@@ -153,24 +153,30 @@ bool isUncapturedFuncLocal(const Value &Addr) {
   return !PointerMayBeCaptured(Underlying, true, true);
 }
 
-// Check whether the Instruction is on the top of the BB (ignore debug/phi
-// instruction). If so, just return its parent BB address. Otherwise, split the
-// BB on the location of this instruction, and return the new split BB address.
-// Using llvm::SplitBlock to hot-updates some analysis results.
+// If the instruction is immediately followed by a terminator and the block has
+// only a single successor, return that successor. Otherwise, split the BB after
+// this instruction and return the new split BB address. Using llvm::SplitBlock
+// to hot-update some analysis results.
 BlockAddress *getBlockAddressOfInstruction(Instruction &I, DominatorTree *DT,
                                            LoopInfo *LI,
                                            MemorySSAUpdater *MSSAU) {
-  BasicBlock *OriginalBB = I.getParent();
-  auto *FirstRealInstruction = OriginalBB->getFirstNonPHIOrDbgOrLifetime();
+  BasicBlock *OriginalBb = I.getParent();
 
-  // If the current instruction is the first valid instruction
-  if (FirstRealInstruction == &I)
-    return BlockAddress::get(OriginalBB->getParent(), OriginalBB);
+  // If the next instruction is at the end of the BB and there is only single
+  // successor, just return the successor BB
+  Instruction *NextI = I.getNextNode();
+  if (NextI && NextI->isTerminator()) {
+    auto *SingleSuccessor = NextI->getParent()->getSingleSuccessor();
+    if (SingleSuccessor) {
+      return BlockAddress::get(SingleSuccessor->getParent(), SingleSuccessor);
+    }
+  }
 
-  // or split the block
-  BasicBlock *NewBB =
-      llvm::SplitBlock(OriginalBB, &I, DT, LI, MSSAU, "mop.address", false);
-  return BlockAddress::get(NewBB->getParent(), NewBB);
+  // or split the block.
+  // NewBb is the BB after the instruction I.
+  BasicBlock *NewBb =
+      llvm::SplitBlock(OriginalBb, NextI, DT, LI, MSSAU, "mop.address", false);
+  return BlockAddress::get(NewBb->getParent(), NewBb);
 }
 
 // ref: llvm/lib/Analysis/ValueTracking.cpp

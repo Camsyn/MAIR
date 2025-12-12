@@ -557,12 +557,12 @@ void InitializePlatform() {
   // Unlimited stack is not a problem as well, because the executable
   // is not compiled with -pie.
 #  if !SANITIZER_GO
-  {
-#    if SANITIZER_LINUX && (defined(__aarch64__) || defined(__loongarch_lp64))
-    // Initialize the xor key used in {sig}{set,long}jump.
-    InitializeLongjmpXorKey();
-#    endif
-  }
+// {
+// #    if SANITIZER_LINUX && (defined(__aarch64__) || defined(__loongarch_lp64))
+//    // Initialize the xor key used in {sig}{set,long}jump.
+//    InitializeLongjmpXorKey();
+// #    endif
+// }
 
   // We called ReExecIfNeeded() in InitializePlatformEarly(), but there are
   // intervening allocations that result in an edge case:

@@ -153,10 +153,10 @@ bool isUncapturedFuncLocal(const Value &Addr) {
   return !PointerMayBeCaptured(Underlying, true, true);
 }
 
-// If the instruction is immediately followed by a terminator and the block has
-// only a single successor, return that successor. Otherwise, split the BB after
-// this instruction and return the new split BB address. Using llvm::SplitBlock
-// to hot-update some analysis results.
+// Check whether the next instruction is at the end of the BB and there is only
+// single successor. If so, just return this single successor. Otherwise, split
+// the BB after the location of this instruction, and return the new split BB
+// address. Using llvm::SplitBlock to hot-updates some analysis results.
 BlockAddress *getBlockAddressOfInstruction(Instruction &I, DominatorTree *DT,
                                            LoopInfo *LI,
                                            MemorySSAUpdater *MSSAU) {
@@ -166,9 +166,9 @@ BlockAddress *getBlockAddressOfInstruction(Instruction &I, DominatorTree *DT,
   // successor, just return the successor BB
   Instruction *NextI = I.getNextNode();
   if (NextI && NextI->isTerminator()) {
-    auto *SingleSuccessor = NextI->getParent()->getSingleSuccessor();
-    if (SingleSuccessor) {
-      return BlockAddress::get(SingleSuccessor->getParent(), SingleSuccessor);
+    auto *SingleSuccesor = NextI->getParent()->getSingleSuccessor();
+    if (SingleSuccesor) {
+      return BlockAddress::get(SingleSuccesor->getParent(), SingleSuccesor);
     }
   }
 

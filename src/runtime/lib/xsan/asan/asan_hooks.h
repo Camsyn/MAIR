@@ -36,7 +36,8 @@ PSEUDO_MACRO void AccessMemoryRange(const AsanContext *ctx, const uptr offset,
     }
     if (!suppressed) {
       GET_CURRENT_PC_BP_SP;
-      __asan::ReportGenericError(pc, bp, sp, bad, isWrite, size, 0, false);
+      __asan::ReportGenericError(__xsan::GetRealPc(pc), bp, sp, bad, isWrite,
+                                 size, 0, false);
     }
   }
 }

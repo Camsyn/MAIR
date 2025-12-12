@@ -5,6 +5,7 @@
 #include <sanitizer_common/sanitizer_stacktrace.h>
 
 #include "xsan_attribute.h"
+#include "xsan_hooks_types.h"
 
 namespace __asan {
 u32 GetMallocContextSize();
@@ -22,13 +23,13 @@ PSEUDO_MACRO void GetStackTrace(BufferedStackTrace& stack, uptr max_size,
     stack.size = max_size;
     if (max_size > 0) {
       stack.top_frame_bp = GET_CURRENT_FRAME();
-      stack.trace_buffer[0] = StackTrace::GetCurrentPc();
+      stack.trace_buffer[0] = GetRealPc(StackTrace::GetCurrentPc());
       if (max_size > 1)
         stack.trace_buffer[1] = GET_CALLER_PC();
     }
   } else {
-    stack.Unwind(StackTrace::GetCurrentPc(), GET_CURRENT_FRAME(), nullptr, fast,
-                 max_size);
+    stack.Unwind(GetRealPc(StackTrace::GetCurrentPc()), GET_CURRENT_FRAME(),
+                 nullptr, fast, max_size);
   }
 }
 

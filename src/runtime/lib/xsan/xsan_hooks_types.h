@@ -9,6 +9,15 @@ extern const char *SanitizerToolName;  // Can be changed by the tool.
 
 namespace __xsan {
 
+// Thread-local variable storing the correct PC when set by ScopedRealPc.
+// A value of 0 indicates no override is active.
+extern THREADLOCAL uptr real_pc;
+// Returns the real PC if set via ScopedRealPc, otherwise returns the provided
+// pc. Used to correct PC locations in sanitizer reports affected by loop
+// optimizations.
+static ALWAYS_INLINE uptr GetRealPc(uptr pc) {
+  return (LIKELY(real_pc == 0)) ? pc : real_pc;
+}
 /// TODO: This enum should be unified
 enum class XsanHooksSanitizer {
   Asan,

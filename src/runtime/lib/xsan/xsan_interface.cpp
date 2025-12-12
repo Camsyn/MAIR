@@ -58,6 +58,8 @@ void __xsan_read_range(const void *beg, const void *end, uptr pc = 0) {
   DCHECK(beg < end && "Invalid range");
   uptr size = (uptr)end - (uptr)beg;
   // Printf("beg: %p, end: %p, size: %lx\n", beg, end, size);
+  // set global pc to the scoped_pc one
+  ScopedRealPc scoped_pc(pc);
   /// TODO: use a more specific function to perform the check.
   XSAN_READ_RANGE((void *)nullptr, beg, size);
 }
@@ -69,6 +71,8 @@ void __xsan_write_range(const void *beg, const void *end, uptr pc = 0) {
   /// The caller of __xsan_write_range should ensure that beg <= end
   DCHECK(beg < end && "Invalid range");
   uptr size = (uptr)end - (uptr)beg;
+  // set global pc to the scoped_pc one
+  ScopedRealPc scoped_pc(pc);
   XSAN_WRITE_RANGE((void *)nullptr, beg, size);
 }
 
@@ -79,6 +83,7 @@ void __xsan_write_range(const void *beg, const void *end, uptr pc = 0) {
                                              s64 step, uptr pc = 0) {          \
     if (UNLIKELY(beg == end))                                                  \
       return;                                                                  \
+    ScopedRealPc scoped_pc(pc);                                                \
     DCHECK(Abs(step) >= (size_param) && "Invalid arguments");                  \
     uptr L = (uptr)beg, R = (uptr)end;                                         \
     if (UNLIKELY((step) < 0)) {                                                \
@@ -120,12 +125,14 @@ XSAN_PERIODICAL_WRITE_CALLBACK(16)
 #define XSAN_READ(size)                                \
   SANITIZER_INTERFACE_ATTRIBUTE                        \
   void __xsan_read##size(const void *p, uptr pc = 0) { \
+    ScopedRealPc scoped_pc(pc);                        \
     XSAN_HOOKS_EXEC(__xsan_read<size>, (uptr)p);       \
   }
 
 #define XSAN_WRITE(size)                                \
   SANITIZER_INTERFACE_ATTRIBUTE                         \
   void __xsan_write##size(const void *p, uptr pc = 0) { \
+    ScopedRealPc scoped_pc(pc);                         \
     XSAN_HOOKS_EXEC(__xsan_write<size>, (uptr)p);       \
   }
 

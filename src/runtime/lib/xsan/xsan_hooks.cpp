@@ -8,12 +8,11 @@
 
 #include "xsan_hooks.h"
 
-#include "sanitizer_common/sanitizer_common.h"
-#include "sanitizer_common/sanitizer_internal_defs.h"
-
 #include "asan/asan_thread.h"
 #include "asan/orig/asan_internal.h"
 #include "lsan/lsan_common.h"
+#include "sanitizer_common/sanitizer_common.h"
+#include "sanitizer_common/sanitizer_internal_defs.h"
 #include "xsan_hooks_dispatch.h"
 #include "xsan_interceptors.h"
 #include "xsan_interface_internal.h"
@@ -21,13 +20,14 @@
 #include "xsan_thread.h"
 
 #if XSAN_CONTAINS_TSAN
-#include "tsan/tsan_rtl.h"
+#  include "tsan/tsan_rtl.h"
 #endif
 
 using namespace __xsan;
 // ---------------------- State/Ignoration Management Hooks --------------------
 namespace __xsan {
-
+// definition of real_pc
+THREADLOCAL uptr real_pc = 0;
 THREADLOCAL int xsan_in_internal = 0;
 THREADLOCAL int is_in_symbolizer = 0;
 THREADLOCAL int xsan_in_unwind = 0;

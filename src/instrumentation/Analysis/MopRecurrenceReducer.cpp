@@ -437,7 +437,8 @@ struct MOPState {
     - Contains(range1, range2), considering aliases.
     - MOP1 dom MOP2 || MOP1 pdom MOP2
     - (optional) isWrite1 || (isWrite1 == isWrite2)
-  Return the FromI if recurring, otherwise, return nullptr.
+  Return the FromI (FYI, from inst -> to inst) if recurring, otherwise, return
+  nullptr.
   */
   const Instruction *isMopCheckRecurring(const MemoryOperation &KillingMop,
                                          const MemoryOperation &DeadMop,
@@ -453,9 +454,6 @@ struct MOPState {
         KillingMop.isWrite() != DeadMop.isWrite()) {
       return nullptr;
     }
-
-    const MemoryLocation &KillingLoc = KillingMop.Loc;
-    const MemoryLocation &DeadLoc = DeadMop.Loc;
 
     const Instruction *FromI = nullptr;
     /// MOP1 dom MOP2 || MOP1 pdom MOP2
@@ -477,6 +475,53 @@ struct MOPState {
     return FromI;
   }
 };
+
+struct MOPGroup {
+  [[maybe_unused]] const Value *BasePtr;
+  SmallVector<const Instruction *, 4> Group;
+
+  MOPGroup(const Value *BasePtr, SmallVector<const Instruction *, 4> &&Group)
+      : BasePtr(BasePtr), Group(std::move(Group)) {}
+};
+using MOPGroupVec = SmallVector<MOPGroup, 4>;
+
+/// @brief Group MOPs by the base pointer.
+/// @details We consider the MustAlias/PartialAlias pairs sharing the same base
+/// pointer. Thus, without considering aliases, we groups memory operations by
+/// their base pointer to optimize recurrence analysis. Only returns groups with
+/// 2 or more MOPs, as single-MOP groups cannot have recurring checks. This
+/// enables O(N^2/m) complexity instead of O(N^2) where m is the number of
+/// groups.
+/// @param Insts The memory operations to group.
+/// @param DL The data layout.
+/// @return The groups of memory operations.
+static MOPGroupVec groupMOPsByBasePtr(ArrayRef<const Instruction *> Insts,
+                                      const DataLayout &DL) {
+
+  using MOPGroupMap =
+      DenseMap<const Value *, SmallVector<const Instruction *, 4>>;
+
+  MOPGroupMap BasePtr2MOPs;
+  size_t GroupSize = 0;
+  for (const Instruction *I : Insts) {
+    MemoryLocation Loc = MemoryLocation::get(I);
+    const Value *Ptr = Loc.Ptr->stripPointerCasts();
+    /// ASSUME: all MustAlias/PartialAlias pairs must share the same base
+    /// pointer. Therefore, we are able to group them by the base pointer
+    /// firstly without considering aliases. This assumption holds at
+    /// BasicAliasAnalysis.
+    const Value *BasePtr = getUnderlyingObject(Ptr);
+    BasePtr2MOPs[BasePtr].push_back(I);
+    if (BasePtr2MOPs[BasePtr].size() == 2)
+      GroupSize++;
+  }
+  MOPGroupVec MOPGrps;
+  MOPGrps.reserve(GroupSize);
+  for (auto &[BasePtr, MOPs] : BasePtr2MOPs)
+    if (MOPs.size() >= 2)
+      MOPGrps.emplace_back(BasePtr, std::move(MOPs));
+  return MOPGrps;
+}
 
 void RecurringGraph::fillDominatingSet(
     SmallVectorImpl<const Instruction *> &DomSet) {
@@ -518,11 +563,15 @@ This is the dominating set problem in directed graph.
 */
 SmallVector<const Instruction *, 16>
 MopRecurrenceReducer::distillRecurringChecks(
-    ArrayRef<const Instruction *> Insts, bool IsTsan,
-    bool IgnoreCalls) {
-  if (Insts.size() < 2) {
+    ArrayRef<const Instruction *> Insts, bool IsTsan, bool IgnoreCalls) {
+
+  if (Insts.size() < 2)
     return SmallVector<const Instruction *, 16>(Insts.begin(), Insts.end());
-  }
+
+  MOPGroupVec MOPGrps =
+      groupMOPsByBasePtr(Insts, F.getParent()->getDataLayout());
+  if (MOPGrps.empty())
+    return SmallVector<const Instruction *, 16>(Insts.begin(), Insts.end());
 
   SmallVector<Edge, 16> Edges;
   SmallSetVector<const Instruction *, 16> CandidatesSet;
@@ -536,26 +585,29 @@ MopRecurrenceReducer::distillRecurringChecks(
     - MOP1 dom MOP2 || MOP1 pdom MOP2
     - (optional) isWrite1 || (isWrite1 == isWrite2)
   */
-  for (const Instruction *KillingI : Insts) {
-    for (const Instruction *DeadI : Insts) {
-      if (KillingI == DeadI)
-        continue;
+  // Use the grouping strategy to optimize the O(N^2) traversal into O(N^2 / m)
+  for (auto &Group : MOPGrps) {
+    // The worst case is still O(N^2) if we only have one major group.
+    for (const Instruction *KillingI : Group.Group)
+      for (const Instruction *DeadI : Group.Group) {
+        if (KillingI == DeadI)
+          continue;
 
-      // /// Volatile MOP's check could not have been eliminated.
-      // /// However, TSan ClDistinguishVolatile is always false, that means
-      // /// TSan does not treat volatile MOP's specially.
-      // if (DeadI->isVolatile())
-      //   continue;
+        // /// Volatile MOP's check could not have been eliminated.
+        // /// However, TSan ClDistinguishVolatile is always false, that means
+        // /// TSan does not treat volatile MOP's specially.
+        // if (DeadI->isVolatile())
+        //   continue;
 
-      const Instruction *FromI =
-          State.isMopCheckRecurring(KillingI, DeadI, WriteSensitive);
-      if (!FromI)
-        continue;
-      Edges.emplace_back(KillingI, DeadI, FromI, false);
+        const Instruction *FromI =
+            State.isMopCheckRecurring(KillingI, DeadI, WriteSensitive);
+        if (!FromI)
+          continue;
+        Edges.emplace_back(KillingI, DeadI, FromI, false);
 
-      CandidatesSet.insert(KillingI);
-      CandidatesSet.insert(DeadI);
-    }
+        CandidatesSet.insert(KillingI);
+        CandidatesSet.insert(DeadI);
+      }
   }
 
   /// Initialized with Insts with neither Killing nor Dead Mops.

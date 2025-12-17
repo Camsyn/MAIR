@@ -7,7 +7,7 @@ mode="${1:-${mode:-raw}}"
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 SRC_DIR="${SCRIPT_DIR}/repo"
 TEMP_DIR="${SCRIPT_DIR}/temp"
-BUILD_DIR="${TEMP_DIR}/build-${mode}"
+BUILD_DIR="${TEMP_DIR}"
 BIN_DIR="${TEMP_DIR}/.bin"
 rm -rf "${BUILD_DIR}" && mkdir -p "${BUILD_DIR}" "${BIN_DIR}"
 
@@ -24,8 +24,8 @@ export LDFLAGS="${LDFLAGS} -stdlib=libc++"
 
 # 1) 构建并安装 Abseil（按 oss-fuzz 流程）
 # 使用本地构建的 Abseil（避免污染系统），并确保加入当前模式标志
-if [ ! -d abseil-cpp ]; then
-  git clone https://github.com/abseil/abseil-cpp.git --depth 1 abseil-cpp
+if [ ! -d ../repo/abseil-cpp ]; then
+  git clone https://github.com/abseil/abseil-cpp.git --depth 1 ../repo/abseil-cpp
 fi
 mkdir -p absl-build && pushd absl-build
 cmake -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_STANDARD=17 \
@@ -33,7 +33,7 @@ cmake -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CXX_STANDARD=17 \
       -DCMAKE_C_FLAGS="${CFLAGS}" -DCMAKE_CXX_FLAGS="${CXXFLAGS}" \
       -DCMAKE_EXE_LINKER_FLAGS="${LDFLAGS}" \
       -DCMAKE_INSTALL_PREFIX="$(pwd)/../absl-install" \
-      ../abseil-cpp
+      ../../repo/abseil-cpp
 make -j$(nproc)
 make install
 popd

@@ -15,8 +15,8 @@ mode="${1:-${mode:-raw}}"
 # 与 binutils 一致的最小环境设置（不强行切换编译器/链接器）
 export LDFLAGS=-lpthread
 export ADDITIONAL="-DFORTIFY_SOURCE=2 -fstack-protector-all -fno-omit-frame-pointer -Wno-error"
-export CXXFLAGS="$ADDITIONAL"
-export CFLAGS="$ADDITIONAL"
+export CXXFLAGS="$CXXFLAGS $ADDITIONAL"
+export CFLAGS="$CFLAGS $ADDITIONAL"
 
 # 导入外部消毒器旗标：7zip 为 C++ 项目，这里应当传 true 以启用 -stdlib=libc++ 等
 source ../activate_compile_flags.sh "$mode" true

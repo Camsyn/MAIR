@@ -27,11 +27,54 @@ BINARIES=(
     parse_bjdata_fuzzer
 )
 
-# 我们仅仅对项目本体进行插桩，而不对 libc++.so 进行插桩。
-# 一般而言，使用 MSAN_OPTIONS="poison_in_malloc=0:poison_in_free=0:poison_in_dtor=0" 
-# 可以绕过大部分由于 libc++ 未插桩引起的误报。
-make -j ${BINARIES[@]}
+# The following compilation commands are equivalent to make -j ${BINARIES[@]}
+# We execute them manually to collect the compile time (*.json with -ftime-trace).
+# make -j ${BINARIES[@]}
 
+CPPFLAGS=" -std=c++11 -I ../single_include "
+
+# 先编译每个fuzzer的object文件到../../temp目录，再分别链接生成可执行文件
+# 并行编译各个目标，等待全部完成后再继续
+
+# 1. 并行编译 object 文件
+compile_jobs=()
+$CXX $CXXFLAGS $CPPFLAGS -c src/fuzzer-driver_afl.cpp   -o ../../temp/fuzzer-driver_afl.o   &
+compile_jobs+=($!)
+$CXX $CXXFLAGS $CPPFLAGS -c src/fuzzer-parse_json.cpp    -o ../../temp/fuzzer-parse_json.o   &
+compile_jobs+=($!)
+$CXX $CXXFLAGS $CPPFLAGS -c src/fuzzer-parse_bson.cpp    -o ../../temp/fuzzer-parse_bson.o   &
+compile_jobs+=($!)
+$CXX $CXXFLAGS $CPPFLAGS -c src/fuzzer-parse_cbor.cpp    -o ../../temp/fuzzer-parse_cbor.o   &
+compile_jobs+=($!)
+$CXX $CXXFLAGS $CPPFLAGS -c src/fuzzer-parse_msgpack.cpp -o ../../temp/fuzzer-parse_msgpack.o &
+compile_jobs+=($!)
+$CXX $CXXFLAGS $CPPFLAGS -c src/fuzzer-parse_ubjson.cpp  -o ../../temp/fuzzer-parse_ubjson.o  &
+compile_jobs+=($!)
+$CXX $CXXFLAGS $CPPFLAGS -c src/fuzzer-parse_bjdata.cpp  -o ../../temp/fuzzer-parse_bjdata.o  &
+compile_jobs+=($!)
+# 等待所有 object 编译完成
+for job in "${compile_jobs[@]}"; do
+    wait $job
+done
+
+# 2. 并行链接生成可执行文件
+link_jobs=()
+$CXX $CXXFLAGS $CPPFLAGS ../../temp/fuzzer-driver_afl.o ../../temp/fuzzer-parse_json.o    $LDFLAGS -o parse_afl_fuzzer    &
+link_jobs+=($!)
+$CXX $CXXFLAGS $CPPFLAGS ../../temp/fuzzer-driver_afl.o ../../temp/fuzzer-parse_bson.o    $LDFLAGS -o parse_bson_fuzzer   &
+link_jobs+=($!)
+$CXX $CXXFLAGS $CPPFLAGS ../../temp/fuzzer-driver_afl.o ../../temp/fuzzer-parse_cbor.o    $LDFLAGS -o parse_cbor_fuzzer   &
+link_jobs+=($!)
+$CXX $CXXFLAGS $CPPFLAGS ../../temp/fuzzer-driver_afl.o ../../temp/fuzzer-parse_msgpack.o $LDFLAGS -o parse_msgpack_fuzzer &
+link_jobs+=($!)
+$CXX $CXXFLAGS $CPPFLAGS ../../temp/fuzzer-driver_afl.o ../../temp/fuzzer-parse_ubjson.o  $LDFLAGS -o parse_ubjson_fuzzer &
+link_jobs+=($!)
+$CXX $CXXFLAGS $CPPFLAGS ../../temp/fuzzer-driver_afl.o ../../temp/fuzzer-parse_bjdata.o  $LDFLAGS -o parse_bjdata_fuzzer &
+link_jobs+=($!)
+# 等待所有链接过程完成
+for job in "${link_jobs[@]}"; do
+    wait $job
+done
 
 for bin in "${BINARIES[@]}"; do
     if [ -f "$bin" ]; then

@@ -7,8 +7,8 @@ export PROJ=iproute2
 export SUBJECT=$PWD
 export LDFLAGS="${LDFLAGS:+$LDFLAGS }-lpthread"
 export ADDITIONAL="-DFORTIFY_SOURCE=2 -fstack-protector-all -fno-omit-frame-pointer -Wno-error"
-export CXXFLAGS="$ADDITIONAL"
-export CFLAGS="$ADDITIONAL"
+export CXXFLAGS="$CXXFLAGS $ADDITIONAL"
+export CFLAGS="$CFLAGS $ADDITIONAL"
 
 # 模式：优先位置参数，其次环境变量，默认 raw
 mode="${1:-${mode:-raw}}"

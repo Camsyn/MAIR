@@ -8,7 +8,7 @@ mode="${1:-${mode:-raw}}"
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 SRC_DIR="${SCRIPT_DIR}/repo"
 TEMP_DIR="${SCRIPT_DIR}/temp"
-BUILD_DIR="${TEMP_DIR}/build-${mode}"
+BUILD_DIR="${TEMP_DIR}"
 BIN_DIR="${TEMP_DIR}/.bin"
 rm -rf "${BUILD_DIR}" && mkdir -p "${BUILD_DIR}" "${BIN_DIR}"
 

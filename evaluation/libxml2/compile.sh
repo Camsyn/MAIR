@@ -16,9 +16,8 @@ mkdir -p .bin
 
 # 使用 CMake 构建 libxml2
 echo "使用 CMake 构建 libxml2..."
-cd "$SRC_DIR"
 
-cmake -B build -G Ninja \
+cmake -B . -S "$SRC_DIR" -G Ninja \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     -DBUILD_SHARED_LIBS=OFF \
     -DLIBXML2_WITH_PYTHON=OFF \
@@ -27,10 +26,9 @@ cmake -B build -G Ninja \
     -DCMAKE_CXX_FLAGS="${CXXFLAGS}" \
     -DCMAKE_EXE_LINKER_FLAGS="${LDFLAGS} -lpthread"
 
-cmake --build build -j$(nproc)
+cmake --build . -j$(nproc)
 
 # 编译 fuzzer
-cd -
 
 # 检查 fuzzer 源文件是否存在
 FUZZER_SRC="$SRC_DIR/fuzz/xml.c"
@@ -40,14 +38,14 @@ if [ ! -f "$FUZZER_SRC" ]; then
 fi
 
 # 编译 fuzzer 辅助函数
-$CC $CFLAGS -I"$SRC_DIR" -I"$SRC_DIR/include" -I"$SRC_DIR/fuzz" -I"$SRC_DIR/build" -c "$SRC_DIR/fuzz/fuzz.c" -o ./fuzz.o
+$CC $CFLAGS -I"$SRC_DIR" -I"$SRC_DIR/include" -I"$SRC_DIR/fuzz" -I"." -c "$SRC_DIR/fuzz/fuzz.c" -o ./fuzz.o
 
 # 编译 fuzzer
-$CC $CFLAGS -I"$SRC_DIR" -I"$SRC_DIR/include" -I"$SRC_DIR/fuzz" -I"$SRC_DIR/build" -c "$FUZZER_SRC" -o ./fuzzer.o
+$CC $CFLAGS -I"$SRC_DIR" -I"$SRC_DIR/include" -I"$SRC_DIR/fuzz" -I"." -c "$FUZZER_SRC" -o ./fuzzer.o
 
 # 链接 fuzzer
 $CXX $CXXFLAGS ./fuzzer.o ./fuzz.o -o .bin/libxml2@xml_fuzzer \
-    $LIB_FUZZING_ENGINE "$SRC_DIR/build/libxml2.a" -lm -lc++ -lpthread
+    $LIB_FUZZING_ENGINE "./libxml2.a" -lm -lc++ -lpthread
 
 popd
 

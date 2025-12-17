@@ -12,8 +12,8 @@ CONFIG_OPTIONS="--disable-shared --disable-gdb \
 export SUBJECT=$PWD
 export LDFLAGS=-lpthread
 export ADDITIONAL="-DFORTIFY_SOURCE=2 -fstack-protector-all -fno-omit-frame-pointer -Wno-error"
-export CXXFLAGS="$ADDITIONAL"
-export CFLAGS="$ADDITIONAL"
+export CXXFLAGS="$CXXFLAGS $ADDITIONAL"
+export CFLAGS="$CFLAGS $ADDITIONAL"
 
 source ../activate_compile_flags.sh $mode false
 

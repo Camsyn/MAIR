@@ -51,21 +51,14 @@ else
     LIB_STATIC=$(find . "$SRC_DIR" -name "liblcms2.a" | head -n1 || true)
 fi
 
-# 编译 fuzzer 源
-FUZZ_CC="$SRC_DIR/../oss-fuzz-temp/projects/lcms/cms_transform_fuzzer.c"
+# 编译 fuzzer 源, the driver comes from fuzzbench
+FUZZ_CC="$SRC_DIR/..//cms_transform_fuzzer.cc"
 if [ ! -f "$FUZZ_CC" ]; then
     echo "未找到 fuzzer 源文件: $FUZZ_CC" >&2
     exit 1
 fi
 
-# 创建一个临时的 C++ 包装文件
-cat > ./fuzzer_wrapper.cpp << 'EOF'
-extern "C" {
-#include "cms_transform_fuzzer.c"
-}
-EOF
-
-$CXX $CXXFLAGS -I"$SRC_DIR/include" -I"$SRC_DIR/../oss-fuzz-temp/projects/lcms" -c ./fuzzer_wrapper.cpp -o ./fuzzer.o
+$CXX $CXXFLAGS -I"$SRC_DIR/include"  -c $FUZZ_CC -o ./fuzzer.o
 
 # 链接 fuzzer 可执行文件
 if [ -z "$LIB_STATIC" ]; then
@@ -79,4 +72,3 @@ $CXX $CXXFLAGS ./fuzzer.o -o .bin/lcms@cms_transform_fuzzer \
 popd >/dev/null
 
 echo "完成: lcms($mode) 构建与产物收集。"
-

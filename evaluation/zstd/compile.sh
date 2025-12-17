@@ -13,8 +13,8 @@ mode="${1:-${mode:-raw}}"
 # 与 binutils 一致的最小环境设置（不强行切换编译器/链接器）
 export LDFLAGS=-lpthread
 export ADDITIONAL="-DFORTIFY_SOURCE=2 -fstack-protector-all -fno-omit-frame-pointer -Wno-error"
-export CXXFLAGS="$ADDITIONAL"
-export CFLAGS="$ADDITIONAL"
+export CXXFLAGS="$CXXFLAGS $ADDITIONAL"
+export CFLAGS="$CFLAGS $ADDITIONAL"
 
 # 导入外部消毒器旗标：zstd 为 C 项目，这里传 false
 source ../activate_compile_flags.sh "$mode" false
@@ -99,16 +99,16 @@ export RANLIB="$(command -v ranlib)"
 export STRIP="$(command -v strip)"
 export OBJCOPY="$(command -v objcopy)"
 
-pushd repo
+
+cp -r repo/* temp/
+
+pushd temp
 
 # 与 binutils 风格一致：先 clean 再并行构建
 make clean || true
 make -j CC="$CC" CXX="$CXX" PREFIX="$SUBJECT/temp/_o"
 
-popd
-
 # 收集可执行文件到 temp/.bin
-pushd temp
 mkdir -p .bin
 
 # zstd 主要可执行文件
@@ -116,8 +116,8 @@ CANDIDATES=(zstd)
 SEARCH_PATHS=(
   "./_o/bin"
   "./_o"
-  "../repo"
-  "../repo/programs"
+  "./"
+  "./programs"
 )
 
 found_any=0

@@ -73,7 +73,7 @@ $CXX $CXXFLAGS $CPPFLAGS ../../temp/fuzzer-driver_afl.o ../../temp/fuzzer-parse_
 link_jobs+=($!)
 # 等待所有链接过程完成
 for job in "${link_jobs[@]}"; do
-    wait $job
+    wait $job || exit 1
 done
 
 for bin in "${BINARIES[@]}"; do

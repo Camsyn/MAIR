@@ -5,7 +5,7 @@
 #   本脚本 compile-all.sh 用于批量编译指定 package 目录下的基准程序，支持多种 Sanitizer 组合模式。
 #   可自动遍历所有支持的 mode，依次调用 package 目录下的 compile.sh 进行编译。
 #   支持强制重新编译（-f），以及自定义 package 路径和编译模式。
-#   2024-加：支持 -t 记录编译时间追踪（-ftime-track），详见后述。
+#   2024-加：支持 -t 记录编译时间追踪（-ftime-trace），详见后述。
 #
 # 用法（Usage）:
 #   ./compile-all.sh [package-path] [-f] [-t] [mode1 mode2 ...]
@@ -169,19 +169,19 @@ for mode in "${enabled_modes[@]}"; do
     # 追踪时间模式下收集 *.c.json 或 *.o.json
     if [ $track_time -eq 1 ]; then
         data_dir=".compiled/data-time-trace/$mode"
-        rm -rf $data_dir && mkdir -p $data_dir
+        rm -rf "$data_dir" && mkdir -p "$data_dir"
         # 查找所有 *.c.json
         found=0
         for f in $(find ./temp -type f -name "*.json" 2>/dev/null); do
             found=1
             # 使用 cp --parents 保留路径结构
-            cp --parents "$f" $data_dir 2>/dev/null || \
+            cp --parents "$f" "$data_dir" 2>/dev/null || \
                 (mkdir -p "$(dirname "$data_dir/$f")" && cp "$f" "$data_dir/$f")
         done
         if [ $found -eq 1 ]; then
             # Move $data_dir/temp/* to $data_dir/
-            mv $data_dir/temp/* $data_dir/
-            rm -rf $data_dir/temp
+            mv "$data_dir/temp/*" "$data_dir/"
+            rm -rf "$data_dir/temp"
             echo "已收集 $mode 编译追踪文件到 $data_dir/"
         else
             echo "未发现 $mode 编译追踪（.json）文件"

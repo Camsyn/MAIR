@@ -19,7 +19,7 @@ if [ ! -f "$SRC_DIR/libjpeg_turbo_fuzzer.cc" ]; then
   echo "错误: 未找到 $SRC_DIR/libjpeg_turbo_fuzzer.cc" >&2
   exit 1
 fi
-${CXX:-clang++} ${CXXFLAGS} -std=c++11 -I"$SRC_DIR/src" -Ibuild -c "$SRC_DIR/libjpeg_turbo_fuzzer.cc" -o ./fuzzer.o
+${CXX:-clang++} ${CXXFLAGS} -std=c++11 -I"$SRC_DIR/src" -I. -c "$SRC_DIR/libjpeg_turbo_fuzzer.cc" -o ./fuzzer.o
 
 # 选择静态库（优先 libjpeg*.a 或 libturbojpeg*.a）
 JPEG_LIB=""

@@ -11,7 +11,7 @@ OUT_BIN_DIR="$OUT_DIR/.bin"
 OUT_BIN="$OUT_BIN_DIR/lua"
 
 mkdir -p "$OUT_BIN_DIR"
-cp -r $SRC_DIR/* $OUT_DIR
+cp -r "$SRC_DIR"/* "$OUT_DIR"
 
 # 注入编译/链接标志（C 项目，第二参 false）
 source "$SCRIPT_DIR/../activate_compile_flags.sh" "$mode" false

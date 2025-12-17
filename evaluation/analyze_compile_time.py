@@ -1,10 +1,9 @@
-import os
 import re
 import json
 from collections import defaultdict
 from pathlib import Path
-import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
 def extract_compile_time(file_path):
     """Extract compile time (seconds) from a file."""
@@ -65,8 +64,6 @@ def plot_compile_trace_grid_bar(results, show_targets,
     4. Increase font size for subplot titles and y-axis labels
     5. Automatically set ylim per subplot to ensure top text is fully inside the plot
     """
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
 
     # -------------- Basic Parameters --------------
     ncols = 7
@@ -262,7 +259,6 @@ def main():
                                 "duration_us": dur_total, "count": count_found
                             }
     # Remove 'raw' column, only keep 'asan','msan','tsan','sum','xsan-asan-msan-tsan'
-    targets_order = ['asan', 'msan', 'tsan', 'sum', 'xsan-asan-msan-tsan']
     show_targets = ['asan', 'msan', 'tsan', 'sum', 'xsan-asan-msan-tsan']
     base_required = ['raw', 'asan', 'msan', 'tsan', 'xsan-asan-msan-tsan']
 

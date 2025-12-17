@@ -52,7 +52,7 @@ else
 fi
 
 # 编译 fuzzer 源, the driver comes from fuzzbench
-FUZZ_CC="$SRC_DIR/..//cms_transform_fuzzer.cc"
+FUZZ_CC="$SRC_DIR/../cms_transform_fuzzer.cc"
 if [ ! -f "$FUZZ_CC" ]; then
     echo "未找到 fuzzer 源文件: $FUZZ_CC" >&2
     exit 1

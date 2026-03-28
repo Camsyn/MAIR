@@ -102,15 +102,11 @@ function(import_subsan output_prefix)
     asan_rtl_extra.cpp
   )
 
-  set(ASAN_STATIC_SOURCES
-    orig/asan_rtl_static.cpp
-  )
-
-  if ("x86_64" IN_LIST ASAN_SUPPORTED_ARCH AND NOT WIN32 AND NOT APPLE)
-    list(APPEND ASAN_STATIC_SOURCES
-      orig/asan_rtl_x86_64.S
-    )
-  endif()
+  # Note: orig/asan_rtl_static.cpp, orig/asan_rtl_x86_64.S are intentionally
+  # NOT included here. The standard libclang_rt.asan_static.a is always
+  # co-linked when XSan uses ASan, and it already provides these symbols.
+  # Including them here would cause duplicate symbol errors at link time.
+  set(ASAN_STATIC_SOURCES)
 
   ######################## Flags #########################
   set(ASAN_CFLAGS ${SANITIZER_COMMON_CFLAGS})

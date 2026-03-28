@@ -42,12 +42,6 @@ if(_llvmsupport_type STREQUAL "SHARED_LIBRARY")
     get_target_property(LLVMSupport_LOCATION LLVMSupport LOCATION)
     get_target_property(LLVMDemangle_LOCATION LLVMDemangle LOCATION)
 
-    # # INSTALL_RPATH modifies the RPATH in install time as follows:
-    # file(RPATH_CHANGE
-    # FILE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/lib/xsan/patch/lib*-patch.so"
-    # OLD_RPATH "/data/lib/llvm/build/lib:"
-    # NEW_RPATH "$ORIGIN/../lib")
-
     # Install the LLVMSupport and LLVMDemangle to the patch/../lib directory.
     install(FILES ${LLVMSupport_LOCATION} DESTINATION ${XSAN_INSTALL_RUNTIME_DIR} COMPONENT patch)
     install(FILES ${LLVMDemangle_LOCATION} DESTINATION ${XSAN_INSTALL_RUNTIME_DIR} COMPONENT patch)
@@ -60,8 +54,16 @@ endif()
 # relative address.
 add_link_options(-Wl,-Bsymbolic-functions)
 
-# Due to the LLVM API, we can only livepatch clang-15.
-add_subdirectory(clang-15)
+if(NOT DEFINED XSAN_LIVEPATCH_VARIANT)
+  message(FATAL_ERROR "XSAN_LIVEPATCH_VARIANT is not set")
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${XSAN_LIVEPATCH_VARIANT}/CMakeLists.txt")
+  message(STATUS "Using clang livepatch sources from ${XSAN_LIVEPATCH_VARIANT}")
+  add_subdirectory(${XSAN_LIVEPATCH_VARIANT})
+else()
+  message(FATAL_ERROR "Missing clang livepatch sources for ${XSAN_LIVEPATCH_VARIANT}")
+endif()
 
 # In theory, the hot patch of gcc does not limit the version of gcc
 add_subdirectory(gcc)

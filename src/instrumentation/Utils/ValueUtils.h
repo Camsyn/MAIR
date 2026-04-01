@@ -3,7 +3,9 @@
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/MemorySSAUpdater.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Value.h"
 
 namespace __xsan {
@@ -15,10 +17,6 @@ inline bool isNoSanitize(const llvm::Instruction &I) {
 bool shouldSkip(const llvm::Instruction &I);
 
 const llvm::Value *extractAddrFromLoadStoreInst(const llvm::Instruction &I);
-
-/// Direct migrated from new version LLVM, which introduced by this PR:
-/// https://github.com/llvm/llvm-project/pull/99509
-const llvm::Value *getUnderlyingObjectAggressive(const llvm::Value *V);
 
 bool addrPointsToConstantDataAggressive(const llvm::Value *Addr);
 
@@ -43,4 +41,36 @@ llvm::BlockAddress *getBlockAddressOfInstruction(llvm::Instruction &I,
 /// alloca.
 llvm::Instruction *findAllocaForValue(llvm::Value *V, bool OffsetZero = false);
 
+namespace {
+inline constexpr llvm::StringLiteral
+    kXsanLifetimeStartName("xsan.lifetime_start");
+inline constexpr llvm::StringLiteral kXsanLifetimeEndName("xsan.lifetime_end");
+
+} // namespace
+
+inline bool isXsanLifetimeStart(const llvm::IntrinsicInst &I) {
+  return I.getIntrinsicID() == llvm::Intrinsic::donothing &&
+         I.getOperandBundle(kXsanLifetimeStartName).has_value();
+}
+inline bool isXsanLifetimeEnd(const llvm::IntrinsicInst &I) {
+  return I.getIntrinsicID() == llvm::Intrinsic::donothing &&
+         I.getOperandBundle(kXsanLifetimeEndName).has_value();
+}
+inline llvm::Value *getLifetimeStartOperand(const llvm::IntrinsicInst &I) {
+  if (I.getIntrinsicID() == llvm::Intrinsic::lifetime_start)
+    return I.getArgOperand(0);
+  assert(isXsanLifetimeStart(I) || isXsanLifetimeEnd(I));
+  auto Bundle = I.getOperandBundle(kXsanLifetimeStartName);
+  assert(Bundle && Bundle->Inputs.size() == 1);
+  return Bundle->Inputs.front().get();
+}
+void insertXSanLifetime(llvm::IntrinsicInst &II);
+
+inline void addNoInstrumentionAttr(llvm::ArrayRef<llvm::Function *> Functions) {
+  for (auto *F : Functions)
+    if (F) {
+      F->addFnAttr(llvm::Attribute::NoSanitizeCoverage);
+      F->addFnAttr(llvm::Attribute::DisableSanitizerInstrumentation);
+    }
+}
 } // namespace __xsan

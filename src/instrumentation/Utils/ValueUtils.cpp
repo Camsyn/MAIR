@@ -6,7 +6,10 @@
 #include "llvm/Analysis/CaptureTracking.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
@@ -29,7 +32,10 @@ const llvm::Value *extractAddrFromLoadStoreInst(const llvm::Instruction &I) {
   return nullptr;
 }
 
-const Value *getUnderlyingObjectAggressive(const Value *V) {
+#if LLVM_VERSION_MAJOR <= 18
+/// Direct migrated from new version LLVM, which introduced by this PR:
+/// https://github.com/llvm/llvm-project/pull/99509
+static const Value *getUnderlyingObjectAggressive(const Value *V) {
   const unsigned MaxVisited = 8;
 
   SmallPtrSet<const Value *, 8> Visited;
@@ -70,6 +76,7 @@ const Value *getUnderlyingObjectAggressive(const Value *V) {
 
   return Object ? Object : FirstObject;
 }
+#endif
 
 static bool isVtableAccess(const Instruction &I) {
   if (MDNode *Tag = I.getMetadata(LLVMContext::MD_tbaa))
@@ -79,7 +86,7 @@ static bool isVtableAccess(const Instruction &I) {
 
 static bool isInReadOnlySection(const GlobalVariable &GV) {
   StringRef Section = GV.getSection();
-  return Section.equals(".rodata") || Section.equals(".text") /* 其他只读段 */;
+  return Section == ".rodata" || Section == ".text" /* 其他只读段 */;
 }
 
 /// TODO: ensure this point: any direct/indirect reference to vtable is
@@ -97,7 +104,7 @@ static bool isInReadOnlySection(const GlobalVariable &GV) {
 static bool belongToVtableAggresive(const Value *V) {
   static constexpr uint8_t MaxVtableDepth = 3;
   for (uint8_t Depth = 0; V && Depth < MaxVtableDepth; ++Depth) {
-    V = __xsan::getUnderlyingObjectAggressive(V);
+    V = getUnderlyingObjectAggressive(V);
     if (const LoadInst *L = dyn_cast<LoadInst>(V)) {
       if (isVtableAccess(*L)) {
         return true;
@@ -113,7 +120,7 @@ static bool belongToVtableAggresive(const Value *V) {
 bool addrPointsToConstantDataAggressive(const Value *Addr) {
   /// TODO: use more aggressive one, like `getUnderlyingObjectAggressive` in
   ///       LLVM 20
-  Addr = __xsan::getUnderlyingObjectAggressive(Addr);
+  Addr = getUnderlyingObjectAggressive(Addr);
   // Check globals
   if (const GlobalVariable *GV = dyn_cast<GlobalVariable>(Addr)) {
     if (GV->isConstant() || isInReadOnlySection(*GV)) {
@@ -175,7 +182,7 @@ BlockAddress *getBlockAddressOfInstruction(Instruction &I, DominatorTree *DT,
   // or split the block.
   // NewBb is the BB after the instruction I.
   BasicBlock *NewBb =
-      llvm::SplitBlock(OriginalBb, NextI, DT, LI, MSSAU, "mop.address", false);
+      llvm::SplitBlock(OriginalBb, NextI, DT, LI, MSSAU, "mop.address");
   return BlockAddress::get(NewBb->getParent(), NewBb);
 }
 
@@ -225,6 +232,32 @@ Instruction *findAllocaForValue(Value *V, bool OffsetZero) {
   } while (!Worklist.empty());
 
   return Result;
+}
+
+void insertXSanLifetime(IntrinsicInst &II) {
+  assert(II.getIntrinsicID() == Intrinsic::lifetime_start ||
+         II.getIntrinsicID() == Intrinsic::lifetime_end);
+  // This is a replacement of user's lifetime intrinsic, not pure sanitizers'
+  // semantic; hence we do not tag it with nosanitize.
+  IRBuilder<> IRB(&II);
+  // Preserve lifetime information for later XSan passes after ASan rewrites
+  // allocas to base+offset pointers. LLVM now restricts lifetime.start/end
+  // to allocas, so non-alloca replacements must use side-band markers:
+  // https://github.com/llvm/llvm-project/pull/149310
+  StringRef BundleTag = II.getIntrinsicID() == Intrinsic::lifetime_start
+                            ? kXsanLifetimeStartName
+                            : kXsanLifetimeEndName;
+  Value *BundleInput = II.getArgOperand(0);
+  OperandBundleDef Bundle(BundleTag.str(), ArrayRef<Value *>(BundleInput));
+#if LLVM_VERSION_MAJOR >= 23
+  Function *DoNothing =
+      Intrinsic::getOrInsertDeclaration(II.getModule(), Intrinsic::donothing);
+#else
+  Function *DoNothing =
+      Intrinsic::getDeclaration(II.getModule(), Intrinsic::donothing);
+#endif
+  CallInst *MarkerCall = IRB.CreateCall(DoNothing, {}, {Bundle});
+  MarkerCall->setDebugLoc(II.getDebugLoc());
 }
 
 } // namespace __xsan

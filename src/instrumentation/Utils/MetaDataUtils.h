@@ -1,11 +1,12 @@
 #pragma once
 
-#include <llvm/ADT/Optional.h>
+#include "xsan_llvm_compat.h"
 #include <llvm/IR/Argument.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Value.h>
+#include <optional>
 
 namespace __xsan {
 
@@ -89,7 +90,7 @@ public:
   using MetaDataHelperBase<MetaT, InstT>::drop;
   using Extra = typename MetaT::Extra;
 
-  static llvm::Optional<Extra> get(const InstT &I);
+  static std::optional<Extra> get(const InstT &I);
   static void set(InstT &I, const Extra &Data);
   /// Use MDNode to store and recover the semantic
   /// Specially, for CallBase, it is a more natural way to
@@ -140,7 +141,7 @@ public:
     return I.getOperandBundle(MetaT::Name) != nullptr;
   }
   static llvm::OperandBundleDef getBundle(const Extra &Data);
-  static llvm::Optional<Extra> get(const CallT &I);
+  static std::optional<Extra> get(const CallT &I);
   // We cannot add a new operand bundle to CallBase, so we need to replace the
   // call instruction with a new one.
   static llvm::CallBase *replaceCallWithExtra(CallT &I, const Extra &Data);
@@ -211,7 +212,7 @@ public:
   static bool is(const llvm::Instruction &I) { return I.hasMetadata(ID); }
   static void drop(llvm::Instruction &I) { I.setMetadata(ID, nullptr); }
   static void set(llvm::Instruction &I) {
-    I.setMetadata(ID, llvm::MDNode::get(I.getContext(), llvm::None));
+    I.setMetadata(ID, llvm::MDNode::get(I.getContext(), {}));
   }
 };
 

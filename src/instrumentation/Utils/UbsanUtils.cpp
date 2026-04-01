@@ -43,11 +43,11 @@ bool isUbsanReportCall(const Instruction &I) {
 }
 
 bool isUbsanFunction(const Function &F) {
-  return F.getName().startswith(UbsanInterfacePrefix);
+  return compat::startsWith(F.getName(), UbsanInterfacePrefix);
 }
 
 bool isUbsanReportFunction(const Function &F) {
-  return F.getName().startswith(UbsanReportPrefix);
+  return compat::startsWith(F.getName(), UbsanReportPrefix);
 }
 
 /*

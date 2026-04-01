@@ -20,15 +20,15 @@ void MetaDataHelper<MetaT, InstT, false>::set(InstT &I) {
     ID = Ctx.getMDKindID(MetaT::Name);
   if (is(I))
     return;
-  I.setMetadata(ID, llvm::MDNode::get(Ctx, llvm::None));
+  I.setMetadata(ID, llvm::MDNode::get(Ctx, {}));
 }
 
 template <typename MetaT, typename InstT>
 auto MetaDataHelper<MetaT, InstT, true>::get(const InstT &I)
-    -> llvm::Optional<Extra> {
+    -> std::optional<Extra> {
   MDNode *MD;
   if (!ID || !(MD = I.getMetadata(ID)))
-    return llvm::None;
+    return std::nullopt;
   if constexpr (UseDataMap<MetaT>::value)
     return MetaT::DataMap.lookup(&I);
   else
@@ -53,7 +53,7 @@ void MetaDataHelper<MetaT, InstT, true>::set(InstT &I, const Extra &Data) {
       std::lock_guard<std::mutex> Lock(Mutex);
       MetaT::DataMap[&I] = Data;
     }
-    MD = llvm::MDNode::get(Ctx, llvm::None);
+    MD = llvm::MDNode::get(Ctx, {});
   } else {
     // Otherwise, we use MDNode to store the data.
     MD = MetaDataExtra<Extra>::pack(Ctx, Data);
@@ -87,11 +87,11 @@ OperandBundleHelper<MetaT, InstT, Enabler>::getBundle(const Extra &Data) {
 }
 
 template <typename MetaT, typename CallT, typename Enabler>
-llvm::Optional<typename MetaT::Extra>
+std::optional<typename MetaT::Extra>
 OperandBundleHelper<MetaT, CallT, Enabler>::get(const CallT &I) {
   if (auto *Bundle = I.getOperandBundle(MetaT::Name))
     return unpack(*Bundle);
-  return llvm::None;
+  return std::nullopt;
 }
 
 template <typename MetaT, typename CallT, typename Enabler>

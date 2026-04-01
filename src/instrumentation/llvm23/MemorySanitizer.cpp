@@ -211,14 +211,24 @@
 #include <string>
 #include <tuple>
 
+#include "Instrumentation.h"
+#include "PassRegistry.h"
+
+#include "Utils/MetaDataUtils.h"
+#include "Utils/Options.h"
+#include "Utils/ValueUtils.h"
+#include "xsan_platform_mapping.h"
+
+#include "llvm/Plugins/PassPlugin.h"
+
 using namespace llvm;
 
 #define DEBUG_TYPE "msan"
 
-DEBUG_COUNTER(DebugInsertCheck, "msan-insert-check",
+DEBUG_COUNTER(DebugInsertCheck, "ms-insert-check",
               "Controls which checks to insert");
 
-DEBUG_COUNTER(DebugInstrumentInstruction, "msan-instrument-instruction",
+DEBUG_COUNTER(DebugInstrumentInstruction, "ms-instrument-instruction",
               "Controls which instruction to instrument");
 
 static const unsigned kOriginSize = 4;
@@ -238,36 +248,36 @@ static const size_t kNumberOfAccessSizes = 4;
 /// Adds a section to MemorySanitizer report that points to the allocation
 /// (stack or heap) the uninitialized bits came from originally.
 static cl::opt<int> ClTrackOrigins(
-    "msan-track-origins",
+    "ms-track-origins",
     cl::desc("Track origins (allocation sites) of poisoned memory"), cl::Hidden,
     cl::init(0));
 
-static cl::opt<bool> ClKeepGoing("msan-keep-going",
+static cl::opt<bool> ClKeepGoing("ms-keep-going",
                                  cl::desc("keep going after reporting a UMR"),
                                  cl::Hidden, cl::init(false));
 
 static cl::opt<bool>
-    ClPoisonStack("msan-poison-stack",
+    ClPoisonStack("ms-poison-stack",
                   cl::desc("poison uninitialized stack variables"), cl::Hidden,
                   cl::init(true));
 
 static cl::opt<bool> ClPoisonStackWithCall(
-    "msan-poison-stack-with-call",
+    "ms-poison-stack-with-call",
     cl::desc("poison uninitialized stack variables with a call"), cl::Hidden,
     cl::init(false));
 
 static cl::opt<int> ClPoisonStackPattern(
-    "msan-poison-stack-pattern",
+    "ms-poison-stack-pattern",
     cl::desc("poison uninitialized stack variables with the given pattern"),
     cl::Hidden, cl::init(0xff));
 
 static cl::opt<bool>
-    ClPrintStackNames("msan-print-stack-names",
+    ClPrintStackNames("ms-print-stack-names",
                       cl::desc("Print name of local stack variable"),
                       cl::Hidden, cl::init(true));
 
 static cl::opt<bool>
-    ClPoisonUndef("msan-poison-undef",
+    ClPoisonUndef("ms-poison-undef",
                   cl::desc("Poison fully undef temporary values. "
                            "Partially undefined constant vectors "
                            "are unaffected by this flag (see "
@@ -275,7 +285,7 @@ static cl::opt<bool>
                   cl::Hidden, cl::init(true));
 
 static cl::opt<bool> ClPoisonUndefVectors(
-    "msan-poison-undef-vectors",
+    "ms-poison-undef-vectors",
     cl::desc("Precisely poison partially undefined constant vectors. "
              "If false (legacy behavior), the entire vector is "
              "considered fully initialized, which may lead to false "
@@ -284,23 +294,23 @@ static cl::opt<bool> ClPoisonUndefVectors(
     cl::Hidden, cl::init(false));
 
 static cl::opt<bool> ClPreciseDisjointOr(
-    "msan-precise-disjoint-or",
+    "ms-precise-disjoint-or",
     cl::desc("Precisely poison disjoint OR. If false (legacy behavior), "
              "disjointedness is ignored (i.e., 1|1 is initialized)."),
     cl::Hidden, cl::init(false));
 
 static cl::opt<bool>
-    ClHandleICmp("msan-handle-icmp",
+    ClHandleICmp("ms-handle-icmp",
                  cl::desc("propagate shadow through ICmpEQ and ICmpNE"),
                  cl::Hidden, cl::init(true));
 
 static cl::opt<bool>
-    ClHandleICmpExact("msan-handle-icmp-exact",
+    ClHandleICmpExact("ms-handle-icmp-exact",
                       cl::desc("exact handling of relational integer ICmp"),
                       cl::Hidden, cl::init(true));
 
 static cl::opt<int> ClSwitchPrecision(
-    "msan-switch-precision",
+    "ms-switch-precision",
     cl::desc("Controls the number of cases considered by MSan for LLVM switch "
              "instructions. 0 means no UUMs detected. Higher values lead to "
              "fewer false negatives but may impact compiler and/or "
@@ -309,7 +319,7 @@ static cl::opt<int> ClSwitchPrecision(
     cl::Hidden, cl::init(99));
 
 static cl::opt<bool> ClHandleLifetimeIntrinsics(
-    "msan-handle-lifetime-intrinsics",
+    "ms-handle-lifetime-intrinsics",
     cl::desc(
         "when possible, poison scoped variables at the beginning of the scope "
         "(slower, but more precise)"),
@@ -323,7 +333,7 @@ static cl::opt<bool> ClHandleLifetimeIntrinsics(
 // Because it's impossible to figure out the array sizes, we can only unpoison
 // the first sizeof(type) bytes for each type* pointer.
 static cl::opt<bool> ClHandleAsmConservative(
-    "msan-handle-asm-conservative",
+    "ms-handle-asm-conservative",
     cl::desc("conservative handling of inline assembly"), cl::Hidden,
     cl::init(true));
 
@@ -334,17 +344,17 @@ static cl::opt<bool> ClHandleAsmConservative(
 // early at program startup where malloc-ed memory is more likely to
 // be zeroed. As of 2012-08-28 this flag adds 20% slowdown.
 static cl::opt<bool> ClCheckAccessAddress(
-    "msan-check-access-address",
+    "ms-check-access-address",
     cl::desc("report accesses through a pointer which has poisoned shadow"),
     cl::Hidden, cl::init(true));
 
 static cl::opt<bool> ClEagerChecks(
-    "msan-eager-checks",
+    "ms-eager-checks",
     cl::desc("check arguments and return values at function call boundaries"),
     cl::Hidden, cl::init(false));
 
 static cl::opt<bool> ClDumpStrictInstructions(
-    "msan-dump-strict-instructions",
+    "ms-dump-strict-instructions",
     cl::desc("print out instructions with default strict semantics i.e.,"
              "check that all the inputs are fully initialized, and mark "
              "the output as fully initialized. These semantics are applied "
@@ -357,14 +367,14 @@ static cl::opt<bool> ClDumpStrictInstructions(
 // to parallel 'msan-dump-strict-instructions', and to keep the door open to
 // handling non-intrinsic instructions heuristically.
 static cl::opt<bool> ClDumpHeuristicInstructions(
-    "msan-dump-heuristic-instructions",
+    "ms-dump-heuristic-instructions",
     cl::desc("Prints 'unknown' instructions that were handled heuristically. "
              "Use -msan-dump-strict-instructions to print instructions that "
              "could not be handled explicitly nor heuristically."),
     cl::Hidden, cl::init(false));
 
 static cl::opt<int> ClInstrumentationWithCallThreshold(
-    "msan-instrumentation-with-call-threshold",
+    "ms-instrumentation-with-call-threshold",
     cl::desc(
         "If the function being instrumented requires more than "
         "this number of checks and origin stores, use callbacks instead of "
@@ -372,47 +382,47 @@ static cl::opt<int> ClInstrumentationWithCallThreshold(
     cl::Hidden, cl::init(3500));
 
 static cl::opt<bool>
-    ClEnableKmsan("msan-kernel",
+    ClEnableKmsan("ms-kernel",
                   cl::desc("Enable KernelMemorySanitizer instrumentation"),
                   cl::Hidden, cl::init(false));
 
 static cl::opt<bool>
-    ClDisableChecks("msan-disable-checks",
+    ClDisableChecks("ms-disable-checks",
                     cl::desc("Apply no_sanitize to the whole file"), cl::Hidden,
                     cl::init(false));
 
 static cl::opt<bool>
-    ClCheckConstantShadow("msan-check-constant-shadow",
+    ClCheckConstantShadow("ms-check-constant-shadow",
                           cl::desc("Insert checks for constant shadow values"),
                           cl::Hidden, cl::init(true));
 
 // This is off by default because of a bug in gold:
 // https://sourceware.org/bugzilla/show_bug.cgi?id=19002
 static cl::opt<bool>
-    ClWithComdat("msan-with-comdat",
+    ClWithComdat("ms-with-comdat",
                  cl::desc("Place MSan constructors in comdat sections"),
                  cl::Hidden, cl::init(false));
 
 // These options allow to specify custom memory map parameters
 // See MemoryMapParams for details.
-static cl::opt<uint64_t> ClAndMask("msan-and-mask",
+static cl::opt<uint64_t> ClAndMask("ms-and-mask",
                                    cl::desc("Define custom MSan AndMask"),
                                    cl::Hidden, cl::init(0));
 
-static cl::opt<uint64_t> ClXorMask("msan-xor-mask",
+static cl::opt<uint64_t> ClXorMask("ms-xor-mask",
                                    cl::desc("Define custom MSan XorMask"),
                                    cl::Hidden, cl::init(0));
 
-static cl::opt<uint64_t> ClShadowBase("msan-shadow-base",
+static cl::opt<uint64_t> ClShadowBase("ms-shadow-base",
                                       cl::desc("Define custom MSan ShadowBase"),
                                       cl::Hidden, cl::init(0));
 
-static cl::opt<uint64_t> ClOriginBase("msan-origin-base",
+static cl::opt<uint64_t> ClOriginBase("ms-origin-base",
                                       cl::desc("Define custom MSan OriginBase"),
                                       cl::Hidden, cl::init(0));
 
 static cl::opt<int>
-    ClDisambiguateWarning("msan-disambiguate-warning-threshold",
+    ClDisambiguateWarning("ms-disambiguate-warning-threshold",
                           cl::desc("Define threshold for number of checks per "
                                    "debug location to force origin update."),
                           cl::Hidden, cl::init(3));
@@ -454,6 +464,14 @@ static const MemoryMapParams Linux_X86_64_MemoryMapParams = {
     0x500000000000, // XorMask
     0,              // ShadowBase (not used)
     0x100000000000, // OriginBase
+};
+
+// x86_64 Linux for XSan
+static const MemoryMapParams XSan_Linux_X86_64_MemoryMapParams = {
+    0,                                     // AndMask (not used)
+    __xsan::MappingX64_48::kMSanShadowXor, // XorMask
+    0,                                     // ShadowBase (not used)
+    __xsan::MappingX64_48::kMSanShadowAdd, // OriginBase
 };
 
 // mips32 Linux
@@ -498,6 +516,14 @@ static const MemoryMapParams Linux_AArch64_MemoryMapParams = {
     0x0B00000000000, // XorMask
     0,               // ShadowBase (not used)
     0x0200000000000, // OriginBase
+};
+
+// aarch64 Linux for XSan
+static const MemoryMapParams XSan_Linux_AArch64_MemoryMapParams = {
+    0,                                         // AndMask (not used)
+    __xsan::MappingAarch64_48::kMSanShadowXor, // XorMask
+    0,                                         // ShadowBase (not used)
+    __xsan::MappingAarch64_48::kMSanShadowAdd, // OriginBase
 };
 
 // loongarch64 Linux
@@ -748,6 +774,7 @@ void insertModuleCtor(Module &M) {
       // This callback is invoked when the functions are created the first
       // time. Hook them into the global ctors list in that case:
       [&](Function *Ctor, FunctionCallee) {
+        __xsan::addNoInstrumentionAttr(Ctor);
         if (!ClWithComdat) {
           appendToGlobalCtors(M, Ctor, 0);
           return;
@@ -844,8 +871,9 @@ MemorySanitizer::getOrInsertMsanMetadataFunction(Module &M, StringRef Name,
 }
 
 /// Create KMSAN API callbacks.
-void MemorySanitizer::createKernelApi(Module &M, const TargetLibraryInfo &TLI) {
+void MemorySanitizer::createKernelApi(Module &_M, const TargetLibraryInfo &TLI) {
   IRBuilder<> IRB(*C);
+  __xsan::NoUnwindModuleWrapper M(_M);
 
   // These will be initialized in insertKmsanPrologue().
   RetvalTLS = nullptr;
@@ -906,9 +934,10 @@ static Constant *getOrInsertGlobal(Module &M, StringRef Name, Type *Ty) {
 }
 
 /// Insert declarations for userspace-specific functions and globals.
-void MemorySanitizer::createUserspaceApi(Module &M,
+void MemorySanitizer::createUserspaceApi(Module &_M,
                                          const TargetLibraryInfo &TLI) {
   IRBuilder<> IRB(*C);
+  __xsan::NoUnwindModuleWrapper M(_M);
 
   // Create the callback.
   // FIXME: this function should have "Cold" calling conv,
@@ -949,7 +978,7 @@ void MemorySanitizer::createUserspaceApi(Module &M,
                         ArrayType::get(OriginTy, kParamTLSSize / 4));
 
   VAArgOverflowSizeTLS = getOrInsertGlobal(M, "__msan_va_arg_overflow_size_tls",
-                                           IRB.getIntPtrTy(M.getDataLayout()));
+                                           IRB.getIntPtrTy(_M.getDataLayout()));
 
   for (size_t AccessSizeIndex = 0; AccessSizeIndex < kNumberOfAccessSizes;
        AccessSizeIndex++) {
@@ -1078,7 +1107,11 @@ void MemorySanitizer::initializeModule(Module &M) {
     case Triple::Linux:
       switch (TargetTriple.getArch()) {
       case Triple::x86_64:
+#ifdef XSAN_PASS
+        MapParams = &XSan_Linux_X86_64_MemoryMapParams;
+#else
         MapParams = Linux_X86_MemoryMapParams.bits64;
+#endif
         break;
       case Triple::x86:
         MapParams = Linux_X86_MemoryMapParams.bits32;
@@ -1096,7 +1129,11 @@ void MemorySanitizer::initializeModule(Module &M) {
         break;
       case Triple::aarch64:
       case Triple::aarch64_be:
+#ifdef XSAN_PASS
+        MapParams = &XSan_Linux_AArch64_MemoryMapParams;
+#else
         MapParams = Linux_ARM_MemoryMapParams.bits64;
+#endif
         break;
       case Triple::loongarch64:
         MapParams = Linux_LoongArch_MemoryMapParams.bits64;
@@ -1186,9 +1223,10 @@ namespace {
 
 /// Helper class to attach debug information of the given instruction onto new
 /// instructions inserted after.
-class NextNodeIRBuilder : public IRBuilder<> {
+class NextNodeIRBuilder : public __xsan::InstrumentationIRBuilder {
 public:
-  explicit NextNodeIRBuilder(Instruction *IP) : IRBuilder<>(IP->getNextNode()) {
+  explicit NextNodeIRBuilder(Instruction *IP)
+      : __xsan::InstrumentationIRBuilder(IP->getNextNode()) {
     SetCurrentDebugLocation(IP->getDebugLoc());
   }
 };
@@ -1209,6 +1247,9 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   Instruction *FnPrologueEnd;
   SmallVector<Instruction *, 16> Instructions;
 
+  /// XSan MODIFIED: used to get the real arith operations.
+  SmallPtrSet<ExtractValueInst *, 16> RealArithResults;
+
   // The following flags disable parts of MSan instrumentation based on
   // exclusion list contents and command-line options.
   bool InsertChecks;
@@ -1227,8 +1268,8 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   };
   SmallVector<ShadowOriginAndInsertPoint, 16> InstrumentationList;
   DenseMap<const DILocation *, int> LazyWarningDebugLocationCount;
-  SmallSetVector<AllocaInst *, 16> AllocaSet;
-  SmallVector<std::pair<IntrinsicInst *, AllocaInst *>, 16> LifetimeStartList;
+  SmallSetVector<Instruction *, 16> AllocaSet;
+  SmallVector<std::pair<IntrinsicInst *, Instruction *>, 16> LifetimeStartList;
   SmallVector<StoreInst *, 16> StoreList;
   int64_t SplittableBlocksCount = 0;
 
@@ -1251,11 +1292,12 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
 
     MS.initializeCallbacks(*F.getParent(), TLI);
     FnPrologueEnd =
-        IRBuilder<>(&F.getEntryBlock(), F.getEntryBlock().getFirstNonPHIIt())
+        __xsan::InstrumentationIRBuilder(&F.getEntryBlock(),
+                                         F.getEntryBlock().getFirstNonPHIIt())
             .CreateIntrinsic(Intrinsic::donothing, {});
 
     if (MS.CompileKernel) {
-      IRBuilder<> IRB(FnPrologueEnd);
+      __xsan::InstrumentationIRBuilder IRB(FnPrologueEnd);
       insertKmsanPrologue(IRB);
     }
 
@@ -1384,7 +1426,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
       Value *Cmp = convertToBool(ConvertedShadow, IRB, "_mscmp");
       Instruction *CheckTerm = SplitBlockAndInsertIfThen(
           Cmp, &*IRB.GetInsertPoint(), false, MS.OriginStoreWeights);
-      IRBuilder<> IRBNew(CheckTerm);
+      __xsan::InstrumentationIRBuilder IRBNew(CheckTerm);
       paintOrigin(IRBNew, updateOrigin(Origin, IRBNew), OriginPtr, StoreSize,
                   OriginAlignment);
     }
@@ -1392,7 +1434,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
 
   void materializeStores() {
     for (StoreInst *SI : StoreList) {
-      IRBuilder<> IRB(SI);
+      __xsan::InstrumentationIRBuilder IRB(SI);
       Value *Val = SI->getValueOperand();
       Value *Addr = SI->getPointerOperand();
       Value *Shadow = SI->isAtomic() ? getCleanShadow(Val) : getShadow(Val);
@@ -1445,7 +1487,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
         if (NewDebugLoc && NewDebugLoc != IRB.getCurrentDebugLocation()) {
           // Insert update just before the check, so we call runtime only just
           // before the report.
-          IRBuilder<> IRBOrigin(&*IRB.GetInsertPoint());
+          __xsan::InstrumentationIRBuilder IRBOrigin(&*IRB.GetInsertPoint());
           IRBOrigin.SetCurrentDebugLocation(NewDebugLoc);
           Origin = updateOrigin(Origin, IRBOrigin);
         }
@@ -1514,7 +1556,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     Value *Shadow = nullptr;
     for (const auto &ShadowData : InstructionChecks) {
       assert(ShadowData.OrigIns == Instruction);
-      IRBuilder<> IRB(Instruction);
+      __xsan::InstrumentationIRBuilder IRB(Instruction);
 
       Value *ConvertedShadow = ShadowData.Shadow;
 
@@ -1551,7 +1593,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
 
     if (Shadow) {
       assert(Combine);
-      IRBuilder<> IRB(Instruction);
+      __xsan::InstrumentationIRBuilder IRB(Instruction);
       materializeOneCheck(IRB, Shadow, nullptr);
     }
   }
@@ -1630,8 +1672,29 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
 
     // `visit` above only collects instructions. Process them after iterating
     // CFG to avoid requirement on CFG transformations.
-    for (Instruction *I : Instructions)
+    for (Instruction *I : Instructions) {
+      /// XSan MODIFIED: handle replaced instructons.
+      // ASan replaces stack var x,y,z as follows:
+      //     char alloc[N]; // merge all small allocas into ONE
+      //     char *p = detect_uar? fake_stack_malloc(N) : alloc;
+      //     // Original allocas
+      //     char *x = p + N1; // replaced alloca
+      //     char *y = p + N2; // replaced alloca
+      //     char *z = p + N3; // replaced alloca
+      if (__xsan::ReplacedAlloca::is(*I)) {
+        visitAllocaInst(*I);
+        continue;
+      }
+      if (auto Data = __xsan::ReplacedAtomic::get(*I)) {
+        visitReplacedAtomicInst(*I, Data.value());
+        continue;
+      }
+      if (__xsan::UBSanInst::is(*I)) {
+        visitUBSanReplacedInst(*I);
+        continue;
+      }
       InstVisitor<MemorySanitizerVisitor>::visit(*I);
+    }
 
     // Finalize PHI nodes.
     for (PHINode *PN : ShadowPHINodes) {
@@ -1657,7 +1720,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     }
     // Poison the allocas for which we didn't instrument the corresponding
     // lifetime intrinsics.
-    for (AllocaInst *AI : AllocaSet)
+    for (Instruction *AI : AllocaSet)
       instrumentAlloca(*AI);
 
     // Insert shadow value checks.
@@ -2048,7 +2111,11 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   /// or extracts if from ParamTLS (for function arguments).
   Value *getShadow(Value *V) {
     if (Instruction *I = dyn_cast<Instruction>(V)) {
-      if (!PropagateShadow || I->getMetadata(LLVMContext::MD_nosanitize))
+      if (!PropagateShadow)
+        return getCleanShadow(V);
+      if (I->getMetadata(LLVMContext::MD_nosanitize) &&
+          !__xsan::isReplacedInst(*I) &&
+          !llvm::is_contained(RealArithResults, I))
         return getCleanShadow(V);
       // For instructions the shadow is already stored in the map.
       Value *Shadow = ShadowMap[V];
@@ -2072,7 +2139,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
       if (ShadowPtr)
         return ShadowPtr;
       Function *F = A->getParent();
-      IRBuilder<> EntryIRB(FnPrologueEnd);
+      __xsan::InstrumentationIRBuilder EntryIRB(FnPrologueEnd);
       unsigned ArgOffset = 0;
       const DataLayout &DL = F->getDataLayout();
       for (auto &FArg : F->args()) {
@@ -2195,7 +2262,9 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     assert((isa<Instruction>(V) || isa<Argument>(V)) &&
            "Unexpected value type in getOrigin()");
     if (Instruction *I = dyn_cast<Instruction>(V)) {
-      if (I->getMetadata(LLVMContext::MD_nosanitize))
+      if (I->getMetadata(LLVMContext::MD_nosanitize) &&
+          !__xsan::isReplacedInst(*I) &&
+          !llvm::is_contained(RealArithResults, I))
         return getCleanOrigin();
     }
     Value *Origin = OriginMap[V];
@@ -2332,6 +2401,9 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   // ------------------- Visitors.
   using InstVisitor<MemorySanitizerVisitor>::visit;
   void visit(Instruction &I) {
+    /// XSan MODIFIED: handle replaced instructons.
+    if (__xsan::ReplacedAtomic::is(I) || __xsan::UBSanInst::is(I))
+      return (void)Instructions.push_back(&I);
     if (I.getMetadata(LLVMContext::MD_nosanitize))
       return;
     // Don't want to visit if we're in the prologue
@@ -2399,7 +2471,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void handleCASOrRMW(Instruction &I) {
     assert(isa<AtomicRMWInst>(I) || isa<AtomicCmpXchgInst>(I));
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Addr = I.getOperand(0);
     Value *Val = I.getOperand(1);
     Value *ShadowPtr = getShadowOriginPtr(Addr, IRB, getShadowTy(Val), Align(1),
@@ -2429,6 +2501,81 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void visitAtomicCmpXchgInst(AtomicCmpXchgInst &I) {
     handleCASOrRMW(I);
     I.setSuccessOrdering(addReleaseOrdering(I.getSuccessOrdering()));
+  }
+
+  void visitReplacedAtomicInst(Instruction &I,
+                               const ::__xsan::ReplacedAtomic::Extra &Data) {
+    using AtomicType = ::__xsan::ReplacedAtomic::Extra::AtomicType;
+    Value *Addr = Data.AddrUse->get();
+    Value *Val = Data.ValUse ? Data.ValUse->get() : nullptr;
+    switch (Data.Type) {
+    case AtomicType::Load: {
+      NextNodeIRBuilder IRB(&I);
+      Type *ShadowTy = getShadowTy(&I);
+      Value *ShadowPtr = nullptr, *OriginPtr = nullptr;
+      if (PropagateShadow) {
+        std::tie(ShadowPtr, OriginPtr) = getShadowOriginPtr(
+            Addr, IRB, ShadowTy, Data.Align, /*isStore*/ false);
+        setShadow(&I, IRB.CreateAlignedLoad(ShadowTy, ShadowPtr, Data.Align,
+                                            "_msld"));
+      } else {
+        setShadow(&I, getCleanShadow(&I));
+      }
+      if (ClCheckAccessAddress)
+        insertCheckShadowOf(Addr, &I);
+
+      if (MS.TrackOrigins) {
+        if (PropagateShadow) {
+          const Align OriginAlignment =
+              std::max(kMinOriginAlignment, Data.Align.value());
+          setOrigin(&I, IRB.CreateAlignedLoad(MS.OriginTy, OriginPtr,
+                                              OriginAlignment));
+        } else {
+          setOrigin(&I, getCleanOrigin());
+        }
+      }
+      break;
+    }
+    case AtomicType::Store: {
+      __xsan::InstrumentationIRBuilder IRB(&I);
+      Value *Shadow = getCleanShadow(Val);
+      Value *ShadowPtr, *OriginPtr;
+      Type *ShadowTy = Shadow->getType();
+      const Align OriginAlignment =
+          std::max(kMinOriginAlignment, Data.Align.value());
+      std::tie(ShadowPtr, OriginPtr) =
+          getShadowOriginPtr(Addr, IRB, ShadowTy, Data.Align, /*isStore*/ true);
+
+      StoreInst *NewSI = IRB.CreateAlignedStore(Shadow, ShadowPtr, Data.Align);
+      LLVM_DEBUG(dbgs() << "  STORE: " << *NewSI << "\n");
+      (void)NewSI;
+      break;
+    }
+    case AtomicType::RMW:
+    case AtomicType::CAS: {
+      __xsan::InstrumentationIRBuilder IRB(&I);
+      Value *ShadowPtr = getShadowOriginPtr(Addr, IRB, Val->getType(), Align(1),
+                                            /*isStore*/ true)
+                             .first;
+
+      if (ClCheckAccessAddress)
+        insertCheckShadowOf(Addr, &I);
+
+      // Only test the conditional argument of cmpxchg instruction.
+      // The other argument can potentially be uninitialized, but we can not
+      // detect this situation reliably without possible false positives.
+      if (Data.Type == AtomicType::CAS)
+        insertCheckShadowOf(Val, &I);
+
+      IRB.CreateStore(getCleanShadow(Val), ShadowPtr);
+
+      setShadow(&I, getCleanShadow(&I));
+      setOrigin(&I, getCleanOrigin());
+      break;
+    }
+    default:
+      llvm_unreachable("Unsupported atomic operation");
+    }
   }
 
   /// Generic handler to compute shadow for == and != comparisons.
@@ -2489,7 +2636,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   //                   | propagateEqualityComparison(Val, 1)
   //                   | propagateEqualityComparison(Val, 2))
   void visitSwitchInst(SwitchInst &SI) {
-    IRBuilder<> IRB(&SI);
+    __xsan::InstrumentationIRBuilder IRB(&SI);
 
     Value *Val = SI.getCondition();
     Value *ShadowVal = getShadow(Val);
@@ -2530,7 +2677,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   // Vector manipulation.
   void visitExtractElementInst(ExtractElementInst &I) {
     insertCheckShadowOf(I.getOperand(1), &I);
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     setShadow(&I, IRB.CreateExtractElement(getShadow(&I, 0), I.getOperand(1),
                                            "_msprop"));
     setOrigin(&I, getOrigin(&I, 0));
@@ -2538,7 +2685,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
 
   void visitInsertElementInst(InsertElementInst &I) {
     insertCheckShadowOf(I.getOperand(2), &I);
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     auto *Shadow0 = getShadow(&I, 0);
     auto *Shadow1 = getShadow(&I, 1);
     setShadow(&I, IRB.CreateInsertElement(Shadow0, Shadow1, I.getOperand(2),
@@ -2547,7 +2694,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   }
 
   void visitShuffleVectorInst(ShuffleVectorInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     auto *Shadow0 = getShadow(&I, 0);
     auto *Shadow1 = getShadow(&I, 1);
     setShadow(&I, IRB.CreateShuffleVector(Shadow0, Shadow1, I.getShuffleMask(),
@@ -2557,19 +2704,19 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
 
   // Casts.
   void visitSExtInst(SExtInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     setShadow(&I, IRB.CreateSExt(getShadow(&I, 0), I.getType(), "_msprop"));
     setOrigin(&I, getOrigin(&I, 0));
   }
 
   void visitZExtInst(ZExtInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     setShadow(&I, IRB.CreateZExt(getShadow(&I, 0), I.getType(), "_msprop"));
     setOrigin(&I, getOrigin(&I, 0));
   }
 
   void visitTruncInst(TruncInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     setShadow(&I, IRB.CreateTrunc(getShadow(&I, 0), I.getType(), "_msprop"));
     setOrigin(&I, getOrigin(&I, 0));
   }
@@ -2581,20 +2728,20 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     if (auto *CI = dyn_cast<CallInst>(I.getOperand(0)))
       if (CI->isMustTailCall())
         return;
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     setShadow(&I, IRB.CreateBitCast(getShadow(&I, 0), getShadowTy(&I)));
     setOrigin(&I, getOrigin(&I, 0));
   }
 
   void visitPtrToIntInst(PtrToIntInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     setShadow(&I, IRB.CreateIntCast(getShadow(&I, 0), getShadowTy(&I), false,
                                     "_msprop_ptrtoint"));
     setOrigin(&I, getOrigin(&I, 0));
   }
 
   void visitIntToPtrInst(IntToPtrInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     setShadow(&I, IRB.CreateIntCast(getShadow(&I, 0), getShadowTy(&I), false,
                                     "_msprop_inttoptr"));
     setOrigin(&I, getOrigin(&I, 0));
@@ -2634,7 +2781,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
 
   /// Handler for bitwise AND operator.
   void visitAnd(BinaryOperator &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *V1 = I.getOperand(0);
     Value *V2 = I.getOperand(1);
     Value *S1 = getShadow(&I, 0);
@@ -2647,7 +2794,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   }
 
   void visitOr(BinaryOperator &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     //  "Or" of 1 and a poisoned value results in unpoisoned value:
     //    1|1 => 1;     0|1 => 1;     p|1 => 1;
     //    1|0 => 1;     0|0 => 0;     p|0 => p;
@@ -2778,7 +2925,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void setOriginForNaryOp(Instruction &I) {
     if (!MS.TrackOrigins)
       return;
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     OriginCombiner OC(this, IRB);
     for (Use &Op : I.operands())
       OC.Add(Op.get());
@@ -2831,7 +2978,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
 
   /// Propagate shadow for arbitrary operation.
   void handleShadowOr(Instruction &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     ShadowAndOriginCombiner SC(this, IRB);
     for (Use &Op : I.operands())
       SC.Add(Op.get());
@@ -2876,7 +3023,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
 
     Value *Or = nullptr;
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     for (unsigned i = 0; i < ReductionFactor; i++) {
       SmallVector<int, 16> Mask;
 
@@ -2927,7 +3074,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     assert(ParamType->getNumElements() * I.arg_size() ==
            2 * ReturnType->getNumElements());
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     // Horizontal OR of shadow
     Value *FirstArgShadow = getShadow(&I, 0);
@@ -2968,7 +3115,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     assert(ParamType->getNumElements() * I.arg_size() ==
            2 * ReturnType->getNumElements());
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     FixedVectorType *ReinterpretShadowTy = nullptr;
     assert(isAligned(Align(ReinterpretElemWidth),
@@ -3044,7 +3191,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
       }
     }
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     setShadow(&I,
               IRB.CreateMul(getShadow(OtherArg), ShadowMul, "msprop_mul_cst"));
     setOrigin(&I, getOrigin(OtherArg));
@@ -3069,7 +3216,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void visitXor(BinaryOperator &I) { handleShadowOr(I); }
 
   void handleIntegerDiv(Instruction &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     // Strict on the second argument.
     insertCheckShadowOf(I.getOperand(1), &I);
     setShadow(&I, getShadow(&I, 0));
@@ -3091,7 +3238,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   /// Sometimes the comparison result is known even if some of the bits of the
   /// arguments are not.
   void handleEqualityComparison(ICmpInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *A = I.getOperand(0);
     Value *B = I.getOperand(1);
     Value *Sa = getShadow(A);
@@ -3109,7 +3256,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   /// comparisons of integers, pointers and vectors of those.
   /// FIXME: output seems suboptimal when one of the operands is a constant
   void handleRelationalComparisonExact(ICmpInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *A = I.getOperand(0);
     Value *B = I.getOperand(1);
     Value *Sa = getShadow(A);
@@ -3177,7 +3324,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
          (pre == CmpInst::ICMP_SLT || pre == CmpInst::ICMP_SGE)) ||
         (constOp->isAllOnesValue() &&
          (pre == CmpInst::ICMP_SGT || pre == CmpInst::ICMP_SLE))) {
-      IRBuilder<> IRB(&I);
+      __xsan::InstrumentationIRBuilder IRB(&I);
       Value *Shadow = IRB.CreateICmpSLT(getShadow(op), getCleanShadow(op),
                                         "_msprop_icmp_s");
       setShadow(&I, Shadow);
@@ -3219,7 +3366,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void visitFCmpInst(FCmpInst &I) { handleShadowOr(I); }
 
   void handleShift(BinaryOperator &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     // If any of the S2 bits are poisoned, the whole thing is poisoned.
     // Otherwise perform the same shift on S1.
     Value *S1 = getShadow(&I, 0);
@@ -3237,7 +3384,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void visitLShr(BinaryOperator &I) { handleShift(I); }
 
   void handleFunnelShift(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     // If any of the S2 bits are poisoned, the whole thing is poisoned.
     // Otherwise perform the same shift on S0 and S1.
     Value *S0 = getShadow(&I, 0);
@@ -3264,6 +3411,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   /// Similar situation exists for memcpy and memset.
   void visitMemMoveInst(MemMoveInst &I) {
     getShadow(I.getArgOperand(1)); // Ensure shadow initialized
+    /// Should NOT tag with nosanitize, as here is a user-sematic equivalence.
     IRBuilder<> IRB(&I);
     IRB.CreateCall(MS.MemmoveFn,
                    {I.getArgOperand(0), I.getArgOperand(1),
@@ -3287,6 +3435,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   /// itself, instrumentation should be disabled with the no_sanitize attribute.
   void visitMemCpyInst(MemCpyInst &I) {
     getShadow(I.getArgOperand(1)); // Ensure shadow initialized
+    /// Should NOT tag with nosanitize, as here is a user-sematic equivalent.
     IRBuilder<> IRB(&I);
     IRB.CreateCall(MS.MemcpyFn,
                    {I.getArgOperand(0), I.getArgOperand(1),
@@ -3296,6 +3445,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
 
   // Same as memcpy.
   void visitMemSetInst(MemSetInst &I) {
+    /// Should NOT tag with nosanitize, as here is a user-sematic equivalent.
     IRBuilder<> IRB(&I);
     IRB.CreateCall(
         MS.MemsetFn,
@@ -3316,7 +3466,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   bool handleVectorStoreIntrinsic(IntrinsicInst &I) {
     assert(I.arg_size() == 2);
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Addr = I.getArgOperand(0);
     Value *Shadow = getShadow(&I, 1);
     Value *ShadowPtr, *OriginPtr;
@@ -3343,7 +3493,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   bool handleVectorLoadIntrinsic(IntrinsicInst &I) {
     assert(I.arg_size() == 1);
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Addr = I.getArgOperand(0);
 
     Type *ShadowTy = getShadowTy(&I);
@@ -3402,7 +3552,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
         return false;
     }
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     ShadowAndOriginCombiner SC(this, IRB);
     for (unsigned i = 0; i < NumArgOperands; ++i)
       SC.Add(I.getArgOperand(i));
@@ -3469,13 +3619,16 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void handleLifetimeStart(IntrinsicInst &I) {
     if (!PoisonStack)
       return;
-    AllocaInst *AI = dyn_cast<AllocaInst>(I.getArgOperand(0));
+    /// XSan MODIFIED: now llvm.lifetime intrinsic only support alloca, causing
+    /// ASan's fake stack replacement cannot be tracked.
+    Value *V = __xsan::getLifetimeStartOperand(I);
+    Instruction *AI = __xsan::findAllocaForValue(V);
     if (AI)
       LifetimeStartList.push_back(std::make_pair(&I, AI));
   }
 
   void handleBswap(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Op = I.getArgOperand(0);
     Type *OpType = Op->getType();
     setShadow(&I, IRB.CreateIntrinsic(Intrinsic::bswap, ArrayRef(&OpType, 1),
@@ -3502,7 +3655,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   //      ((ConcreteZerosCount >= ShadowZerosCount) && !AllZeroShadow)
   //   || (is_zero_poison && AllZeroSrc)
   void handleCountLeadingTrailingZeros(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Src = I.getArgOperand(0);
     Value *SrcShadow = getShadow(Src);
 
@@ -3551,7 +3704,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     else
       assert(I.arg_size() == 1);
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *S0 = getShadow(&I, 0);
 
     if (FixedPoint) {
@@ -3597,7 +3750,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   /// input vector.
   /// This is more type-safe than CreateShadowCast().
   Value *maybeExtendVectorShadowWithZeros(Value *Shadow, IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     assert(isa<FixedVectorType>(Shadow->getType()));
     assert(isa<FixedVectorType>(I.getType()));
 
@@ -3657,7 +3810,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     // Temporarily shrink the return type's number of elements.
     VectorType *ShadowType = maybeShrinkVectorShadowType(Src, I);
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *S0 = getShadow(&I, 0);
 
     /// For scalars:
@@ -3696,7 +3849,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   // handleNEONVectorConvertIntrinsic().
   void handleSSEVectorConvertIntrinsic(IntrinsicInst &I, int NumUsedElements,
                                        bool HasRoundingMode = false) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *CopyOp, *ConvertOp;
 
     assert((!HasRoundingMode ||
@@ -3793,7 +3946,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   // greater than register (or field) width.
   void handleVectorShiftIntrinsic(IntrinsicInst &I, bool Variable) {
     assert(I.arg_size() == 2);
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     // If any of the S2 bits are poisoned, the whole thing is poisoned.
     // Otherwise perform the same shift on S1.
     Value *S1 = getShadow(&I, 0);
@@ -3871,7 +4024,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void handleVectorPackIntrinsic(IntrinsicInst &I,
                                  unsigned MMXEltSizeInBits = 0) {
     assert(I.arg_size() == 2);
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *S1 = getShadow(&I, 0);
     Value *S2 = getShadow(&I, 1);
     assert(S1->getType()->isVectorTy());
@@ -3942,7 +4095,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   // 4 elements of inputs and output, and then on last 4 elements of inputs and
   // output.
   void handleDppIntrinsic(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     Value *S0 = getShadow(&I, 0);
     Value *S1 = getShadow(&I, 1);
@@ -3991,7 +4144,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     Value *Oc = MS.TrackOrigins ? getOrigin(C) : nullptr;
 
     {
-      IRBuilder<> IRB(&I);
+      __xsan::InstrumentationIRBuilder IRB(&I);
       // Extract top bit from condition and its shadow.
       C = convertBlendvToSelectMask(IRB, C);
       Sc = convertBlendvToSelectMask(IRB, Sc);
@@ -4010,7 +4163,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     unsigned ZeroBitsPerResultElement =
         ResTy->getScalarSizeInBits() - SignificantBitsPerResultElement;
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     auto *Shadow0 = getShadow(&I, 0);
     auto *Shadow1 = getShadow(&I, 1);
     Value *S = IRB.CreateOr(Shadow0, Shadow1);
@@ -4049,7 +4202,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
                                        bool ZeroPurifies,
                                        unsigned EltSizeInBits,
                                        enum OddOrEvenLanes Lanes) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     [[maybe_unused]] FixedVectorType *ReturnType =
         cast<FixedVectorType>(I.getType());
@@ -4212,7 +4365,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     } else
       assert(I.arg_size() == 2);
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     // Basically, an or followed by sext(icmp ne 0) to end up with all-zeros or
     // all-ones shadow.
@@ -4230,7 +4383,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   // This handles both cmp* intrinsics which return the result in the first
   // element of a vector, and comi* which return the result as i32.
   void handleVectorCompareScalarIntrinsic(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     auto *Shadow0 = getShadow(&I, 0);
     auto *Shadow1 = getShadow(&I, 1);
     Value *S0 = IRB.CreateOr(Shadow0, Shadow1);
@@ -4248,7 +4401,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void handleVectorReduceIntrinsic(IntrinsicInst &I, bool AllowShadowCast) {
     assert(I.arg_size() == 1);
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *S = IRB.CreateOrReduce(getShadow(&I, 0));
     if (AllowShadowCast)
       S = CreateShadowCast(IRB, S, getShadowTy(&I));
@@ -4268,7 +4421,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void handleVectorReduceWithStarterIntrinsic(IntrinsicInst &I) {
     assert(I.arg_size() == 2);
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Shadow0 = getShadow(&I, 0);
     Value *Shadow1 = IRB.CreateOrReduce(getShadow(&I, 1));
     assert(Shadow0->getType() == Shadow1->getType());
@@ -4284,7 +4437,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void handleVectorReduceOrIntrinsic(IntrinsicInst &I) {
     assert(I.arg_size() == 1);
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *OperandShadow = getShadow(&I, 0);
     Value *OperandUnsetBits = IRB.CreateNot(I.getOperand(0));
     Value *OperandUnsetOrPoison = IRB.CreateOr(OperandUnsetBits, OperandShadow);
@@ -4304,7 +4457,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void handleVectorReduceAndIntrinsic(IntrinsicInst &I) {
     assert(I.arg_size() == 1);
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *OperandShadow = getShadow(&I, 0);
     Value *OperandSetOrPoison = IRB.CreateOr(I.getOperand(0), OperandShadow);
     // Bit N is clean if any field's bit N is 0 and unpoison
@@ -4318,7 +4471,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   }
 
   void handleStmxcsr(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Addr = I.getArgOperand(0);
     Type *Ty = IRB.getInt32Ty();
     Value *ShadowPtr =
@@ -4334,7 +4487,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     if (!InsertChecks)
       return;
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Addr = I.getArgOperand(0);
     Type *Ty = IRB.getInt32Ty();
     const Align Alignment = Align(1);
@@ -4352,7 +4505,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   }
 
   void handleMaskedExpandLoad(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Ptr = I.getArgOperand(0);
     MaybeAlign Align = I.getParamAlign(0);
     Value *Mask = I.getArgOperand(1);
@@ -4385,7 +4538,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   }
 
   void handleMaskedCompressStore(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Values = I.getArgOperand(0);
     Value *Ptr = I.getArgOperand(1);
     MaybeAlign Align = I.getParamAlign(1);
@@ -4408,7 +4561,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   }
 
   void handleMaskedGather(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Ptrs = I.getArgOperand(0);
     const Align Alignment = I.getParamAlign(0).valueOrOne();
     Value *Mask = I.getArgOperand(1);
@@ -4445,7 +4598,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   }
 
   void handleMaskedScatter(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Values = I.getArgOperand(0);
     Value *Ptrs = I.getArgOperand(1);
     const Align Alignment = I.getParamAlign(1).valueOrOne();
@@ -4476,7 +4629,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   // Note: handleAVXMaskedStore handles AVX/AVX2 variants, though AVX512 masked
   //       stores are lowered to Intrinsic::masked_store.
   void handleMaskedStore(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *V = I.getArgOperand(0);
     Value *Ptr = I.getArgOperand(1);
     const Align Alignment = I.getParamAlign(1).valueOrOne();
@@ -4509,7 +4662,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   // Note: handleAVXMaskedLoad handles AVX/AVX2 variants, though AVX512 masked
   //       loads are lowered to Intrinsic::masked_load.
   void handleMaskedLoad(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Ptr = I.getArgOperand(0);
     const Align Alignment = I.getParamAlign(0).valueOrOne();
     Value *Mask = I.getArgOperand(1);
@@ -4564,7 +4717,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void handleAVXMaskedStore(IntrinsicInst &I) {
     assert(I.arg_size() == 3);
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     Value *Dst = I.getArgOperand(0);
     assert(Dst->getType()->isPointerTy() && "Destination is not a pointer!");
@@ -4630,7 +4783,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void handleAVXMaskedLoad(IntrinsicInst &I) {
     assert(I.arg_size() == 2);
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     Value *Src = I.getArgOperand(0);
     assert(Src->getType()->isPointerTy() && "Source is not a pointer!");
@@ -4696,7 +4849,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   // Instrument AVX permutation intrinsic.
   // We apply the same permutation (argument index 1) to the shadow.
   void handleAVXVpermilvar(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Shadow = getShadow(&I, 0);
     maskedCheckAVXIndexShadow(IRB, I.getArgOperand(1), &I);
 
@@ -4726,7 +4879,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     assert(I.getArgOperand(0)->getType() == I.getArgOperand(2)->getType());
     assert(I.getType() == I.getArgOperand(0)->getType());
     assert(I.getArgOperand(1)->getType()->isIntOrIntVectorTy());
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *AShadow = getShadow(&I, 0);
     Value *Idx = I.getArgOperand(1);
     Value *BShadow = getShadow(&I, 2);
@@ -4779,7 +4932,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   //    where all_or_nothing(x) is fully uninitialized if x has any
   //    uninitialized bits
   void handleAVX512VectorConvertFPToInt(IntrinsicInst &I, bool LastMask) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     assert(I.arg_size() == 4);
     Value *A = I.getOperand(0);
@@ -4866,7 +5019,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   // i64. The following instrumentation happens to work for all of them:
   //   Sz = I(Sx, Y) | (sext (Sy != 0))
   void handleBmiIntrinsic(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Type *ShadowTy = getShadowTy(&I);
 
     // If any bit of the mask operand is poisoned, then the whole thing is.
@@ -4898,7 +5051,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   //   (0, 1, 2, 3) -> (1, 1, 3, 3) (odd case)
   // and then apply the usual shadow combining logic.
   void handlePclmulIntrinsic(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     unsigned Width =
         cast<FixedVectorType>(I.getArgOperand(0)->getType())->getNumElements();
     assert(isa<ConstantInt>(I.getArgOperand(2)) &&
@@ -4916,7 +5069,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
 
   // Instrument _mm_*_sd|ss intrinsics
   void handleUnarySdSsIntrinsic(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     unsigned Width =
         cast<FixedVectorType>(I.getArgOperand(0)->getType())->getNumElements();
     Value *First = getShadow(&I, 0);
@@ -4933,7 +5086,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   }
 
   void handleVtestIntrinsic(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Shadow0 = getShadow(&I, 0);
     Value *Shadow1 = getShadow(&I, 1);
     Value *Or = IRB.CreateOr(Shadow0, Shadow1);
@@ -4946,7 +5099,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   }
 
   void handleBinarySdSsIntrinsic(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     unsigned Width =
         cast<FixedVectorType>(I.getArgOperand(0)->getType())->getNumElements();
     Value *First = getShadow(&I, 0);
@@ -4971,7 +5124,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     assert(I.arg_size() == 2);
     assert(isa<ConstantInt>(I.getArgOperand(1)));
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     ShadowAndOriginCombiner SC(this, IRB);
     SC.Add(I.getArgOperand(0));
     SC.Done(&I);
@@ -4993,7 +5146,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     assert(IsIntMinPoison->getType()->isIntegerTy());
     assert(IsIntMinPoison->getType()->getIntegerBitWidth() == 1);
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *SrcShadow = getShadow(Src);
 
     APInt MinVal =
@@ -5012,14 +5165,14 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   }
 
   void handleIsFpClass(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Shadow = getShadow(&I, 0);
     setShadow(&I, IRB.CreateICmpNE(Shadow, getCleanShadow(Shadow)));
     setOrigin(&I, getOrigin(&I, 0));
   }
 
   void handleArithmeticWithOverflow(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Shadow0 = getShadow(&I, 0);
     Value *Shadow1 = getShadow(&I, 1);
     Value *ShadowElt0 = IRB.CreateOr(Shadow0, Shadow1);
@@ -5060,7 +5213,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   // Note: for PMOV (truncation), handleIntrinsicByApplyingToShadow is precise
   //       and is much faster than this handler.
   void handleAVX512VectorDownConvert(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     assert(I.arg_size() == 3);
     Value *A = I.getOperand(0);
@@ -5158,7 +5311,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
                                          SmallVector<unsigned, 4> DataIndices,
                                          unsigned WriteThruIndex,
                                          unsigned MaskIndex) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     unsigned NumArgs = I.arg_size();
 
@@ -5241,7 +5394,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   // DstShadow[0] = Mask[0] ? (AShadow[0] | BShadow[0]) : WriteThruShadow[0]
   // DstShadow[1..7] = AShadow[1..7]
   void visitGenericScalarHalfwordInst(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     assert(I.arg_size() == 5);
     Value *A = I.getOperand(0);
@@ -5316,7 +5469,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   // contains an even number of 1's, the parity is 0.
   // It has no false positives.
   void handleAVXGF2P8Affine(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     assert(I.arg_size() == 3);
     Value *A = I.getOperand(0);
@@ -5396,7 +5549,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
       assert(numArgs == 1);
     }
 
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     SmallVector<Value *, 6> ShadowArgs;
     if (WithLane) {
@@ -5448,7 +5601,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   /// These instructions can all be instrumented with essentially the same
   /// MSan logic, simply by applying the corresponding intrinsic to the shadow.
   void handleNEONVectorStoreIntrinsic(IntrinsicInst &I, bool useLane) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     // Don't use getNumOperands() because it includes the callee
     int numArgOperands = I.arg_size();
@@ -5585,7 +5738,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   // is equivalent to what is tested by the instrumentation for the integer
   // form.
   void handleNEONMatrixMultiply(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     assert(I.arg_size() == 3);
     Value *R = I.getArgOperand(0);
@@ -5696,7 +5849,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void handleIntrinsicByApplyingToShadow(IntrinsicInst &I,
                                          Intrinsic::ID shadowIntrinsicID,
                                          unsigned int trailingVerbatimArgs) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     assert(trailingVerbatimArgs < I.arg_size());
 
@@ -5838,6 +5991,12 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
       // The result of llvm.is.constant() is always defined.
       setShadow(&I, getCleanShadow(&I));
       setOrigin(&I, getCleanOrigin());
+      break;
+
+    /// XSan MODIFIED: handle custom lifetime
+    case Intrinsic::donothing:
+      if (__xsan::isXsanLifetimeStart(I))
+        handleLifetimeStart(I);
       break;
 
     default:
@@ -7240,7 +7399,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     // Since we use getNextNode here, we can't have CB terminate the BB.
     assert(isa<CallInst>(CB));
 
-    IRBuilder<> IRB(&CB);
+    __xsan::InstrumentationIRBuilder IRB(&CB);
     Value *Size = CB.getArgOperand(0);
     Value *SrcPtr = CB.getArgOperand(1);
     Value *DstPtr = CB.getArgOperand(2);
@@ -7271,7 +7430,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   }
 
   void visitLibAtomicStore(CallBase &CB) {
-    IRBuilder<> IRB(&CB);
+    __xsan::InstrumentationIRBuilder IRB(&CB);
     Value *Size = CB.getArgOperand(0);
     Value *DstPtr = CB.getArgOperand(2);
     Value *Ordering = CB.getArgOperand(3);
@@ -7344,7 +7503,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
 
       maybeMarkSanitizerLibraryCallNoBuiltin(Call, TLI);
     }
-    IRBuilder<> IRB(&CB);
+    __xsan::InstrumentationIRBuilder IRB(&CB);
     bool MayCheckCall = MS.EagerChecks;
     if (Function *Func = CB.getCalledFunction()) {
       // __sanitizer_unaligned_{load,store} functions may be called by users
@@ -7461,7 +7620,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
       return;
     }
 
-    IRBuilder<> IRBBefore(&CB);
+    __xsan::InstrumentationIRBuilder IRBBefore(&CB);
     // Until we have full dynamic coverage, make sure the retval shadow is 0.
     Value *Base = getShadowPtrForRetval(IRBBefore);
     IRBBefore.CreateAlignedStore(getCleanShadow(&CB), Base,
@@ -7486,7 +7645,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
       assert(NextInsn != NormalDest->end() &&
              "Could not find insertion point for retval shadow load");
     }
-    IRBuilder<> IRBAfter(&*NextInsn);
+    __xsan::InstrumentationIRBuilder IRBAfter(&*NextInsn);
     Value *RetvalShadow = IRBAfter.CreateAlignedLoad(
         getShadowTy(&CB), getShadowPtrForRetval(IRBAfter), kShadowTLSAlignment,
         "_msret");
@@ -7506,7 +7665,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   }
 
   void visitReturnInst(ReturnInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *RetVal = I.getReturnValue();
     if (!RetVal)
       return;
@@ -7538,7 +7697,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   }
 
   void visitPHINode(PHINode &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     if (!PropagateShadow) {
       setShadow(&I, getCleanShadow(&I));
       setOrigin(&I, getCleanOrigin());
@@ -7553,7 +7712,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
           &I, IRB.CreatePHI(MS.OriginTy, I.getNumIncomingValues(), "_msphi_o"));
   }
 
-  Value *getLocalVarIdptr(AllocaInst &I) {
+  Value *getLocalVarIdptr(Instruction &I) {
     ConstantInt *IntConst =
         ConstantInt::get(Type::getInt32Ty((*F.getParent()).getContext()), 0);
     return new GlobalVariable(*F.getParent(), IntConst->getType(),
@@ -7561,11 +7720,12 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
                               IntConst);
   }
 
-  Value *getLocalVarDescription(AllocaInst &I) {
+  Value *getLocalVarDescription(Instruction &I) {
     return createPrivateConstGlobalForString(*F.getParent(), I.getName());
   }
 
-  void poisonAllocaUserspace(AllocaInst &I, IRBuilder<> &IRB, Value *Len) {
+  void poisonAllocaUserspace(Instruction &I, IRBuilder<> &IRB, Value *Len,
+                             Align Al) {
     if (PoisonStack && ClPoisonStackWithCall) {
       IRB.CreateCall(MS.MsanPoisonStackFn, {&I, Len});
     } else {
@@ -7574,7 +7734,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
           &I, IRB, IRB.getInt8Ty(), Align(1), /*isStore*/ true);
 
       Value *PoisonValue = IRB.getInt8(PoisonStack ? ClPoisonStackPattern : 0);
-      IRB.CreateMemSet(ShadowBase, PoisonValue, Len, I.getAlign());
+      IRB.CreateMemSet(ShadowBase, PoisonValue, Len, Al);
     }
 
     if (PoisonStack && MS.TrackOrigins) {
@@ -7589,7 +7749,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     }
   }
 
-  void poisonAllocaKmsan(AllocaInst &I, IRBuilder<> &IRB, Value *Len) {
+  void poisonAllocaKmsan(Instruction &I, IRBuilder<> &IRB, Value *Len) {
     Value *Descr = getLocalVarDescription(I);
     if (PoisonStack) {
       IRB.CreateCall(MS.MsanPoisonAllocaFn, {&I, Len, Descr});
@@ -7598,19 +7758,29 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     }
   }
 
-  void instrumentAlloca(AllocaInst &I, Instruction *InsPoint = nullptr) {
+  void instrumentAlloca(Instruction &I, Instruction *InsPoint = nullptr) {
     if (!InsPoint)
       InsPoint = &I;
     NextNodeIRBuilder IRB(InsPoint);
-    Value *Len = IRB.CreateAllocationSize(MS.IntptrTy, &I);
+    Value *Len;
+    Align Al;
+    if (auto Data = __xsan::ReplacedAlloca::get(I)) {
+      Len = ConstantInt::get(MS.IntptrTy, Data->Len);
+      Al = Data->Align;
+    } else {
+      AllocaInst &AI = cast<AllocaInst>(I);
+      Len = IRB.CreateAllocationSize(MS.IntptrTy, &AI);
+      Al = AI.getAlign();
+    }
 
     if (MS.CompileKernel)
       poisonAllocaKmsan(I, IRB, Len);
     else
-      poisonAllocaUserspace(I, IRB, Len);
+      poisonAllocaUserspace(I, IRB, Len, Al);
   }
 
-  void visitAllocaInst(AllocaInst &I) {
+  /// XSan MODIFIED: support replaced alloca
+  void visitAllocaInst(Instruction &I) {
     setShadow(&I, getCleanShadow(&I));
     setOrigin(&I, getCleanOrigin());
     // We'll get to this alloca later unless it's poisoned at the corresponding
@@ -7628,7 +7798,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   }
 
   void handleSelectLikeInst(Instruction &I, Value *B, Value *C, Value *D) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
 
     Value *Sb = getShadow(B);
     Value *Sc = getShadow(C);
@@ -7703,7 +7873,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   void visitGetElementPtrInst(GetElementPtrInst &I) { handleShadowOr(I); }
 
   void visitExtractValueInst(ExtractValueInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *Agg = I.getAggregateOperand();
     LLVM_DEBUG(dbgs() << "ExtractValue:  " << I << "\n");
     Value *AggShadow = getShadow(Agg);
@@ -7715,7 +7885,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   }
 
   void visitInsertValueInst(InsertValueInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     LLVM_DEBUG(dbgs() << "InsertValue:  " << I << "\n");
     Value *AggShadow = getShadow(I.getAggregateOperand());
     Value *InsShadow = getShadow(I.getInsertedValueOperand());
@@ -7870,7 +8040,7 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     // function to be called).
     const DataLayout &DL = F.getDataLayout();
     CallBase *CB = cast<CallBase>(&I);
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     InlineAsm *IA = cast<InlineAsm>(CB->getCalledOperand());
     int OutputArgs = getNumOutputArgs(IA, CB);
     // The last operand of a CallInst is the function itself.
@@ -7914,6 +8084,37 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     }
     setShadow(&I, getCleanShadow(&I));
     setOrigin(&I, getCleanOrigin());
+  }
+
+  // This is a temporary fix of a bug of UBSan. UBSan replaces some arithmetic
+  // instructions with intrinsics to check for overflow. But all replaced
+  // instructions are tagged with nosanitize metadata, which makes other
+  // sanitizers ignore them and miss these arithmetic operations.
+  bool visitUBSanReplacedInst(Instruction &I) {
+    using namespace Intrinsic;
+    constexpr static ID AllInrtrinsicArithInstBeReplacedTo[] = {
+        sadd_with_overflow, uadd_with_overflow, ssub_with_overflow,
+        usub_with_overflow, smul_with_overflow, umul_with_overflow};
+    assert(__xsan::UBSanInst::is(I) && "Expected UBSan's instructions");
+    // Actual arithmetic result. `extractvalue` may be copied and moved by
+    // optimization and lose the metadata, so we don't check metadata.
+    if (auto *EI = dyn_cast<ExtractValueInst>(&I);
+        EI && EI->getNumIndices() == 1 && EI->getIndices()[0] == 0) {
+      // Check whether extract from a replaced arithmetic instructions
+      if (auto *II = dyn_cast<IntrinsicInst>(EI->getAggregateOperand());
+          II && __xsan::UBSanInst::is(*II) &&
+          llvm::is_contained(AllInrtrinsicArithInstBeReplacedTo,
+                             II->getIntrinsicID())) {
+        __xsan::InstrumentationIRBuilder IRB(EI);
+        ShadowAndOriginCombiner SC(this, IRB);
+        SC.Add(II->getOperand(0));
+        SC.Add(II->getOperand(1));
+        SC.Done(EI);
+        RealArithResults.insert(EI);
+        return true;
+      }
+    }
+    return false;
   }
 };
 
@@ -7972,7 +8173,7 @@ struct VarArgHelperBase : public VarArgHelper {
   }
 
   void unpoisonVAListTagForInst(IntrinsicInst &I) {
-    IRBuilder<> IRB(&I);
+    __xsan::InstrumentationIRBuilder IRB(&I);
     Value *VAListTag = I.getArgOperand(0);
     const Align Alignment = Align(8);
     auto [ShadowPtr, OriginPtr] = MSV.getShadowOriginPtr(
@@ -8153,7 +8354,7 @@ struct VarArgAMD64Helper : public VarArgHelperBase {
     if (!VAStartInstrumentationList.empty()) {
       // If there is a va_start in this function, make a backup copy of
       // va_arg_tls somewhere in the function entry block.
-      IRBuilder<> IRB(MSV.FnPrologueEnd);
+      __xsan::InstrumentationIRBuilder IRB(MSV.FnPrologueEnd);
       VAArgOverflowSize =
           IRB.CreateLoad(IRB.getInt64Ty(), MS.VAArgOverflowSizeTLS);
       Value *CopySize = IRB.CreateAdd(
@@ -8345,7 +8546,7 @@ struct VarArgAArch64Helper : public VarArgHelperBase {
     if (!VAStartInstrumentationList.empty()) {
       // If there is a va_start in this function, make a backup copy of
       // va_arg_tls somewhere in the function entry block.
-      IRBuilder<> IRB(MSV.FnPrologueEnd);
+      __xsan::InstrumentationIRBuilder IRB(MSV.FnPrologueEnd);
       VAArgOverflowSize =
           IRB.CreateLoad(IRB.getInt64Ty(), MS.VAArgOverflowSizeTLS);
       Value *CopySize = IRB.CreateAdd(
@@ -8554,7 +8755,7 @@ struct VarArgPowerPC64Helper : public VarArgHelperBase {
   void finalizeInstrumentation() override {
     assert(!VAArgSize && !VAArgTLSCopy &&
            "finalizeInstrumentation called twice");
-    IRBuilder<> IRB(MSV.FnPrologueEnd);
+    __xsan::InstrumentationIRBuilder IRB(MSV.FnPrologueEnd);
     VAArgSize = IRB.CreateLoad(IRB.getInt64Ty(), MS.VAArgOverflowSizeTLS);
     Value *CopySize = VAArgSize;
 
@@ -8690,7 +8891,7 @@ struct VarArgPowerPC32Helper : public VarArgHelperBase {
   void finalizeInstrumentation() override {
     assert(!VAArgSize && !VAArgTLSCopy &&
            "finalizeInstrumentation called twice");
-    IRBuilder<> IRB(MSV.FnPrologueEnd);
+    __xsan::InstrumentationIRBuilder IRB(MSV.FnPrologueEnd);
     VAArgSize = IRB.CreateLoad(MS.IntptrTy, MS.VAArgOverflowSizeTLS);
     Value *CopySize = VAArgSize;
 
@@ -9028,7 +9229,7 @@ struct VarArgSystemZHelper : public VarArgHelperBase {
     if (!VAStartInstrumentationList.empty()) {
       // If there is a va_start in this function, make a backup copy of
       // va_arg_tls somewhere in the function entry block.
-      IRBuilder<> IRB(MSV.FnPrologueEnd);
+      __xsan::InstrumentationIRBuilder IRB(MSV.FnPrologueEnd);
       VAArgOverflowSize =
           IRB.CreateLoad(IRB.getInt64Ty(), MS.VAArgOverflowSizeTLS);
       Value *CopySize =
@@ -9130,7 +9331,7 @@ struct VarArgI386Helper : public VarArgHelperBase {
   void finalizeInstrumentation() override {
     assert(!VAArgSize && !VAArgTLSCopy &&
            "finalizeInstrumentation called twice");
-    IRBuilder<> IRB(MSV.FnPrologueEnd);
+    __xsan::InstrumentationIRBuilder IRB(MSV.FnPrologueEnd);
     VAArgSize = IRB.CreateLoad(MS.IntptrTy, MS.VAArgOverflowSizeTLS);
     Value *CopySize = VAArgSize;
 
@@ -9215,7 +9416,7 @@ struct VarArgGenericHelper : public VarArgHelperBase {
   void finalizeInstrumentation() override {
     assert(!VAArgSize && !VAArgTLSCopy &&
            "finalizeInstrumentation called twice");
-    IRBuilder<> IRB(MSV.FnPrologueEnd);
+    __xsan::InstrumentationIRBuilder IRB(MSV.FnPrologueEnd);
     VAArgSize = IRB.CreateLoad(MS.IntptrTy, MS.VAArgOverflowSizeTLS);
     Value *CopySize = VAArgSize;
 
@@ -9345,3 +9546,26 @@ bool MemorySanitizer::sanitizeFunction(Function &F, TargetLibraryInfo &TLI) {
 
   return Visitor.runOnFunction();
 }
+
+namespace __xsan {
+
+/// Moved to this file, as the type information is needed there.
+void registerAnalysisForMsan(PassBuilder &PB) {
+  // PB.registerAnalysisRegistrationCallback([](FunctionAnalysisManager &FAM) {
+  //   FAM.registerPass([&] { return MsanTargetsToInstrumentAnalysis(); });
+  // });
+}
+
+void addMsanRequireAnalysisPass(SubSanitizers &MPM, FunctionPassManager &FPM) {
+  // FPM.addPass(RequireAnalysisPass<MsanTargetsToInstrumentAnalysis,
+  // Function>());
+}
+
+} // namespace __xsan
+
+#ifndef XSAN_PASS
+extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
+  return {LLVM_PLUGIN_API_VERSION, "MSan Pass", LLVM_VERSION_STRING,
+          __xsan::registerMsanForClangAndOpt};
+}
+#endif

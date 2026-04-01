@@ -263,7 +263,7 @@ static bool CheckAndProtect(bool protect, bool ignore_heap,
   MemoryMappingLayout proc_maps(true);
   MemoryMappedSegment segment;
   while (proc_maps.Next(&segment)) {
-    if (segment.start >= HeapMemEnd() && segment.end <= HeapEnd()) {
+    if (segment.start >= HeapMemBeg() && segment.end <= HeapEnd()) {
       if (ignore_heap)
         continue;
       else

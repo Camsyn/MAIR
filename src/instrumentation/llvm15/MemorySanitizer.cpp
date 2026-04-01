@@ -1896,7 +1896,11 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
     assert((isa<Instruction>(V) || isa<Argument>(V)) &&
            "Unexpected value type in getOrigin()");
     if (Instruction *I = dyn_cast<Instruction>(V)) {
-      if (I->getMetadata(LLVMContext::MD_nosanitize))
+      // As https://github.com/llvm/llvm-project/pull/148376 had not landed for LLVM15, 
+      // msan/TestCases/vararg.cpp cannot expose the issue of miss-filtering.
+      if (I->getMetadata(LLVMContext::MD_nosanitize) &&
+          !__xsan::isReplacedInst(*I) &&
+          !llvm::is_contained(RealArithResults, I))
         return getCleanOrigin();
     }
     Value *Origin = OriginMap[V];

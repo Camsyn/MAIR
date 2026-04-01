@@ -820,7 +820,7 @@ bool ThreadSanitizer::instrumentAtomic(Instruction *I, const DataLayout &DL) {
     ::__xsan::ReplacedAtomic::set(
         *cast<Instruction>(Casted),
         {Extra::RMW, &C->getArgOperandUse(0), &C->getArgOperandUse(1), None});
-    I->replaceAllUsesWith(C);
+    I->replaceAllUsesWith(Casted);
     I->eraseFromParent();
   } else if (AtomicCmpXchgInst *CASI = dyn_cast<AtomicCmpXchgInst>(I)) {
     Value *Addr = CASI->getPointerOperand();

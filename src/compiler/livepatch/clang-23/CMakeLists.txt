@@ -25,7 +25,7 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 add_library(clang-patch MODULE
     BackendUtil.cpp
     CommonArgs.cpp
-    PassBuilderPipelines.cpp
+    # PassBuilderPipelines.cpp
     SanitizerArgs.cpp
     ../utils/PatchHelper.cpp
 )
@@ -69,7 +69,7 @@ else()
     # target_link_libraries(clang-patch PRIVATE clangBasic LLVMSupport LLVMOption)
 
     # To livepatch static-linked clang, we need to link LLVM libraries explicitly
-    target_link_libraries(clang-patch PRIVATE LLVMSupport)
+    target_link_libraries(clang-patch PRIVATE LLVMSupport LLVMOption)
 
     if(${LINK_DYNAMIC_LLVMSUPPORT})
         # You can use `readelf -d <ELF> | grep 'RPATH\|RUNPATH'` to check the RUNPATH.

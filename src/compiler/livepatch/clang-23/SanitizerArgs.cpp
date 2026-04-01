@@ -22,6 +22,9 @@
 #include "llvm/Transforms/Instrumentation/AddressSanitizerOptions.h"
 #include <memory>
 
+#include "utils/PatchHelper.h"
+#include "xsan_common.h"
+
 using namespace clang;
 using namespace clang::driver;
 using namespace llvm::opt;
@@ -356,10 +359,12 @@ bool SanitizerArgs::needsFuzzerInterceptors() const {
 }
 
 bool SanitizerArgs::needsUbsanRt() const {
+  // XSAN-MODIFIED: check env var XSAN_COMPILE_MASK to stop linking Sanitizer Rt
   // All of these include ubsan.
   if (needsAsanRt() || needsMsanRt() || needsNsanRt() || needsHwasanRt() ||
       needsTsanRt() || needsDfsanRt() || needsLsanRt() || needsTysanRt() ||
-      needsCfiCrossDsoDiagRt() || (needsScudoRt() && !requiresMinimalRuntime()))
+      needsCfiCrossDsoDiagRt() || (needsScudoRt() && !requiresMinimalRuntime()) ||
+      (__xsan::isXsanEnabled() && __xsan::getSanType() != UBSan))
     return false;
 
   return (Sanitizers.Mask & NeedsUbsanRt & ~TrapSanitizers.Mask) ||
@@ -626,12 +631,16 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
 
   std::pair<SanitizerMask, SanitizerMask> IncompatibleGroups[] = {
       std::make_pair(SanitizerKind::Address,
-                     SanitizerKind::Thread | SanitizerKind::Memory),
+                     __xsan::isXsanEnabled()
+                         ? SanitizerMask()
+                         : SanitizerKind::Thread | SanitizerKind::Memory),
       std::make_pair(SanitizerKind::Type,
                      SanitizerKind::Address | SanitizerKind::KernelAddress |
                          SanitizerKind::Memory | SanitizerKind::Leak |
                          SanitizerKind::Thread | SanitizerKind::KernelAddress),
-      std::make_pair(SanitizerKind::Thread, SanitizerKind::Memory),
+      std::make_pair(SanitizerKind::Thread, __xsan::isXsanEnabled()
+                                                ? SanitizerMask()
+                                                : SanitizerKind::Memory),
       std::make_pair(SanitizerKind::Leak,
                      SanitizerKind::Thread | SanitizerKind::Memory),
       std::make_pair(SanitizerKind::KernelAddress,
@@ -1795,3 +1804,7 @@ std::string describeSanitizeArg(const llvm::opt::Arg *A, SanitizerMask Mask) {
   assert(!Sanitizers.empty() && "arg didn't provide expected value");
   return "-fsanitize=" + Sanitizers;
 }
+
+static __xsan::XsanInterceptor Interceptor(
+    "_ZN5clang6driver13SanitizerArgsC2ERKNS0_9ToolChainERKN4llvm3opt7ArgListEb",
+    {"clang", "clang++"});

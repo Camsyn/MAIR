@@ -23,6 +23,7 @@
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 
 namespace __xsan {
@@ -42,7 +43,7 @@ private:
     static llvm::ReturnInst *I = [&IRB]() {
       auto *I = llvm::ReturnInst::Create(IRB.getContext());
       I->setMetadata(LLVMContext::MD_nosanitize,
-                     MDNode::get(I->getContext(), None));
+                     MDNode::get(I->getContext(), {}));
       return I;
     }();
     // Every instructions created by this IRBuilder will have this metadata.
@@ -91,6 +92,11 @@ public:
     ensureDebugInfo(*this, *IP);
     ensureNoSanitize(*this);
   }
+  explicit InstrumentationIRBuilder(IRBuilderBase &IRB)
+      : IRBuilder<>(IRB.GetInsertBlock(), IRB.GetInsertPoint()) {
+    ensureDebugInfo(*this, *IRB.GetInsertPoint());
+    ensureNoSanitize(*this);
+  }
 
   InstrumentationIRBuilder(BasicBlock *TheBB, BasicBlock::iterator IP)
       : IRBuilder<>(TheBB, IP) {
@@ -103,6 +109,7 @@ public:
   }
 };
 
+/// Add nounwind attribute automatically
 struct NoUnwindModuleWrapper {
   Module &M;
   const AttributeList Attr;

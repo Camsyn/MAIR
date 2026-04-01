@@ -7,7 +7,6 @@
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/iterator_range.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -22,12 +21,12 @@
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
-#include <optional>
 
 using namespace llvm;
 
@@ -495,8 +494,15 @@ private:
     do {
       // Handle pointer type
       if (auto *PTy = dyn_cast<PointerType>(Ty)) {
+#if LLVM_VERSION_MAJOR >= 22
+        (void)PTy;
+        // LLVM 23 uses opaque pointers by default. Conservatively assume a
+        // pointer-typed field may eventually reach i64-sized memory.
+        // TODO: find user of load i32 %ptr to judge the pointer type.
+        Suspicious = true;
+        break;
+#else
         // Transparent pointer handling logic
-
         if (PTy->isOpaque()) {
           // Conservatively assume transparent pointers may point to i64
           Suspicious = true;
@@ -509,6 +515,7 @@ private:
           Suspicious = true;
           break;
         }
+#endif
       }
 
       // Recursively check struct members

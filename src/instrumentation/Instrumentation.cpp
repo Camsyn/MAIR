@@ -21,9 +21,9 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/Triple.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/CFG.h"
+#include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/MemorySSA.h"
 #include "llvm/Analysis/MemorySSAUpdater.h"
@@ -50,26 +50,31 @@
 #include "llvm/IR/Value.h"
 #include "llvm/ProfileData/InstrProf.h"
 #include "llvm/Support/Casting.h"
-#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
 #include <cstdint>
 #include <optional>
 
+
+#if LLVM_VERSION_MAJOR >= 20
+#include "llvm/TargetParser/Triple.h"
+#else
+#include "llvm/ADT/Triple.h"
+#endif
+
+#include "xsan_llvm_compat.h"
+
+
 using namespace llvm;
 
 #define DEBUG_TYPE "xsan_opt"
 
+#if LLVM_VERSION_MAJOR <= 15
+// Backport https://github.com/llvm/llvm-project/pull/99439
 static cl::opt<bool> ClIgnoreRedundantInstrumentation(
     "ignore-redundant-instrumentation",
     cl::desc("Ignore redundant instrumentation"), cl::Hidden, cl::init(false));
-
-/// Number of loop invariant checks relocated.
-uint32_t NumInvChecksRelocated = 0;
-uint32_t NumInvChecksRelocatedDup = 0;
-/// Number of loop periodic checks combined.
-uint32_t NumPeriodChecksCombined = 0;
-uint32_t NumPeriodChecksCombinedDup = 0;
 
 namespace {
 /// Diagnostic information for IR instrumentation reporting.
@@ -82,6 +87,36 @@ public:
       : DiagnosticInfo(DK_Linker, Severity), Msg(DiagMsg) {}
   void print(DiagnosticPrinter &DP) const override { DP << Msg; }
 };
+} // namespace
+
+namespace __xsan {
+
+/// Check if module has flag attached, if not add the flag.
+bool checkIfAlreadyInstrumented(Module &M, StringRef Flag) {
+  if (!M.getModuleFlag(Flag)) {
+    M.addModuleFlag(Module::ModFlagBehavior::Override, Flag, 1);
+    return false;
+  }
+  if (ClIgnoreRedundantInstrumentation)
+    return true;
+  std::string diagInfo =
+      "Redundant instrumentation detected, with module flag: " +
+      std::string(Flag);
+  M.getContext().diagnose(
+      DiagnosticInfoInstrumentation(diagInfo, DiagnosticSeverity::DS_Warning));
+  return true;
+}
+} // namespace __xsan
+#endif
+
+/// Number of loop invariant checks relocated.
+uint32_t NumInvChecksRelocated = 0;
+uint32_t NumInvChecksRelocatedDup = 0;
+/// Number of loop periodic checks combined.
+uint32_t NumPeriodChecksCombined = 0;
+uint32_t NumPeriodChecksCombinedDup = 0;
+
+namespace {
 
 /// IntTy -> IntTy, PtrTy -> IntTy with the same bitwidth.
 static IntegerType *getIntTy(Type *Ty, const DataLayout &DL) {
@@ -305,16 +340,24 @@ class XsanSCEVExpander : public SCEVExpander {
 public:
   explicit XsanSCEVExpander(ScalarEvolution &se, const DataLayout &DL,
                             const char *name, bool PreserveLCSSA = true)
-      : SCEVExpander(se, DL, name, PreserveLCSSA) {}
+#if LLVM_VERSION_MAJOR <= 15
+      : SCEVExpander(se, DL, name, PreserveLCSSA)
+#elif LLVM_VERSION_MAJOR >= 22
+      : SCEVExpander(se, name, PreserveLCSSA)
+#else
+      static_assert(false && "Unsupport LLVM version");
+#endif
+  {
+  }
   Value *expandCodeFor(const SCEV *SH, Type *Ty, Instruction *I) {
     Instruction *LastI = I->getPrevNode();
     Value *V = SCEVExpander::expandCodeFor(SH, Ty, I);
-    Instruction *Beg =
-        LastI ? LastI->getNextNode() : I->getParent()->getFirstNonPHI();
+    Instruction *Beg = LastI ? LastI->getNextNode()
+                             : __xsan::compat::getFirstNonPHIIt(I->getParent());
     Instruction *End = I;
     while (Beg != End) {
       Beg->setMetadata(LLVMContext::MD_nosanitize,
-                       MDNode::get(I->getContext(), None));
+                       llvm::MDNode::get(I->getContext(), {}));
       Beg = Beg->getNextNode();
     }
     return V;
@@ -426,8 +469,12 @@ Instruction *SplitBlockAndInsertIfThen(Value *Cond, Instruction *SplitBefore,
     SplitBefore
   */
   BasicBlock *OldBB = SplitBefore->getParent();
+  std::optional<DomTreeUpdater> DTU;
+  if (DT)
+    DTU.emplace(*DT, DomTreeUpdater::UpdateStrategy::Lazy);
   Instruction *Term = llvm::SplitBlockAndInsertIfThen(
-      Cond, SplitBefore, Unreachable, BranchWeights, DT, LI, ThenBlock);
+      Cond, SplitBefore, Unreachable, BranchWeights,
+      DTU ? &*DTU : nullptr, LI, ThenBlock);
   /*
   OldBB:
     ...
@@ -454,7 +501,7 @@ LoopInvariantChecker::LoopInvariantChecker(const DominatorTree &DT,
     : DT(DT), AA(AA) {
   const Module &M = *DT.getRoot()->getModule();
   UBSanExists = any_of(M.getFunctionList(), [&](const Function &F) {
-    return F.isDeclaration() && F.getName().startswith("__ubsan_handle");
+    return F.isDeclaration() && compat::startsWith(F.getName(), "__ubsan_handle");
   });
 }
 
@@ -467,6 +514,11 @@ bool LoopInvariantChecker::isLoopInvariant(const SCEV *S, const Loop *L) {
   switch (S->getSCEVType()) {
   case scConstant:
     return true;
+#if LLVM_VERSION_MAJOR > 22
+  case scVScale:
+    return false;
+  case scPtrToAddr:
+#endif
   case scPtrToInt:
   case scTruncate:
   case scZeroExtend:
@@ -535,6 +587,8 @@ bool LoopInvariantChecker::isLoopInvariant(const SCEV *S, const Loop *L) {
     return isLoopInvariant(cast<SCEVUnknown>(S)->getValue(), L);
   case scCouldNotCompute:
     llvm_unreachable("Attempt to use a SCEVCouldNotCompute object!");
+  default:
+    return false;
   }
   llvm_unreachable("Unknown SCEV kind!");
 }
@@ -634,22 +688,6 @@ LoopInvariantChecker::getStoresInLoopLazily(const Loop *L) {
   }
   StoresInLoop[L] = std::move(Stores);
   return StoresInLoop[L];
-}
-
-/// Check if module has flag attached, if not add the flag.
-bool checkIfAlreadyInstrumented(Module &M, StringRef Flag) {
-  if (!M.getModuleFlag(Flag)) {
-    M.addModuleFlag(Module::ModFlagBehavior::Override, Flag, 1);
-    return false;
-  }
-  if (ClIgnoreRedundantInstrumentation)
-    return true;
-  std::string diagInfo =
-      "Redundant instrumentation detected, with module flag: " +
-      std::string(Flag);
-  M.getContext().diagnose(
-      DiagnosticInfoInstrumentation(diagInfo, DiagnosticSeverity::DS_Warning));
-  return true;
 }
 
 /*
@@ -899,7 +937,7 @@ static bool expandBegAndEnd(Loop *Loop, ScalarEvolution &SE,
   }
 
   /// TODO: figure out if it is Okay to insert code in Predecessor block
-  Beg = Expander.expandCodeFor(Start, IRB.getInt8PtrTy(), InsertPt);
+  Beg = Expander.expandCodeFor(Start, IRB.getPtrTy(), InsertPt);
   StepVal = Expander.expandCodeFor(Step, PtrIntTy, InsertPt);
 
   /// Does not consider step -1, which should be used as factor of term,
@@ -941,7 +979,7 @@ static bool expandBegAndEnd(Loop *Loop, ScalarEvolution &SE,
         (StepIsOne ? IterCounter : SE.getMulExpr(IterCounter, Step));
     const auto *EndSE = SE.getAddExpr(Start, Offset);
 
-    End = Expander.expandCodeFor(EndSE, IRB.getInt8PtrTy(), InsertPt);
+    End = Expander.expandCodeFor(EndSE, IRB.getPtrTy(), InsertPt);
 
   } else {
     /* If the loop count isn't an invariant, manually insert a loop counter */
@@ -993,11 +1031,11 @@ LoopMopInstrumenter::LoopMopInstrumenter(Function &F,
   AttributeList Attr;
   Attr = Attr.addFnAttribute(Ctx, Attribute::NoUnwind);
   XsanRangeRead = M.getOrInsertFunction("__xsan_read_range", Attr,
-                                        IRB.getVoidTy(), IRB.getInt8PtrTy(),
-                                        IRB.getInt8PtrTy(), IRB.getInt64Ty());
+                                        IRB.getVoidTy(), IRB.getPtrTy(),
+                                        IRB.getPtrTy(), IRB.getInt64Ty());
   XsanRangeWrite = M.getOrInsertFunction("__xsan_write_range", Attr,
-                                         IRB.getVoidTy(), IRB.getInt8PtrTy(),
-                                         IRB.getInt8PtrTy(), IRB.getInt64Ty());
+                                         IRB.getVoidTy(), IRB.getPtrTy(),
+                                         IRB.getPtrTy(), IRB.getInt64Ty());
 
   for (size_t i = 0; i < kNumberOfAccessSizes; i++) {
     const unsigned ByteSize = 1U << i;
@@ -1005,18 +1043,18 @@ LoopMopInstrumenter::LoopMopInstrumenter(Function &F,
 
     XsanPeriodRead[i] = M.getOrInsertFunction(
         "__xsan_period_read" + ByteSizeStr, Attr, IRB.getVoidTy(),
-        IRB.getInt8PtrTy(), IRB.getInt8PtrTy(), IRB.getInt64Ty(),
+        IRB.getPtrTy(), IRB.getPtrTy(), IRB.getInt64Ty(),
         IRB.getInt64Ty());
     XsanPeriodWrite[i] = M.getOrInsertFunction(
         "__xsan_period_write" + ByteSizeStr, Attr, IRB.getVoidTy(),
-        IRB.getInt8PtrTy(), IRB.getInt8PtrTy(), IRB.getInt64Ty(),
+        IRB.getPtrTy(), IRB.getPtrTy(), IRB.getInt64Ty(),
         IRB.getInt64Ty());
 
     XsanRead[i] = M.getOrInsertFunction("__xsan_read" + ByteSizeStr, Attr,
-                                        IRB.getVoidTy(), IRB.getInt8PtrTy(),
+                                        IRB.getVoidTy(), IRB.getPtrTy(),
                                         IRB.getInt64Ty());
     XsanWrite[i] = M.getOrInsertFunction("__xsan_write" + ByteSizeStr, Attr,
-                                         IRB.getVoidTy(), IRB.getInt8PtrTy(),
+                                         IRB.getVoidTy(), IRB.getPtrTy(),
                                          IRB.getInt64Ty());
   }
 }
@@ -1069,14 +1107,14 @@ static bool shouldInstrumentReadWriteFromAddress(const Module *M, Value *Addr) {
       StringRef SectionName = GV->getSection();
       // Check if the global is in the PGO counters section.
       auto OF = Triple(M->getTargetTriple()).getObjectFormat();
-      if (SectionName.endswith(
+      if (compat::endsWith(SectionName, 
               getInstrProfSectionName(IPSK_cnts, OF, /*AddSegmentInfo=*/false)))
         return false;
     }
 
     // Check if the global is private gcov data.
-    if (GV->getName().startswith("__llvm_gcov") ||
-        GV->getName().startswith("__llvm_gcda"))
+    if (compat::startsWith(GV->getName(), "__llvm_gcov") ||
+        compat::startsWith(GV->getName(), "__llvm_gcda"))
       return false;
   }
 
@@ -1433,7 +1471,7 @@ bool LoopMopInstrumenter::combinePeriodicChecks(bool RangeAccessOnly) {
       IRB.CreateCall(IsWrite ? XsanRangeWrite : XsanRangeRead,
                      {Beg, End, PcValue});
     } else {
-      size_t Idx = countTrailingZeros(MopSize);
+      size_t Idx = compat::countr_zero(MopSize);
       // __xsan_period_readX(const void *beg, const void *end, size_t step)
       // __xsan_period_writeX(const void *beg, const void *end, size_t step)
       IRB.CreateCall(IsWrite ? XsanPeriodWrite[Idx] : XsanPeriodRead[Idx],
@@ -1579,13 +1617,17 @@ bool LoopMopInstrumenter::relocateInvariantChecks() {
     /// For these cases, we need to copy the address into the insert point.
     if (AddrInst && !DT.dominates(AddrInst, InsertPt)) {
       Instruction *ClonedAddr = AddrInst->clone();
+#if LLVM_VERSION_MAJOR >= 22
+      ClonedAddr->insertBefore(InsertPt->getIterator());
+#else
       ClonedAddr->insertBefore(InsertPt);
+#endif
       ClonedAddr->setMetadata(LLVMContext::MD_nosanitize,
-                              MDNode::get(AddrInst->getContext(), None));
+                              llvm::MDNode::get(AddrInst->getContext(), {}));
       Addr = ClonedAddr;
     }
 
-    size_t Idx = countTrailingZeros(MopSize);
+    size_t Idx = compat::countr_zero(MopSize);
 
     InstrumentationIRBuilder IRB(InsertPt);
 

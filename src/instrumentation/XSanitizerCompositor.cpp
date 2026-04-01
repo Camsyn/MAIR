@@ -11,7 +11,6 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
-#include "llvm/Passes/PassPlugin.h"
 
 using namespace llvm;
 using namespace __xsan;
@@ -73,7 +72,11 @@ void registerXsanForClangAndOpt(llvm::PassBuilder &PB) {
 
   // Register on the end of the pipeline.
   PB.registerOptimizerLastEPCallback(
+#if LLVM_VERSION_MAJOR >= 22
+      [=](ModulePassManager &MPM, OptimizationLevel level, ThinOrFullLTOPhase) {
+#else
       [=](ModulePassManager &MPM, OptimizationLevel level) {
+#endif
         MPM.addPass(SanitizerCompositorPass(level));
       });
 

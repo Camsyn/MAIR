@@ -24,7 +24,6 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Passes/PassBuilder.h"
-#include "llvm/Passes/PassPlugin.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
@@ -34,6 +33,7 @@
 
 #include "Analysis/ActiveMopAnalysis.h"
 #include "Analysis/MopRecurrenceReducer.h"
+#include "PassRegistry.h"
 
 using namespace llvm;
 
@@ -289,7 +289,11 @@ void testSCEV(Function &F, FunctionAnalysisManager &FAM) {
       IRBuilder<> IRB(&*ExitBlock->getFirstInsertionPt());
 
       // 你可以提取起始值、步长等
+#if LLVM_VERSION_MAJOR >= 22
+      SCEVExpander Expander(SE, "expander");
+#else
       SCEVExpander Expander(SE, DL, "expander");
+#endif
 
       auto *StartSCEV = AR->getStart();
       Value *Start = Expander.expandCodeFor(StartSCEV, StartSCEV->getType(),
@@ -396,7 +400,11 @@ PreservedAnalyses TestPass::run(Module &M, ModuleAnalysisManager &MAM) {
 void registerTestPassForClangAndOpt(PassBuilder &PB) {
 
   PB.registerOptimizerLastEPCallback(
-      [=](ModulePassManager &MPM, OptimizationLevel level) {
+#if LLVM_VERSION_MAJOR >= 22
+      [=](ModulePassManager &MPM, OptimizationLevel Level, ThinOrFullLTOPhase) {
+#else
+      [=](ModulePassManager &MPM, OptimizationLevel Level) {
+#endif
         MPM.addPass(__xsan::TestPass());
       });
 

@@ -1,11 +1,11 @@
 #include "PassRegistry.h"
 #include "AttributeTaggingPass.hpp"
 #include "Utils/Options.h"
-
+#include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
-
 #include "llvm/Passes/OptimizationLevel.h"
+#include "llvm/Support/TimeProfiler.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Instrumentation/AddressSanitizer.h"
 #include "llvm/Transforms/Instrumentation/AddressSanitizerOptions.h"
@@ -158,8 +158,13 @@ static void addAsanToMPM(ModulePassManager &MPM) {
     return;
 
   const auto &Opts = obtainAsanPassArgs();
+#if LLVM_VERSION_MAJOR >= 23
+  MPM.addPass(AddressSanitizerPass(Opts.Opts, Opts.UseGlobalGC,
+                                   Opts.UseOdrIndicator, Opts.DestructorKind));
+#else
   MPM.addPass(ModuleAddressSanitizerPass(
       Opts.Opts, Opts.UseGlobalGC, Opts.UseOdrIndicator, Opts.DestructorKind));
+#endif
 }
 
 static void addTsanToMPM(ModulePassManager &MPM) {
@@ -178,6 +183,9 @@ static void addMsanToMPM(ModulePassManager &MPM,
     return;
 
   const auto &Opts = obtainMsanPassArgs();
+#if LLVM_VERSION_MAJOR >= 23
+  MPM.addPass(MemorySanitizerPass(Opts.Opts));
+#else
   MPM.addPass(ModuleMemorySanitizerPass(Opts.Opts));
   FunctionPassManager FPM;
   FPM.addPass(MemorySanitizerPass(Opts.Opts));
@@ -194,6 +202,7 @@ static void addMsanToMPM(ModulePassManager &MPM,
     // compiler-rt/test/msan/select_origin.cpp.
   }
   MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+#endif
 }
 
 PreservedAnalyses SubSanitizers::run(Module &IR, ModuleAnalysisManager &AM) {
@@ -311,7 +320,11 @@ void registerAsanForClangAndOpt(PassBuilder &PB) {
   registerAnalysisForAsan(PB);
 
   PB.registerOptimizerLastEPCallback(
+#if LLVM_VERSION_MAJOR >= 22
+      [=](ModulePassManager &MPM, OptimizationLevel Level, ThinOrFullLTOPhase) {
+#else
       [=](ModulePassManager &MPM, OptimizationLevel Level) {
+#endif
         addAsanToMPM(MPM);
       });
 
@@ -339,7 +352,11 @@ void registerTsanForClangAndOpt(PassBuilder &PB) {
   // );
 
   PB.registerOptimizerLastEPCallback(
+#if LLVM_VERSION_MAJOR >= 22
+      [=](ModulePassManager &MPM, OptimizationLevel Level, ThinOrFullLTOPhase) {
+#else
       [=](ModulePassManager &MPM, OptimizationLevel Level) {
+#endif
         addTsanToMPM(MPM);
       });
 
@@ -360,7 +377,11 @@ void registerMsanForClangAndOpt(PassBuilder &PB) {
   registerAnalysisForMsan(PB);
 
   PB.registerOptimizerLastEPCallback(
+#if LLVM_VERSION_MAJOR >= 22
+      [=](ModulePassManager &MPM, OptimizationLevel Level, ThinOrFullLTOPhase) {
+#else
       [=](ModulePassManager &MPM, OptimizationLevel Level) {
+#endif
         addMsanToMPM(MPM, Level);
       });
 

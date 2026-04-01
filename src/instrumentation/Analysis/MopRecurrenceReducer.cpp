@@ -9,7 +9,6 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Statistic.h"
-#include "llvm/ADT/iterator_range.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/MemoryBuiltins.h"
@@ -25,7 +24,6 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/PassManager.h"
-#include <array>
 #include <optional>
 #include <type_traits>
 
@@ -200,7 +198,11 @@ static bool isCall(const Instruction *Inst, bool IgnoreNoSanitized = true) {
 struct MOPState {
   Function &F;
   AliasAnalysis &AA;
+#if LLVM_VERSION_MAJOR >= 22
+  EarliestEscapeAnalysis EI;
+#else
   EarliestEscapeInfo EI;
+#endif
 
   /// The single BatchAA instance that is used to cache AA queries. It will
   /// not be invalidated over the whole run. This is safe, because:
@@ -233,8 +235,13 @@ struct MOPState {
   MOPState(Function &F, AliasAnalysis &AA, DominatorTree &DT,
            PostDominatorTree &PDT, const TargetLibraryInfo &TLI,
            const LoopInfo &LI)
-      : F(F), AA(AA), EI(DT, LI, EphValues), BatchAA(AA, &EI), DT(DT), PDT(PDT),
-        TLI(TLI), DL(F.getParent()->getDataLayout()), LI(LI) {
+      : F(F), AA(AA), BatchAA(AA, &EI), DT(DT), PDT(PDT), TLI(TLI),
+#if LLVM_VERSION_MAJOR >= 22
+        EI(DT, &LI),
+#else
+        EI(DT, LI, EphValues),
+#endif
+        DL(F.getParent()->getDataLayout()), LI(LI) {
 
     // Collect whether there is any irreducible control flow in the function.
     ContainsIrreducibleLoops = mayContainIrreducibleControl(F, &LI);

@@ -10,6 +10,8 @@
 
 #include "AttributeTaggingPass.hpp"
 #include "llvm/IR/Attributes.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Module.h"
 
 using namespace llvm;
 

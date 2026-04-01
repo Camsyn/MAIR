@@ -8,12 +8,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "ActiveMopAnalysis.h"
+#include "xsan_llvm_compat.h"
 
-#include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h" // For llvm::reverse
 #include "llvm/ADT/SetVector.h"
-#include "llvm/ADT/iterator_range.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -139,7 +138,7 @@ static bool isActiveInTheSameBlock(const Instruction *From,
     if (isClobberingCall(Inst)) {
       return false;
     }
-  } while ((Inst = Inst->getNextNonDebugInstruction()));
+  } while ((Inst = compat::getNextNonDebugInstruction(Inst)));
 
   llvm_unreachable("From and To should be in the same basic block and FromI "
                    "should be before ToI");
@@ -160,7 +159,7 @@ static bool isActiveInTheSameBlock(const Instruction *From,
     if (Acq && HasAcq || !Acq && HasRel) {
       return false;
     }
-  } while ((Inst = Inst->getNextNonDebugInstruction()));
+  } while ((Inst = compat::getNextNonDebugInstruction(Inst)));
 
   llvm_unreachable("From and To should be in the same basic block and FromI "
                    "should be before ToI");
@@ -264,7 +263,7 @@ ActiveMopAnalysis::getInitializedBlockInfo(const BasicBlock &BB) const {
 
   // Traverse instructions in reverse to find MOPs that are not followed by
   // calls.
-  for (const Instruction &I : reverse(BB.getInstList())) {
+  for (const Instruction &I : reverse(BB)) {
     if (!ContainsCall && isClobberingCall(&I)) {
       ContainsCall = true;
     }
@@ -453,7 +452,7 @@ void ActiveMopAnalysis::dataflowAnalyze() {
   initializeBlockInfo(F);
 
   // Initialize the worklist using SmallSetVector to avoid duplicates.
-  SmallSetVector<const BasicBlock *, 64> WorkList;
+  SmallSetVector<const BasicBlock *, 32> WorkList;
 
   // Use reverse post-order traversal first to speed up the iteration.
   ReversePostOrderTraversal<const Function *> RPOT(&F);
@@ -538,7 +537,9 @@ bool ActiveMopAnalysis::isOneMopActiveToAnother(const Instruction *From,
   }
 
   // Eventually, we need to check if the entry of the ToBB can reach To.
-  const Instruction *Entry = ToBB->getFirstNonPHIOrDbgOrLifetime();
+  const Instruction *Entry = __xsan::compat::getFirstNonPHIOrDbgOrLifetime(*ToBB);
+  if (!Entry)
+    return false;
   return isOneActiveToAnotherInTheSameBlock(Entry, To);
 }
 

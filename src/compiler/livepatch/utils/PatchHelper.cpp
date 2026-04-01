@@ -285,9 +285,8 @@ void *getRealFuncAddr(const char *ManagledName) {
   const char *DSOName = getDSOName(addr);
   auto selfPatchDso = getThisPatchDsoPath();
   std::string patchName = selfPatchDso.filename().string();
-  if (llvm::StringRef(DSOName).endswith(patchName)) {
+  if (compat::endsWith(llvm::StringRef(DSOName), patchName))
     FATAL("Cannot find the real addr for dynamic symbol %s", ManagledName);
-  }
   return addr;
 }
 
@@ -312,9 +311,8 @@ void *getMyFuncAddr(const char *ManagledName) {
   auto selfPatchDso = getThisPatchDsoPath();
   std::string patchName = selfPatchDso.filename().string();
   // If the symbol is in the patch DSO, return it.
-  if (llvm::StringRef(DSOName).endswith(patchName)) {
+  if (compat::endsWith(llvm::StringRef(DSOName), patchName))
     return addr;
-  }
   // If the symbol is not in the patch DSO, it might be masked by the main
   // executable. Try to find it via explicit dlopen.
   // RTLD_NOLOAD is used to search the symbol in the loaded DSOs.
@@ -331,9 +329,8 @@ void *getMyFuncAddr(const char *ManagledName) {
           err ? err : "null");
   }
   const char *my_dso = getDSOName(addr);
-  if (!llvm::StringRef(my_dso).endswith(patchName)) {
+  if (!compat::endsWith(llvm::StringRef(my_dso), patchName))
     FATAL("getMyFuncAddr: found symbol %s is not in patch so", my_dso);
-  }
   // Do not dlclose(handle), because RTLD_NOLOAD does not increase the reference
   // count.
   return addr;

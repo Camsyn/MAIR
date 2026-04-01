@@ -3,7 +3,6 @@
 #include <cctype>
 #include <clang/Driver/ToolChain.h>
 #include <cstddef>
-#include <cstdint>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringRef.h>
 #include <llvm/ADT/StringSet.h>
@@ -44,9 +43,9 @@ gen_hacked_san_names() {
   return result;
 }
 
-static constexpr auto hacked_san_names = gen_hacked_san_names();
+static constexpr auto HackedSanNames = gen_hacked_san_names();
 // Save new args here to extend their lifespan.
-static llvm::SmallVector<std::string, 8> saved_args;
+static llvm::SmallVector<std::string, 8> SavedArgs;
 
 namespace {
 
@@ -63,7 +62,7 @@ public:
     if (getSanType() == SanNone || PrefixToReplace.empty())
       return;
 
-    StringRef sanName = hacked_san_names[getSanType()];
+    StringRef sanName = HackedSanNames[getSanType()];
     PrefixToReplace += sanName;
 
     generate_new_args();
@@ -84,7 +83,7 @@ private:
     if (pos == StringRef::npos)
       return std::nullopt;
     arg = arg.substr(pos + CompilerRt.size());
-    for (StringRef sanName : hacked_san_names) {
+    for (StringRef sanName : HackedSanNames) {
       if (sanName.empty())
         continue;
       if (arg.startswith(sanName)) {
@@ -173,9 +172,9 @@ private:
       }
 
       // Extend the lifetime of NewRt
-      saved_args.push_back(std::move(NewRt.value()));
+      SavedArgs.push_back(std::move(NewRt.value()));
       // Replace the link argument related to our hacked sanitizers
-      NewCmdArgs.push_back(saved_args.back().c_str());
+      NewCmdArgs.push_back(SavedArgs.back().c_str());
       return true;
     } else {
       // The relevant replaced argument was added, skip to avoid
@@ -204,9 +203,9 @@ private:
     // In this option, we should add xxx_static.a manually.
     if (shouldHasStaticRt) {
       shouldHasStaticRt = false;
-      saved_args.push_back(PrefixToReplace + "_static" + ".a");
+      SavedArgs.push_back(PrefixToReplace + "_static" + ".a");
       NewCmdArgs.push_back(PreRt.data());
-      NewCmdArgs.push_back(saved_args.back().c_str());
+      NewCmdArgs.push_back(SavedArgs.back().c_str());
       NewCmdArgs.push_back(PostRt.data());
     }
   }

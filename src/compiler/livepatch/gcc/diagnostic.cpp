@@ -1,6 +1,7 @@
 /*
 Patch the error_at in diagnostic.c/diagnostic.cc in gcc.
 */
+#include <cstdarg>
 #include <cstdint>
 #include <string.h>
 

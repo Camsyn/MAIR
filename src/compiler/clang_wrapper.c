@@ -598,14 +598,12 @@ static void edit_params(u32 argc, const char **argv) {
 
     See ASan's testcase "init_fini_sections.cpp" for details.
   */
-  if (!only_lib) {
+  if (!only_lib)
     regist_pass_plugin(xsanTy);
-  }
 
   // *.c/cpp -o *.o, don't link sanitizer runtime library.
-  if (!have_c) {
+  if (!have_c)
     add_sanitizer_runtime(xsanTy, is_cxx, shared_linking, needs_shared_rt);
-  }
 
   while (--argc) {
     const u8 *cur = *(++argv);
@@ -613,9 +611,8 @@ static void edit_params(u32 argc, const char **argv) {
     if (!strcmp(cur, "-Wl,-z,defs") || !strcmp(cur, "-Wl,--no-undefined"))
       continue;
 
-    if (handle_sanitizer_options(cur, !strcmp(argv[-1], "-mllvm"), xsanTy)) {
+    if (handle_sanitizer_options(cur, !strcmp(argv[-1], "-mllvm"), xsanTy))
       continue;
-    }
 
     if (frontend_opt.AsmAsSource && !strcmp(cur, "-mllvm")) {
       ++argv;

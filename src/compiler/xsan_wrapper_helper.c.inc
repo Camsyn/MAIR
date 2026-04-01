@@ -515,9 +515,8 @@ static enum SanitizerType detect_san_type(const u32 argc, const char *argv[]) {
 }
 
 static u8 *get_xsan_comb_name(const XsanOption *opt) {
-  if (!has(opt, XSan)) {
+  if (!has(opt, XSan))
     return alloc_printf("");
-  }
   const char *asan_suffix = has(opt, ASan) ? "_asan" : "";
   const char *msan_suffix = has(opt, MSan) ? "_msan" : "";
   const char *tsan_suffix = has(opt, TSan) ? "_tsan" : "";

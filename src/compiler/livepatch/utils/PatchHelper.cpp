@@ -2,18 +2,25 @@
 #include <dlfcn.h>
 #include <elf.h>
 #include <filesystem>
+#include <limits.h>
 #include <link.h>
-#include <llvm/Support/Host.h>
 #include <llvm/Support/Memory.h>
 #include <llvm/Support/Process.h>
 #include <optional>
 #include <string_view>
+
+#if LLVM_VERSION_MAJOR >= 22
+#include <llvm/TargetParser/Host.h>
+#else
+#include <llvm/Support/Host.h>
+#endif
 
 #include "PatchHelper.h"
 #include "config_compile.h"
 #include "debug.h"
 #include "types.h"
 #include "xsan_common.h"
+#include "xsan_llvm_compat.h"
 
 namespace fs = std::filesystem;
 
@@ -21,17 +28,14 @@ namespace __xsan {
 
 // Lazy initialization for XsanEnabled
 bool isXsanEnabled() {
-  static const bool enabled =
-      llvm::sys::Process::GetEnv("XSAN_COMPILE_MASK").hasValue();
+  static const bool enabled = !!llvm::sys::Process::GetEnv("XSAN_COMPILE_MASK");
   return enabled;
 }
 
 // Lazy initialization for str_mask
 const std::string &getStrMask() {
   static const std::string val =
-      isXsanEnabled()
-          ? llvm::sys::Process::GetEnv("XSAN_COMPILE_MASK").getValue()
-          : "";
+      isXsanEnabled() ? *llvm::sys::Process::GetEnv("XSAN_COMPILE_MASK") : "";
   return val;
 }
 
@@ -152,25 +156,24 @@ fs::path getThisPatchDsoPath() {
 fs::path getXsanAbsPath(std::string_view rel_path) {
   /// TODO: do not use env var to transmit base dir, but parse the DSO link
   /// path.
-  static const llvm::Optional<std::string> &xsan_base_dir =
-      llvm::sys::Process::GetEnv("XSAN_BASE_DIR");
+  static const auto &XsanBaseDir = llvm::sys::Process::GetEnv("XSAN_BASE_DIR");
   // <base_dir>/patch/libclang-patch.so -> <base_dir>/
   static const fs::path PatchBaseDir =
       getThisPatchDsoPath().parent_path().parent_path();
   static const bool ExistEnvVarBaseDir =
-      xsan_base_dir.hasValue() && fs::exists(xsan_base_dir.getValue());
+      !!XsanBaseDir && fs::exists(*XsanBaseDir);
   static const fs::path EnvVarBaseDir =
-      ExistEnvVarBaseDir ? fs::canonical(xsan_base_dir.getValue()) : fs::path();
+      ExistEnvVarBaseDir ? fs::canonical(*XsanBaseDir) : fs::path();
 
   fs::path abs_path;
-  if (!xsan_base_dir.hasValue()) {
+  if (!XsanBaseDir) {
     abs_path = PatchBaseDir / rel_path;
   } else if (EnvVarBaseDir.empty()) {
     // xsan_base_dir has value, but EnvVarBaseDir is empty.
     WARNF("Warning: The path provided by the environment variable "
           "XSAN_BASE_DIR (\"%s\") is invalid. Using auto-detected base "
           "path: %s\n",
-          xsan_base_dir.getValue().c_str(), PatchBaseDir.c_str());
+          XsanBaseDir->c_str(), PatchBaseDir.c_str());
     abs_path = PatchBaseDir / rel_path;
   } else {
     abs_path = EnvVarBaseDir / rel_path;

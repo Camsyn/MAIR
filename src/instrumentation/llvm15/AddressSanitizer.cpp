@@ -3299,6 +3299,7 @@ void FunctionStackPoisoner::processStaticAllocas() {
     IRBuilder<> IRBIf(Term);
     Value *AllocaValue =
         DoDynamicAlloca ? createAllocaForLayout(IRBIf, L, true) : StaticAlloca;
+
     IRB.SetInsertPoint(InsBefore);
     LocalStackBase = createPHI(IRB, NoFakeStack, AllocaValue, Term, FakeStack);
     __xsan::NoSanitize::drop(*cast<Instruction>(LocalStackBase));
@@ -3339,12 +3340,11 @@ void FunctionStackPoisoner::processStaticAllocas() {
           AI->getType());
       AI->replaceAllUsesWith(NewAllocaPtr);
       NewAllocaPtr->takeName(AI);
-      if (MDNode *MD = __xsan::ReplacedAlloca::getMD(*AI)) {
+      if (MDNode *MD = __xsan::ReplacedAlloca::getMD(*AI))
         __xsan::ReplacedAlloca::setMD(*cast<Instruction>(NewAllocaPtr), MD);
-      } else {
+      else
         __xsan::ReplacedAlloca::set(*cast<Instruction>(NewAllocaPtr),
                                     {Desc.Size, Align(Desc.Alignment)});
-      }
     }
   }
 
@@ -3656,9 +3656,8 @@ public:
           FAM.getResult<__xsan::AsanTargetsToInstrumentAnalysis>(F);
       const TargetLibraryInfo &TLI = FAM.getResult<TargetLibraryAnalysis>(F);
 
-      if (!FunctionSanitizer.collectTargetsToIntrument(F, &TLI, Targets)) {
+      if (!FunctionSanitizer.collectTargetsToIntrument(F, &TLI, Targets))
         continue;
-      }
 
       /// Reduce recurrence between load/store instructions.
       if (__xsan::options::opt::enableReccReductionAsan()) {

@@ -912,9 +912,8 @@ public:
     XsanThreadSanitizer FunctionSanitizer;
     TsanToInstrument Targets;
 
-    if (!FunctionSanitizer.collectTargetsToIntrument(F, TLI, Targets)) {
+    if (!FunctionSanitizer.collectTargetsToIntrument(F, TLI, Targets))
       return Targets;
-    }
 
     auto RngMap = map_range(Targets.AllLoadsAndStores,
                             [](const auto &II) { return II.Inst; });
@@ -991,9 +990,8 @@ bool XsanThreadSanitizer::collectTargetsToIntrument(
     Function &F, const TargetLibraryInfo &TLI,
     __xsan::TsanToInstrument &Targets) {
 
-  if (shouldSkipFunction(F)) {
+  if (shouldSkipFunction(F))
     return false;
-  }
 
   SmallVector<Instruction *, 8> LocalLoadsAndStores;
 
@@ -1040,9 +1038,8 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
       FAM.getCachedResult<__xsan::TsanTargetsToInstrumentAnalysis>(F);
   const TargetLibraryInfo &TLI = FAM.getResult<TargetLibraryAnalysis>(F);
   // For non-XSan ASan scenarios, the `Targets` is nullptr
-  if (!Targets) {
+  if (!Targets)
     return ThreadSanitizer::sanitizeFunction(F, TLI);
-  }
 
   if (shouldSkipFunction(F))
     return false;
@@ -1065,16 +1062,14 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
 
   // Instrument memory accesses only if we want to report bugs in the function.
   if (ClInstrumentMemoryAccesses && SanitizeFunction)
-    for (const auto &II : AllLoadsAndStores) {
+    for (const auto &II : AllLoadsAndStores)
       Res |= instrumentLoadOrStore(II, DL);
-    }
 
   // Instrument atomic memory accesses in any case (they can be used to
   // implement synchronization).
   if (ClInstrumentAtomics)
-    for (auto *Inst : AtomicAccesses) {
+    for (auto *Inst : AtomicAccesses)
       Res |= instrumentAtomic(Inst, DL);
-    }
 
   /// ASan's instrumentation might replace some GlobalVariables, MemIntrinsics
   /// and AllocInsts.

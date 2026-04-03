@@ -89,7 +89,7 @@ struct MsanHooks : ::__xsan::DefaultHooks<MsanContext, MsanThread> {
   static void OnXsanFreeHook(uptr ptr, uptr size, BufferedStackTrace *stack);
   /// Now MSan directly poison stack shadow via ReplacedAlloca API in pass.
   // ALWAYS_INLINE static void OnFakeStackAlloc(uptr addr, uptr size) {
-  //   / We now let ASan tag its replaced alloca.
+  //   // We now let ASan tag its replaced alloca.
   //   __sanitizer::internal_memset((void *)MemToShadow(addr), 0xff, size);
   // }
   ALWAYS_INLINE static void OnDtlsAlloc(uptr addr, uptr size) {

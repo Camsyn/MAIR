@@ -774,7 +774,7 @@ void insertModuleCtor(Module &M) {
       // This callback is invoked when the functions are created the first
       // time. Hook them into the global ctors list in that case:
       [&](Function *Ctor, FunctionCallee) {
-        __xsan::addNoInstrumentionAttr(Ctor);
+        __xsan::addNoInstrumentationAttr(Ctor);
         if (!ClWithComdat) {
           appendToGlobalCtors(M, Ctor, 0);
           return;

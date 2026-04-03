@@ -4045,7 +4045,7 @@ namespace {
 /// Handle some global semantics modification.
 bool XsanModuleAddressSanitizer::instrumentModule() {
   bool Changed = ModuleAddressSanitizer::instrumentModule();
-  __xsan::addNoInstrumentionAttr(
+  __xsan::addNoInstrumentationAttr(
       {this->AsanCtorFunction, this->AsanDtorFunction});
   return Changed;
 }

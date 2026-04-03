@@ -4015,7 +4015,8 @@ collectSanitizerInteriorGlobals( Module &M) {
 bool XsanModuleAddressSanitizer::instrumentModule(Module &M) {
   markSanitizerGlobals(M);
   bool Changed = ModuleAddressSanitizer::instrumentModule(M);
-  __xsan::addNoInstrumentionAttr({this->AsanCtorFunction, this->AsanDtorFunction});
+  __xsan::addNoInstrumentationAttr(
+      {this->AsanCtorFunction, this->AsanDtorFunction});
   return Changed;
 }
 

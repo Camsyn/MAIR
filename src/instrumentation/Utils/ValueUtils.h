@@ -59,14 +59,15 @@ inline bool isXsanLifetimeEnd(const llvm::IntrinsicInst &I) {
 inline llvm::Value *getLifetimeStartOperand(const llvm::IntrinsicInst &I) {
   if (I.getIntrinsicID() == llvm::Intrinsic::lifetime_start)
     return I.getArgOperand(0);
-  assert(isXsanLifetimeStart(I) || isXsanLifetimeEnd(I));
+  assert(isXsanLifetimeStart(I));
   auto Bundle = I.getOperandBundle(kXsanLifetimeStartName);
   assert(Bundle && Bundle->Inputs.size() == 1);
   return Bundle->Inputs.front().get();
 }
 void insertXSanLifetime(llvm::IntrinsicInst &II);
 
-inline void addNoInstrumentionAttr(llvm::ArrayRef<llvm::Function *> Functions) {
+inline void
+addNoInstrumentationAttr(llvm::ArrayRef<llvm::Function *> Functions) {
   for (auto *F : Functions)
     if (F) {
       F->addFnAttr(llvm::Attribute::NoSanitizeCoverage);

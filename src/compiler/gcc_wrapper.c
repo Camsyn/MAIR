@@ -200,8 +200,9 @@ static void edit_params(u32 argc, const char **argv) {
       const char *suffix = strrchr(cur, '.');
       if (!suffix)
         continue;
-      if (!strcmp(suffix, ".s") || !strcmp(suffix, ".S") ||
-          !strcmp(suffix, ".asm")) {
+      if ((!strcmp(suffix, ".s") || !strcmp(suffix, ".S") ||
+           !strcmp(suffix, ".asm")) &&
+          strcmp(argv[i - 1], "-o") /*Not as output*/) {
         AsmAsSource = 1;
         continue;
       }

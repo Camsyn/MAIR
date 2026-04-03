@@ -56,6 +56,7 @@
 #include "PassRegistry.h"
 #include "Utils/MetaDataUtils.h"
 #include "Utils/Options.h"
+#include "Utils/ValueUtils.h"
 
 using namespace llvm;
 
@@ -184,7 +185,7 @@ private:
 };
 
 struct XsanThreadSanitizer : public ThreadSanitizer {
-  XsanThreadSanitizer() : ThreadSanitizer() {}
+  using ThreadSanitizer::ThreadSanitizer;
   bool shouldSkipFunction(Function &F);
   bool sanitizeFunction(Function &F, FunctionAnalysisManager &FAM);
   bool collectTargetsToIntrument(Function &F, const TargetLibraryInfo &TLI,
@@ -198,8 +199,7 @@ void insertModuleCtor(Module &M) {
       // This callback is invoked when the functions are created the first
       // time. Hook them into the global ctors list in that case:
       [&](Function *Ctor, FunctionCallee) {
-        Ctor->addFnAttr(Attribute::NoSanitizeCoverage);
-        Ctor->addFnAttr(Attribute::DisableSanitizerInstrumentation);
+        __xsan::addNoInstrumentionAttr(Ctor);
         appendToGlobalCtors(M, Ctor, 0);
       });
 }

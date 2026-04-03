@@ -94,6 +94,7 @@
 #include "PassRegistry.h"
 #include "Utils/MetaDataUtils.h"
 #include "Utils/Options.h"
+#include "Utils/ValueUtils.h"
 
 using namespace llvm;
 
@@ -878,13 +879,7 @@ private:
 
 struct XsanAddressSanitizer : public AddressSanitizer {
 public:
-  XsanAddressSanitizer(Module &M, const StackSafetyGlobalInfo *SSGI,
-                       bool CompileKernel = false, bool Recover = false,
-                       bool UseAfterScope = false,
-                       AsanDetectStackUseAfterReturnMode UseAfterReturn =
-                           AsanDetectStackUseAfterReturnMode::Runtime)
-      : AddressSanitizer(M, SSGI, CompileKernel, Recover, UseAfterScope,
-                         UseAfterReturn) {}
+  using AddressSanitizer::AddressSanitizer;
   bool shouldSkipFunction(Function &F);
   bool instrumentFunction(Function &F, FunctionAnalysisManager &FAM);
   bool collectTargetsToIntrument(Function &F, const TargetLibraryInfo *TLI,
@@ -893,13 +888,7 @@ public:
 
 struct XsanModuleAddressSanitizer : public ModuleAddressSanitizer {
 public:
-  XsanModuleAddressSanitizer(Module &M, bool CompileKernel = false,
-                             bool Recover = false, bool UseGlobalsGC = true,
-                             bool UseOdrIndicator = true,
-                             AsanDtorKind DestructorKind = AsanDtorKind::Global)
-      : ModuleAddressSanitizer(M, CompileKernel, Recover, UseGlobalsGC,
-                               UseOdrIndicator, DestructorKind) {}
-
+  using ModuleAddressSanitizer::ModuleAddressSanitizer;
   bool instrumentModule(Module &M);
   /// FIXME: something wrong in the compilation for testcase init-order-dlopen.cpp
   bool markSanitizerGlobals(Module &M);
@@ -2053,8 +2042,6 @@ Instruction *ModuleAddressSanitizer::CreateAsanModuleDtor(Module &M) {
       FunctionType::get(Type::getVoidTy(*C), false),
       GlobalValue::InternalLinkage, 0, kAsanModuleDtorName, &M);
   AsanDtorFunction->addFnAttr(Attribute::NoUnwind);
-  AsanDtorFunction->addFnAttr(Attribute::NoSanitizeCoverage);
-  AsanDtorFunction->addFnAttr(Attribute::DisableSanitizerInstrumentation);
   // Ensure Dtor cannot be discarded, even if in a comdat.
   appendToUsed(M, {AsanDtorFunction});
   BasicBlock *AsanDtorBB = BasicBlock::Create(*C, "", AsanDtorFunction);
@@ -3236,12 +3223,8 @@ void FunctionStackPoisoner::processStaticAllocas() {
   DoDynamicAlloca &= !HasInlineAsm && !HasReturnsTwiceCall;
   DoStackMalloc &= !HasInlineAsm && !HasReturnsTwiceCall;
 
-  Value *StaticAlloca;
-  {
-    auto Scoper = IRB.scopedNotTagNoSanitize();
-    StaticAlloca =
-        DoDynamicAlloca ? nullptr : createAllocaForLayout(IRB, L, false);
-  }
+  Value *StaticAlloca =
+      DoDynamicAlloca ? nullptr : createAllocaForLayout(IRB, L, false);
 
   Value *FakeStack;
   Value *LocalStackBase;
@@ -3327,26 +3310,24 @@ void FunctionStackPoisoner::processStaticAllocas() {
          "Variable descriptions relative to ASan stack base will be dropped");
 
   // Replace Alloca instructions with base+offset.
-  {
+  for (const auto &Desc : SVD) {
     /// Should NOT tag with nosanitize, as here is a user-sematic equivalent
     /// replacement.
     auto Scoper = IRB.scopedNotTagNoSanitize();
-    for (const auto &Desc : SVD) {
-      AllocaInst *AI = Desc.AI;
-      replaceDbgDeclare(AI, LocalStackBaseAllocaPtr, DIB, DIExprFlags,
-                        Desc.Offset);
-      Value *NewAllocaPtr = IRB.CreateIntToPtr(
-          IRB.CreateAdd(LocalStackBase,
-                        ConstantInt::get(IntptrTy, Desc.Offset)),
-          AI->getType());
-      AI->replaceAllUsesWith(NewAllocaPtr);
-      NewAllocaPtr->takeName(AI);
-      if (MDNode *MD = __xsan::ReplacedAlloca::getMD(*AI))
-        __xsan::ReplacedAlloca::setMD(*cast<Instruction>(NewAllocaPtr), MD);
-      else
-        __xsan::ReplacedAlloca::set(*cast<Instruction>(NewAllocaPtr),
-                                    {Desc.Size, Align(Desc.Alignment)});
-    }
+    AllocaInst *AI = Desc.AI;
+    replaceDbgDeclare(AI, LocalStackBaseAllocaPtr, DIB, DIExprFlags,
+                      Desc.Offset);
+    Value *NewAllocaPtr = IRB.CreateIntToPtr(
+        IRB.CreateAdd(LocalStackBase,
+                      ConstantInt::get(IntptrTy, Desc.Offset)),
+        AI->getType());
+    AI->replaceAllUsesWith(NewAllocaPtr);
+    NewAllocaPtr->takeName(AI);
+    if (MDNode *MD = __xsan::ReplacedAlloca::getMD(*AI))
+      __xsan::ReplacedAlloca::setMD(*cast<Instruction>(NewAllocaPtr), MD);
+    else
+      __xsan::ReplacedAlloca::set(*cast<Instruction>(NewAllocaPtr),
+                                  {Desc.Size, Align(Desc.Alignment)});
   }
 
   // The left-most redzone has enough space for at least 4 pointers.
@@ -4033,7 +4014,9 @@ collectSanitizerInteriorGlobals( Module &M) {
 
 bool XsanModuleAddressSanitizer::instrumentModule(Module &M) {
   markSanitizerGlobals(M);
-  return ModuleAddressSanitizer::instrumentModule(M);
+  bool Changed = ModuleAddressSanitizer::instrumentModule(M);
+  __xsan::addNoInstrumentionAttr({this->AsanCtorFunction, this->AsanDtorFunction});
+  return Changed;
 }
 
 bool XsanModuleAddressSanitizer::markSanitizerGlobals(Module &M) {

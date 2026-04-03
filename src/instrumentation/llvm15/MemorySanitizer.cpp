@@ -662,8 +662,7 @@ void insertModuleCtor(Module &M) {
       // This callback is invoked when the functions are created the first
       // time. Hook them into the global ctors list in that case:
       [&](Function *Ctor, FunctionCallee) {
-        Ctor->addFnAttr(Attribute::NoSanitizeCoverage);
-        Ctor->addFnAttr(Attribute::DisableSanitizerInstrumentation);
+        __xsan::addNoInstrumentionAttr(Ctor);
         if (!ClWithComdat) {
           appendToGlobalCtors(M, Ctor, 0);
           return;
@@ -2020,6 +2019,18 @@ struct MemorySanitizerVisitor : public InstVisitor<MemorySanitizerVisitor> {
   // ------------------- Visitors.
   using InstVisitor<MemorySanitizerVisitor>::visit;
   void visit(Instruction &I) {
+    /// XSan MODIFIED: handle replaced instructons.
+    // ASan replaces stack var x,y,z as follows:
+    //     char alloc[N]; // merge all small allocas into ONE
+    //     char *p = detect_uar? fake_stack_malloc(N) : alloc;
+    //     // Original allocas
+    //     char *x = p + N1; // replaced alloca
+    //     char *y = p + N2; // replaced alloca
+    //     char *z = p + N3; // replaced alloca
+    if (__xsan::ReplacedAlloca::is(I)) {
+      visitAllocaInst(I);
+      return;
+    }
     if (auto Data = __xsan::ReplacedAtomic::get(I))
       return visitReplacedAtomicInst(I, Data.value());
     if (visitUBSanReplacedInst(I))

@@ -3266,6 +3266,7 @@ void FunctionStackPoisoner::processStaticAllocas() {
           SplitBlockAndInsertIfThen(UseAfterReturnIsEnabled, InsBefore, false);
       __xsan::NoSanitize::set(*cast<Instruction>(
           UseAfterReturnIsEnabled->getUniqueUndroppableUser()));
+      __xsan::NoSanitize::set(*Term);
       /// Although here is a user-sematic equivalent replacement, other
       /// sanitizers could not instrument the callee (i.e.,
       /// __asan_stack_malloc_N), so we need to tag with nosanitize.
@@ -3296,7 +3297,8 @@ void FunctionStackPoisoner::processStaticAllocas() {
         SplitBlockAndInsertIfThen(NoFakeStack, InsBefore, false);
     __xsan::NoSanitize::set(
         *cast<Instruction>(NoFakeStack->getUniqueUndroppableUser()));
-    IRBuilder<> IRBIf(Term);
+    __xsan::NoSanitize::set(*Term);
+    __xsan::InstrumentationIRBuilder IRBIf(Term);
     Value *AllocaValue =
         DoDynamicAlloca ? createAllocaForLayout(IRBIf, L, true) : StaticAlloca;
 
@@ -3308,7 +3310,6 @@ void FunctionStackPoisoner::processStaticAllocas() {
   } else {
     // void *FakeStack = nullptr;
     // void *LocalStackBase = alloca(LocalStackSize);
-    auto Scoper = IRB.scopedNotTagNoSanitize();
     FakeStack = ConstantInt::get(IntptrTy, 0);
     LocalStackBase =
         DoDynamicAlloca ? createAllocaForLayout(IRB, L, true) : StaticAlloca;

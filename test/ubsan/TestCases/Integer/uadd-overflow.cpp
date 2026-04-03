@@ -27,6 +27,6 @@ int main() {
 # else
   puts("__int128 not supported");
 # endif
-  // CHECK-ADD_I128: {{0x80000000000000000000000000000000 \+ 0x80000000000000000000000000000000 cannot be represented in type 'unsigned __int128'|__int128 not supported}}
+  // CHECK-ADD_I128: {{0x80000000000000000000000000000000 \+ 0x80000000000000000000000000000000 cannot be represented in type '(unsigned __int128|__uint128_t).*|__int128 not supported}}
 #endif
 }

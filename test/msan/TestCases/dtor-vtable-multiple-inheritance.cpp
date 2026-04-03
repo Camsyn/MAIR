@@ -51,7 +51,7 @@ int main() {
   // This fails
 #ifdef CVPTR
   c->A_Foo();
-// CVPTR: Memory was marked as uninitialized
+// CVPTR: {{Memory was marked as uninitialized|Virtual table ptr was destroyed}}
 // CVPTR: {{#0 0x.* in __sanitizer_dtor_callback}}
 // CVPTR: {{#1 0x.* in (C::~C\(\)|~C) .*cpp:}}[[@LINE-28]]:
 // CVPTR: {{#2 0x.* in main .*cpp:}}[[@LINE-7]]:
@@ -63,7 +63,7 @@ int main() {
   // Both of these fail
 #ifdef EAVPTR
   e->A_Foo();
-// EAVPTR: Memory was marked as uninitialized
+// EAVPTR: {{Memory was marked as uninitialized|Virtual table ptr was destroyed}}
 // EAVPTR: {{#0 0x.* in __sanitizer_dtor_callback}}
 // EAVPTR: {{#1 0x.* in (E::~E\(\)|~E) .*cpp:}}[[@LINE-25]]:
 // EAVPTR: {{#2 0x.* in main .*cpp:}}[[@LINE-7]]:
@@ -71,7 +71,7 @@ int main() {
 
 #ifdef EDVPTR
   e->D_Foo();
-// EDVPTR: Memory was marked as uninitialized
+// EDVPTR: {{Memory was marked as uninitialized|Virtual table ptr was destroyed}}
 // EDVPTR: {{#0 0x.* in __sanitizer_dtor_callback}}
 // EDVPTR: {{#1 0x.* in (E::~E\(\)|~E) .*cpp:}}[[@LINE-33]]:
 // EDVPTR: {{#2 0x.* in main .*cpp:}}[[@LINE-15]]:

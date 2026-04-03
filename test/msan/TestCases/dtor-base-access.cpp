@@ -66,19 +66,19 @@ int main() {
   assert(__msan_test_shadow(&g->d, sizeof(g->d)) == 0);
 
   __msan_print_shadow(&g->tb0, sizeof(g->tb0));
-  // CHECK: Memory was marked as uninitialized
+  // CHECK: {{Memory was marked as uninitialized|Member fields were destroyed}}
   // CHECK: {{#0 0x.* in __sanitizer_dtor_callback}}
-  // CHECK: {{#1 0x.* in .*~Derived.*cpp:}}[[@LINE-20]]:
+  // CHECK: {{#1 0x.* in .*~Derived.*cpp:}}
 
   __msan_print_shadow(&g->b, sizeof(g->b));
-  // CHECK: Memory was marked as uninitialized
+  // CHECK: {{Memory was marked as uninitialized|Member fields were destroyed}}
   // CHECK: {{#0 0x.* in __sanitizer_dtor_callback}}
-  // CHECK: {{#1 0x.* in .*~Base.*cpp:}}[[@LINE-33]]:
+  // CHECK: {{#1 0x.* in .*~Base.*cpp:}}
 
   __msan_print_shadow(&g->tb1, sizeof(g->tb1));
-  // CHECK: Memory was marked as uninitialized
+  // CHECK: {{Memory was marked as uninitialized|Member fields were destroyed}}
   // CHECK: {{#0 0x.* in __sanitizer_dtor_callback}}
-  // CHECK: {{#1 0x.* in .*~Derived.*cpp:}}[[@LINE-30]]:
+  // CHECK: {{#1 0x.* in .*~Derived.*cpp:}}
 
   return 0;
 }

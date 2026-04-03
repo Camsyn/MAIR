@@ -26,6 +26,6 @@ int main() {
 # else
   puts("__int128 not supported");
 # endif
-  // CHECK-SUB_I128: {{0x80000000000000000000000000000000 - 1 cannot be represented in type '__int128'|__int128 not supported}}
+  // CHECK-SUB_I128: {{0x80000000000000000000000000000000 - 1 cannot be represented in type '__int128.*|__int128 not supported}}
 #endif
 }

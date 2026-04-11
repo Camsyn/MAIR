@@ -1,5 +1,9 @@
 #pragma once
 
+/// Directly copied from somewhere of ASan to provide some interfaces to hooks.
+/// E.g., AsanQuickCheckForUnpoisonedRegion_ comes from QuickCheckForUnpoisonedRegion
+/// in asan_interceptors_memintrinsics.h
+
 #include "../xsan_platform.h"
 #include "asan_interface_internal.h"
 #include "sanitizer_common/sanitizer_internal_defs.h"

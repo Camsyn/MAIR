@@ -453,9 +453,23 @@ TSAN_INTERCEPTOR(int, pause, int fake) {
       
 #if !SANITIZER_ANDROID
 DECLARE_REAL(int, atexit, void (*f)())
+// TSAN_INTERCEPTOR(int, atexit, void (*f)()) {
+//   if (in_symbolizer())
+//     return 0;
+//   // We want to setup the atexit callback even if we are in ignored lib
+//   // or after fork.
+//   SCOPED_INTERCEPTOR_RAW(atexit, f);
+//   return setup_at_exit_wrapper(thr, GET_CALLER_PC(), (void (*)())f, 0, 0);
+// }
 #endif
 
 DECLARE_REAL(int, __cxa_atexit, void (*f)(void *a), void *arg, void *dso)
+// TSAN_INTERCEPTOR(int, __cxa_atexit, void (*f)(void *a), void *arg, void *dso) {
+//   if (in_symbolizer())
+//     return 0;
+//   SCOPED_TSAN_INTERCEPTOR(__cxa_atexit, f, arg, dso);
+//   return setup_at_exit_wrapper(thr, GET_CALLER_PC(), (void (*)())f, arg, dso);
+// }
 
 // static int setup_at_exit_wrapper(ThreadState *thr, uptr pc, void(*f)(),
 //       void *arg, void *dso) {
@@ -503,7 +517,22 @@ DECLARE_REAL(int, __cxa_atexit, void (*f)(void *a), void *arg, void *dso)
 // }
 
 DECLARE_REAL(int, on_exit, void(*f)(int, void*), void *arg);
-
+// TSAN_INTERCEPTOR(int, on_exit, void(*f)(int, void*), void *arg) {
+//   if (in_symbolizer())
+//     return 0;
+//   SCOPED_TSAN_INTERCEPTOR(on_exit, f, arg);
+//   auto *ctx = New<AtExitCtx>();
+//   ctx->f = (void(*)())f;
+//   ctx->arg = arg;
+//   ctx->pc = GET_CALLER_PC();
+//   Release(thr, pc, (uptr)ctx);
+//   // Memory allocation in __cxa_atexit will race with free during exit,
+//   // because we do not see synchronization around atexit callback list.
+//   ThreadIgnoreBegin(thr, pc);
+//   int res = REAL(on_exit)(on_exit_callback_installed_at, ctx);
+//   ThreadIgnoreEnd(thr);
+//   return res;
+// }
 #define TSAN_MAYBE_INTERCEPT_ON_EXIT TSAN_INTERCEPT(on_exit)
 #else
 #define TSAN_MAYBE_INTERCEPT_ON_EXIT
@@ -646,11 +675,50 @@ DECLARE_REAL(void, longjmp_symname, uptr *env, int val)
 
 DECLARE_REAL(void, siglongjmp_symname, uptr *env, int val)
 
+// TSAN_INTERCEPTOR(void, longjmp_symname, uptr *env, int val) {
+//   // Note: if we call REAL(longjmp) in the context of ScopedInterceptor,
+//   // bad things will happen. We will jump over ScopedInterceptor dtor and can
+//   // leave thr->in_ignored_lib set.
+//   {
+//     SCOPED_INTERCEPTOR_RAW(longjmp_symname, env, val);
+//   }
+//   LongJmp(cur_thread(), env);
+//   REAL(longjmp_symname)(env, val);
+// }
+
+// TSAN_INTERCEPTOR(void, siglongjmp_symname, uptr *env, int val) {
+//   {
+//     SCOPED_INTERCEPTOR_RAW(siglongjmp_symname, env, val);
+//   }
+//   LongJmp(cur_thread(), env);
+//   REAL(siglongjmp_symname)(env, val);
+// }
+
 #if SANITIZER_NETBSD
 DECLARE_REAL(void, _longjmp, uptr *env, int val)
+// TSAN_INTERCEPTOR(void, _longjmp, uptr *env, int val) {
+//   {
+//     SCOPED_INTERCEPTOR_RAW(_longjmp, env, val);
+//   }
+//   LongJmp(cur_thread(), env);
+//   REAL(_longjmp)(env, val);
+// }
 #endif
 
 #if !SANITIZER_APPLE
+// TSAN_INTERCEPTOR(void*, malloc, uptr size) {
+//   if (in_symbolizer())
+//     return InternalAlloc(size);
+//   if (DlsymAlloc::Use())
+//     return DlsymAlloc::Allocate(size);
+//   void *p = 0;
+//   {
+//     SCOPED_INTERCEPTOR_RAW(malloc, size);
+//     p = user_alloc(thr, pc, size);
+//   }
+//   invoke_malloc_hook(p, size);
+//   return p;
+// }
 
 // In glibc<2.25, dynamic TLS blocks are allocated by __libc_memalign. Intercept
 // __libc_memalign so that (1) we can detect races (2) free will not be called
@@ -667,6 +735,82 @@ DECLARE_REAL(void, free, void *p)
 DECLARE_REAL(void, cfree, void *p)
 
 DECLARE_REAL(uptr, malloc_usable_size, void *p)
+
+// TSAN_INTERCEPTOR(void*, __libc_memalign, uptr align, uptr sz) {
+//   SCOPED_INTERCEPTOR_RAW(__libc_memalign, align, sz);
+//   return user_memalign(thr, pc, align, sz);
+// }
+
+// TSAN_INTERCEPTOR(void *, calloc, uptr n, uptr size) {
+//   if (in_symbolizer())
+//     return InternalCalloc(n, size);
+//   if (DlsymAlloc::Use())
+//     return DlsymAlloc::Callocate(n, size);
+//   void *p = 0;
+//   {
+//     SCOPED_INTERCEPTOR_RAW(calloc, n, size);
+//     p = user_calloc(thr, pc, size, n);
+//   }
+//   invoke_malloc_hook(p, n * size);
+//   return p;
+// }
+
+// TSAN_INTERCEPTOR(void*, realloc, void *p, uptr size) {
+//   if (in_symbolizer())
+//     return InternalRealloc(p, size);
+//   if (DlsymAlloc::Use() || DlsymAlloc::PointerIsMine(p))
+//     return DlsymAlloc::Realloc(p, size);
+//   if (p)
+//     invoke_free_hook(p);
+//   {
+//     SCOPED_INTERCEPTOR_RAW(realloc, p, size);
+//     p = user_realloc(thr, pc, p, size);
+//   }
+//   invoke_malloc_hook(p, size);
+//   return p;
+// }
+
+// TSAN_INTERCEPTOR(void *, reallocarray, void *p, uptr n, uptr size) {
+//   if (in_symbolizer())
+//     return InternalReallocArray(p, n, size);
+//   if (p)
+//     invoke_free_hook(p);
+//   {
+//     SCOPED_INTERCEPTOR_RAW(reallocarray, p, n, size);
+//     p = user_reallocarray(thr, pc, p, size, n);
+//   }
+//   invoke_malloc_hook(p, size);
+//   return p;
+// }
+
+// TSAN_INTERCEPTOR(void, free, void *p) {
+//   if (UNLIKELY(!p))
+//     return;
+//   if (in_symbolizer())
+//     return InternalFree(p);
+//   if (DlsymAlloc::PointerIsMine(p))
+//     return DlsymAlloc::Free(p);
+//   invoke_free_hook(p);
+//   SCOPED_INTERCEPTOR_RAW(free, p);
+//   user_free(thr, pc, p);
+// }
+
+// TSAN_INTERCEPTOR(void, cfree, void *p) {
+//   if (UNLIKELY(!p))
+//     return;
+//   if (in_symbolizer())
+//     return InternalFree(p);
+//   if (DlsymAlloc::PointerIsMine(p))
+//     return DlsymAlloc::Free(p);
+//   invoke_free_hook(p);
+//   SCOPED_INTERCEPTOR_RAW(cfree, p);
+//   user_free(thr, pc, p);
+// }
+
+// TSAN_INTERCEPTOR(uptr, malloc_usable_size, void *p) {
+//   SCOPED_INTERCEPTOR_RAW(malloc_usable_size, p);
+//   return user_alloc_usable_size(p);
+// }
 #endif
 
 DECLARE_REAL(char *, strcpy, char *dst, const char *src)
@@ -674,6 +818,28 @@ DECLARE_REAL(char *, strcpy, char *dst, const char *src)
 // DECLARE_REAL(char*, strncpy, char *dst, char *src, uptr n)
 
 DECLARE_REAL(char*, strdup, const char *str)
+
+// TSAN_INTERCEPTOR(char *, strcpy, char *dst, const char *src) {
+//   SCOPED_TSAN_INTERCEPTOR(strcpy, dst, src);
+//   uptr srclen = internal_strlen(src);
+//   MemoryAccessRange(thr, pc, (uptr)dst, srclen + 1, true);
+//   MemoryAccessRange(thr, pc, (uptr)src, srclen + 1, false);
+//   return REAL(strcpy)(dst, src);
+// }
+
+// TSAN_INTERCEPTOR(char*, strncpy, char *dst, char *src, usize n) {
+//   SCOPED_TSAN_INTERCEPTOR(strncpy, dst, src, n);
+//   uptr srclen = internal_strnlen(src, n);
+//   MemoryAccessRange(thr, pc, (uptr)dst, n, true);
+//   MemoryAccessRange(thr, pc, (uptr)src, min(srclen + 1, n), false);
+//   return REAL(strncpy)(dst, src, n);
+// }
+
+// TSAN_INTERCEPTOR(char*, strdup, const char *str) {
+//   SCOPED_TSAN_INTERCEPTOR(strdup, str);
+//   // strdup will call malloc, so no instrumentation is required here.
+//   return REAL(strdup)(str);
+// }
 
 // // Zero out addr if it points into shadow memory and was provided as a hint
 // // only, i.e., MAP_FIXED is not set.
@@ -719,6 +885,10 @@ DECLARE_REAL(char*, strdup, const char *str)
 
 #if SANITIZER_LINUX
 DECLARE_REAL(void*, memalign, uptr align, uptr sz)
+// TSAN_INTERCEPTOR(void*, memalign, uptr align, uptr sz) {
+//   SCOPED_INTERCEPTOR_RAW(memalign, align, sz);
+//   return user_memalign(thr, pc, align, sz);
+// }
 #define TSAN_MAYBE_INTERCEPT_MEMALIGN TSAN_INTERCEPT(memalign)
 #else
 #define TSAN_MAYBE_INTERCEPT_MEMALIGN
@@ -728,10 +898,33 @@ DECLARE_REAL(void*, memalign, uptr align, uptr sz)
 DECLARE_REAL(void*, aligned_alloc, uptr align, uptr sz)
 
 DECLARE_REAL(void*, valloc, uptr sz)
+
+// TSAN_INTERCEPTOR(void*, aligned_alloc, uptr align, uptr sz) {
+//   if (in_symbolizer())
+//     return InternalAlloc(sz, nullptr, align);
+//   SCOPED_INTERCEPTOR_RAW(aligned_alloc, align, sz);
+//   return user_aligned_alloc(thr, pc, align, sz);
+// }
+
+// TSAN_INTERCEPTOR(void*, valloc, uptr sz) {
+//   if (in_symbolizer())
+//     return InternalAlloc(sz, nullptr, GetPageSizeCached());
+//   SCOPED_INTERCEPTOR_RAW(valloc, sz);
+//   return user_valloc(thr, pc, sz);
+// }
 #endif
 
 #if SANITIZER_LINUX
 DECLARE_REAL(void*, pvalloc, uptr sz)
+// TSAN_INTERCEPTOR(void*, pvalloc, uptr sz) {
+//   if (in_symbolizer()) {
+//     uptr PageSize = GetPageSizeCached();
+//     sz = sz ? RoundUpTo(sz, PageSize) : PageSize;
+//     return InternalAlloc(sz, nullptr, PageSize);
+//   }
+//   SCOPED_INTERCEPTOR_RAW(pvalloc, sz);
+//   return user_pvalloc(thr, pc, sz);
+// }
 #define TSAN_MAYBE_INTERCEPT_PVALLOC TSAN_INTERCEPT(pvalloc)
 #else
 #define TSAN_MAYBE_INTERCEPT_PVALLOC
@@ -739,6 +932,17 @@ DECLARE_REAL(void*, pvalloc, uptr sz)
 
 #if !SANITIZER_APPLE
 DECLARE_REAL(int, posix_memalign, void **memptr, uptr align, uptr sz)
+// TSAN_INTERCEPTOR(int, posix_memalign, void **memptr, uptr align, uptr sz) {
+//   if (in_symbolizer()) {
+//     void *p = InternalAlloc(sz, nullptr, align);
+//     if (!p)
+//       return errno_ENOMEM;
+//     *memptr = p;
+//     return 0;
+//   }
+//   SCOPED_INTERCEPTOR_RAW(posix_memalign, memptr, align, sz);
+//   return user_posix_memalign(thr, pc, memptr, align, sz);
+// }
 #endif
 
 // Both __cxa_guard_acquire and pthread_once 0-initialize
@@ -907,6 +1111,63 @@ extern "C" void *__tsan_thread_start_func(void *arg) {
 
 DECLARE_REAL(int, pthread_create,
     void *th, void *attr, void *(*callback)(void*), void * param)
+// TSAN_INTERCEPTOR(int, pthread_create,
+//     void *th, void *attr, void *(*callback)(void*), void * param) {
+//   SCOPED_INTERCEPTOR_RAW(pthread_create, th, attr, callback, param);
+//
+//   MaybeSpawnBackgroundThread();
+//
+//   if (ctx->after_multithreaded_fork) {
+//     if (flags()->die_after_fork) {
+//       Report("ThreadSanitizer: starting new threads after multi-threaded "
+//           "fork is not supported. Dying (set die_after_fork=0 to override)\n");
+//       Die();
+//     } else {
+//       VPrintf(1,
+//               "ThreadSanitizer: starting new threads after multi-threaded "
+//               "fork is not supported (pid %lu). Continuing because of "
+//               "die_after_fork=0, but you are on your own\n",
+//               internal_getpid());
+//     }
+//   }
+//   __sanitizer_pthread_attr_t myattr;
+//   if (attr == 0) {
+//     pthread_attr_init(&myattr);
+//     attr = &myattr;
+//   }
+//   int detached = 0;
+//   REAL(pthread_attr_getdetachstate)(attr, &detached);
+//   AdjustStackSize(attr);
+//
+//   ThreadParam p;
+//   p.callback = callback;
+//   p.param = param;
+//   p.tid = kMainTid;
+//   int res = -1;
+//   {
+//     // Otherwise we see false positives in pthread stack manipulation.
+//     ScopedIgnoreInterceptors ignore;
+//     ThreadIgnoreBegin(thr, pc);
+//     res = REAL(pthread_create)(th, attr, __tsan_thread_start_func, &p);
+//     ThreadIgnoreEnd(thr);
+//   }
+//   if (res == 0) {
+//     p.tid = ThreadCreate(thr, pc, *(uptr *)th, IsStateDetached(detached));
+//     CHECK_NE(p.tid, kMainTid);
+//     // Synchronization on p.tid serves two purposes:
+//     // 1. ThreadCreate must finish before the new thread starts.
+//     //    Otherwise the new thread can call pthread_detach, but the pthread_t
+//     //    identifier is not yet registered in ThreadRegistry by ThreadCreate.
+//     // 2. ThreadStart must finish before this thread continues.
+//     //    Otherwise, this thread can call pthread_detach and reset thr->sync
+//     //    before the new thread got a chance to acquire from it in ThreadStart.
+//     p.created.Post();
+//     p.started.Wait();
+//   }
+//   if (attr == &myattr)
+//     pthread_attr_destroy(&myattr);
+//   return res;
+// }
 
 // TSAN_INTERCEPTOR(int, pthread_join, void *th, void **ret) {
 //   SCOPED_INTERCEPTOR_RAW(pthread_join, th, ret);

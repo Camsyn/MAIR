@@ -1,5 +1,7 @@
 #pragma once
 
+/// Directly copied from somewhere of TSan to provide some interfaces to hooks.
+
 #include "../xsan_platform.h"
 #include "sanitizer_common/sanitizer_flags.h"
 #include "sanitizer_common/sanitizer_internal_defs.h"

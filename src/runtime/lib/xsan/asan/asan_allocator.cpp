@@ -683,9 +683,8 @@ struct Allocator {
   // -------------------- Allocation/Deallocation routines ---------------
   void *Allocate(uptr size, uptr alignment, BufferedStackTrace *stack,
                  AllocType alloc_type, bool can_fill) {
-    if (__xsan::IsInXsanInternal()) {
+    if (__xsan::IsInXsanInternal())
       return AllocateInternel(size, alignment, stack);
-    }
     if (UNLIKELY(!AsanInited()))
       AsanInitFromRtl();
     if (UNLIKELY(IsRssLimitExceeded())) {
@@ -889,7 +888,7 @@ struct Allocator {
       return;
     }
 
-    if (!__xsan::ShouldSanitzerIgnoreAllocFreeHook()) {
+    if (!__xsan::ShouldSanitzerIgnoreAllocFreeHook())
       if (RunFreeHooks(ptr)) {
         // Someone used __sanitizer_ignore_free_hook() and decided that they
         // didn't want the memory to __sanitizer_ignore_free_hook freed right now.
@@ -899,7 +898,6 @@ struct Allocator {
         m->alloc_type = FROM_MALLOC;
         return;
       }
-    }
 
     // Must mark the chunk as quarantined before any changes to its metadata.
     // Do not quarantine given chunk if we failed to set CHUNK_QUARANTINE flag.
@@ -1319,7 +1317,7 @@ void asan_mz_force_unlock() SANITIZER_NO_THREAD_SAFETY_ANALYSIS {
 }
 
 // ---------------------- Hook for other Sanitizers -------------------
-bool GetASanMellocStackTrace(u32 &stack_trace_id, uptr addr,
+bool GetASanMallocStackTrace(u32& stack_trace_id, uptr addr,
                              bool set_stack_trace_id) {
   __asan::AsanChunkView chunk = __asan::FindHeapChunkByAddress(addr);
   if (chunk.IsValid()) {

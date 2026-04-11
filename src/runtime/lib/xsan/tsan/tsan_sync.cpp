@@ -50,10 +50,8 @@ void MetaMap::AllocBlock(ThreadState *thr, uptr pc, uptr p, uptr sz) {
   b->siz = sz;
   b->tag = 0;
   b->tid = thr->tid;
-  
-  if(!__xsan::GetMellocStackTrace(b->stk,p,false)) {
+  if (!__xsan::GetMallocStackTrace(b->stk, p, false))
     b->stk = CurrentStackId(thr, pc);
-  }
   u32 *meta = MemToMeta(p);
   DCHECK_EQ(*meta, 0);
   *meta = idx | kFlagBlock;

@@ -1,6 +1,8 @@
 // For XSan to use MSan's API, while not introducing so many unrelated things.
 #pragma once
 
+/// Directly copied from somewhere of MSan to provide some interfaces to hooks.
+
 #include "../xsan_platform.h"
 #include "msan_chained_origin_depot.h"
 #include "msan_flags.h"

@@ -1,3 +1,5 @@
+/// This code is copied from tsan_interceptors_posix.cpp
+
 namespace __tsan {
   struct __tsan::ThreadState *thr = __tsan::cur_thread();;
   void Acquire(ThreadState *thr, uptr pc, uptr addr);

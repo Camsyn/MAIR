@@ -1,3 +1,5 @@
+/// This code is copied from tsan_interceptors_posix.cpp
+
 namespace __tsan {
 struct ThreadState;
 SANITIZER_WEAK_CXX_DEFAULT_IMPL

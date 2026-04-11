@@ -200,13 +200,41 @@ void SignalUnsafeCall(ThreadState *thr, uptr pc) {
 }
 
 
-void *user_alloc_internal(ThreadState *thr, uptr pc, uptr sz, uptr align,
+void* user_alloc_internal(ThreadState* thr, uptr pc, uptr sz, uptr align,
                           bool signal) {
   /// Call from tsan_fd.cpp
   BufferedStackTrace stack;
   stack.Init(thr->shadow_stack, thr->shadow_stack_pos - thr->shadow_stack, pc);
   return __xsan::allocator()->AllocateInternel(sz, &stack);
 
+  // if (sz >= kMaxAllowedMallocSize || align >= kMaxAllowedMallocSize ||
+  //     sz > max_user_defined_malloc_size) {
+  //   if (AllocatorMayReturnNull())
+  //     return nullptr;
+  //   uptr malloc_limit =
+  //       Min(kMaxAllowedMallocSize, max_user_defined_malloc_size);
+  //   GET_STACK_TRACE_FATAL(thr, pc);
+  //   ReportAllocationSizeTooBig(sz, malloc_limit, &stack);
+  // }
+  // if (UNLIKELY(IsRssLimitExceeded())) {
+  //   if (AllocatorMayReturnNull())
+  //     return nullptr;
+  //   GET_STACK_TRACE_FATAL(thr, pc);
+  //   ReportRssLimitExceeded(&stack);
+  // }
+  // void *p = allocator()->Allocate(&thr->proc()->alloc_cache, sz, align);
+  // if (UNLIKELY(!p)) {
+  //   SetAllocatorOutOfMemory();
+  //   if (AllocatorMayReturnNull())
+  //     return nullptr;
+  //   GET_STACK_TRACE_FATAL(thr, pc);
+  //   ReportOutOfMemory(sz, &stack);
+  // }
+  // if (ctx && ctx->initialized)
+  //   OnUserAlloc(thr, pc, (uptr)p, sz, true);
+  // if (signal)
+  //   SignalUnsafeCall(thr, pc);
+  // return p;
 }
 
 void user_free(ThreadState *thr, uptr pc, void *p, bool signal) {
@@ -215,7 +243,12 @@ void user_free(ThreadState *thr, uptr pc, void *p, bool signal) {
   BufferedStackTrace stack;
   stack.Init(thr->shadow_stack, thr->shadow_stack_pos - thr->shadow_stack, pc);
   __xsan::allocator()->DeallocateInternal(p, &stack);
-  return;
+
+  // if (ctx && ctx->initialized)
+  //   OnUserFree(thr, pc, (uptr)p, true);
+  // allocator()->Deallocate(&thr->proc()->alloc_cache, p);
+  // if (signal)
+  //   SignalUnsafeCall(thr, pc);
 }
 
 // void *user_alloc(ThreadState *thr, uptr pc, uptr sz) {

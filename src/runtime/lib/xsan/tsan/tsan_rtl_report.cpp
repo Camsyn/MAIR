@@ -342,11 +342,10 @@ void ScopedReportBase::AddLocation(uptr addr, uptr size) {
     loc->heap_chunk_size = b->siz;
     loc->external_tag = b->tag;
     loc->tid = b->tid;
-    if (__xsan::GetMellocStackTrace(b->stk, addr, true)) {
+    if (__xsan::GetMallocStackTrace(b->stk, addr, true))
       loc->stack = SymbolizeReverseStackId(b->stk);
-    } else {
+    else
       loc->stack = SymbolizeStackId(b->stk);
-    }
     rep_->locs.PushBack(loc);
     AddThread(b->tid);
     return;

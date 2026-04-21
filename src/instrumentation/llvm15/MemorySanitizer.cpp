@@ -5700,6 +5700,17 @@ void addMsanRequireAnalysisPass(SubSanitizers &MPM, FunctionPassManager &FPM) {
   // Function>());
 }
 
+PreservedAnalyses runMsan(Module &M, ModuleAnalysisManager &MAM,
+                          OptimizationLevel Level) {
+  PreservedAnalyses PA = PreservedAnalyses::all();
+
+  const auto &Opts = obtainMsanPassArgs();
+  PA.intersect(ModuleMemorySanitizerPass(Opts.Opts).run(M, MAM));
+  FunctionPassManager FPM;
+  FPM.addPass(MemorySanitizerPass(Opts.Opts));
+  PA.intersect(createModuleToFunctionPassAdaptor(std::move(FPM)).run(M, MAM));
+
+  return PA;
 } // namespace __xsan
 
 #ifndef XSAN_PASS

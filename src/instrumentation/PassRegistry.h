@@ -71,6 +71,15 @@ void registerAnalysisForAsan(llvm::PassBuilder &PB);
 void registerAnalysisForTsan(llvm::PassBuilder &PB);
 void registerAnalysisForMsan(llvm::PassBuilder &PB);
 void registerAnalysisForXsan(llvm::PassBuilder &PB);
+llvm::PreservedAnalyses runAsan(llvm::Module &M,
+                                llvm::ModuleAnalysisManager &MAM,
+                                llvm::OptimizationLevel Level);
+llvm::PreservedAnalyses runTsan(llvm::Module &M,
+                                llvm::ModuleAnalysisManager &MAM,
+                                llvm::OptimizationLevel Level);
+llvm::PreservedAnalyses runMsan(llvm::Module &M,
+                                llvm::ModuleAnalysisManager &MAM,
+                                llvm::OptimizationLevel Level);
 void addAsanRequireAnalysisPass(SubSanitizers &MPM,
                                 llvm::FunctionPassManager &FPM);
 void addTsanRequireAnalysisPass(SubSanitizers &MPM,

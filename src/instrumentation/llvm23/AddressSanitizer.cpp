@@ -1347,6 +1347,21 @@ public:
   }
 };
 
+PreservedAnalyses runAsan(Module &M, ModuleAnalysisManager &MAM,
+                          OptimizationLevel Level) {
+  (void)Level;
+  PreservedAnalyses PA = PreservedAnalyses::all();
+  const auto &Opts = obtainAsanPassArgs();
+
+  PA.intersect(AsanRequireAnalysisPass(Opts.Opts, Opts.UseGlobalGC,
+                                       Opts.UseOdrIndicator,
+                                       Opts.DestructorKind)
+                   .run(M, MAM));
+  PA.intersect(AddressSanitizerPass(Opts.Opts, Opts.UseGlobalGC,
+                                    Opts.UseOdrIndicator, Opts.DestructorKind)
+                   .run(M, MAM));
+
+  return PA;
 } // namespace __xsan
 
 void AddressSanitizerPass::printPipeline(
@@ -4314,6 +4329,21 @@ void registerAnalysisForAsan(PassBuilder &PB) {
     FAM.registerPass([&] { return AsanTargetsToInstrumentAnalysis(); });
   });
 }
+PreservedAnalyses runAsan(Module &M, ModuleAnalysisManager &MAM,
+                          OptimizationLevel Level) {
+  (void)Level;
+  PreservedAnalyses PA = PreservedAnalyses::all();
+  const auto &Opts = obtainAsanPassArgs();
+
+  PA.intersect(AsanRequireAnalysisPass(Opts.Opts, Opts.UseGlobalGC,
+                                       Opts.UseOdrIndicator,
+                                       Opts.DestructorKind)
+                   .run(M, MAM));
+  PA.intersect(AddressSanitizerPass(Opts.Opts, Opts.UseGlobalGC,
+                                    Opts.UseOdrIndicator, Opts.DestructorKind)
+                   .run(M, MAM));
+
+  return PA;
 } // namespace __xsan
 
 #ifndef XSAN_PASS

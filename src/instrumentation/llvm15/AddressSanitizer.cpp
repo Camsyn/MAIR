@@ -3709,6 +3709,22 @@ void registerAnalysisForAsan(PassBuilder &PB) {
   });
 }
 
+PreservedAnalyses runAsan(Module &M, ModuleAnalysisManager &MAM,
+                          OptimizationLevel Level) {
+  (void)Level;
+  PreservedAnalyses PA = PreservedAnalyses::all();
+  const auto &Opts = obtainAsanPassArgs();
+
+  PA.intersect(AsanRequireAnalysisPass(Opts.Opts, Opts.UseGlobalGC,
+                                       Opts.UseOdrIndicator,
+                                       Opts.DestructorKind)
+                   .run(M, MAM));
+  PA.intersect(ModuleAddressSanitizerPass(Opts.Opts, Opts.UseGlobalGC,
+                                          Opts.UseOdrIndicator,
+                                          Opts.DestructorKind)
+                   .run(M, MAM));
+
+  return PA;
 } // namespace __xsan
 
 bool XsanAddressSanitizer::shouldSkipFunction(Function &F) {

@@ -205,6 +205,24 @@ static void addMsanToMPM(ModulePassManager &MPM,
 #endif
 }
 
+__attribute__((weak)) PreservedAnalyses runAsan(Module &M,
+                                                ModuleAnalysisManager &MAM,
+                                                OptimizationLevel Level) {
+  return PreservedAnalyses::all();
+}
+
+__attribute__((weak)) PreservedAnalyses runTsan(Module &M,
+                                                ModuleAnalysisManager &MAM,
+                                                OptimizationLevel Level) {
+  return PreservedAnalyses::all();
+}
+
+__attribute__((weak)) PreservedAnalyses runMsan(Module &M,
+                                                ModuleAnalysisManager &MAM,
+                                                OptimizationLevel Level) {
+  return PreservedAnalyses::all();
+}
+
 PreservedAnalyses SubSanitizers::run(Module &IR, ModuleAnalysisManager &AM) {
   PreservedAnalyses PA = PreservedAnalyses::all();
 

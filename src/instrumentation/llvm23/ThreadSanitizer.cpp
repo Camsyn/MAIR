@@ -949,6 +949,20 @@ void addTsanRequireAnalysisPass(SubSanitizers &MPM, FunctionPassManager &FPM) {
   FPM.addPass(RequireAnalysisPass<TsanTargetsToInstrumentAnalysis, Function>());
 }
 
+PreservedAnalyses runTsan(Module &M, ModuleAnalysisManager &MAM,
+                          OptimizationLevel Level) {
+  (void)Level;
+  PreservedAnalyses PA = PreservedAnalyses::all();
+
+  PA.intersect(
+      createModuleToFunctionPassAdaptor(
+          RequireAnalysisPass<TsanTargetsToInstrumentAnalysis, Function>())
+          .run(M, MAM));
+  PA.intersect(ModuleThreadSanitizerPass().run(M, MAM));
+  PA.intersect(
+      createModuleToFunctionPassAdaptor(ThreadSanitizerPass()).run(M, MAM));
+
+  return PA;
 } // namespace __xsan
 
 bool XsanThreadSanitizer::shouldSkipFunction(Function &F) {

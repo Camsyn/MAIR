@@ -81,7 +81,13 @@ static cl::opt<int>
 static cl::opt<bool>
     ClMsanParamRetval("sanitize-memory-param-retval",
                       cl::desc("Simulates -fsanitize-memory-param-retval"),
-                      cl::Hidden, cl::init(false));
+                      cl::Hidden,
+#if LLVM_VERSION_MAJOR >= 23
+                      cl::init(true)
+#else
+                      cl::init(false)
+#endif
+    );
 
 static cl::opt<bool>
     ClAsanRecover("sanitize-recover-address",

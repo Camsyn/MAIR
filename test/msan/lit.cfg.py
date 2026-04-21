@@ -2,6 +2,8 @@
 
 import os
 
+# lit_config.maxIndividualTestTime = 30
+
 # Setup config name.
 config.name = "MemorySanitizer" + getattr(config, "name_suffix", "default")
 
@@ -22,7 +24,7 @@ clang_msan_cflags = (
     + [config.target_cflags]
     + config.debug_info_flags
 )
-if "-xsan" in clang_msan_cflags:
+if "-xsan" in clang_msan_cflags or "-xsan-only" in clang_msan_cflags:
     config.available_features.add("xsan")
     config.environment["LSAN_OPTIONS"] = "detect_leaks=0"
 # Some Msan tests leverage backtrace() which requires libexecinfo on FreeBSD.

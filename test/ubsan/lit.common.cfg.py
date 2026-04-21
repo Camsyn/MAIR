@@ -13,6 +13,7 @@ def get_required_attr(config, attr_name):
         )
     return attr_value
 
+lit_config.maxIndividualTestTime = 30
 
 # Setup config name.
 config.name = "UBSan-" + config.name_suffix

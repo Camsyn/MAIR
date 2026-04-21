@@ -13,6 +13,7 @@ def get_required_attr(config, attr_name):
         )
     return attr_value
 
+# lit_config.maxIndividualTestTime = 30
 
 # Setup config name.
 config.name = "ThreadSanitizer" + config.name_suffix
@@ -63,7 +64,7 @@ clang_tsan_cflags = (
     + extra_cflags
     + ["-I%s" % tsan_incdir]
 )
-if "-xsan" in clang_tsan_cflags:
+if "-xsan" in clang_tsan_cflags or "-xsan-only" in clang_tsan_cflags:
     config.available_features.add("xsan")
     # Let XSan's stack trace format be the same with TSan's.
     config.environment['XSAN_IN_TSAN_TEST'] = '1'

@@ -18,6 +18,8 @@ def get_required_attr(config, attr_name):
         )
     return attr_value
 
+# lit_config.maxIndividualTestTime = 30
+
 # Setup config name.
 config.name = "AddressSanitizer" + config.name_suffix
 
@@ -71,7 +73,7 @@ clang_asan_static_cflags = (
     + config.debug_info_flags
     + target_cflags
 )
-if "-xsan" in clang_asan_static_cflags:
+if "-xsan" in clang_asan_static_cflags or "-xsan-only" in clang_asan_static_cflags:
     config.available_features.add("xsan")
     # Disable TSan's report in ASan's test pipeline.
     config.environment['TSAN_OPTIONS'] = "report_bugs=0"

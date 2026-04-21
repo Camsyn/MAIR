@@ -22,3 +22,6 @@ compile_commands.json
 xsan_config.cmake
 
 xsan_hooks_gen.h
+
+.codex
+AGENTS.md

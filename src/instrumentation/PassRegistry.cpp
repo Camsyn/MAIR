@@ -1,9 +1,11 @@
 #include "PassRegistry.h"
 #include "AttributeTaggingPass.hpp"
 #include "Utils/Options.h"
+#include "XSanDeSanPass.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Passes/OptimizationLevel.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
@@ -244,34 +246,43 @@ PreservedAnalyses SubSanitizers::run(Module &IR, ModuleAnalysisManager &AM) {
     PA.intersect(std::move(PassPA));
   }
 
-  // Invalidation was handled after each pass in the above loop for the
-  // current unit of IR. Therefore, the remaining analysis results in the
-  // AnalysisManager are preserved. We mark this with a set so that we don't
-  // need to inspect each one individually.
-  PA.preserveSet<AllAnalysesOn<Module>>();
-
   return PA;
 }
 
 SubSanitizers SubSanitizers::loadSubSanitizers(llvm::OptimizationLevel Level) {
-  SubSanitizers Sanitizers;
-  // ---------- Collect targets to instrument first ----------------
-  FunctionPassManager FPM;
-  if (!options::ClDisableAsan) {
-    addAsanRequireAnalysisPass(Sanitizers, FPM);
-  }
-  if (!options::ClDisableTsan) {
-    addTsanRequireAnalysisPass(Sanitizers, FPM);
-  }
-  if (!options::ClDisableMsan) {
-    addMsanRequireAnalysisPass(Sanitizers, FPM);
-  }
-  Sanitizers.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+  using StagePipelineRunner = std::function<PreservedAnalyses(
+      Module &, ModuleAnalysisManager &, OptimizationLevel)>;
+  struct SanitizerStagePlan {
+    bool Enabled;
+    desan::StageKind Stage;
+    StagePipelineRunner Run;
+  } const Plans[] = {
+      {!options::ClDisableAsan, desan::StageKind::ASan, runAsan},
+      {!options::ClDisableTsan, desan::StageKind::TSan, runTsan},
+      {!options::ClDisableMsan, desan::StageKind::MSan, runMsan},
+  };
 
-  // ------------ Then instrument ----------------------------------
-  addAsanToMPM(Sanitizers);
-  addTsanToMPM(Sanitizers);
-  addMsanToMPM(Sanitizers, Level);
+  SubSanitizers Sanitizers;
+  auto State = std::make_shared<desan::PipelineState>();
+  Sanitizers.addPass(desan::PreprocessPass(State));
+  Sanitizers.addPass(desan::DeSanPass(desan::StageKind::UBSan, State));
+
+  for (const auto &Plan : Plans) {
+    if (!Plan.Enabled)
+      continue;
+
+    Sanitizers.addPass(desan::StagePass(
+        Plan.Stage,
+        [Level, RunStage = Plan.Run](Module &M, ModuleAnalysisManager &MAM) {
+          return RunStage(M, MAM, Level);
+        }));
+    Sanitizers.addPass(desan::DeSanPass(Plan.Stage, State));
+  }
+
+  Sanitizers.addPass(desan::ReSanPass(State));
+
+  if (options::ClDebug)
+    Sanitizers.addPass(llvm::VerifierPass());
 
   return Sanitizers;
 }

@@ -190,10 +190,34 @@ struct ReplacedAtomicMeta : MetaDataExtra<ReplacedAtomicExtra> {
   static llvm::DenseMap<llvm::Instruction *, ReplacedAtomicExtra> DataMap;
 };
 
+// ---------------------- User IR --------------------------------
+
+struct UserIRMeta {
+  static constexpr char Name[] = "xsan.user";
+};
+
 // ---------------------- UBSan Instrumented -------------------------
 
 struct UBSanInstMeta {
   static constexpr char Name[] = "xsan.ubsan";
+};
+
+// ---------------------- ASan Instrumented -------------------------
+
+struct ASanInstMeta {
+  static constexpr char Name[] = "xsan.asan";
+};
+
+// ---------------------- TSan Instrumented -------------------------
+
+struct TSanInstMeta {
+  static constexpr char Name[] = "xsan.tsan";
+};
+
+// ---------------------- MSan Instrumented -------------------------
+
+struct MSanInstMeta {
+  static constexpr char Name[] = "xsan.msan";
 };
 
 // ---------------------- NoSanitize --------------------------------
@@ -220,7 +244,11 @@ using DelegateToXSan = MetaDataHelper<DelegateToXSanMeta>;
 using ReplacedAlloca = MetaDataHelper<ReplacedAllocaMeta>;
 using CopyArgs = MetaDataHelper<CopyArgsMeta, llvm::MemCpyInst>;
 using ReplacedAtomic = MetaDataHelper<ReplacedAtomicMeta>;
+using UserIR = MetaDataHelper<UserIRMeta>;
 using UBSanInst = MetaDataHelper<UBSanInstMeta>;
+using ASanInst = MetaDataHelper<ASanInstMeta>;
+using TSanInst = MetaDataHelper<TSanInstMeta>;
+using MSanInst = MetaDataHelper<MSanInstMeta>;
 using NoSanitize = MetaDataHelper<NoSanitizeMeta>;
 
 /// ---------------------- Util Functions ----------------------------

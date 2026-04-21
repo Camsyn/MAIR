@@ -198,10 +198,7 @@ void insertModuleCtor(Module &M) {
       /*InitArgs=*/{},
       // This callback is invoked when the functions are created the first
       // time. Hook them into the global ctors list in that case:
-      [&](Function *Ctor, FunctionCallee) {
-        __xsan::addNoInstrumentationAttr(Ctor);
-        appendToGlobalCtors(M, Ctor, 0);
-      });
+      [&](Function *Ctor, FunctionCallee) { appendToGlobalCtors(M, Ctor, 0); });
 }
 }  // namespace
 
@@ -506,12 +503,12 @@ static bool isTsanAtomic(const Instruction *I) {
 }
 
 void ThreadSanitizer::InsertRuntimeIgnores(Function &F) {
-  __xsan::InstrumentationIRBuilder IRB(&F.getEntryBlock(),
-                                       F.getEntryBlock().getFirstNonPHIIt());
+  InstrumentationIRBuilder IRB(&F.getEntryBlock(),
+                               F.getEntryBlock().getFirstNonPHIIt());
   IRB.CreateCall(TsanIgnoreBegin);
   EscapeEnumerator EE(F, "tsan_ignore_cleanup", ClHandleCxxExceptions);
   while (IRBuilder<> *AtExit = EE.Next()) {
-    __xsan::InstrumentationIRBuilder::ensureDebugInfo(*AtExit, F);
+    InstrumentationIRBuilder::ensureDebugInfo(*AtExit, F);
     AtExit->CreateCall(TsanIgnoreEnd);
   }
 }
@@ -596,15 +593,15 @@ bool ThreadSanitizer::sanitizeFunction(Function &F,
 
   // Instrument function entry/exit points if there were instrumented accesses.
   if ((Res || HasCalls) && ClInstrumentFuncEntryExit) {
-    __xsan::InstrumentationIRBuilder IRB(&F.getEntryBlock(),
-                                         F.getEntryBlock().getFirstNonPHIIt());
+    InstrumentationIRBuilder IRB(&F.getEntryBlock(),
+                                 F.getEntryBlock().getFirstNonPHIIt());
     Value *ReturnAddress =
         IRB.CreateIntrinsic(Intrinsic::returnaddress, IRB.getInt32(0));
     IRB.CreateCall(TsanFuncEntry, ReturnAddress);
 
     EscapeEnumerator EE(F, "tsan_cleanup", ClHandleCxxExceptions);
     while (IRBuilder<> *AtExit = EE.Next()) {
-      __xsan::InstrumentationIRBuilder::ensureDebugInfo(*AtExit, F);
+      InstrumentationIRBuilder::ensureDebugInfo(*AtExit, F);
       AtExit->CreateCall(TsanFuncExit, {});
     }
     Res = true;
@@ -614,7 +611,7 @@ bool ThreadSanitizer::sanitizeFunction(Function &F,
 
 bool ThreadSanitizer::instrumentLoadOrStore(const InstructionInfo &II,
                                             const DataLayout &DL) {
-  __xsan::InstrumentationIRBuilder IRB(II.Inst);
+  InstrumentationIRBuilder IRB(II.Inst);
   const bool IsWrite = isa<StoreInst>(*II.Inst);
   Value *Addr = IsWrite ? cast<StoreInst>(II.Inst)->getPointerOperand()
                         : cast<LoadInst>(II.Inst)->getPointerOperand();
@@ -712,8 +709,7 @@ static ConstantInt *createOrdering(IRBuilder<> *IRB, AtomicOrdering ord) {
 // replaced back with intrinsics. If that becomes wrong at some point,
 // we will need to call e.g. __tsan_memset to avoid the intrinsics.
 bool ThreadSanitizer::instrumentMemIntrinsic(Instruction *I) {
-  /// Should NOT tag with nosanitize, as here is a user-sematic equivalent
-  IRBuilder<> IRB(I);
+  InstrumentationIRBuilder IRB(I);
   if (MemSetInst *M = dyn_cast<MemSetInst>(I)) {
     Value *Cast1 = IRB.CreateIntCast(M->getArgOperand(1), IRB.getInt32Ty(), false);
     Value *Cast2 = IRB.CreateIntCast(M->getArgOperand(2), IntptrTy, false);
@@ -743,14 +739,7 @@ bool ThreadSanitizer::instrumentMemIntrinsic(Instruction *I) {
 // http://www.hpl.hp.com/personal/Hans_Boehm/c++mm/
 
 bool ThreadSanitizer::instrumentAtomic(Instruction *I, const DataLayout &DL) {
-  /// Although this is a substitution of user semantics, sanitizer cannot
-  /// penetrate into the TSan handlers (unless), so we still tag nosanitize, and use
-  /// special metadata for other sanitizers to recognize its original semantics
-
-  /// TODO: use XSan to replace these instructions and expose hooks, and thus we can 
-  /// remove the nosanitize and special metadata.
-  using Extra = ::__xsan::ReplacedAtomic::Extra;
-  __xsan::InstrumentationIRBuilder IRB(I);
+  InstrumentationIRBuilder IRB(I);
   if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
     Value *Addr = LI->getPointerOperand();
     Type *OrigTy = LI->getType();
@@ -759,11 +748,8 @@ bool ThreadSanitizer::instrumentAtomic(Instruction *I, const DataLayout &DL) {
       return false;
     Value *Args[] = {Addr,
                      createOrdering(&IRB, LI->getOrdering())};
-    CallInst *C = IRB.CreateCall(TsanAtomicLoad[Idx], Args);
+    Value *C = IRB.CreateCall(TsanAtomicLoad[Idx], Args);
     Value *Cast = IRB.CreateBitOrPointerCast(C, OrigTy);
-    ::__xsan::ReplacedAtomic::set(
-        *cast<Instruction>(Cast),
-        {Extra::Load, &C->getArgOperandUse(0), nullptr, LI->getAlign()});
     I->replaceAllUsesWith(Cast);
     I->eraseFromParent();
   } else if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
@@ -778,10 +764,7 @@ bool ThreadSanitizer::instrumentAtomic(Instruction *I, const DataLayout &DL) {
     Value *Args[] = {Addr,
                      IRB.CreateBitOrPointerCast(SI->getValueOperand(), Ty),
                      createOrdering(&IRB, SI->getOrdering())};
-    CallInst *C = IRB.CreateCall(TsanAtomicStore[Idx], Args);
-    ::__xsan::ReplacedAtomic::set(*C,
-                                  {Extra::Store, &C->getArgOperandUse(0),
-                                   &C->getArgOperandUse(1), SI->getAlign()});
+    IRB.CreateCall(TsanAtomicStore[Idx], Args);
     SI->eraseFromParent();
   } else if (AtomicRMWInst *RMWI = dyn_cast<AtomicRMWInst>(I)) {
     Value *Addr = RMWI->getPointerOperand();
@@ -798,12 +781,8 @@ bool ThreadSanitizer::instrumentAtomic(Instruction *I, const DataLayout &DL) {
     Value *Val = RMWI->getValOperand();
     Value *Args[] = {Addr, IRB.CreateBitOrPointerCast(Val, Ty),
                      createOrdering(&IRB, RMWI->getOrdering())};
-    CallInst *C = IRB.CreateCall(F, Args);
-    Value *Casted = IRB.CreateBitOrPointerCast(C, Val->getType());
-    ::__xsan::ReplacedAtomic::set(*cast<Instruction>(Casted),
-                                  {Extra::RMW, &C->getArgOperandUse(0),
-                                   &C->getArgOperandUse(1), std::nullopt});
-    I->replaceAllUsesWith(Casted);
+    Value *C = IRB.CreateCall(F, Args);
+    I->replaceAllUsesWith(IRB.CreateBitOrPointerCast(C, Val->getType()));
     I->eraseFromParent();
   } else if (AtomicCmpXchgInst *CASI = dyn_cast<AtomicCmpXchgInst>(I)) {
     Value *Addr = CASI->getPointerOperand();
@@ -835,9 +814,6 @@ bool ThreadSanitizer::instrumentAtomic(Instruction *I, const DataLayout &DL) {
       IRB.CreateInsertValue(PoisonValue::get(CASI->getType()), OldVal, 0);
     Res = IRB.CreateInsertValue(Res, Success, 1);
 
-    ::__xsan::ReplacedAtomic::set(
-        *cast<Instruction>(Res),
-        {Extra::CAS, &C->getOperandUse(0), &C->getOperandUse(1), std::nullopt});
     I->replaceAllUsesWith(Res);
     I->eraseFromParent();
   } else if (FenceInst *FI = dyn_cast<FenceInst>(I)) {
@@ -963,6 +939,8 @@ PreservedAnalyses runTsan(Module &M, ModuleAnalysisManager &MAM,
       createModuleToFunctionPassAdaptor(ThreadSanitizerPass()).run(M, MAM));
 
   return PA;
+}
+
 } // namespace __xsan
 
 bool XsanThreadSanitizer::shouldSkipFunction(Function &F) {

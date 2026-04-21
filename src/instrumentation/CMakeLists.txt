@@ -70,6 +70,11 @@ add_llvm_pass_plugin(XSanInstPass
   ${XSAN_PASS_VERSIONED_DIR}/ThreadSanitizer.cpp
   ${XSAN_PASS_VERSIONED_DIR}/AddressSanitizer.cpp
   ${XSAN_PASS_VERSIONED_DIR}/MemorySanitizer.cpp
+  XSanDeSanPass.cpp
+  XSanDeSanRuntime.cpp
+  XSanDeSanDeSan.cpp
+  XSanDeSanReSan.cpp
+  XSanDeSanState.cpp
   XSanitizerCompositor.cpp
   ${XSAN_PASS_COMMON}
 )

@@ -326,3 +326,85 @@ __xsan_desan_copy_delete_blocks(XSanDeSanDeleteBlock *OutBlocks,
               sizeof(XSanDeSanDeleteBlock) * ToCopy);
   return Count;
 }
+
+namespace llvm {
+
+static __xsan::XsanInterceptor
+    RemoveFromParentInterceptor(&llvm::Instruction::removeFromParent,
+                                {"clang", "clang++"});
+
+void Instruction::removeFromParent() {
+  __xsan::desan::recordDeleteEvent(this);
+  RemoveFromParentInterceptor(this);
+}
+
+static __xsan::XsanInterceptor
+    EraseFromParentInterceptor(&llvm::Instruction::eraseFromParent,
+                               {"clang", "clang++"});
+
+__xsan::compat::InstructionEraseIterator Instruction::eraseFromParent() {
+  __xsan::desan::recordDeleteEvent(this);
+  if (__xsan_desan_is_stage_active() && __xsan::desan::hasUserMark(*this)) {
+    auto Next = std::next(getIterator());
+    RemoveFromParentInterceptor(this);
+    return Next;
+  }
+  return EraseFromParentInterceptor(this);
+}
+
+static __xsan::XsanInterceptor
+    ReplaceAllUsesWithInterceptor(&llvm::Value::replaceAllUsesWith,
+                                  {"clang", "clang++"});
+
+void Value::replaceAllUsesWith(Value *V) {
+  __xsan::desan::recordReplaceEvent(this, V);
+  ReplaceAllUsesWithInterceptor(this, V);
+}
+
+using ReplaceInstWithInstFn = void (*)(llvm::Instruction *,
+                                       llvm::Instruction *);
+
+static __xsan::XsanInterceptor<ReplaceInstWithInstFn>
+    ReplaceInstWithInstInterceptor(
+        static_cast<ReplaceInstWithInstFn>(&llvm::ReplaceInstWithInst),
+        {"clang", "clang++"});
+
+void ReplaceInstWithInst(Instruction *From, Instruction *To) {
+  if (__xsan_desan_is_stage_active() && From && To) {
+    if (__xsan::desan::hasUserMark(*From)) {
+      if (!To->getDebugLoc())
+        To->setDebugLoc(From->getDebugLoc());
+      __xsan::compat::insertInstructionBefore(To, From);
+      From->replaceAllUsesWith(To);
+      __xsan::desan::recordDeleteEvent(From);
+      RemoveFromParentInterceptor(From);
+      return;
+    }
+  }
+  ReplaceInstWithInstInterceptor(From, To);
+}
+
+// static __xsan::XsanInterceptor
+//     BasicBlockRemoveFromParentInterceptor(&llvm::BasicBlock::removeFromParent,
+//                                           {"clang", "clang++"});
+
+// void BasicBlock::removeFromParent() {
+//   __xsan::desan::recordDeleteBlock(this);
+//   BasicBlockRemoveFromParentInterceptor(this);
+// }
+
+// static __xsan::XsanInterceptor
+//     BasicBlockEraseFromParentInterceptor(&llvm::BasicBlock::eraseFromParent,
+//                                          {"clang", "clang++"});
+
+// SymbolTableList<BasicBlock>::iterator BasicBlock::eraseFromParent() {
+//   __xsan::desan::recordDeleteBlock(this);
+//   if (__xsan_desan_is_stage_active() && !getParent()->isDeclaration()) {
+//     auto Next = std::next(getIterator());
+//     BasicBlockRemoveFromParentInterceptor(this);
+//     return Next;
+//   }
+//   return BasicBlockEraseFromParentInterceptor(this);
+// }
+
+} // namespace llvm

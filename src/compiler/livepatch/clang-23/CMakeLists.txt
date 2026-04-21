@@ -28,6 +28,7 @@ add_library(clang-patch MODULE
     # PassBuilderPipelines.cpp
     SanitizerArgs.cpp
     ../clang-common/CommonArgs.cpp
+    ../clang-common/DeSanInterceptors.cpp
     ../utils/PatchHelper.cpp
 )
 add_dependencies(livepatch clang-patch)

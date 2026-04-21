@@ -25,9 +25,11 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 add_library(clang-patch MODULE
     BackendUtil.cpp
     CommonArgs.cpp
+    Local.cpp
     PassBuilderPipelines.cpp
     SanitizerArgs.cpp
     ../clang-common/CommonArgs.cpp
+    ../clang-common/DeSanInterceptors.cpp
     ../utils/PatchHelper.cpp
 )
 add_dependencies(livepatch clang-patch)

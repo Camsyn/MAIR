@@ -102,4 +102,25 @@ struct PipelineState {
   UserBBsMap UserBBs;
 };
 
+// Utilities.
+void requireOrDie(bool Condition, const llvm::Twine &Message);
+
+void markUserIR(llvm::Module &M);
+UserBBsMap collectUserBBs(llvm::Module &M);
+
+bool isStageIR(StageKind Stage, const llvm::Instruction &I);
+void setStageIR(StageKind Stage, llvm::Instruction &I);
+
+bool replaceUserIRUses(llvm::Value &From, llvm::Value &To);
+bool replaceNonStageIRUses(StageKind Stage, llvm::Value &From, llvm::Value &To);
+
+// Main logic.
+void runDeSan(llvm::Module &M, StageKind Stage, ReSanArchive &Archive,
+              UserBBsMap &UserBBs);
+void runReSan(llvm::Module &M, ReSanArchive &Archive);
+
+// For debug and verification.
+void dumpArchive(const ReSanArchive &Archive, llvm::raw_ostream &OS);
+void validateArchive(const ReSanArchive &Archive, const UserBBsMap &UserBBs);
+
 } // namespace __xsan::desan

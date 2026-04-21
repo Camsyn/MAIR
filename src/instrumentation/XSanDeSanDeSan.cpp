@@ -8,6 +8,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/Support/FileSystem.h"
 
 #include <algorithm>
 
@@ -370,6 +371,14 @@ void runDeSan(Module &M, StageKind Stage, ReSanArchive &Archive,
   restoreDelete(Stage, Archive.DeleteRecords, DeleteEvents);
   restoreReplace(Stage, Archive.ReplaceRecords, ReplaceEvents);
   restoreAdd(Stage, Archive.AddRecords, M, UserBBsMap);
+
+  if (options::ClDebug) {
+    std::error_code EC;
+    llvm::raw_fd_ostream OS(
+        (llvm::Twine(getStageName(Stage)) + ".archive.txt").str(), EC,
+        llvm::sys::fs::OF_None);
+    dumpArchive(Archive, OS);
+  }
 }
 
 } // namespace __xsan::desan

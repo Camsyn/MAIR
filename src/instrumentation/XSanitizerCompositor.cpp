@@ -114,7 +114,8 @@ struct XSanVisitor : public InstVisitor<XSanVisitor> {
     I.getIntrinsicID();
     IRBuilder<> IRB(&I);
     IRB.CreateCall(MemsetFn,
-                   {I.getArgOperand(0), I.getArgOperand(1),
+                   {I.getArgOperand(0),
+                    IRB.CreateIntCast(I.getOperand(1), I32Ty, false),
                     IRB.CreateIntCast(I.getArgOperand(2), IntptrTy, false)});
     I.eraseFromParent();
   }

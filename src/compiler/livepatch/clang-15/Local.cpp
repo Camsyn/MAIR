@@ -45,6 +45,9 @@ static __xsan::XsanInterceptor ChangeToInvokeAndSplitBasicBlockInterceptor(
 // This function use `Split->getInstList().pop_front();` to remove the
 // instruction. But some interceptors need to record the delete event,
 // so we need to intercept and use `eraseFromParent` instead.
+//
+// Note: LLVM23 has already changed to use `eraseFromParent`, so we only need to
+// intercept LLVM15.
 BasicBlock *llvm::changeToInvokeAndSplitBasicBlock(CallInst *CI,
                                                    BasicBlock *UnwindEdge,
                                                    DomTreeUpdater *DTU) {

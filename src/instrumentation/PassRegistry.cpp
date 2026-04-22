@@ -78,6 +78,7 @@ static cl::opt<int>
                        cl::desc("Simulates -fsanitize-memory-track-origins"),
                        cl::Hidden, cl::init(0));
 
+// The default value of this option is false in LLVM 15, but true in LLVM 23.
 static cl::opt<bool>
     ClMsanParamRetval("sanitize-memory-param-retval",
                       cl::desc("Simulates -fsanitize-memory-param-retval"),
@@ -213,6 +214,10 @@ static void addMsanToMPM(ModulePassManager &MPM,
 #endif
 }
 
+// Strong symbols are located in each sanitizer's .cpp file, but when building
+// each sanitizer's own plugin, the plugin don't link the other sanitizer's .cpp
+// file, so we need to provide weak symbols here to make sure the plugin can be
+// linked successfully.
 __attribute__((weak)) PreservedAnalyses runAsan(Module &M,
                                                 ModuleAnalysisManager &MAM,
                                                 OptimizationLevel Level) {
@@ -270,21 +275,29 @@ SubSanitizers SubSanitizers::loadSubSanitizers(llvm::OptimizationLevel Level) {
 
   SubSanitizers Sanitizers;
   auto State = std::make_shared<desan::SanitizingContext>();
+
+  // PreprocessPass: mark user IR and collect user BBs.
   Sanitizers.addPass(desan::PreprocessPass(State));
+
+  // Deal with UBSan first, since UBSan is done by clang frontend
   Sanitizers.addPass(desan::DeSanPass(desan::StageKind::UBSan, State));
 
   for (const auto &Plan : Plans) {
     if (!Plan.Enabled)
       continue;
 
+    // StagePass: notify interceptors and run sanitizer passes.
     Sanitizers.addPass(desan::StagePass(
         Plan.Stage,
         [Level, RunStage = Plan.Run](Module &M, ModuleAnalysisManager &MAM) {
           return RunStage(M, MAM, Level);
         }));
+
+    // DeSanPass: restore user IR for the stage.
     Sanitizers.addPass(desan::DeSanPass(Plan.Stage, State));
   }
 
+  // ReSanPass: replay sanitizer events to user IR.
   Sanitizers.addPass(desan::ReSanPass(State));
 
   if (options::ClDebug)

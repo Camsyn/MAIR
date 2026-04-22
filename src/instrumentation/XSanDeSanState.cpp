@@ -473,11 +473,6 @@ void validateArchive(const ReSanArchive &Archive,
           OS << "\n";
         }
       }
-      if (llvm::any_of(*Pure->SanInsts,
-                       [](const Instruction &I) { return I.getParent(); })) {
-        OS << "[ReSan AddRecord] Stage " << getStageName(Stage)
-           << ". PureRecord has instructions still with parent blocks\n";
-      }
     } else if (auto *Split = std::get_if<AddRecord::SplitRecord>(&Record)) {
       if (Split->SanInstsToAppend->empty()) {
         OS << "[ReSan AddRecord] Stage " << getStageName(Stage)
@@ -493,12 +488,6 @@ void validateArchive(const ReSanArchive &Archive,
           dumpValueRef(&I, OS);
           OS << "\n";
         }
-      }
-      if (llvm::any_of(*Split->SanInstsToAppend,
-                       [](const Instruction &I) { return I.getParent(); })) {
-        OS << "[ReSan AddRecord] Stage " << getStageName(Stage)
-           << ". SplitRecord has instructions to append still with parent "
-              "blocks\n";
       }
       if (!Split->LastBB) {
         OS << "[ReSan AddRecord] Stage " << getStageName(Stage)
@@ -602,6 +591,11 @@ void validateArchive(const ReSanArchive &Archive,
       OS << "\n";
     }
   }
+
+  OS.flush();
+  if (!S.empty())
+    errs() << "ReSanArchive validation failed with the following issues:\n"
+           << S;
 }
 
 } // namespace __xsan::desan

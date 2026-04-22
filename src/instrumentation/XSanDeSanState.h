@@ -97,7 +97,7 @@ struct ResidualSanitizerSummary {
 using UserBBsSet = llvm::SmallPtrSet<llvm::BasicBlock *, 8>;
 using UserBBsMap = llvm::DenseMap<llvm::Function *, UserBBsSet>;
 
-struct PipelineState {
+struct SanitizingContext {
   ReSanArchive Archive;
   UserBBsMap UserBBs;
 };

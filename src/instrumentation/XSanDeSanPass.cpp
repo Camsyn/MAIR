@@ -11,7 +11,7 @@ using namespace llvm;
 
 namespace __xsan::desan {
 
-PreprocessPass::PreprocessPass(std::shared_ptr<PipelineState> State)
+PreprocessPass::PreprocessPass(std::shared_ptr<SanitizingContext> State)
     : State(std::move(State)) {}
 
 PreservedAnalyses PreprocessPass::run(Module &M, ModuleAnalysisManager &MAM) {
@@ -56,7 +56,7 @@ PreservedAnalyses StagePass::run(Module &M, ModuleAnalysisManager &AM) {
   return PA;
 }
 
-DeSanPass::DeSanPass(StageKind Stage, std::shared_ptr<PipelineState> State)
+DeSanPass::DeSanPass(StageKind Stage, std::shared_ptr<SanitizingContext> State)
     : Stage(Stage), State(std::move(State)) {}
 
 PreservedAnalyses DeSanPass::run(Module &M, ModuleAnalysisManager &) {
@@ -83,7 +83,7 @@ PreservedAnalyses DeSanPass::run(Module &M, ModuleAnalysisManager &) {
   return PreservedAnalyses::all();
 }
 
-ReSanPass::ReSanPass(std::shared_ptr<PipelineState> State)
+ReSanPass::ReSanPass(std::shared_ptr<SanitizingContext> State)
     : State(std::move(State)) {}
 
 PreservedAnalyses ReSanPass::run(Module &M, ModuleAnalysisManager &) {

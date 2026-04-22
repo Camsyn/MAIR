@@ -12,14 +12,14 @@ namespace __xsan::desan {
 
 class PreprocessPass : public llvm::PassInfoMixin<PreprocessPass> {
 public:
-  explicit PreprocessPass(std::shared_ptr<PipelineState> State);
+  explicit PreprocessPass(std::shared_ptr<SanitizingContext> State);
 
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 
   static bool isRequired() { return true; }
 
 private:
-  std::shared_ptr<PipelineState> State;
+  std::shared_ptr<SanitizingContext> State;
 };
 
 class StagePass : public llvm::PassInfoMixin<StagePass> {
@@ -40,7 +40,7 @@ private:
 
 class DeSanPass : public llvm::PassInfoMixin<DeSanPass> {
 public:
-  DeSanPass(StageKind Stage, std::shared_ptr<PipelineState> State);
+  DeSanPass(StageKind Stage, std::shared_ptr<SanitizingContext> State);
 
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 
@@ -48,19 +48,19 @@ public:
 
 private:
   StageKind Stage;
-  std::shared_ptr<PipelineState> State;
+  std::shared_ptr<SanitizingContext> State;
 };
 
 class ReSanPass : public llvm::PassInfoMixin<ReSanPass> {
 public:
-  explicit ReSanPass(std::shared_ptr<PipelineState> State);
+  explicit ReSanPass(std::shared_ptr<SanitizingContext> State);
 
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 
   static bool isRequired() { return true; }
 
 private:
-  std::shared_ptr<PipelineState> State;
+  std::shared_ptr<SanitizingContext> State;
 };
 
 } // namespace __xsan::desan

@@ -269,7 +269,7 @@ SubSanitizers SubSanitizers::loadSubSanitizers(llvm::OptimizationLevel Level) {
   };
 
   SubSanitizers Sanitizers;
-  auto State = std::make_shared<desan::PipelineState>();
+  auto State = std::make_shared<desan::SanitizingContext>();
   Sanitizers.addPass(desan::PreprocessPass(State));
   Sanitizers.addPass(desan::DeSanPass(desan::StageKind::UBSan, State));
 

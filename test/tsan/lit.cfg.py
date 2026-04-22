@@ -70,6 +70,7 @@ if "-xsan" in clang_tsan_cflags or "-xsan-only" in clang_tsan_cflags:
     config.environment['XSAN_IN_TSAN_TEST'] = '1'
     # Forbids some ASan's options to pass TSan's testcases
     config.environment['ASAN_OPTIONS'] = 'alloc_dealloc_mismatch=0:detect_leaks=0:detect_odr_violation=0'
+    config.environment['MSAN_OPTIONS'] = "exit_code_unchanged=1"
 clang_tsan_cxxflags = (
     config.cxx_mode_flags + clang_tsan_cflags + ["-std=c++11"] + ["-I%s" % tsan_incdir]
 )

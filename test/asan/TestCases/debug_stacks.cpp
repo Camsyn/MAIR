@@ -42,9 +42,9 @@ int main() {
   fprintf(stderr, "thread id = %d\n", thread_id);
   // CHECK: thread id = 0
   fprintf(stderr, "0x" PTR "\n", trace[0]);
-  // CHECK: 0x{{0*}}[[ALLOC_FRAME_0:[0-9a-f]+]]
+  // CHECK: {{^}}0x{{0*}}[[ALLOC_FRAME_0:[0-9a-f]+]]
   fprintf(stderr, "0x" PTR "\n", trace[1]);
-  // CHECK: 0x{{0*}}[[ALLOC_FRAME_1:[0-9a-f]+]]
+  // CHECK: {{^}}0x{{0*}}[[ALLOC_FRAME_1:[0-9a-f]+]]
 
   num_frames = 100;
   num_frames = __asan_get_free_stack(mem, trace, num_frames, &thread_id);
@@ -55,9 +55,9 @@ int main() {
   fprintf(stderr, "thread id = %d\n", thread_id);
   // CHECK: thread id = 0
   fprintf(stderr, "0x" PTR "\n", trace[0]);
-  // CHECK: 0x{{0*}}[[FREE_FRAME_0:[0-9a-f]+]]
+  // CHECK: {{^}}0x{{0*}}[[FREE_FRAME_0:[0-9a-f]+]]
   fprintf(stderr, "0x" PTR "\n", trace[1]);
-  // CHECK: 0x{{0*}}[[FREE_FRAME_1:[0-9a-f]+]]
+  // CHECK: {{^}}0x{{0*}}[[FREE_FRAME_1:[0-9a-f]+]]
 
   mem[0] = 'A'; // BOOM
 

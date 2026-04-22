@@ -1,5 +1,5 @@
+#include "../../../include/xsan_llvm_compat.h"
 #include "../../include/xsan_desan_abi.h"
-#include "../../include/xsan_llvm_compat.h"
 #include "utils/PatchHelper.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/BasicBlock.h"

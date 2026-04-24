@@ -3,7 +3,7 @@
 #include "xsan_common.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
-#include <atomic>
+#include "llvm/Support/Mutex.h"
 #include <bitset>
 #include <cassert>
 #include <cstddef>
@@ -269,42 +269,71 @@ public:
   XsanInterceptor(XsanInterceptor &&) = delete;
   XsanInterceptor &operator=(const XsanInterceptor &) = delete;
   XsanInterceptor &operator=(XsanInterceptor &&) = delete;
-  ~XsanInterceptor() { PreCall(); }
+  ~XsanInterceptor() {
+    llvm::sys::SmartScopedLock<true> Guard(Mutex);
+    recoverRealFunc();
+  }
+
+  /// Return whether the current thread is re-entering this interceptor while an
+  /// outer intercepted call is still active.
+  bool isRecursive() const {
+    llvm::sys::SmartScopedLock<true> Guard(Mutex);
+    return CallDepth > 0;
+  }
 
 private:
+  void recoverRealFunc() {
+    if (!Modified)
+      return;
+    Patch.applyBackup(this->GetRealFunc());
+    Modified = false;
+  }
+
+  void injectTrampoline() {
+    if (Modified)
+      return;
+    Patch.applyPatch(this->GetRealFunc());
+    Modified = true;
+  }
+
   void InitPatch() {
     if (XsanPatch::isPatched(this->GetRealFunc())) {
       FATAL("Function %p is already patched.", this->GetMyFunc());
     }
     Patch.initialize(this->GetMyFunc(), this->GetRealFunc());
-    PostCall();
+    injectTrampoline();
   }
 
   void PreCall() {
-    while (Mutex.exchange(true, std::memory_order_acquire)) {
-    }
-    if (!IsEnabled)
+    Mutex.lock();
+    bool Recursive = CallDepth > 0;
+    ++CallDepth;
+    // Recursive entries reuse the outer call's unlocked state. The outermost
+    // call already holds the recursive mutex and has restored the real function
+    // body, so recursive calls must not patch/unpatch again.
+    if (Recursive) {
+      assert(!Modified && "When recursive, the interceptee must be recovered");
       return;
+    }
 
-    Patch.applyBackup(this->GetRealFunc());
-    IsEnabled = false;
+    recoverRealFunc();
   }
 
   void PostCall() {
-    if (IsEnabled) {
-      Mutex.store(false, std::memory_order_release);
-      return;
-    }
-
-    Patch.applyPatch(this->GetRealFunc());
-    IsEnabled = true;
-    Mutex.store(false, std::memory_order_release);
+    assert(CallDepth > 0 && "interceptor call depth underflow");
+    bool Recursive = CallDepth > 1;
+    --CallDepth;
+    if (!Recursive)
+      injectTrampoline();
+    Mutex.unlock();
   }
 
   llvm::ArrayRef<const char *> target_procs;
   XsanPatch Patch;
-  std::atomic_bool Mutex;
-  bool IsEnabled = false;
+  // Support recursive lock.
+  mutable llvm::sys::SmartMutex<true> Mutex;
+  unsigned CallDepth = 0;
+  bool Modified = false;
 };
 
 } // namespace __xsan

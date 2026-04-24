@@ -357,7 +357,13 @@ static __xsan::XsanInterceptor
                                   {"clang", "clang++"});
 
 void Value::replaceAllUsesWith(Value *V) {
-  __xsan::desan::recordReplaceEvent(this, V);
+  // RAUW can recurse when a Constant user needs to rebuild itself.
+  // For example, replacing an operand of a Global may trigger
+  // Constant::handleOperandChange(), which then performs another RAUW on the
+  // rebuilt Constant/Global. We only record the outermost RAUW semantic event;
+  // recursive RAUW calls reuse the same interceptor critical section.
+  if (!ReplaceAllUsesWithInterceptor.isRecursive())
+    __xsan::desan::recordReplaceEvent(this, V);
   ReplaceAllUsesWithInterceptor(this, V);
 }
 

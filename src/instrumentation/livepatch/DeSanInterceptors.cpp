@@ -1,6 +1,6 @@
-#include "../../../include/xsan_llvm_compat.h"
-#include "../../include/xsan_desan_abi.h"
-#include "utils/PatchHelper.h"
+#include "PatchCore.h"
+#include "livepatch/xsan_desan_abi.h"
+#include "xsan_llvm_compat.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -327,90 +327,102 @@ __xsan_desan_copy_delete_blocks(XSanDeSanDeleteBlock *OutBlocks,
   return Count;
 }
 
-namespace llvm {
+namespace __xsan {
+namespace {
 
-static __xsan::XsanInterceptor
-    RemoveFromParentInterceptor(&llvm::Instruction::removeFromParent,
-                                {"clang", "clang++"});
+// DeSan deliberately keeps these interceptor bodies under __xsan with names
+// different from their LLVM interceptees.  We do not rely on DSO
+// injection/interposition for interception; recording is enabled only when
+// needed by planting trampolines at run time, so matching LLVM's mangled names
+// is unnecessary and would hide that these are patch entry points.
+void removeFromParent(llvm::Instruction *Self);
+compat::InstructionEraseIterator eraseFromParent(llvm::Instruction *Self);
+void replaceAllUsesWith(llvm::Value *Self, llvm::Value *V);
+void ReplaceInstWithInst(llvm::Instruction *From, llvm::Instruction *To);
 
-void Instruction::removeFromParent() {
-  __xsan::desan::recordDeleteEvent(this);
-  RemoveFromParentInterceptor(this);
+static ManualInterception
+    RemoveFromParentInterceptee(&removeFromParent,
+                                &llvm::Instruction::removeFromParent,
+                                TargetProcesses, XSAN_DESAN_INTERCEPTION_GROUP);
+
+void removeFromParent(llvm::Instruction *Self) {
+  desan::recordDeleteEvent(Self);
+  RemoveFromParentInterceptee(Self);
 }
 
-static __xsan::XsanInterceptor
-    EraseFromParentInterceptor(&llvm::Instruction::eraseFromParent,
-                               {"clang", "clang++"});
+static ManualInterception
+    EraseFromParentInterceptee(&eraseFromParent,
+                               &llvm::Instruction::eraseFromParent,
+                               TargetProcesses, XSAN_DESAN_INTERCEPTION_GROUP);
 
-__xsan::compat::InstructionEraseIterator Instruction::eraseFromParent() {
-  __xsan::desan::recordDeleteEvent(this);
-  if (__xsan_desan_is_stage_active() && __xsan::desan::hasUserMark(*this)) {
-    auto Next = std::next(getIterator());
-    RemoveFromParentInterceptor(this);
+compat::InstructionEraseIterator eraseFromParent(llvm::Instruction *Self) {
+  desan::recordDeleteEvent(Self);
+  if (__xsan_desan_is_stage_active() && desan::hasUserMark(*Self)) {
+    auto Next = std::next(Self->getIterator());
+    RemoveFromParentInterceptee(Self);
     return Next;
   }
-  return EraseFromParentInterceptor(this);
+  return EraseFromParentInterceptee(Self);
 }
 
-static __xsan::XsanInterceptor
-    ReplaceAllUsesWithInterceptor(&llvm::Value::replaceAllUsesWith,
-                                  {"clang", "clang++"});
+static ManualInterception ReplaceAllUsesWithInterceptee(
+    &replaceAllUsesWith, &llvm::Value::replaceAllUsesWith, TargetProcesses,
+    XSAN_DESAN_INTERCEPTION_GROUP);
 
-void Value::replaceAllUsesWith(Value *V) {
+void replaceAllUsesWith(llvm::Value *Self, llvm::Value *V) {
   // RAUW can recurse when a Constant user needs to rebuild itself.
   // For example, replacing an operand of a Global may trigger
   // Constant::handleOperandChange(), which then performs another RAUW on the
   // rebuilt Constant/Global. We only record the outermost RAUW semantic event;
   // recursive RAUW calls reuse the same interceptor critical section.
-  if (!ReplaceAllUsesWithInterceptor.isRecursive())
-    __xsan::desan::recordReplaceEvent(this, V);
-  ReplaceAllUsesWithInterceptor(this, V);
+  if (!ReplaceAllUsesWithInterceptee.isRecursive())
+    desan::recordReplaceEvent(Self, V);
+  ReplaceAllUsesWithInterceptee(Self, V);
 }
 
-using ReplaceInstWithInstFn = void (*)(llvm::Instruction *,
-                                       llvm::Instruction *);
+static ManualInterception ReplaceInstWithInstInterceptee(
+    &ReplaceInstWithInst,
+    /* select one of the overloadings */
+    static_cast<decltype(&ReplaceInstWithInst)>(&llvm::ReplaceInstWithInst),
+    TargetProcesses, XSAN_DESAN_INTERCEPTION_GROUP);
 
-static __xsan::XsanInterceptor<ReplaceInstWithInstFn>
-    ReplaceInstWithInstInterceptor(
-        static_cast<ReplaceInstWithInstFn>(&llvm::ReplaceInstWithInst),
-        {"clang", "clang++"});
-
-void ReplaceInstWithInst(Instruction *From, Instruction *To) {
+void ReplaceInstWithInst(llvm::Instruction *From, llvm::Instruction *To) {
   if (__xsan_desan_is_stage_active() && From && To) {
-    if (__xsan::desan::hasUserMark(*From)) {
+    if (desan::hasUserMark(*From)) {
       if (!To->getDebugLoc())
         To->setDebugLoc(From->getDebugLoc());
-      __xsan::compat::insertInstructionBefore(To, From);
+      compat::insertInstructionBefore(To, From);
       From->replaceAllUsesWith(To);
-      __xsan::desan::recordDeleteEvent(From);
-      RemoveFromParentInterceptor(From);
+      desan::recordDeleteEvent(From);
+      RemoveFromParentInterceptee(From);
       return;
     }
   }
-  ReplaceInstWithInstInterceptor(From, To);
+  ReplaceInstWithInstInterceptee(From, To);
 }
 
-// static __xsan::XsanInterceptor
-//     BasicBlockRemoveFromParentInterceptor(&llvm::BasicBlock::removeFromParent,
+// static __xsan::Interception
+//     BasicBlockRemoveFromParentInterception(&llvm::BasicBlock::removeFromParent,
 //                                           {"clang", "clang++"});
 
 // void BasicBlock::removeFromParent() {
 //   __xsan::desan::recordDeleteBlock(this);
-//   BasicBlockRemoveFromParentInterceptor(this);
+//   BasicBlockRemoveFromParentInterception(this);
 // }
 
-// static __xsan::XsanInterceptor
-//     BasicBlockEraseFromParentInterceptor(&llvm::BasicBlock::eraseFromParent,
+// static __xsan::Interception
+//     BasicBlockEraseFromParentInterception(&llvm::BasicBlock::eraseFromParent,
 //                                          {"clang", "clang++"});
 
 // SymbolTableList<BasicBlock>::iterator BasicBlock::eraseFromParent() {
 //   __xsan::desan::recordDeleteBlock(this);
 //   if (__xsan_desan_is_stage_active() && !getParent()->isDeclaration()) {
 //     auto Next = std::next(getIterator());
-//     BasicBlockRemoveFromParentInterceptor(this);
+//     BasicBlockRemoveFromParentInterception(this);
 //     return Next;
 //   }
-//   return BasicBlockEraseFromParentInterceptor(this);
+//   return BasicBlockEraseFromParentInterception(this);
 // }
 
-} // namespace llvm
+} // namespace
+} // namespace __xsan

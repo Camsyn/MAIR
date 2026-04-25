@@ -1,7 +1,8 @@
 #pragma once
 
-#include "../compiler/include/xsan_desan_abi.h"
+#include "livepatch/xsan_desan_abi.h"
 
+#include <llvm/ADT/StringRef.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Instruction.h>
 

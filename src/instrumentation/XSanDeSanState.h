@@ -1,6 +1,6 @@
 #pragma once
 
-#include "XSanDeSanRuntime.h"
+#include "livepatch/XSanDeSanRuntime.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"

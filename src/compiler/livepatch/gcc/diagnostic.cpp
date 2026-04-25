@@ -5,7 +5,7 @@ Patch the error_at in diagnostic.c/diagnostic.cc in gcc.
 #include <cstdint>
 #include <string.h>
 
-#include "../utils/PatchHelper.h"
+#include "PatchCore.h"
 #include "llvm/ADT/STLExtras.h"
 #include <llvm/ADT/StringRef.h>
 
@@ -14,8 +14,8 @@ Patch the error_at in diagnostic.c/diagnostic.cc in gcc.
 using location_t = unsigned int;
 
 void error_at(location_t loc, const char *gmsgid, ...);
-static __xsan::XsanInterceptor
-    Interceptor(&error_at,
+static __xsan::Interception
+    Interceptee(&error_at,
                 /* In fact, cc1 is enough, our match is a match, just
                    to clarify the semantics, plus cc1plus */
                 {"cc1", "cc1plus", /* For LTO */ "lto1"});
@@ -30,15 +30,15 @@ static unsigned count_gcc_diag_specifiers(const char *gmsgid,
 // template <size_t... Is>
 // void call_interceptor(location_t loc, const char *gmsgid, va_list &args,
 //                       std::index_sequence<Is...>) {
-//   Interceptor(loc, gmsgid, get_arg<Is>(args)...);
+//   InterceptionHandle(loc, gmsgid, get_arg<Is>(args)...);
 // }
 
 /// A better implementation to expand the variadic parameters
 /// I.e., use the comma expression.
 template <size_t... Is>
-void call_interceptor(location_t loc, const char *gmsgid, va_list &args,
+void call_interceptee(location_t loc, const char *gmsgid, va_list &args,
                       std::index_sequence<Is...>) {
-  Interceptor(loc, gmsgid,
+  Interceptee(loc, gmsgid,
               (/* Suppress the compiler warning */ static_cast<void>(Is),
                va_arg(args, intptr_t))...);
 }
@@ -152,7 +152,7 @@ void error_at(location_t loc, const char *gmsgid, ...) {
   switch (count_extra_args) {
 #define FORWARD(num_args)                                                      \
   case num_args:                                                               \
-    call_interceptor(loc, gmsgid, args, std::make_index_sequence<num_args>{}); \
+    call_interceptee(loc, gmsgid, args, std::make_index_sequence<num_args>{}); \
     break;
     FORWARD(0)
     FORWARD(1)

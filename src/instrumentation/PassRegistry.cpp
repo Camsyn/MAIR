@@ -1,7 +1,9 @@
 #include "PassRegistry.h"
 #include "AttributeTaggingPass.hpp"
+#include "PatchCore.h"
 #include "Utils/Options.h"
 #include "XSanDeSanPass.h"
+#include "livepatch/XSanDeSanRuntime.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -237,6 +239,7 @@ __attribute__((weak)) PreservedAnalyses runMsan(Module &M,
 }
 
 PreservedAnalyses SubSanitizers::run(Module &IR, ModuleAnalysisManager &AM) {
+  __xsan::InterceptionScope Scope(XSAN_DESAN_INTERCEPTION_GROUP);
   PreservedAnalyses PA = PreservedAnalyses::all();
 
   for (unsigned Idx = 0, Size = Passes.size(); Idx != Size; ++Idx) {

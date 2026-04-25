@@ -1,6 +1,6 @@
 #pragma once
 
-#include "XSanDeSanRuntime.h"
+#include "livepatch/XSanDeSanRuntime.h"
 #include "XSanDeSanState.h"
 
 #include "llvm/IR/PassManager.h"

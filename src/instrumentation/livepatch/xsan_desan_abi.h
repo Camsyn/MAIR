@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -7,6 +8,8 @@ extern "C" {
 #endif
 
 static const char *const XSanDeSanUserInstMDKind = "xsan.user";
+static constexpr std::array<const char *, 3> TargetProcesses{"clang", "clang++",
+                                                             "opt"};
 
 typedef enum XSanDeSanStageKind {
   XSAN_DESAN_STAGE_NONE = 0,
@@ -22,6 +25,8 @@ typedef enum XSanDeSanSanitizerMask {
   XSAN_DESAN_SANITIZER_TSAN = 1u << 1,
   XSAN_DESAN_SANITIZER_MSAN = 1u << 2,
 } XSanDeSanSanitizerMask;
+
+#define XSAN_DESAN_INTERCEPTION_GROUP "desan"
 
 typedef enum XSanDeSanDeleteAnchorKind {
   XSAN_DESAN_DELETE_ANCHOR_BB = 0,

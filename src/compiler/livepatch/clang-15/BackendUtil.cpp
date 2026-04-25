@@ -7,14 +7,13 @@
 #include <clang/CodeGen/BackendUtil.h>
 #include <clang/Lex/HeaderSearchOptions.h>
 
-#include "utils/PatchHelper.h"
+#include "PatchCore.h"
 #include "llvm/IR/Module.h"
 
 using namespace clang;
 using namespace llvm;
-
-static __xsan::XsanInterceptor Interceptor(&clang::EmitBackendOutput,
-                                           {"clang", "clang++"});
+static __xsan::Interception Interceptee(&clang::EmitBackendOutput,
+                                        {"clang", "clang++"});
 
 void clang::EmitBackendOutput(DiagnosticsEngine &Diags,
                               const HeaderSearchOptions &HeaderOpts,
@@ -29,6 +28,6 @@ void clang::EmitBackendOutput(DiagnosticsEngine &Diags,
   if (__xsan::isXsanEnabled()) {
     NewLangOpts.Sanitize.clear(HackedSanitizers);
   }
-  Interceptor(Diags, HeaderOpts, CGOpts, TOpts, NewLangOpts, TDesc, M, Action,
+  Interceptee(Diags, HeaderOpts, CGOpts, TOpts, NewLangOpts, TDesc, M, Action,
               std::move(OS));
 }

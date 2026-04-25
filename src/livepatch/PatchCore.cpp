@@ -1,3 +1,5 @@
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
 #include <cstdio>
 #include <dlfcn.h>
 #include <elf.h>
@@ -15,7 +17,7 @@
 #include <llvm/Support/Host.h>
 #endif
 
-#include "PatchHelper.h"
+#include "PatchCore.h"
 #include "config_compile.h"
 #include "debug.h"
 #include "types.h"
@@ -25,6 +27,55 @@
 namespace fs = std::filesystem;
 
 namespace __xsan {
+
+namespace detail {
+namespace {
+
+class ManualInterceptionRegistry {
+public:
+  void registerInterceptor(llvm::StringRef Group,
+                           ManualInterceptionController *Interceptor) {
+    llvm::sys::SmartScopedLock<true> Guard(Mutex);
+    Groups[Group].Interceptors.push_back(Interceptor);
+  }
+
+  llvm::ArrayRef<ManualInterceptionController *> get(llvm::StringRef Group) {
+    llvm::sys::SmartScopedLock<true> Guard(Mutex);
+    auto It = Groups.find(Group);
+    assert(It != Groups.end() && "unknown interception group");
+    return It->second.Interceptors;
+  }
+
+private:
+  struct GroupState {
+    llvm::SmallVector<ManualInterceptionController *, 8> Interceptors;
+  };
+
+  llvm::sys::SmartMutex<true> Mutex;
+  llvm::StringMap<GroupState> Groups;
+};
+
+ManualInterceptionRegistry &getRegistry() {
+  static ManualInterceptionRegistry Registry;
+  return Registry;
+}
+
+} // namespace
+
+void registerManualInterception(llvm::StringRef Group,
+                                ManualInterceptionController *Interceptor) {
+  getRegistry().registerInterceptor(Group, Interceptor);
+}
+
+llvm::ArrayRef<ManualInterceptionController *>
+getManualInterceptionGroup(llvm::StringRef Group) {
+  return getRegistry().get(Group);
+}
+
+} // namespace detail
+
+InterceptionScope::InterceptionScope(llvm::StringRef Group)
+    : InterceptionScope(detail::getManualInterceptionGroup(Group)) {}
 
 // Lazy initialization for XsanEnabled
 bool isXsanEnabled() {
@@ -153,6 +204,13 @@ fs::path getThisPatchDsoPath() {
   return this_dso_path.value();
 }
 
+static fs::path getDsoPathFromAddr(void *SymAddr) {
+  Dl_info info;
+  if (dladdr(SymAddr, &info) != 0 && info.dli_fname)
+    return fs::canonical(info.dli_fname);
+  return fs::path();
+}
+
 fs::path getXsanAbsPath(std::string_view rel_path) {
   /// TODO: do not use env var to transmit base dir, but parse the DSO link
   /// path.
@@ -262,10 +320,10 @@ static const char *getDSOName(void *SymAddr) {
 // Find the symbol in the main executable or other DSOs.
 // 1. Search it by RTLD_NEXT first.
 // 2. If not found, try to find it via RTLD_DEFAULT.
-void *getRealFuncAddr(const char *ManagledName) {
+void *getIntercepteeAddr(const char *MangledName, void *DsoAnchor) {
   void *addr = nullptr;
   dlerror(); // clear previous error
-  addr = dlsym(RTLD_NEXT, ManagledName);
+  addr = dlsym(RTLD_NEXT, MangledName);
   const char *err = dlerror();
   // If RTLD_NEXT found the symbol, return it.
   if (addr && !err) {
@@ -273,64 +331,75 @@ void *getRealFuncAddr(const char *ManagledName) {
   }
   // RTLD_NEXT not found, try RTLD_DEFAULT (e.g., symbol might exist in the
   // executable)
-  addr = dlsym(RTLD_DEFAULT, ManagledName);
+  addr = dlsym(RTLD_DEFAULT, MangledName);
   err = dlerror();
   if (!addr || err) {
-    FATAL("getRealFuncAddr: cannot find symbol %s, RTLD_NEXT/RTLD_DEFAULT "
+    FATAL("getIntercepteeAddr: cannot find symbol %s, RTLD_NEXT/RTLD_DEFAULT "
           "both failed: %s",
-          ManagledName, err ? err : "null");
+          MangledName, err ? err : "null");
   }
   // If RTLD_DEFAULT return the symbol of patch so, it means the symbol cannot
   // be found either in the executable or other DSOs.
   const char *DSOName = getDSOName(addr);
-  auto selfPatchDso = getThisPatchDsoPath();
+  auto selfPatchDso =
+      DsoAnchor ? getDsoPathFromAddr(DsoAnchor) : getThisPatchDsoPath();
   std::string patchName = selfPatchDso.filename().string();
   if (compat::endsWith(llvm::StringRef(DSOName), patchName))
-    FATAL("Cannot find the real addr for dynamic symbol %s", ManagledName);
+    FATAL("Cannot find the real addr for dynamic symbol %s", MangledName);
   return addr;
 }
 
-void *getRealFuncAddr(void *InterceptorFunc) {
-  const char *ManagledName = getMangledName(InterceptorFunc);
-  return getRealFuncAddr(ManagledName);
+void *getIntercepteeAddr(void *InterceptorFunc) {
+  const char *MangledName = getMangledName(InterceptorFunc);
+  return getIntercepteeAddr(MangledName, InterceptorFunc);
+}
+
+void *getIntercepteeAddr(void *SymbolFunc, void *DsoAnchor) {
+  const char *MangledName = getMangledName(SymbolFunc);
+  return getIntercepteeAddr(MangledName, DsoAnchor);
 }
 
 // Find the symbol in the patch DSO.
 // 1. Search it by RTLD_DEFAULT first.
 // 2. If not found, try to find it via explicit dlopen.
-void *getMyFuncAddr(const char *ManagledName) {
+void *getInterceptorAddr(const char *MangledName, void *DsoAnchor) {
   void *addr = nullptr;
+  fs::path targetDso =
+      DsoAnchor ? getDsoPathFromAddr(DsoAnchor) : getThisPatchDsoPath();
+  if (targetDso.empty())
+    FATAL("getInterceptorAddr: failed to resolve target DSO for %s",
+          MangledName);
+
   dlerror(); // clear previous error
-  addr = dlsym(RTLD_DEFAULT, ManagledName);
+  addr = dlsym(RTLD_DEFAULT, MangledName);
   const char *err = dlerror();
   if (!addr || err) {
-    FATAL("getMyFuncAddr: dlsym(RTLD_DEFAULT, %s) failed: %s", ManagledName,
+    FATAL("getInterceptorAddr: dlsym(RTLD_DEFAULT, %s) failed: %s", MangledName,
           err ? err : "null");
   }
   const char *DSOName = getDSOName(addr);
-  auto selfPatchDso = getThisPatchDsoPath();
-  std::string patchName = selfPatchDso.filename().string();
+  std::string patchName = targetDso.filename().string();
   // If the symbol is in the patch DSO, return it.
   if (compat::endsWith(llvm::StringRef(DSOName), patchName))
     return addr;
   // If the symbol is not in the patch DSO, it might be masked by the main
   // executable. Try to find it via explicit dlopen.
   // RTLD_NOLOAD is used to search the symbol in the loaded DSOs.
-  void *handle = dlopen(selfPatchDso.c_str(), RTLD_LAZY | RTLD_NOLOAD);
+  void *handle = dlopen(targetDso.c_str(), RTLD_LAZY | RTLD_NOLOAD);
   if (!handle) {
-    FATAL("getMyFuncAddr: dlopen(%s) failed: %s", selfPatchDso.c_str(),
+    FATAL("getInterceptorAddr: dlopen(%s) failed: %s", targetDso.c_str(),
           dlerror());
   }
   dlerror();
-  addr = dlsym(handle, ManagledName);
+  addr = dlsym(handle, MangledName);
   err = dlerror();
   if (!addr || err) {
-    FATAL("getMyFuncAddr: dlsym(patch_so, %s) failed: %s", ManagledName,
+    FATAL("getInterceptorAddr: dlsym(patch_so, %s) failed: %s", MangledName,
           err ? err : "null");
   }
   const char *my_dso = getDSOName(addr);
   if (!compat::endsWith(llvm::StringRef(my_dso), patchName))
-    FATAL("getMyFuncAddr: found symbol %s is not in patch so", my_dso);
+    FATAL("getInterceptorAddr: found symbol %s is not in patch so", my_dso);
   // Do not dlclose(handle), because RTLD_NOLOAD does not increase the reference
   // count.
   return addr;
@@ -390,10 +459,10 @@ void XsanPatch::validateInit() const {
   }
 }
 
-void XsanPatch::initialize(void *MyFunc, void *RealFunc) {
+void XsanPatch::initialize(void *Interceptor, void *Interceptee) {
   std::memcpy(patch, PatchTempl, PatchSize);
-  std::memcpy(&patch[FuncAddrOffset], (void *)&MyFunc, sizeof(void *));
-  std::memcpy(backup, RealFunc, PatchSize);
+  std::memcpy(&patch[FuncAddrOffset], (void *)&Interceptor, sizeof(void *));
+  std::memcpy(backup, Interceptee, PatchSize);
   isInitialized = true;
 }
 

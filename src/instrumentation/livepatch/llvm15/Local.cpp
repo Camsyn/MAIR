@@ -35,12 +35,20 @@
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include <cassert>
 
-#include "utils/PatchHelper.h"
+#include "PatchCore.h"
+#include "livepatch/xsan_desan_abi.h"
 
 using namespace llvm;
 
-static __xsan::XsanInterceptor ChangeToInvokeAndSplitBasicBlockInterceptor(
-    &llvm::changeToInvokeAndSplitBasicBlock, {"clang", "clang++"});
+namespace {
+
+BasicBlock *changeToInvokeAndSplitBasicBlock(CallInst *CI,
+                                             BasicBlock *UnwindEdge,
+                                             DomTreeUpdater *DTU);
+
+static __xsan::ManualInterception ChangeToInvokeAndSplitBasicBlockInterceptee(
+    &changeToInvokeAndSplitBasicBlock, &llvm::changeToInvokeAndSplitBasicBlock,
+    TargetProcesses, XSAN_DESAN_INTERCEPTION_GROUP);
 
 // This function use `Split->getInstList().pop_front();` to remove the
 // instruction. But some interceptors need to record the delete event,
@@ -48,9 +56,9 @@ static __xsan::XsanInterceptor ChangeToInvokeAndSplitBasicBlockInterceptor(
 //
 // Note: LLVM23 has already changed to use `eraseFromParent`, so we only need to
 // intercept LLVM15.
-BasicBlock *llvm::changeToInvokeAndSplitBasicBlock(CallInst *CI,
-                                                   BasicBlock *UnwindEdge,
-                                                   DomTreeUpdater *DTU) {
+BasicBlock *changeToInvokeAndSplitBasicBlock(CallInst *CI,
+                                             BasicBlock *UnwindEdge,
+                                             DomTreeUpdater *DTU) {
   BasicBlock *BB = CI->getParent();
 
   // Convert this function call into an invoke instruction.  First, split the
@@ -90,3 +98,5 @@ BasicBlock *llvm::changeToInvokeAndSplitBasicBlock(CallInst *CI,
   CI->eraseFromParent();
   return Split;
 }
+
+} // namespace

@@ -19,7 +19,7 @@
 #include <llvm/Transforms/Instrumentation/AddressSanitizerOptions.h>
 #include <memory>
 
-#include "utils/PatchHelper.h"
+#include "PatchCore.h"
 #include "xsan_common.h"
 
 using namespace clang;
@@ -1083,6 +1083,6 @@ std::string describeSanitizeArg(const llvm::opt::Arg *A, SanitizerMask Mask) {
   return "-fsanitize=" + Sanitizers;
 }
 
-static __xsan::XsanInterceptor Interceptor(
+static __xsan::Interception InterceptionHandle(
     "_ZN5clang6driver13SanitizerArgsC2ERKNS0_9ToolChainERKN4llvm3opt7ArgListEb",
     {"clang", "clang++"});

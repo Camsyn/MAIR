@@ -11,7 +11,7 @@ Hot patch to modify the sanitizer passes pipeline
 
 #include <utility>
 
-#include "utils/PatchHelper.h"
+#include "PatchCore.h"
 
 using namespace llvm;
 using namespace __xsan;
@@ -61,41 +61,41 @@ ModulePassManager modifySanitizerPassesPipeline(ModulePassManager &MPM) {
 }
 } // namespace
 
-static XsanInterceptor buildPerModuleDefaultPipelineInterceptor(
+static Interception buildPerModuleDefaultPipelineInterceptee(
     &PassBuilder::buildPerModuleDefaultPipeline, {"clang", "clang++"});
-static XsanInterceptor buildLTOPreLinkDefaultPipelineInterceptor(
+static Interception buildLTOPreLinkDefaultPipelineInterceptee(
     &PassBuilder::buildLTOPreLinkDefaultPipeline, {"clang", "clang++"});
-static XsanInterceptor buildThinLTOPreLinkDefaultPipelineInterceptor(
+static Interception buildThinLTOPreLinkDefaultPipelineInterceptee(
     &PassBuilder::buildThinLTOPreLinkDefaultPipeline, {"clang", "clang++"});
-static XsanInterceptor
-    buildO0DefaultPipelineInterceptor(&PassBuilder::buildO0DefaultPipeline,
+static Interception
+    buildO0DefaultPipelineInterceptee(&PassBuilder::buildO0DefaultPipeline,
                                       {"clang", "clang++"});
 
 ModulePassManager
 PassBuilder::buildPerModuleDefaultPipeline(OptimizationLevel Level,
                                            bool LTOPreLink) {
   ModulePassManager MPM =
-      buildPerModuleDefaultPipelineInterceptor(this, Level, LTOPreLink);
+      buildPerModuleDefaultPipelineInterceptee(this, Level, LTOPreLink);
   return ::modifySanitizerPassesPipeline(MPM);
 }
 
 ModulePassManager
 PassBuilder::buildLTOPreLinkDefaultPipeline(OptimizationLevel Level) {
   ModulePassManager MPM =
-      buildLTOPreLinkDefaultPipelineInterceptor(this, Level);
+      buildLTOPreLinkDefaultPipelineInterceptee(this, Level);
   return ::modifySanitizerPassesPipeline(MPM);
 }
 
 ModulePassManager
 PassBuilder::buildThinLTOPreLinkDefaultPipeline(OptimizationLevel Level) {
   ModulePassManager MPM =
-      buildThinLTOPreLinkDefaultPipelineInterceptor(this, Level);
+      buildThinLTOPreLinkDefaultPipelineInterceptee(this, Level);
   return ::modifySanitizerPassesPipeline(MPM);
 }
 
 ModulePassManager PassBuilder::buildO0DefaultPipeline(OptimizationLevel Level,
                                                       bool LTOPreLink) {
   ModulePassManager MPM =
-      buildO0DefaultPipelineInterceptor(this, Level, LTOPreLink);
+      buildO0DefaultPipelineInterceptee(this, Level, LTOPreLink);
   return ::modifySanitizerPassesPipeline(MPM);
 }

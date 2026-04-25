@@ -16,6 +16,8 @@ if(NOT DEFINED XSAN_INSTRUMENTATION_VARIANT)
   message(FATAL_ERROR "XSAN_INSTRUMENTATION_VARIANT is not set")
 endif()
 
+add_subdirectory(livepatch)
+
 set(XSAN_PASS_COMMON
   AttributeTaggingPass.cpp
   Instrumentation.cpp
@@ -71,12 +73,13 @@ add_llvm_pass_plugin(XSanInstPass
   ${XSAN_PASS_VERSIONED_DIR}/AddressSanitizer.cpp
   ${XSAN_PASS_VERSIONED_DIR}/MemorySanitizer.cpp
   XSanDeSanPass.cpp
-  XSanDeSanRuntime.cpp
+  ${XSAN_INSTRUMENTATION_LIVEPATCH_SOURCES}
   XSanDeSanDeSan.cpp
   XSanDeSanReSan.cpp
   XSanDeSanState.cpp
   XSanitizerCompositor.cpp
   ${XSAN_PASS_COMMON}
+  ${XSAN_INSTRUMENTATION_LIVEPATCH_OBJECTS}
 )
 
 add_llvm_pass_plugin(TestPass
@@ -95,6 +98,9 @@ foreach(_xsan_pass_target
   target_include_directories(${_xsan_pass_target} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${XSAN_PASS_VERSIONED_DIR}
+    ${CMAKE_SOURCE_DIR}/src/livepatch
+    ${CMAKE_SOURCE_DIR}/src/compiler/include
+    ${CMAKE_SOURCE_DIR}/src/include
   )
   target_compile_definitions(${_xsan_pass_target} PRIVATE
     XSAN_LLVM_MAJOR=${LLVM_VERSION_MAJOR}
@@ -102,6 +108,7 @@ foreach(_xsan_pass_target
 endforeach()
 
 target_compile_definitions(XSanInstPass PRIVATE XSAN_PASS)
+xsan_instrumentation_enable_livepatch(XSanInstPass)
 
 set_target_properties(ASanInstPass
   TSanInstPass

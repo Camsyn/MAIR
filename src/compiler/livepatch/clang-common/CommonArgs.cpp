@@ -13,7 +13,7 @@
 #include "CommonArgs.h"
 #include "config_compile.h"
 #include "debug.h"
-#include "utils/PatchHelper.h"
+#include "PatchCore.h"
 #include "xsan_common.h"
 #include "xsan_llvm_compat.h"
 

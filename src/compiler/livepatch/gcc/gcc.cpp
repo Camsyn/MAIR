@@ -118,7 +118,7 @@ The key components related to sanitizers are:
 
 */
 
-#include "../utils/PatchHelper.h"
+#include "PatchCore.h"
 #include "config_compile.h"
 #include "xsan_common.h"
 #include <algorithm>
@@ -144,7 +144,7 @@ void *search_substr(const char *hay, size_t haylen, const char *needle,
 }
 
 std::string_view find_link_command_spec(const std::vector<ROSegment> &ro_sec) {
-  std::array patterns{
+  static constexpr std::array patterns{
       "%(linker)",
       "%{flto} %{fno-lto}",
       "%(post_link)",

@@ -30,8 +30,3 @@ set(XSAN_INSTRUMENTATION_LIVEPATCH_OBJECTS
   $<TARGET_OBJECTS:instr-livepatch-objects>
   PARENT_SCOPE
 )
-
-function(xsan_instrumentation_enable_livepatch target)
-  xsan_livepatch_link_core(${target})
-  xsan_livepatch_append_shared_llvm_rpath(${target})
-endfunction()

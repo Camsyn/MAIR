@@ -62,20 +62,32 @@ set_property(GLOBAL PROPERTY XSAN_LIVEPATCH_HEADERS
 )
 set(XSAN_LIVEPATCH_HEADERS ${XSAN_LIVEPATCH_HEADERS} PARENT_SCOPE)
 
-add_library(LivePatchCore STATIC
+add_library(LivePatchCoreObjects OBJECT
   PatchCore.cpp
   ${XSAN_LIVEPATCH_HEADERS}
+)
+
+target_include_directories(LivePatchCoreObjects
+  PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_SOURCE_DIR}/src/include
+  ${LLVM_INCLUDE_DIRS}
+  PRIVATE
+  ${CMAKE_BINARY_DIR}/src/compiler
+)
+
+set_target_properties(LivePatchCoreObjects PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+)
+
+add_library(LivePatchCore STATIC
+  $<TARGET_OBJECTS:LivePatchCoreObjects>
 )
 add_library(livepatch-core ALIAS LivePatchCore)
 
 target_include_directories(LivePatchCore
   PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/src/compiler/include
-    ${CMAKE_SOURCE_DIR}/src/include
-    ${LLVM_INCLUDE_DIRS}
-  PRIVATE
-    ${CMAKE_BINARY_DIR}/src/compiler
+  $<TARGET_PROPERTY:LivePatchCoreObjects,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
 if(LLVM_LINK_LLVM_DYLIB)
@@ -88,7 +100,6 @@ endif()
 
 set_target_properties(LivePatchCore PROPERTIES
   ARCHIVE_OUTPUT_DIRECTORY "${XSAN_OUTPUT_PATCHDIR}"
-  POSITION_INDEPENDENT_CODE ON
 )
 
 function(xsan_livepatch_link_core target)
@@ -97,6 +108,42 @@ function(xsan_livepatch_link_core target)
   endif()
 
   target_link_libraries(${target} PRIVATE LivePatchCore dl)
+endfunction()
+
+function(add_livepatch_core_into_llvm_plugin target)
+  if(NOT TARGET ${target})
+    message(FATAL_ERROR
+      "add_livepatch_core_into_llvm_plugin: unknown target '${target}'")
+  endif()
+
+  string(TOUPPER ${target} _xsan_target_upper)
+
+  if(NOT DEFINED LLVM_${_xsan_target_upper}_LINK_INTO_TOOLS)
+    message(FATAL_ERROR
+      "add_livepatch_core_into_llvm_plugin: target '${target}' must be "
+      "created by add_llvm_pass_plugin")
+  endif()
+
+  get_target_property(_xsan_target_type ${target} TYPE)
+
+  if(NOT(_xsan_target_type STREQUAL "MODULE_LIBRARY" OR
+    _xsan_target_type STREQUAL "OBJECT_LIBRARY"))
+    message(FATAL_ERROR
+      "add_livepatch_core_into_llvm_plugin: target '${target}' has type "
+      "'${_xsan_target_type}', expected add_llvm_pass_plugin module/object")
+  endif()
+
+  # Pass plugins are loaded into clang/opt, which already own LLVM's command
+  # line registry.  Do not link LivePatchCore's static LLVMSupport dependency
+  # into them: LLVM-15 static-LLVM builds would otherwise get a second
+  # llvm::cl registry inside the plugin, so plugin-defined -mllvm options (for
+  # example -as-recover or -sanitize-recover-address) would be registered in the
+  # wrong registry and clang would reject them before running the pass.
+  target_sources(${target} PRIVATE
+    $<TARGET_OBJECTS:LivePatchCoreObjects>)
+  target_include_directories(${target} PRIVATE
+    $<TARGET_PROPERTY:LivePatchCoreObjects,INTERFACE_INCLUDE_DIRECTORIES>)
+  target_link_libraries(${target} PRIVATE dl)
 endfunction()
 
 function(xsan_livepatch_append_shared_llvm_rpath target)

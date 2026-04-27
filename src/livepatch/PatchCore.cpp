@@ -20,7 +20,6 @@
 #include "PatchCore.h"
 #include "config_compile.h"
 #include "debug.h"
-#include "types.h"
 #include "xsan_common.h"
 #include "xsan_llvm_compat.h"
 
@@ -326,19 +325,18 @@ void *getIntercepteeAddr(const char *MangledName, void *DsoAnchor) {
   addr = dlsym(RTLD_NEXT, MangledName);
   const char *err = dlerror();
   // If RTLD_NEXT found the symbol, return it.
-  if (addr && !err) {
+  if (addr && !err)
     return addr;
-  }
-  // RTLD_NEXT not found, try RTLD_DEFAULT (e.g., symbol might exist in the
+
+    // RTLD_NEXT not found, try RTLD_DEFAULT (e.g., symbol might exist in the
   // executable)
   addr = dlsym(RTLD_DEFAULT, MangledName);
   err = dlerror();
-  if (!addr || err) {
+  if (!addr || err)
     FATAL("getIntercepteeAddr: cannot find symbol %s, RTLD_NEXT/RTLD_DEFAULT "
           "both failed: %s",
           MangledName, err ? err : "null");
-  }
-  // If RTLD_DEFAULT return the symbol of patch so, it means the symbol cannot
+  // If RTLD_DEFAULT returns the symbol of patch so, it means the symbol cannot
   // be found either in the executable or other DSOs.
   const char *DSOName = getDSOName(addr);
   auto selfPatchDso =
@@ -454,9 +452,8 @@ void memcpy_forcibly(void *dst, const void *src, size_t n, bool is_dst_exec) {
 }
 
 void XsanPatch::validateInit() const {
-  if (unlikely(!isInitialized)) {
+  if (!isInitialized)
     FATAL("Cannot use patch without initialization");
-  }
 }
 
 void XsanPatch::initialize(void *Interceptor, void *Interceptee) {

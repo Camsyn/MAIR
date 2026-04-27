@@ -107,7 +107,7 @@ foreach(_xsan_pass_target
 endforeach()
 
 target_compile_definitions(XSanInstPass PRIVATE XSAN_PASS)
-xsan_instrumentation_enable_livepatch(XSanInstPass)
+add_livepatch_core_into_llvm_plugin(XSanInstPass)
 
 set_target_properties(ASanInstPass
   TSanInstPass

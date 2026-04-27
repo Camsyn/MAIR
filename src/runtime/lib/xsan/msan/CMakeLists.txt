@@ -56,6 +56,7 @@ function(import_subsan output_prefix)
   set(XSAN_MSAN_SOURCES
     msan.cpp
     msan_linux.cpp
+    msan_rtl_extra.cpp
     ${MSAN_SOURCES}
   )
 
@@ -119,6 +120,7 @@ function(import_subsan output_prefix)
   )
 
   set(${output_prefix}_WRAPPED_SYMBOLS
+    msan_wrapped_symbols.txt.in
     PARENT_SCOPE
   )
 

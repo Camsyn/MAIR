@@ -23,5 +23,10 @@ xsan_config.cmake
 
 xsan_hooks_gen.h
 
-.codex
+.codex/
+build*/
+.omx/
 AGENTS.md
+/temp/
+/archive/
+/tasks/

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "livepatch/XSanDeSanRuntime.h"
 #include "XSanDeSanState.h"
+#include "livepatch/XSanSanitizingRecorder.h"
 
 #include "llvm/IR/PassManager.h"
 

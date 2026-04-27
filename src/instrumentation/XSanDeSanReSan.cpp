@@ -9,6 +9,51 @@ using namespace llvm;
 
 namespace __xsan::desan {
 
+namespace {
+
+static bool isLaterStage(StageKind LHS, StageKind RHS) {
+  return static_cast<uint32_t>(LHS) > static_cast<uint32_t>(RHS);
+}
+
+static Value *resolveReplayReplacement(
+    StageKind Stage, Value *SanitizerValue, const ReplaceArchive &ReplaceArchive,
+    const DeleteArchive &DeleteArchive) {
+  if (!SanitizerValue)
+    return nullptr;
+
+  SmallPtrSet<Value *, 8> Visited;
+  Value *CurrentValue = SanitizerValue;
+  StageKind CurrentStage = Stage;
+
+  while (Visited.insert(CurrentValue).second) {
+    bool Advanced = false;
+    if (auto It = ReplaceArchive.find(CurrentValue); It != ReplaceArchive.end()) {
+      const auto &Next = It->second.front();
+      if (isLaterStage(Next.Stage, CurrentStage) && Next.SanitizerValue) {
+        CurrentValue = Next.SanitizerValue;
+        CurrentStage = Next.Stage;
+        Advanced = true;
+      }
+    }
+    if (Advanced)
+      continue;
+
+    if (auto *I = dyn_cast<Instruction>(CurrentValue)) {
+      if (auto It = DeleteArchive.find(I); It != DeleteArchive.end()) {
+        if (llvm::any_of(It->second, [&](const DeleteRecord &Record) {
+              return isLaterStage(Record.Stage, CurrentStage);
+            }))
+          return nullptr;
+      }
+    }
+    return CurrentValue;
+  }
+
+  return nullptr;
+}
+
+} // namespace
+
 // We need ReplaceArchive to redirect instruction anchor, and DeleteArchive to
 // add the sentry anchor into it.
 static void replayAdd(Module &M, AddArchive &Archive,
@@ -220,15 +265,36 @@ static void replayAdd(Module &M, AddArchive &Archive,
   }
 }
 
-static void replayReplace(Module &M, ReplaceArchive &Archive) {
+static void replayReplace(Module &M, ReplaceArchive &Archive,
+                          const DeleteArchive &DeleteArchive) {
   for (auto &[UserValue, Records] : Archive) {
     auto &Record = Records.front();
-    replaceNonStageIRUses(Record.Stage, *UserValue, *Record.SanitizerValue);
+    Value *ResolvedValue = resolveReplayReplacement(
+        Record.Stage, Record.SanitizerValue, Archive, DeleteArchive);
+    if (!ResolvedValue)
+      continue;
+    replaceNonStageIRUses(Record.Stage, *UserValue, *ResolvedValue);
   }
 }
 
-static void replayDelete(Module &M, DeleteArchive &Archive) {
+static bool shouldReplayDelete(Instruction &UserInst,
+                               const ReplaceArchive &ReplaceArchive,
+                               const DeleteArchive &DeleteArchive) {
+  auto It = ReplaceArchive.find(&UserInst);
+  if (It == ReplaceArchive.end())
+    return true;
+
+  const auto &Record = It->second.front();
+  Value *ResolvedValue = resolveReplayReplacement(
+      Record.Stage, Record.SanitizerValue, ReplaceArchive, DeleteArchive);
+  return ResolvedValue && ResolvedValue != &UserInst;
+}
+
+static void replayDelete(Module &M, DeleteArchive &Archive,
+                         const ReplaceArchive &ReplaceArchive) {
   for (auto &[UserInst, Records] : Archive) {
+    if (!shouldReplayDelete(*UserInst, ReplaceArchive, Archive))
+      continue;
     UserInst->eraseFromParent();
   }
 }
@@ -260,8 +326,8 @@ void runReSan(Module &M, ReSanArchive &Archive) {
 
   replayAdd(M, Archive.AddRecords, Archive.DeleteRecords,
             Archive.ReplaceRecords);
-  replayReplace(M, Archive.ReplaceRecords);
-  replayDelete(M, Archive.DeleteRecords);
+  replayReplace(M, Archive.ReplaceRecords, Archive.DeleteRecords);
+  replayDelete(M, Archive.DeleteRecords, Archive.ReplaceRecords);
 
   replayFunction(M, Archive.FunctionRecords);
 }

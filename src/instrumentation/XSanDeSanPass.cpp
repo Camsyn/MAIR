@@ -94,6 +94,10 @@ PreservedAnalyses ReSanPass::run(Module &M, ModuleAnalysisManager &) {
 
   runReSan(M, State->Archive);
 
+  if (options::ClDebug)
+    requireOrDie(!llvm::verifyModule(M, &llvm::errs()),
+                 "resan replay produced invalid IR");
+
   if (options::ClDebug) {
     std::error_code EC;
     llvm::raw_fd_ostream OS("resan.ll", EC, llvm::sys::fs::OF_None);

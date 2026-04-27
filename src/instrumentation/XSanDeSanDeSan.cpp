@@ -365,7 +365,6 @@ void runDeSan(Module &M, StageKind Stage, ReSanArchive &Archive,
 
   auto DeleteEvents = getDeleteEvents();
   auto ReplaceEvents = getReplaceEvents();
-  auto DeleteBlocks = getDeleteBlocks();
 
   restoreFunction(Stage, Archive.FunctionRecords, M, UserBBsMap);
   restoreDelete(Stage, Archive.DeleteRecords, DeleteEvents);

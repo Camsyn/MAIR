@@ -1,5 +1,7 @@
 #pragma once
 
+#include "XSanDeSanPass.h"
+
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/OptimizationLevel.h"
 #include "llvm/Passes/PassBuilder.h"
@@ -11,6 +13,9 @@
 #include "llvm/Transforms/Instrumentation/AddressSanitizer.h"
 #include "llvm/Transforms/Instrumentation/AddressSanitizerOptions.h"
 #include "llvm/Transforms/Instrumentation/MemorySanitizer.h"
+
+#include <functional>
+#include <optional>
 
 namespace llvm {
 struct AddressSanitizerOptions;
@@ -35,10 +40,45 @@ struct MsanOption {
 
 class SubSanitizers : public llvm::ModulePassManager {
 private:
-  SubSanitizers() = default;
+  using PassAdder =
+      std::function<void(llvm::ModulePassManager &, llvm::OptimizationLevel)>;
+
+  class ScopedStageTransition {
+  public:
+    ScopedStageTransition(unsigned PassIndex, SubSanitizers &Owner);
+    ~ScopedStageTransition();
+
+  private:
+    const unsigned PassIndex;
+    const bool IsDeSanPass;
+    SubSanitizers &Owner;
+  };
+
+  SubSanitizers(llvm::OptimizationLevel Level) : Level(Level) {}
+
+  void advanceStage();
+  std::optional<desan::StageKind> currentStage() const;
+  bool isDeSanPass(unsigned PassIndex) const {
+    return DeSanPassIndices.contains(PassIndex);
+  }
+  bool isInSanitzing(unsigned PassIndex) const;
+  void resetRunState();
+  void addSanitizerWithDeSan(desan::StageKind Stage, PassAdder AddSanitizer);
+  void addDeSanPass(desan::StageKind Stage);
+  void addReSanPass();
+
+  llvm::OptimizationLevel Level;
+  llvm::SmallSetVector<unsigned, 8> DeSanPassIndices;
+  int StageEntryPassIndex = -1;
+  int ReSanPassIndex = -1;
+  llvm::SmallVector<desan::StageKind, 8> Stages;
+  size_t StageIndex = 0;
+  std::shared_ptr<desan::SanitizingContext> State;
+  bool InStage = false;
 
 public:
   static SubSanitizers loadSubSanitizers(llvm::OptimizationLevel Level);
+
   /// Run all of the sanitizer passes on the module, and preserve all analysises
   /// between them.
   llvm::PreservedAnalyses run(llvm::Module &IR,
@@ -61,31 +101,6 @@ createPostOptimizationPasses(llvm::OptimizationLevel Level);
 
 const AsanOption obtainAsanPassArgs();
 const MsanOption obtainMsanPassArgs();
-
-// -- The following funtcions are implemented in XXXSanitizer.cpp --------
-/// Because the structure, indicating targets to instrument, depends on the
-/// interior type in each XXXSanitizer.cpp
-struct AsanToInstrument;
-struct TsanToInstrument;
-void registerAnalysisForAsan(llvm::PassBuilder &PB);
-void registerAnalysisForTsan(llvm::PassBuilder &PB);
-void registerAnalysisForMsan(llvm::PassBuilder &PB);
-void registerAnalysisForXsan(llvm::PassBuilder &PB);
-llvm::PreservedAnalyses runAsan(llvm::Module &M,
-                                llvm::ModuleAnalysisManager &MAM,
-                                llvm::OptimizationLevel Level);
-llvm::PreservedAnalyses runTsan(llvm::Module &M,
-                                llvm::ModuleAnalysisManager &MAM,
-                                llvm::OptimizationLevel Level);
-llvm::PreservedAnalyses runMsan(llvm::Module &M,
-                                llvm::ModuleAnalysisManager &MAM,
-                                llvm::OptimizationLevel Level);
-void addAsanRequireAnalysisPass(SubSanitizers &MPM,
-                                llvm::FunctionPassManager &FPM);
-void addTsanRequireAnalysisPass(SubSanitizers &MPM,
-                                llvm::FunctionPassManager &FPM);
-void addMsanRequireAnalysisPass(SubSanitizers &MPM,
-                                llvm::FunctionPassManager &FPM);
 
 // --------- Implemented in PassRegistry.cpp -----------
 void registerAsanForClangAndOpt(llvm::PassBuilder &PB);

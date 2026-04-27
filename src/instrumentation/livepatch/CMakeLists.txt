@@ -1,7 +1,3 @@
-set(instr_livepatch_sources
-  ${CMAKE_CURRENT_SOURCE_DIR}/XSanDeSanRuntime.cpp
-)
-
 # Instrumentation livepatch is intentionally different from compiler
 # livepatches. Compiler livepatches are PRELOAD DSOs and can cover a symbol's
 # full lifetime by combining dynamic symbol interposition with dynamic binary
@@ -26,29 +22,16 @@ add_library(instr-livepatch-objects OBJECT
 target_include_directories(instr-livepatch-objects PRIVATE
   ${CMAKE_SOURCE_DIR}/src/instrumentation
   ${CMAKE_SOURCE_DIR}/src/livepatch
-  ${CMAKE_SOURCE_DIR}/src/compiler/include
   ${CMAKE_SOURCE_DIR}/src/include
   ${LLVM_INCLUDE_DIRS}
 )
 
-set(XSAN_INSTRUMENTATION_LIVEPATCH_SOURCES
-  ${instr_livepatch_sources}
-  PARENT_SCOPE
-)
 set(XSAN_INSTRUMENTATION_LIVEPATCH_OBJECTS
   $<TARGET_OBJECTS:instr-livepatch-objects>
-  PARENT_SCOPE
-)
-
-set(XSAN_INSTRUMENTATION_LIVEPATCH_VERSION_SCRIPT
-  ${CMAKE_CURRENT_SOURCE_DIR}/xsan-pass.version.map
   PARENT_SCOPE
 )
 
 function(xsan_instrumentation_enable_livepatch target)
   xsan_livepatch_link_core(${target})
   xsan_livepatch_append_shared_llvm_rpath(${target})
-  target_link_options(${target} PRIVATE
-    -Wl,--version-script,${XSAN_INSTRUMENTATION_LIVEPATCH_VERSION_SCRIPT}
-  )
 endfunction()

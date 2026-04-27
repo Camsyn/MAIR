@@ -1,9 +1,8 @@
 #pragma once
 
-#include "livepatch/XSanDeSanRuntime.h"
+#include "livepatch/XSanSanitizingRecorder.h"
 
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/IR/Instructions.h"

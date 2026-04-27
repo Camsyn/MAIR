@@ -257,6 +257,10 @@ static u8 handle_msan_options(const char *arg, u8 is_mllvm_arg, u8 is_neg) {
 
 static u8 handle_ubsan_options(const char *opt) { return 0; }
 
+static u8 *fallback_if_missing(const char *path, u8 *fallback) {
+  return path[0] && !access(path, X_OK) ? (u8 *)path : fallback;
+}
+
 /*
   Ports the arguments for sanitizers to our plugin sanitizers
   Dicards the original argument if return 1.
@@ -447,11 +451,15 @@ static void edit_params(u32 argc, const char **argv) {
   if (!strncmp(name, "xclang++", strlen("xclang++"))) {
     is_cxx = 1;
     u8 *alt_cxx = getenv("X_CXX");
-    cc_params[0] = alt_cxx ? alt_cxx : (u8 *)"clang++";
+    cc_params[0] =
+        alt_cxx ? alt_cxx
+                : fallback_if_missing(XSAN_DEFAULT_CLANGXX, (u8 *)"clang++");
   } else {
     is_cxx = 0;
     u8 *alt_cc = getenv("X_CC");
-    cc_params[0] = alt_cc ? alt_cc : (u8 *)"clang";
+    cc_params[0] = alt_cc
+                       ? alt_cc
+                       : fallback_if_missing(XSAN_DEFAULT_CLANG, (u8 *)"clang");
   }
 
   /* There are two ways to compile afl-clang-fast. In the traditional mode, we

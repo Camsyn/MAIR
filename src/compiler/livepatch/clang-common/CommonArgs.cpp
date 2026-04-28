@@ -11,9 +11,9 @@
 #include <optional>
 
 #include "CommonArgs.h"
+#include "PatchCore.h"
 #include "config_compile.h"
 #include "debug.h"
-#include "PatchCore.h"
 #include "xsan_common.h"
 #include "xsan_llvm_compat.h"
 
@@ -124,8 +124,7 @@ private:
       if (argref.contains("_static")) {
         shouldHasStaticRt = false;
       }
-      if (NewCmdArgs.back() != PreRt &&
-          compat::startsWith(argref, DynList)) {
+      if (NewCmdArgs.back() != PreRt && compat::startsWith(argref, DynList)) {
         NewRt = DynList.data() + NewRt.value();
       }
 

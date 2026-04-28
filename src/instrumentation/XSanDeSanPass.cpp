@@ -1,7 +1,9 @@
 #include "XSanDeSanPass.h"
 
+#include "PatchCore.h"
 #include "Utils/Options.h"
 #include "Utils/UbsanUtils.h"
+#include "livepatch/XSanSanitizingRecorder.h"
 
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/FileSystem.h"
@@ -51,6 +53,7 @@ PreservedAnalyses StagePass::run(Module &M, ModuleAnalysisManager &AM) {
                              getStageName(Stage));
 
   beginStage(Stage);
+  __xsan::InterceptionScope Scope(__xsan::desan::InterceptionGroup);
   PreservedAnalyses PA = Runner(M, AM);
   endStage();
   return PA;

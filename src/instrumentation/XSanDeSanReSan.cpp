@@ -15,9 +15,9 @@ static bool isLaterStage(StageKind LHS, StageKind RHS) {
   return static_cast<uint32_t>(LHS) > static_cast<uint32_t>(RHS);
 }
 
-static Value *resolveReplayReplacement(
-    StageKind Stage, Value *SanitizerValue, const ReplaceArchive &ReplaceArchive,
-    const DeleteArchive &DeleteArchive) {
+static Value *resolveReplayReplacement(StageKind Stage, Value *SanitizerValue,
+                                       const ReplaceArchive &ReplaceArchive,
+                                       const DeleteArchive &DeleteArchive) {
   if (!SanitizerValue)
     return nullptr;
 
@@ -27,7 +27,8 @@ static Value *resolveReplayReplacement(
 
   while (Visited.insert(CurrentValue).second) {
     bool Advanced = false;
-    if (auto It = ReplaceArchive.find(CurrentValue); It != ReplaceArchive.end()) {
+    if (auto It = ReplaceArchive.find(CurrentValue);
+        It != ReplaceArchive.end()) {
       const auto &Next = It->second.front();
       if (isLaterStage(Next.Stage, CurrentStage) && Next.SanitizerValue) {
         CurrentValue = Next.SanitizerValue;

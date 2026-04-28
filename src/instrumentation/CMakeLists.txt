@@ -48,12 +48,14 @@ add_llvm_pass_plugin(ASanInstPass
   PARTIAL_SOURCES_INTENDED # Skip checking for else files
   ${XSAN_PASS_VERSIONED_DIR}/AddressSanitizer.cpp
   ${XSAN_PASS_COMMON}
+  ${XSAN_INSTRUMENTATION_LIVEPATCH_OBJECTS}
 )
 
 add_llvm_pass_plugin(TSanInstPass
   PARTIAL_SOURCES_INTENDED # Skip checking for else files
   ${XSAN_PASS_VERSIONED_DIR}/ThreadSanitizer.cpp
   ${XSAN_PASS_COMMON}
+  ${XSAN_INSTRUMENTATION_LIVEPATCH_OBJECTS}
 )
 
 add_llvm_pass_plugin(CovSanInstPass
@@ -65,6 +67,7 @@ add_llvm_pass_plugin(MSanInstPass
   PARTIAL_SOURCES_INTENDED # Skip checking for else files
   ${XSAN_PASS_VERSIONED_DIR}/MemorySanitizer.cpp
   ${XSAN_PASS_COMMON}
+  ${XSAN_INSTRUMENTATION_LIVEPATCH_OBJECTS}
 )
 
 add_llvm_pass_plugin(XSanInstPass
@@ -107,7 +110,13 @@ foreach(_xsan_pass_target
 endforeach()
 
 target_compile_definitions(XSanInstPass PRIVATE XSAN_PASS)
-add_livepatch_core_into_llvm_plugin(XSanInstPass)
+foreach(_xsan_livepatch_pass_target
+    ASanInstPass
+    TSanInstPass
+    MSanInstPass
+    XSanInstPass)
+  add_livepatch_core_into_llvm_plugin(${_xsan_livepatch_pass_target})
+endforeach()
 
 set_target_properties(ASanInstPass
   TSanInstPass

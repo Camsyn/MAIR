@@ -1,6 +1,7 @@
 #include "AttributeTaggingPass.hpp"
 #include "Instrumentation.h"
 #include "PassRegistry.h"
+#include "PatchCore.h"
 #include "UbsanInstTagging.hpp"
 #include "Utils/Logging.h"
 #include "Utils/Options.h"
@@ -49,49 +50,76 @@ private:
   OptimizationLevel Level;
 };
 
+void addXsanPipelineStartPasses(ModulePassManager &MPM) {
+  // UbsanInstTaggingPass is deliberately a pipeline-start pass.  It tags UBSan
+  // checks before later optimizations and sanitizers consume the IR; unlike the
+  // sanitizer instrumentation passes, it does not need to occupy Clang's
+  // original sanitizer position after SanCov.  Therefore it should be installed
+  // through the normal PipelineStart extension point, not through the
+  // livepatch-based sanitizer-position rewriter.
+  MPM.addPass(UbsanInstTaggingPass());
+}
+
+static void addXsanPipelineStartPassesIntoClang(ModulePassManager &MPM,
+                                                OptimizationLevel) {
+  addXsanPipelineStartPasses(MPM);
+}
+
+void addXsanToMPM(ModulePassManager &MPM, OptimizationLevel Level) {
+  MPM.addPass(SanitizerCompositorPass(Level));
+}
+
+static void addNoSanitizerPositionPasses(ModulePassManager &,
+                                         OptimizationLevel) {}
+
+static void addXsanOptPasses(ModulePassManager &MPM, OptimizationLevel Level) {
+  MPM.addPass(AttributeTaggingPass(SanitizerType::XSan));
+  addXsanPipelineStartPasses(MPM);
+  addXsanToMPM(MPM, Level);
+}
+
 void registerAnalysisForXsan(PassBuilder &PB) {
-  if (!options::ClDisableAsan) {
+  if (!options::ClDisableAsan)
     registerAnalysisForAsan(PB);
-  }
-  if (!options::ClDisableTsan) {
+  if (!options::ClDisableTsan)
     registerAnalysisForTsan(PB);
-  }
-  if (!options::ClDisableMsan) {
+  if (!options::ClDisableMsan)
     registerAnalysisForMsan(PB);
-  }
 }
 
 void registerXsanForClangAndOpt(llvm::PassBuilder &PB) {
   registerAnalysisForXsan(PB);
 
-  // Register on the start of the pipeline.
-  PB.registerPipelineStartEPCallback(
-      [](ModulePassManager &MPM, OptimizationLevel _) {
-        MPM.addPass(UbsanInstTaggingPass());
-      });
-
-  // Register on the end of the pipeline.
-  PB.registerOptimizerLastEPCallback(
-#if LLVM_VERSION_MAJOR >= 22
-      [=](ModulePassManager &MPM, OptimizationLevel level, ThinOrFullLTOPhase) {
-#else
-      [=](ModulePassManager &MPM, OptimizationLevel level) {
-#endif
-        MPM.addPass(SanitizerCompositorPass(level));
-      });
-
-  // 这里注册opt回调的名称
-  PB.registerPipelineParsingCallback(
-      [=](StringRef Name, ModulePassManager &MPM,
-          ArrayRef<PassBuilder::PipelineElement>) {
-        if (Name == "xsan") {
-          MPM.addPass(AttributeTaggingPass(SanitizerType::XSan));
-          MPM.addPass(UbsanInstTaggingPass());
-          MPM.addPass(SanitizerCompositorPass(OptimizationLevel::O0));
-          return true;
-        }
-        return false;
-      });
+  // Clang sanitizer-position passes are not registered through OptimizerLast
+  // here.  Even if we choose the same OptimizerLast extension point as Clang's
+  // original sanitizer callback, the pass plugin callback is registered earlier
+  // and therefore runs before Clang adds SanCov.  XSan must respect Clang's
+  // original ordering (SanCov before sanitizer passes), so the instrumentation
+  // livepatch rewrites the final ModulePassManager by replacing the original
+  // sanitizer anchor with this compositor pass.
+  //
+  // UbsanInstTaggingPass is different: it is intentionally inserted at pipeline
+  // start rather than at the sanitizer position, so it should keep using the
+  // regular extension point instead of the livepatch rewriter.
+  //
+  // Keep the opt parsing entry: explicit `opt -passes=xsan` has no Clang
+  // sanitizer callback to rewrite and should still build the XSan pass group
+  // directly.
+  //
+  //     PB.registerOptimizerLastEPCallback(
+  // #if LLVM_VERSION_MAJOR >= 22
+  //       [=](ModulePassManager &MPM, OptimizationLevel level,
+  //       ThinOrFullLTOPhase) {
+  // #else
+  //       [=](ModulePassManager &MPM, OptimizationLevel level) {
+  // #endif
+  //         MPM.addPass(SanitizerCompositorPass(level));
+  //       });
+  PassRegistry.registerSanitizerPassIntoClang(
+      getXsanMask().none() ? addNoSanitizerPositionPasses : addXsanToMPM);
+  PassRegistry.registerStartPassIntoClang(addXsanPipelineStartPassesIntoClang);
+  PassRegistry.registerPassIntoOpt("xsan", addXsanOptPasses);
+  PassRegistry.delegateNonSanPassTo(PB);
 }
 
 } // namespace __xsan

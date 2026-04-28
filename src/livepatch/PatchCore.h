@@ -5,9 +5,8 @@
 #include "debug.h"
 #include "xsan_common.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/StringMap.h"
-#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Mutex.h"
 #include <bitset>
 #include <cassert>
@@ -27,6 +26,21 @@ template <typename FunPtr = void *,
               std::is_same_v<FunPtr, void *>>>
 class ManualInterception;
 
+struct SourceLocation {
+  const char *File = "<unknown>";
+  const char *Function = "<unknown>";
+  unsigned Line = 0;
+
+  // C++17-compatible source-location shim.  Clang/GCC evaluate these builtins
+  // at the caller of SourceLocation::current(), giving each Interception
+  // construction site without requiring every call site to pass metadata.
+  static constexpr SourceLocation
+  current(const char *File = __builtin_FILE(), unsigned Line = __builtin_LINE(),
+          const char *Function = __builtin_FUNCTION()) {
+    return {File, Function, Line};
+  }
+};
+
 class ManualInterceptionController {
 public:
   virtual ~ManualInterceptionController() = default;
@@ -40,6 +54,10 @@ void registerManualInterception(llvm::StringRef Group,
                                 ManualInterceptionController *Interceptor);
 llvm::ArrayRef<ManualInterceptionController *>
 getManualInterceptionGroup(llvm::StringRef Group);
+void registerActiveInterception(void *IntercepteeAddr,
+                                llvm::StringRef MangledName,
+                                SourceLocation Location, const void *Owner);
+void unregisterActiveInterception(void *IntercepteeAddr, const void *Owner);
 
 template <typename FunTy1, typename FunTy2>
 struct IsAbiCompatibleFunTyPair
@@ -86,6 +104,9 @@ std::filesystem::path getXsanArchRtDir(std::string_view triple = "");
 std::filesystem::path getSelfPath();
 // Return true if the executable file is PIE
 bool is_self_proc_pie();
+// Return the dynamic symbol name for an address, or null if the loader has no
+// symbol name for it.
+const char *getMangledName(void *SymAddr);
 // Return the base address of the executable file
 /// TODO: support base address resolution for shared library.
 void *get_base_address();
@@ -94,9 +115,19 @@ void *get_base_address();
 /// We should find a better way to filter out irrelevant processes.
 bool isPatchingProc(const char *proc_name);
 
-// Find the symbol in the main executable or other DSOs.
-// 1. Search it by RTLD_NEXT first.
-// 2. If not found, try to find it via RTLD_DEFAULT.
+// Find the real interceptee in the executable or ordinary DSOs.
+//
+// Dynamic-symbol-only rule:
+//   1. RTLD_DEFAULT finds the interceptee directly when it appears before the
+//      livepatch DSO; executable dynsym entries are included in this case.
+//   2. If RTLD_DEFAULT lands on this livepatch DSO, RTLD_NEXT finds the
+//      interceptee that appears after it.
+//
+// This relies on the livepatch invariant enforced at Interception construction:
+// the same dynamic symbol must not be intercepted more than once, and there is
+// only one same-name interceptor for a symbol.  Non-dynsym executable symbols
+// are intentionally unsupported here; future support should use shared ELF
+// utilities rather than ad-hoc parsing in this path.
 void *getIntercepteeAddr(const char *MangledName, void *DsoAnchor = nullptr);
 void *getIntercepteeAddr(void *InterceptorFunc);
 // Resolve a real function by the mangled name of another symbol. This is used
@@ -228,8 +259,7 @@ protected:
 };
 
 template <typename DeriveTy, typename FunPtr>
-class InterceptionFunctor
-    : public InterceptionFunctorBase<DeriveTy, void *> {
+class InterceptionFunctor : public InterceptionFunctorBase<DeriveTy, void *> {
 protected:
   using ScopedCall =
       typename InterceptionFunctorBase<DeriveTy, void *>::ScopedCall;
@@ -241,8 +271,7 @@ class InterceptionFunctor<DeriveTy, Ret (*)(Args...)>
     : public InterceptionFunctorBase<DeriveTy, Ret (*)(Args...)> {
 protected:
   using ScopedCall =
-      typename InterceptionFunctorBase<DeriveTy,
-                                          Ret (*)(Args...)>::ScopedCall;
+      typename InterceptionFunctorBase<DeriveTy, Ret (*)(Args...)>::ScopedCall;
 
 public:
   Ret operator()(Args... args) {
@@ -258,7 +287,7 @@ class InterceptionFunctor<DeriveTy, Ret (*)(Args..., ...)>
 protected:
   using ScopedCall =
       typename InterceptionFunctorBase<DeriveTy,
-                                          Ret (*)(Args..., ...)>::ScopedCall;
+                                       Ret (*)(Args..., ...)>::ScopedCall;
 
 public:
   template <typename... CallArgs> Ret operator()(CallArgs &&...args) {
@@ -275,7 +304,7 @@ class InterceptionFunctor<DeriveTy, Ret (Class::*)(Args...)>
 protected:
   using ScopedCall =
       typename InterceptionFunctorBase<DeriveTy,
-                                          Ret (Class::*)(Args...)>::ScopedCall;
+                                       Ret (Class::*)(Args...)>::ScopedCall;
 
 public:
   Ret operator()(Class *obj, Args... args) {
@@ -335,9 +364,8 @@ template <typename FunPtr = void *,
               std::is_function_v<std::remove_pointer_t<FunPtr>> ||
               std::is_member_function_pointer_v<FunPtr> ||
               std::is_same_v<FunPtr, void *>>>
-class Interception
-    : public InterceptionFunctor<Interception<FunPtr>,
-                                    std::remove_cv_t<FunPtr>> {
+class Interception : public InterceptionFunctor<Interception<FunPtr>,
+                                                std::remove_cv_t<FunPtr>> {
   using BaseTy =
       InterceptionFunctor<Interception<FunPtr>, std::remove_cv_t<FunPtr>>;
   friend BaseTy;
@@ -370,28 +398,34 @@ protected:
   }
 
 public:
-  Interception(FunPtr Interceptor, llvm::ArrayRef<const char *> target_procs)
+  Interception(FunPtr Interceptor, llvm::ArrayRef<const char *> target_procs,
+               SourceLocation Location = SourceLocation::current())
       : Interception(getFunctionAddress(Interceptor), nullptr, nullptr,
-                     target_procs, InitialInterceptionState::Enabled) {}
+                     target_procs, InitialInterceptionState::Enabled, nullptr,
+                     Location) {}
   Interception(FunPtr Interceptor, const char *IntercepteeMangledName,
-               llvm::ArrayRef<const char *> target_procs)
+               llvm::ArrayRef<const char *> target_procs,
+               SourceLocation Location = SourceLocation::current())
       : Interception(getFunctionAddress(Interceptor), IntercepteeMangledName,
-                     nullptr, target_procs,
-                     InitialInterceptionState::Enabled) {}
+                     nullptr, target_procs, InitialInterceptionState::Enabled,
+                     nullptr, Location) {}
   template <typename InterceptorFunPtr>
   Interception(InterceptorFunPtr Interceptor, FunPtr Interceptee,
-               llvm::ArrayRef<const char *> target_procs)
+               llvm::ArrayRef<const char *> target_procs,
+               SourceLocation Location = SourceLocation::current())
       : Interception(getCheckedInterceptorAddress(Interceptor), nullptr,
                      getFunctionAddress(Interceptee), target_procs,
-                     InitialInterceptionState::Enabled) {}
+                     InitialInterceptionState::Enabled, nullptr, Location) {}
   Interception(const char *MangledName,
-               llvm::ArrayRef<const char *> target_procs)
+               llvm::ArrayRef<const char *> target_procs,
+               SourceLocation Location = SourceLocation::current())
       : Interception(nullptr, MangledName, nullptr, target_procs,
-                     InitialInterceptionState::Enabled) {}
+                     InitialInterceptionState::Enabled, nullptr, Location) {}
   Interception(const char *MangledName,
-               llvm::ArrayRef<const char *> target_procs, void *DsoAnchor)
+               llvm::ArrayRef<const char *> target_procs, void *DsoAnchor,
+               SourceLocation Location = SourceLocation::current())
       : Interception(nullptr, MangledName, nullptr, target_procs,
-                     InitialInterceptionState::Enabled, DsoAnchor) {}
+                     InitialInterceptionState::Enabled, DsoAnchor, Location) {}
   Interception(const Interception &) = delete;
   Interception(Interception &&) = delete;
   Interception &operator=(const Interception &) = delete;
@@ -399,6 +433,7 @@ public:
   ~Interception() {
     llvm::sys::SmartScopedLock<true> Guard(Mutex);
     recoverInterceptee();
+    unregisterInterceptionIfNeeded();
   }
 
   /// Return whether the current thread is re-entering this interceptor while an
@@ -409,45 +444,51 @@ public:
   }
 
 protected:
+  // Internal/protected constructors intentionally require an explicit
+  // SourceLocation.  A default argument here would be evaluated at the
+  // delegating/subclass constructor site, not necessarily at the user
+  // construction site that we want to report.
   Interception(FunPtr Interceptor, llvm::ArrayRef<const char *> target_procs,
-               InitialInterceptionState InitialState)
+               InitialInterceptionState InitialState, SourceLocation Location)
       : Interception(getFunctionAddress(Interceptor), nullptr, nullptr,
-                     target_procs, InitialState) {}
+                     target_procs, InitialState, nullptr, Location) {}
   Interception(FunPtr Interceptor, const char *IntercepteeMangledName,
                llvm::ArrayRef<const char *> target_procs,
-               InitialInterceptionState InitialState)
+               InitialInterceptionState InitialState, SourceLocation Location)
       : Interception(getFunctionAddress(Interceptor), IntercepteeMangledName,
-                     nullptr, target_procs, InitialState) {}
+                     nullptr, target_procs, InitialState, nullptr, Location) {}
   template <typename InterceptorFunPtr>
   Interception(InterceptorFunPtr Interceptor, FunPtr Interceptee,
                llvm::ArrayRef<const char *> target_procs,
-               InitialInterceptionState InitialState)
+               InitialInterceptionState InitialState, SourceLocation Location)
       : Interception(getCheckedInterceptorAddress(Interceptor), nullptr,
                      getFunctionAddress(Interceptee), target_procs,
-                     InitialState) {}
+                     InitialState, nullptr, Location) {}
   Interception(const char *MangledName,
                llvm::ArrayRef<const char *> target_procs,
-               InitialInterceptionState InitialState)
-      : Interception(nullptr, MangledName, nullptr, target_procs,
-                     InitialState) {}
-  Interception(const char *MangledName,
-               llvm::ArrayRef<const char *> target_procs,
-               InitialInterceptionState InitialState, void *DsoAnchor)
+               InitialInterceptionState InitialState, SourceLocation Location)
       : Interception(nullptr, MangledName, nullptr, target_procs, InitialState,
-                     DsoAnchor) {}
+                     nullptr, Location) {}
+  Interception(const char *MangledName,
+               llvm::ArrayRef<const char *> target_procs,
+               InitialInterceptionState InitialState, void *DsoAnchor,
+               SourceLocation Location)
+      : Interception(nullptr, MangledName, nullptr, target_procs, InitialState,
+                     DsoAnchor, Location) {}
 
   // The single full constructor. Short constructors above only fill these
   // optional knobs:
-  // - InterceptorAddr: patch target jumps here; if null, resolve by mangled name
+  // - InterceptorAddr: patch target jumps here; if null, resolve by mangled
+  // name
   // - IntercepteeMangledName: explicit real function name
   // - IntercepteeSymbol: explicit real function symbol; wins over mangled name
   // - DsoAnchor: patch DSO identity when resolving same-name hooks
   Interception(void *InterceptorAddr, const char *IntercepteeMangledName,
                void *IntercepteeSymbol,
                llvm::ArrayRef<const char *> target_procs,
-               InitialInterceptionState InitialState,
-               void *DsoAnchor = nullptr)
-      : target_procs(target_procs) {
+               InitialInterceptionState InitialState, void *DsoAnchor,
+               SourceLocation Location)
+      : target_procs(target_procs), DefinitionLocation(Location) {
     if (!llvm::any_of(target_procs, isPatchingProc))
       return;
 
@@ -467,6 +508,9 @@ protected:
     } else {
       this->SetInterceptee(getIntercepteeAddr(this->GetInterceptor()));
     }
+    if (IntercepteeMangledName)
+      RegisteredMangledName = IntercepteeMangledName;
+    registerInterception();
     InitPatch(InitialState);
   }
 
@@ -509,14 +553,40 @@ protected:
     Modified = true;
   }
 
+  llvm::StringRef getRegisteredMangledName() const {
+    if (!RegisteredMangledName.empty())
+      return RegisteredMangledName;
+    if (const char *Name = getMangledName(this->GetInterceptee()))
+      return Name;
+    return "<unknown>";
+  }
+
+  void registerInterception() {
+    RegisteredMangledName = getRegisteredMangledName().str();
+    detail::registerActiveInterception(this->GetInterceptee(),
+                                       RegisteredMangledName,
+                                       DefinitionLocation, this);
+    InterceptionRegistered = true;
+  }
+
+  void unregisterInterceptionIfNeeded() {
+    if (!InterceptionRegistered)
+      return;
+    detail::unregisterActiveInterception(this->GetInterceptee(), this);
+    InterceptionRegistered = false;
+  }
+
   void InitPatch(InitialInterceptionState InitialState) {
     if (XsanPatch::isPatched(this->GetInterceptee())) {
-      FATAL("Function %p is already patched.", this->GetInterceptor());
+      FATAL("Function %p is already patched before installing interception "
+            "for %s at %s:%u (%s).",
+            this->GetInterceptee(), RegisteredMangledName.c_str(),
+            DefinitionLocation.File, DefinitionLocation.Line,
+            DefinitionLocation.Function);
     }
     Patch.initialize(this->GetInterceptor(), this->GetInterceptee());
     Initialized = true;
-    InterceptionEnabled =
-        InitialState == InitialInterceptionState::Enabled;
+    InterceptionEnabled = InitialState == InitialInterceptionState::Enabled;
     if (InitialState == InitialInterceptionState::Enabled)
       injectTrampoline();
   }
@@ -552,9 +622,12 @@ protected:
   // Support recursive lock.
   mutable llvm::sys::SmartMutex<true> Mutex;
   unsigned CallDepth = 0;
+  SourceLocation DefinitionLocation;
+  std::string RegisteredMangledName;
   bool Modified = false;
   bool Initialized = false;
   bool InterceptionEnabled = false;
+  bool InterceptionRegistered = false;
 };
 
 /// Disabled-by-default livepatch plus callable handle to the original
@@ -566,8 +639,9 @@ protected:
 ///
 /// Extra parameter:
 /// - Group: optional registry key. Empty Group means "do not register"; control
-///   this object only with enableInterception()/disableInterception(). Non-empty
-///   Group lets InterceptionScope(Group) enable/disable all registered entries.
+///   this object only with enableInterception()/disableInterception().
+///   Non-empty Group lets InterceptionScope(Group) enable/disable all
+///   registered entries.
 ///
 /// Quick use:
 ///   static ManualInterception I(&foo, {"clang"});        // no registry
@@ -598,41 +672,43 @@ class ManualInterception : public Interception<FunPtr>,
 public:
   ManualInterception(FunPtr Interceptor,
                      llvm::ArrayRef<const char *> target_procs,
-                     llvm::StringRef Group = {})
+                     llvm::StringRef Group = {},
+                     SourceLocation Location = SourceLocation::current())
       : ManualInterception(BaseTy::getFunctionAddress(Interceptor), nullptr,
-                           nullptr, target_procs, Group) {}
+                           nullptr, target_procs, Group, nullptr, Location) {}
 
   template <typename InterceptorFunPtr>
   ManualInterception(InterceptorFunPtr Interceptor, FunPtr Interceptee,
                      llvm::ArrayRef<const char *> target_procs,
-                     llvm::StringRef Group = {})
+                     llvm::StringRef Group = {},
+                     SourceLocation Location = SourceLocation::current())
       : ManualInterception(
             BaseTy::template getCheckedInterceptorAddress<InterceptorFunPtr>(
                 Interceptor),
             nullptr, BaseTy::getFunctionAddress(Interceptee), target_procs,
-            Group) {}
+            Group, nullptr, Location) {}
 
   ManualInterception(FunPtr Interceptor, const char *IntercepteeMangledName,
                      llvm::ArrayRef<const char *> target_procs,
-                     llvm::StringRef Group = {})
+                     llvm::StringRef Group = {},
+                     SourceLocation Location = SourceLocation::current())
       : ManualInterception(BaseTy::getFunctionAddress(Interceptor),
-                           IntercepteeMangledName, nullptr, target_procs,
-                           Group) {}
+                           IntercepteeMangledName, nullptr, target_procs, Group,
+                           nullptr, Location) {}
 
   ManualInterception(const char *MangledName,
                      llvm::ArrayRef<const char *> target_procs,
-                     llvm::StringRef Group = {}, void *DsoAnchor = nullptr)
+                     llvm::StringRef Group = {}, void *DsoAnchor = nullptr,
+                     SourceLocation Location = SourceLocation::current())
       : ManualInterception(nullptr, MangledName, nullptr, target_procs, Group,
-                           DsoAnchor) {}
+                           DsoAnchor, Location) {}
 
   ManualInterception(const ManualInterception &) = delete;
   ManualInterception(ManualInterception &&) = delete;
   ManualInterception &operator=(const ManualInterception &) = delete;
   ManualInterception &operator=(ManualInterception &&) = delete;
 
-  ~ManualInterception() {
-    BaseTy::disableInterceptionPatch();
-  }
+  ~ManualInterception() { BaseTy::disableInterceptionPatch(); }
 
   void enableInterception() override { BaseTy::enableInterceptionPatch(); }
 
@@ -642,10 +718,11 @@ private:
   ManualInterception(void *InterceptorAddr, const char *IntercepteeMangledName,
                      void *IntercepteeSymbol,
                      llvm::ArrayRef<const char *> target_procs,
-                     llvm::StringRef Group = {}, void *DsoAnchor = nullptr)
+                     llvm::StringRef Group, void *DsoAnchor,
+                     SourceLocation Location)
       : BaseTy(InterceptorAddr, IntercepteeMangledName, IntercepteeSymbol,
                target_procs, BaseTy::InitialInterceptionState::Disabled,
-               DsoAnchor),
+               DsoAnchor, Location),
         Group(Group.str()) {
     registerGroupIfRequested();
   }

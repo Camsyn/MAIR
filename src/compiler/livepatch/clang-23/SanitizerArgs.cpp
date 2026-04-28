@@ -363,7 +363,8 @@ bool SanitizerArgs::needsUbsanRt() const {
   // All of these include ubsan.
   if (needsAsanRt() || needsMsanRt() || needsNsanRt() || needsHwasanRt() ||
       needsTsanRt() || needsDfsanRt() || needsLsanRt() || needsTysanRt() ||
-      needsCfiCrossDsoDiagRt() || (needsScudoRt() && !requiresMinimalRuntime()) ||
+      needsCfiCrossDsoDiagRt() ||
+      (needsScudoRt() && !requiresMinimalRuntime()) ||
       (__xsan::isXsanEnabled() && __xsan::getSanType() != UBSan))
     return false;
 

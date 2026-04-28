@@ -141,7 +141,7 @@ void saveAndUndefineOperands(StageRecorder &Recorder, llvm::Instruction &I,
     llvm::Value *Operand =
         CachedOperands ? (*CachedOperands)[IOp] : I.getOperand(IOp);
     Event.Operands.push_back(Operand);
-    I.setOperand(IOp, llvm::UndefValue::get(Operand->getType()));
+    I.setOperand(IOp, llvm::PoisonValue::get(Operand->getType()));
   }
 }
 
@@ -349,7 +349,7 @@ void ReplaceInstWithInst(llvm::Instruction *From, llvm::Instruction *To) {
   ReplaceInstWithInstInterceptee(From, To);
 }
 
-// Keep the following comments for potential future interception of 
+// Keep the following comments for potential future interception of
 // BasicBlock::eraseFromParent
 
 // static __xsan::Interception

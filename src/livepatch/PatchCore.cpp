@@ -1,6 +1,8 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 #include <cstdio>
+#include <cstring>
 #include <dlfcn.h>
 #include <elf.h>
 #include <filesystem>
@@ -10,6 +12,9 @@
 #include <llvm/Support/Process.h>
 #include <optional>
 #include <string_view>
+#include <system_error>
+#include <unistd.h>
+#include <vector>
 
 #if LLVM_VERSION_MAJOR >= 22
 #include <llvm/TargetParser/Host.h>
@@ -59,6 +64,64 @@ ManualInterceptionRegistry &getRegistry() {
   return Registry;
 }
 
+class ActiveInterceptionRegistry {
+public:
+  void registerInterception(void *IntercepteeAddr, llvm::StringRef MangledName,
+                            SourceLocation Location, const void *Owner) {
+    llvm::sys::SmartScopedLock<true> Guard(Mutex);
+    for (const Entry &Existing : Entries) {
+      if (Existing.IntercepteeAddr != IntercepteeAddr)
+        continue;
+      if (Existing.Owner == Owner)
+        return;
+
+      // A second livepatch for the same dynamic symbol makes symbol lookup
+      // ambiguous: RTLD_DEFAULT/RTLD_NEXT can no longer be described by the
+      // simple two-case relationship between the sole interceptor and the real
+      // interceptee.  Fail fast and print both construction sites so the owner
+      // can remove the duplicate instead of debugging a mis-patched process.
+      FATAL("Attempted to intercept the same symbol twice.\n"
+            "  Interceptee address: %p\n"
+            "  Mangled name: %s\n"
+            "  First interception: %s:%u (%s)\n"
+            "  Second interception: %s:%u (%s)",
+            IntercepteeAddr, Existing.MangledName.c_str(),
+            Existing.Location.File, Existing.Location.Line,
+            Existing.Location.Function, Location.File, Location.Line,
+            Location.Function);
+    }
+    Entries.push_back({IntercepteeAddr, MangledName.str(), Location, Owner});
+  }
+
+  void unregisterInterception(void *IntercepteeAddr, const void *Owner) {
+    llvm::sys::SmartScopedLock<true> Guard(Mutex);
+    for (auto It = Entries.begin(), End = Entries.end(); It != End; ++It) {
+      if (It->IntercepteeAddr == IntercepteeAddr && It->Owner == Owner) {
+        Entries.erase(It);
+        return;
+      }
+    }
+  }
+
+private:
+  struct Entry {
+    void *IntercepteeAddr = nullptr;
+    std::string MangledName;
+    SourceLocation Location;
+    const void *Owner = nullptr;
+  };
+
+  llvm::sys::SmartMutex<true> Mutex;
+  std::vector<Entry> Entries;
+};
+
+ActiveInterceptionRegistry &getActiveInterceptionRegistry() {
+  // Intentionally leaked to avoid static-destruction-order problems: global
+  // Interception objects may unregister while the process is tearing down.
+  static auto *Registry = new ActiveInterceptionRegistry();
+  return *Registry;
+}
+
 } // namespace
 
 void registerManualInterception(llvm::StringRef Group,
@@ -69,6 +132,18 @@ void registerManualInterception(llvm::StringRef Group,
 llvm::ArrayRef<ManualInterceptionController *>
 getManualInterceptionGroup(llvm::StringRef Group) {
   return getRegistry().get(Group);
+}
+
+void registerActiveInterception(void *IntercepteeAddr,
+                                llvm::StringRef MangledName,
+                                SourceLocation Location, const void *Owner) {
+  getActiveInterceptionRegistry().registerInterception(
+      IntercepteeAddr, MangledName, Location, Owner);
+}
+
+void unregisterActiveInterception(void *IntercepteeAddr, const void *Owner) {
+  getActiveInterceptionRegistry().unregisterInterception(IntercepteeAddr,
+                                                         Owner);
 }
 
 } // namespace detail
@@ -203,10 +278,19 @@ fs::path getThisPatchDsoPath() {
   return this_dso_path.value();
 }
 
+static fs::path canonicalizeDsoPath(const fs::path &Path) {
+  if (Path.empty())
+    return fs::path();
+
+  std::error_code EC;
+  fs::path Canonical = fs::weakly_canonical(Path, EC);
+  return EC ? Path : Canonical;
+}
+
 static fs::path getDsoPathFromAddr(void *SymAddr) {
   Dl_info info;
   if (dladdr(SymAddr, &info) != 0 && info.dli_fname)
-    return fs::canonical(info.dli_fname);
+    return canonicalizeDsoPath(info.dli_fname);
   return fs::path();
 }
 
@@ -298,7 +382,7 @@ std::string getXsanCombName(const std::bitset<NumSanitizerTypes> &xsan_mask) {
   }
 }
 
-static const char *getMangledName(void *SymAddr) {
+const char *getMangledName(void *SymAddr) {
   Dl_info Info;
   if (!dladdr(SymAddr, &Info)) {
     FATAL("dladdr failed for address %p. Error: %s", SymAddr,
@@ -316,35 +400,131 @@ static const char *getDSOName(void *SymAddr) {
   return Info.dli_fname;
 }
 
-// Find the symbol in the main executable or other DSOs.
-// 1. Search it by RTLD_NEXT first.
-// 2. If not found, try to find it via RTLD_DEFAULT.
-void *getIntercepteeAddr(const char *MangledName, void *DsoAnchor) {
-  void *addr = nullptr;
-  dlerror(); // clear previous error
-  addr = dlsym(RTLD_NEXT, MangledName);
-  const char *err = dlerror();
-  // If RTLD_NEXT found the symbol, return it.
-  if (addr && !err)
-    return addr;
+namespace {
 
-    // RTLD_NEXT not found, try RTLD_DEFAULT (e.g., symbol might exist in the
-  // executable)
-  addr = dlsym(RTLD_DEFAULT, MangledName);
-  err = dlerror();
-  if (!addr || err)
-    FATAL("getIntercepteeAddr: cannot find symbol %s, RTLD_NEXT/RTLD_DEFAULT "
-          "both failed: %s",
-          MangledName, err ? err : "null");
-  // If RTLD_DEFAULT returns the symbol of patch so, it means the symbol cannot
-  // be found either in the executable or other DSOs.
-  const char *DSOName = getDSOName(addr);
-  auto selfPatchDso =
-      DsoAnchor ? getDsoPathFromAddr(DsoAnchor) : getThisPatchDsoPath();
-  std::string patchName = selfPatchDso.filename().string();
-  if (compat::endsWith(llvm::StringRef(DSOName), patchName))
-    FATAL("Cannot find the real addr for dynamic symbol %s", MangledName);
-  return addr;
+struct LivepatchModuleMatcher {
+  fs::path AnchorPath;
+  std::string AnchorFilename;
+
+  explicit LivepatchModuleMatcher(void *DsoAnchor) {
+    AnchorPath =
+        DsoAnchor ? getDsoPathFromAddr(DsoAnchor) : getThisPatchDsoPath();
+    AnchorPath = canonicalizeDsoPath(AnchorPath);
+    AnchorFilename = AnchorPath.filename().string();
+  }
+
+  bool isLivepatchPath(const fs::path &Path) const {
+    fs::path CanonicalPath = canonicalizeDsoPath(Path);
+    if (CanonicalPath.empty())
+      return false;
+    if (!AnchorPath.empty() && CanonicalPath == AnchorPath)
+      return true;
+    return !AnchorFilename.empty() &&
+           CanonicalPath.filename() == AnchorFilename;
+  }
+
+  bool isLivepatchAddr(void *Addr) const {
+    return isLivepatchPath(getDsoPathFromAddr(Addr));
+  }
+};
+
+struct DynamicSymbolLookup {
+  const char *MangledName = nullptr;
+  const LivepatchModuleMatcher *Matcher = nullptr;
+  void *Addr = nullptr;
+};
+
+static int lookupDynamicSymbolInLoadedObject(dl_phdr_info *Info, size_t,
+                                             void *Data) {
+  auto &Lookup = *static_cast<DynamicSymbolLookup *>(Data);
+
+  const bool IsMainExecutable = !Info->dlpi_name || !Info->dlpi_name[0];
+  fs::path ObjectPath =
+      IsMainExecutable ? getSelfPath() : canonicalizeDsoPath(Info->dlpi_name);
+  if (Lookup.Matcher->isLivepatchPath(ObjectPath))
+    return 0;
+
+  void *Handle = nullptr;
+  if (IsMainExecutable) {
+    Handle = dlopen(nullptr, RTLD_LAZY);
+  } else {
+    Handle = dlopen(ObjectPath.c_str(), RTLD_LAZY | RTLD_NOLOAD);
+  }
+  if (!Handle)
+    return 0;
+
+  dlerror();
+  void *Addr = dlsym(Handle, Lookup.MangledName);
+  const char *Err = dlerror();
+  if (!IsMainExecutable)
+    dlclose(Handle);
+
+  if (!Addr || Err || Lookup.Matcher->isLivepatchAddr(Addr))
+    return 0;
+
+  Lookup.Addr = Addr;
+  return 1;
+}
+
+static void *
+findNonLivepatchDynamicSymbol(const char *MangledName,
+                              const LivepatchModuleMatcher &Matcher) {
+  DynamicSymbolLookup Lookup{MangledName, &Matcher, nullptr};
+  dl_iterate_phdr(lookupDynamicSymbolInLoadedObject, &Lookup);
+  return Lookup.Addr;
+}
+
+} // namespace
+
+// Find the real interceptee symbol, not the livepatch replacement.
+//
+// Prefer the loader's normal global/next lookups for the two common dynamic
+// relationships:
+//   1. interceptee before interceptor: RTLD_DEFAULT may see the real symbol;
+//   2. interceptor before interceptee: RTLD_NEXT may see the real symbol.
+//
+// Some toolchains expose the interceptee from the executable dynsym, but
+// RTLD_DEFAULT still resolves to the preloaded livepatch interceptor and
+// RTLD_NEXT cannot walk "back" to the executable.  For that case, scan loaded
+// objects and query each object handle with dlsym, still limiting support to
+// dlsym-visible dynamic symbols.
+//
+// We intentionally rely only on dlsym-visible dynamic symbols here.  Executable
+// dynsym entries are covered by RTLD_DEFAULT; non-dynsym executable symbols are
+// future work and should be implemented with the shared ELF utilities, not
+// custom parsing in this path.
+void *getIntercepteeAddr(const char *MangledName, void *DsoAnchor) {
+  LivepatchModuleMatcher Matcher(DsoAnchor);
+
+  dlerror();
+  void *Addr = dlsym(RTLD_DEFAULT, MangledName);
+  const char *Err = dlerror();
+  if (Addr && !Err && !Matcher.isLivepatchAddr(Addr))
+    return Addr;
+
+  if (Addr && !Err) {
+    dlerror();
+    void *NextAddr = dlsym(RTLD_NEXT, MangledName);
+    const char *NextErr = dlerror();
+    if (NextAddr && !NextErr && !Matcher.isLivepatchAddr(NextAddr))
+      return NextAddr;
+
+    if (void *ObjectAddr = findNonLivepatchDynamicSymbol(MangledName, Matcher))
+      return ObjectAddr;
+
+    FATAL("Cannot find the real interceptee addr for symbol %s after "
+          "RTLD_DEFAULT found the livepatch interceptor at %p. RTLD_NEXT "
+          "returned %p%s%s",
+          MangledName, Addr, NextAddr, NextErr ? ": " : "",
+          NextErr ? NextErr : "");
+  }
+
+  if (void *ObjectAddr = findNonLivepatchDynamicSymbol(MangledName, Matcher))
+    return ObjectAddr;
+
+  FATAL("Cannot find the real interceptee addr for symbol %s via "
+        "RTLD_DEFAULT: %s",
+        MangledName, Err ? Err : "not found");
 }
 
 void *getIntercepteeAddr(void *InterceptorFunc) {

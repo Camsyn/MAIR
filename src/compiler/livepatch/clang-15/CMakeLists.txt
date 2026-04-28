@@ -26,7 +26,6 @@ add_dso_livepatch(clang-patch
     SOURCES
       BackendUtil.cpp
       CommonArgs.cpp
-      PassBuilderPipelines.cpp
       SanitizerArgs.cpp
       ../clang-common/CommonArgs.cpp
 )

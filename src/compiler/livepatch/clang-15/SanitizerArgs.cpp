@@ -5,10 +5,10 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
-#include <clang/Driver/SanitizerArgs.h>
 #include <clang/Basic/Sanitizers.h>
 #include <clang/Driver/Driver.h>
 #include <clang/Driver/Options.h>
+#include <clang/Driver/SanitizerArgs.h>
 #include <clang/Driver/ToolChain.h>
 #include <llvm/ADT/StringSwitch.h>
 #include <llvm/Support/AArch64TargetParser.h>

@@ -13,6 +13,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # and instrumentation-side late patching.
 set(XSAN_LIVEPATCH_LLVM_DYLIB_VERSION_SCRIPT
     "${CMAKE_CURRENT_LIST_DIR}/simple_version_script.map.in")
+set_property(GLOBAL PROPERTY XSAN_LIVEPATCH_LLVM_DYLIB_VERSION_SCRIPT
+  "${XSAN_LIVEPATCH_LLVM_DYLIB_VERSION_SCRIPT}")
 
 get_target_property(_llvmsupport_type LLVMSupport TYPE)
 if(TARGET LLVM)
@@ -247,7 +249,13 @@ function(add_dso_livepatch target)
       message(STATUS "LLVM_SHLIB_SYMBOL_VERSION: ${LLVM_SHLIB_SYMBOL_VERSION}")
       set(_xsan_version_script_output
         ${CMAKE_CURRENT_BINARY_DIR}/simple_version_script.map)
-      configure_file(${XSAN_LIVEPATCH_LLVM_DYLIB_VERSION_SCRIPT}
+      get_property(_xsan_version_script_input GLOBAL PROPERTY
+        XSAN_LIVEPATCH_LLVM_DYLIB_VERSION_SCRIPT)
+      if(NOT _xsan_version_script_input)
+        message(FATAL_ERROR
+          "XSAN_LIVEPATCH_LLVM_DYLIB_VERSION_SCRIPT is not configured")
+      endif()
+      configure_file(${_xsan_version_script_input}
                      ${_xsan_version_script_output} @ONLY)
       target_link_options(${target} PRIVATE
         -Wl,--version-script,${_xsan_version_script_output})

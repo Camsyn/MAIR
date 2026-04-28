@@ -27,6 +27,12 @@ void clang::EmitBackendOutput(DiagnosticsEngine &Diags,
   LangOptions NewLangOpts = LOpts;
   if (__xsan::isXsanEnabled()) {
     NewLangOpts.Sanitize.clear(HackedSanitizers);
+    // Keep a single original ASan pass as a pipeline anchor.  The XSan pass
+    // plugin removes this anchor from the final ModulePassManager and inserts
+    // the selected XSan/custom sanitizer pass group at the same position.  This
+    // preserves Clang's sanitizer ordering, especially SanCov before sanitizer
+    // instrumentation, without letting the original ASan pass run.
+    NewLangOpts.Sanitize.set(SanitizerKind::Address, true);
   }
   Interceptee(Diags, HeaderOpts, CGOpts, TOpts, NewLangOpts, TDesc, M, Action,
               std::move(OS));

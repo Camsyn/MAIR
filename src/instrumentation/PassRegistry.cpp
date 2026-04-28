@@ -1,10 +1,7 @@
 #include "PassRegistry.h"
 #include "AttributeTaggingPass.hpp"
-#include "PatchCore.h"
 #include "Utils/Options.h"
 #include "XSanDeSanPass.h"
-#include "livepatch/XSanSanitizingRecorder.h"
-
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -24,12 +21,6 @@
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
 #include "llvm/Transforms/Scalar/TailRecursionElimination.h"
 #include "llvm/Transforms/Utils/Mem2Reg.h"
-#include <optional>
-
-#if LLVM_VERSION_MAJOR >= 23
-#include "llvm/Analysis/GlobalsModRef.h"
-#include "llvm/Transforms/Scalar/JumpThreading.h"
-#endif
 
 using namespace llvm;
 
@@ -121,6 +112,52 @@ static cl::opt<bool>
                                cl::Hidden, cl::init(false));
 namespace __xsan {
 
+void PassRegistry::registerPassIntoOpt(StringRef Name, PassAdder AddPass) {
+  OptPassAdders.push_back({Name.str(), AddPass});
+}
+
+void PassRegistry::registerStartPassIntoClang(PassAdder AddPass) {
+  StartPassAdders.push_back(AddPass);
+}
+
+void PassRegistry::registerSanitizerPassIntoClang(PassAdder AddPass) {
+  HasSanitizerPassAdder = true;
+  SanitizerPassAdder = AddPass;
+}
+
+void PassRegistry::delegateNonSanPassTo(PassBuilder &PB) {
+  if (NonSanPassDelegated)
+    return;
+  NonSanPassDelegated = true;
+
+  if (!StartPassAdders.empty()) {
+    PB.registerPipelineStartEPCallback(
+        [this](ModulePassManager &MPM, OptimizationLevel Level) {
+          for (PassAdder AddPass : StartPassAdders) {
+            if (AddPass)
+              AddPass(MPM, Level);
+          }
+        });
+  }
+
+  if (!OptPassAdders.empty()) {
+    PB.registerPipelineParsingCallback(
+        [this](StringRef Name, ModulePassManager &MPM,
+               ArrayRef<PassBuilder::PipelineElement>) {
+          for (const NamedPassAdder &Entry : OptPassAdders) {
+            if (Entry.Name != Name)
+              continue;
+            if (Entry.AddPass)
+              Entry.AddPass(MPM, OptimizationLevel::O0);
+            return true;
+          }
+          return false;
+        });
+  }
+}
+
+class PassRegistry PassRegistry;
+
 bool shouldAsanPoisonInternalGlobals() { return ClAsanPoisonInternalGlobal; }
 
 const AsanOption obtainAsanPassArgs() {
@@ -171,7 +208,7 @@ const MsanOption obtainMsanPassArgs() {
   return Opts;
 }
 
-static void addAsanToMPM(ModulePassManager &MPM, OptimizationLevel Level) {
+void addAsanToMPM(ModulePassManager &MPM, OptimizationLevel Level) {
   (void)Level;
   if (options::ClDisableAsan)
     return;
@@ -186,7 +223,7 @@ static void addAsanToMPM(ModulePassManager &MPM, OptimizationLevel Level) {
 #endif
 }
 
-static void addTsanToMPM(ModulePassManager &MPM, OptimizationLevel Level) {
+void addTsanToMPM(ModulePassManager &MPM, OptimizationLevel Level) {
   (void)Level;
   if (options::ClDisableTsan)
     return;
@@ -197,31 +234,13 @@ static void addTsanToMPM(ModulePassManager &MPM, OptimizationLevel Level) {
   MPM.addPass(createModuleToFunctionPassAdaptor(ThreadSanitizerPass()));
 }
 
-static void addMsanToMPM(ModulePassManager &MPM,
-                         llvm::OptimizationLevel Level) {
+void addMsanToMPM(ModulePassManager &MPM, llvm::OptimizationLevel Level) {
   if (options::ClDisableMsan)
     return;
 
   const auto &Opts = obtainMsanPassArgs();
 #if LLVM_VERSION_MAJOR >= 23
   MPM.addPass(MemorySanitizerPass(Opts.Opts));
-  // XSan delegates the post optimization uniformly.
-#ifndef XSAN_PASS
-  if (Level != OptimizationLevel::O0) {
-    // MemorySanitizer inserts complex instrumentation that mostly follows
-    // the logic of the original code, but operates on "shadow" values. It
-    // can benefit from re-running some general purpose optimization
-    // passes.
-    MPM.addPass(RequireAnalysisPass<GlobalsAA, llvm::Module>());
-    FunctionPassManager FPM;
-    FPM.addPass(EarlyCSEPass(true /* Enable mem-ssa. */));
-    FPM.addPass(InstCombinePass());
-    FPM.addPass(JumpThreadingPass());
-    FPM.addPass(GVNPass());
-    FPM.addPass(InstCombinePass());
-    MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
-  }
-#endif
 #else
   MPM.addPass(ModuleMemorySanitizerPass(Opts.Opts));
   FunctionPassManager FPM;
@@ -242,113 +261,36 @@ static void addMsanToMPM(ModulePassManager &MPM,
 #endif
 }
 
-SubSanitizers::ScopedStageTransition::ScopedStageTransition(
-    unsigned PassIndex, SubSanitizers &Owner)
-    : PassIndex(PassIndex), IsDeSanPass(Owner.isDeSanPass(PassIndex)),
-      Owner(Owner) {
-  // Before pass run
-
-  // DeSan ends a stage.
-  if (this->IsDeSanPass) {
-    desan::requireOrDie(this->Owner.currentStage().has_value(),
-                        "sub-sanitizer stage pass missing current stage");
-    // DeSan means an end of a sanitizer instrumentation.
-    if (this->Owner.InStage) {
-      desan::endStage();
-      this->Owner.InStage = false;
-    }
-    return;
-  }
-
-  // If in sanitizing and not DeSan, it must be a sanitizer instrumentation
-  // pass.
-  auto CurrentStage = this->Owner.currentStage();
-  if (!this->Owner.InStage && CurrentStage &&
-      this->Owner.isInSanitzing(this->PassIndex)) {
-    desan::beginStage(*CurrentStage);
-    this->Owner.InStage = true;
-  }
+// Strong symbols are located in each sanitizer's .cpp file, but when building
+// each sanitizer's own plugin, the plugin don't link the other sanitizer's .cpp
+// file, so we need to provide weak symbols here to make sure the plugin can be
+// linked successfully.
+__attribute__((weak)) PreservedAnalyses runAsan(Module &M,
+                                                ModuleAnalysisManager &MAM,
+                                                OptimizationLevel Level) {
+  return PreservedAnalyses::all();
 }
 
-SubSanitizers::ScopedStageTransition::~ScopedStageTransition() {
-  // After pass run
-  if (!IsDeSanPass)
-    return;
-  // After a stage pass, advance to the next stage, e.g., ASan -> TSan or
-  // ReSan -> done.
-  Owner.advanceStage();
+__attribute__((weak)) PreservedAnalyses runTsan(Module &M,
+                                                ModuleAnalysisManager &MAM,
+                                                OptimizationLevel Level) {
+  return PreservedAnalyses::all();
 }
 
-void SubSanitizers::advanceStage() {
-  desan::requireOrDie(currentStage().has_value(),
-                      "desan stage queue underflow");
-  ++StageIndex;
-}
-
-std::optional<desan::StageKind> SubSanitizers::currentStage() const {
-  return StageIndex < Stages.size() ? std::optional(Stages[StageIndex])
-                                    : std::nullopt;
-}
-
-bool SubSanitizers::isInSanitzing(unsigned PassIndex) const {
-  assert(StageEntryPassIndex != -1 && ReSanPassIndex != -1);
-  return StageEntryPassIndex <= PassIndex && PassIndex < ReSanPassIndex;
-}
-
-void SubSanitizers::resetRunState() {
-  StageIndex = 0;
-  InStage = false;
-}
-
-void SubSanitizers::addSanitizerWithDeSan(desan::StageKind Stage,
-                                          PassAdder AddSanitizer) {
-  desan::requireOrDie(!!State,
-                      "sub-sanitizer addSanitizerWithDeSan missing pipeline "
-                      "state");
-  desan::requireOrDie(Stage != desan::StageKind::UBSan,
-                      "sub-sanitizer UBSan stage should use addDeSanPass only");
-  desan::requireOrDie(Stage != desan::StageKind::ReSan,
-                      "sub-sanitizer ReSan stage must use addReSanPass");
-  if (StageEntryPassIndex == -1)
-    StageEntryPassIndex = Passes.size();
-  AddSanitizer(*this, Level);
-  addDeSanPass(Stage);
-}
-
-void SubSanitizers::addDeSanPass(desan::StageKind Stage) {
-  desan::requireOrDie(!!State,
-                      "sub-sanitizer addDeSanPass missing pipeline state");
-  desan::requireOrDie(Stage != desan::StageKind::ReSan,
-                      "sub-sanitizer ReSan stage must use addReSanPass");
-  if (StageEntryPassIndex == -1)
-    StageEntryPassIndex = Passes.size();
-  Stages.push_back(Stage);
-  DeSanPassIndices.insert(Passes.size());
-  addPass(desan::DeSanPass(Stage, State));
-}
-
-void SubSanitizers::addReSanPass() {
-  desan::requireOrDie(!!State,
-                      "sub-sanitizer addReSanPass missing pipeline state");
-  desan::requireOrDie(ReSanPassIndex == -1,
-                      "sub-sanitizer addReSanPass called more than once");
-  Stages.push_back(desan::StageKind::ReSan);
-  ReSanPassIndex = Passes.size();
-  addPass(desan::ReSanPass(State));
+__attribute__((weak)) PreservedAnalyses runMsan(Module &M,
+                                                ModuleAnalysisManager &MAM,
+                                                OptimizationLevel Level) {
+  return PreservedAnalyses::all();
 }
 
 PreservedAnalyses SubSanitizers::run(Module &IR, ModuleAnalysisManager &AM) {
-  __xsan::InterceptionScope Scope(__xsan::desan::InterceptionGroup);
   PreservedAnalyses PA = PreservedAnalyses::all();
-  resetRunState();
-  desan::requireOrDie(!InStage, "Unexpected interception before sanitzing");
 
   for (unsigned Idx = 0, Size = Passes.size(); Idx != Size; ++Idx) {
     auto *P = Passes[Idx].get();
 
     PreservedAnalyses PassPA;
     {
-      ScopedStageTransition SST(Idx, *this);
       TimeTraceScope TimeScope(P->name(), IR.getName());
       PassPA = P->run(IR, AM);
     }
@@ -362,44 +304,48 @@ PreservedAnalyses SubSanitizers::run(Module &IR, ModuleAnalysisManager &AM) {
     PA.intersect(std::move(PassPA));
   }
 
-  desan::requireOrDie(!InStage, "Unexpected interception after sanitzing");
-  desan::requireOrDie(currentStage() == desan::StageKind::ReSan,
-                      "sub-sanitizer stage queue not fully consumed");
-
   return PA;
 }
 
 SubSanitizers SubSanitizers::loadSubSanitizers(llvm::OptimizationLevel Level) {
+  using StagePipelineRunner = std::function<PreservedAnalyses(
+      Module &, ModuleAnalysisManager &, OptimizationLevel)>;
   struct SanitizerStagePlan {
     bool Enabled;
     desan::StageKind Stage;
-    PassAdder Run;
+    StagePipelineRunner Run;
   } const Plans[] = {
-      {!options::ClDisableAsan, desan::StageKind::ASan, addAsanToMPM},
-      {!options::ClDisableTsan, desan::StageKind::TSan, addTsanToMPM},
-      {!options::ClDisableMsan, desan::StageKind::MSan, addMsanToMPM},
+      {!options::ClDisableAsan, desan::StageKind::ASan, runAsan},
+      {!options::ClDisableTsan, desan::StageKind::TSan, runTsan},
+      {!options::ClDisableMsan, desan::StageKind::MSan, runMsan},
   };
 
-  SubSanitizers Sanitizers(Level);
-  Sanitizers.State = std::make_shared<desan::SanitizingContext>();
+  SubSanitizers Sanitizers;
+  auto State = std::make_shared<desan::SanitizingContext>();
 
   // PreprocessPass: mark user IR and collect user BBs.
-  Sanitizers.addPass(desan::PreprocessPass(Sanitizers.State));
+  Sanitizers.addPass(desan::PreprocessPass(State));
 
   // Deal with UBSan first, since UBSan is done by clang frontend
-  Sanitizers.addDeSanPass(desan::StageKind::UBSan);
+  Sanitizers.addPass(desan::DeSanPass(desan::StageKind::UBSan, State));
 
-  for (const auto &[Enabled, Stage, AddSanitizer] : Plans) {
-    if (!Enabled)
+  for (const auto &Plan : Plans) {
+    if (!Plan.Enabled)
       continue;
 
-    // SanitizerPass: perform sanitizing instrumentation.
+    // StagePass: notify interceptors and run sanitizer passes.
+    Sanitizers.addPass(desan::StagePass(
+        Plan.Stage,
+        [Level, RunStage = Plan.Run](Module &M, ModuleAnalysisManager &MAM) {
+          return RunStage(M, MAM, Level);
+        }));
+
     // DeSanPass: restore user IR for the stage.
-    Sanitizers.addSanitizerWithDeSan(Stage, AddSanitizer);
+    Sanitizers.addPass(desan::DeSanPass(Plan.Stage, State));
   }
 
   // ReSanPass: replay sanitizer events to user IR.
-  Sanitizers.addReSanPass();
+  Sanitizers.addPass(desan::ReSanPass(State));
 
   if (options::ClDebug)
     Sanitizers.addPass(llvm::VerifierPass());
@@ -465,81 +411,53 @@ llvm::ModulePassManager createPostOptimizationPasses(OptimizationLevel Level) {
   return MPM;
 }
 
-void registerAsanForClangAndOpt(PassBuilder &PB) {
-  PB.registerOptimizerLastEPCallback(
-#if LLVM_VERSION_MAJOR >= 22
-      [=](ModulePassManager &MPM, OptimizationLevel Level, ThinOrFullLTOPhase) {
-#else
-      [=](ModulePassManager &MPM, OptimizationLevel Level) {
-#endif
-        addAsanToMPM(MPM, Level);
-      });
+void addAsanOptPasses(ModulePassManager &MPM, OptimizationLevel Level) {
+  MPM.addPass(AttributeTaggingPass(SanitizerType::ASan));
+  addAsanToMPM(MPM, Level);
+}
 
-  // 这里注册opt回调的名称
-  PB.registerPipelineParsingCallback(
-      [=](StringRef Name, ModulePassManager &MPM,
-          ArrayRef<PassBuilder::PipelineElement>) {
-        if (Name == "asan") {
-          MPM.addPass(AttributeTaggingPass(SanitizerType::ASan));
-          addAsanToMPM(MPM, OptimizationLevel::O0);
-          return true;
-        }
-        return false;
-      });
+void addTsanOptPasses(ModulePassManager &MPM, OptimizationLevel Level) {
+  MPM.addPass(AttributeTaggingPass(SanitizerType::TSan));
+  addTsanToMPM(MPM, Level);
+}
+
+void addMsanOptPasses(ModulePassManager &MPM, OptimizationLevel Level) {
+  MPM.addPass(AttributeTaggingPass(SanitizerType::MSan));
+  addMsanToMPM(MPM, Level);
+}
+
+void registerAsanForClangAndOpt(PassBuilder &PB) {
+  registerAnalysisForAsan(PB);
+
+  // Clang default pipelines are rewritten after PassBuilder has assembled the
+  // original sanitizer pipeline. Registering this plugin on the same
+  // OptimizerLast extension point as Clang's addSanitizers callback would put
+  // it before SanCov, because plugin callbacks are registered earlier. The
+  // livepatch MPM rewriter stays sanitizer-agnostic: this registration provides
+  // the indirect callback used at Clang's original sanitizer position.
+  PassRegistry.registerSanitizerPassIntoClang(addAsanToMPM);
+  PassRegistry.registerPassIntoOpt("asan", addAsanOptPasses);
+  PassRegistry.delegateNonSanPassTo(PB);
 }
 
 void registerTsanForClangAndOpt(PassBuilder &PB) {
-  // // 这里注册 clang plugin extension point
-  // // FIXME: what if LTO? this EP is not suitable for LTO.
-  // PB.registerPipelineStartEPCallback(
-  //   [](ModulePassManager &MPM, auto _) {
-  //     MPM.addPass(AttributeTaggingPass(SanitizerType::TSan));
-  //   }
-  // );
+  registerAnalysisForTsan(PB);
 
-  PB.registerOptimizerLastEPCallback(
-#if LLVM_VERSION_MAJOR >= 22
-      [=](ModulePassManager &MPM, OptimizationLevel Level, ThinOrFullLTOPhase) {
-#else
-      [=](ModulePassManager &MPM, OptimizationLevel Level) {
-#endif
-        addTsanToMPM(MPM, Level);
-      });
-
-  // 这里注册opt回调的名称
-  PB.registerPipelineParsingCallback(
-      [=](StringRef Name, ModulePassManager &MPM,
-          ArrayRef<PassBuilder::PipelineElement>) {
-        if (Name == "tsan") {
-          MPM.addPass(AttributeTaggingPass(SanitizerType::TSan));
-          addTsanToMPM(MPM, OptimizationLevel::O0);
-          return true;
-        }
-        return false;
-      });
+  // See registerAsanForClangAndOpt: clang insertion is handled by the final
+  // MPM rewriter so SanCov keeps Clang's original position before sanitizers.
+  PassRegistry.registerSanitizerPassIntoClang(addTsanToMPM);
+  PassRegistry.registerPassIntoOpt("tsan", addTsanOptPasses);
+  PassRegistry.delegateNonSanPassTo(PB);
 }
 
 void registerMsanForClangAndOpt(PassBuilder &PB) {
-  PB.registerOptimizerLastEPCallback(
-#if LLVM_VERSION_MAJOR >= 22
-      [=](ModulePassManager &MPM, OptimizationLevel Level, ThinOrFullLTOPhase) {
-#else
-      [=](ModulePassManager &MPM, OptimizationLevel Level) {
-#endif
-        addMsanToMPM(MPM, Level);
-      });
+  registerAnalysisForMsan(PB);
 
-  // 这里注册opt回调的名称
-  PB.registerPipelineParsingCallback(
-      [=](StringRef Name, ModulePassManager &MPM,
-          ArrayRef<PassBuilder::PipelineElement>) {
-        if (Name == "msan") {
-          MPM.addPass(AttributeTaggingPass(SanitizerType::MSan));
-          addMsanToMPM(MPM, OptimizationLevel::O0);
-          return true;
-        }
-        return false;
-      });
+  // See registerAsanForClangAndOpt: clang insertion is handled by the final
+  // MPM rewriter so SanCov keeps Clang's original position before sanitizers.
+  PassRegistry.registerSanitizerPassIntoClang(addMsanToMPM);
+  PassRegistry.registerPassIntoOpt("msan", addMsanOptPasses);
+  PassRegistry.delegateNonSanPassTo(PB);
 }
 
 } // namespace __xsan

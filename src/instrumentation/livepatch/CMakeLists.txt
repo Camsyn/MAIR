@@ -7,6 +7,7 @@
 # running.
 set(instr_latepatch_impl_sources
   ${CMAKE_CURRENT_SOURCE_DIR}/DeSanInterceptors.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/PassBuilderPipeline.cpp
 )
 
 if(XSAN_INSTRUMENTATION_VARIANT STREQUAL "llvm15")
@@ -17,6 +18,10 @@ endif()
 
 add_library(instr-livepatch-objects OBJECT
   ${instr_latepatch_impl_sources}
+)
+
+set_target_properties(instr-livepatch-objects PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
 )
 
 target_include_directories(instr-livepatch-objects PRIVATE

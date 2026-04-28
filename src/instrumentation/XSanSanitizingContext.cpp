@@ -6,6 +6,9 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
@@ -219,6 +222,50 @@ SanitizerArchive &SanitizingContext::addArchive(const Sanitizer &San) {
                          San.name());
 
   return SanitizerArchives.emplace_back(San);
+}
+
+static void dumpIRToFile(Module &M, const Twine &FileName) {
+  if (!options::enableDeSanReSanDump())
+    return;
+
+  SmallString<128> Dir(options::ClDumpDeSanReSan);
+  if (std::error_code EC = sys::fs::create_directories(Dir))
+    report_fatal_error(Twine("failed to create DeSan/ReSan dump directory '") +
+                       Dir + "': " + EC.message());
+
+  SmallString<256> Path(Dir);
+  sys::path::append(Path, FileName.str());
+
+  std::error_code EC;
+  raw_fd_ostream OS(Path, EC, sys::fs::OF_None);
+  if (EC)
+    report_fatal_error(Twine("failed to open DeSan/ReSan dump file '") + Path +
+                       "': " + EC.message());
+  M.print(OS, nullptr);
+}
+
+unsigned SanitizingContext::reserveDumpIndex() {
+  if (!options::enableDeSanReSanDump())
+    return NoDumpIndex;
+  return NextDumpIndex++;
+}
+
+void SanitizingContext::dumpIR(Module &M, unsigned Index,
+                               const Twine &Name) const {
+  if (!options::enableDeSanReSanDump() || Index == NoDumpIndex)
+    return;
+  dumpIRToFile(M, formatv("{0:02}-{1}.ll", Index, Name).str());
+}
+
+unsigned SanitizingContext::dumpNextIR(Module &M, const Twine &Name) {
+  unsigned Index = reserveDumpIndex();
+  dumpIR(M, Index, Name);
+  return Index;
+}
+
+void SanitizingContext::dumpNestedIR(Module &M, unsigned ParentIndex,
+                                     const Twine &Name) const {
+  dumpIR(M, ParentIndex, Name);
 }
 
 void markUserIR(Module &M) {

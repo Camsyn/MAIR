@@ -1,5 +1,7 @@
 #include "../Instrumentation.h"
 #include <llvm/Support/CommandLine.h>
+
+#include <string>
 namespace __xsan {
 
 /// TODO: Add and move all options here.
@@ -60,6 +62,11 @@ extern const cl::opt<bool> ClDisableMsan;
 
 /// Enable debug output.
 extern cl::opt<bool> ClDebug;
+
+/// Dump the DeSan/ReSan pipeline IR snapshots into the given directory.
+extern cl::opt<std::string> ClDumpDeSanReSan;
+
+inline bool enableDeSanReSanDump() { return !ClDumpDeSanReSan.empty(); }
 
 } // namespace options
 

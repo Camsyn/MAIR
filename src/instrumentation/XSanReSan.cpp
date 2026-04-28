@@ -135,7 +135,8 @@ collectArgumentReplaceInsts(const SanitizingContext &Context, Function &F) {
 } // namespace
 
 // We need ReplaceArchive to redirect instruction anchors.
-static void replayAdd(Module &M, SanitizingContext &Context) {
+static void replayAdd(Module &M, SanitizingContext &Context,
+                      unsigned DumpIndex) {
   // Some sanitizers replace arguments with sanitized versions and assume these
   // replacements are prepared at the beginning of the function. The sentry
   // anchor gives those argument replacements a stable position before the first
@@ -258,6 +259,8 @@ static void replayAdd(Module &M, SanitizingContext &Context) {
     }
   }
 
+  Context.dumpNestedIR(M, DumpIndex, "1-1-resan-add-bb");
+
   SmallVector<AddRecordRef, 64> Records;
   for (SanitizerArchive &Entry : Context.SanitizerArchives)
     for (AddRecord &Record : Entry.Archive.AddRecords.Records)
@@ -348,6 +351,8 @@ static void replayAdd(Module &M, SanitizingContext &Context) {
     for (Instruction *Sentry : SentryAnchors)
       if (Sentry->getParent())
         Sentry->eraseFromParent();
+
+  Context.dumpNestedIR(M, DumpIndex, "1-2-resan-add-inst");
 }
 
 static void replayReplace(Module &M, SanitizingContext &Context) {
@@ -409,14 +414,17 @@ static void validateReplaceArchive(const Sanitizer &San,
   }
 }
 
-void runReSan(Module &M, SanitizingContext &Context) {
+void runReSan(Module &M, SanitizingContext &Context, unsigned DumpIndex) {
   for (const SanitizerArchive &Entry : Context.SanitizerArchives)
     validateReplaceArchive(Entry.San, Entry.Archive.ReplaceRecords);
 
-  replayAdd(M, Context);
+  replayAdd(M, Context, DumpIndex);
   replayReplace(M, Context);
+  Context.dumpNestedIR(M, DumpIndex, "2-resan-replace");
   replayDelete(M, Context);
+  Context.dumpNestedIR(M, DumpIndex, "3-resan-delete");
   replayFunction(M, Context);
+  Context.dumpNestedIR(M, DumpIndex, "4-resan-func");
 }
 
 ReSanPass::ReSanPass(std::shared_ptr<SanitizingContext> Ctx)
@@ -429,7 +437,9 @@ PreservedAnalyses ReSanPass::run(Module &M, ModuleAnalysisManager &) {
     for (const SanitizerArchive &Entry : Ctx->SanitizerArchives)
       validateArchive(Entry.San, Entry.Archive, Ctx->UserBBs);
 
-  runReSan(M, *Ctx);
+  unsigned DumpIndex = Ctx->reserveDumpIndex();
+  runReSan(M, *Ctx, DumpIndex);
+  Ctx->dumpIR(M, DumpIndex, "resan");
 
   if (options::ClDebug)
     requireOrDie(!llvm::verifyModule(M, &llvm::errs()),

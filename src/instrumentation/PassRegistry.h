@@ -70,6 +70,8 @@ private:
 public:
   static SubSanitizers loadSubSanitizers(llvm::OptimizationLevel Level);
 
+  void dumpFinalIR(llvm::Module &IR) const;
+
   /// Run all of the sanitizer passes on the module, and preserve all analysises
   /// between them.
   llvm::PreservedAnalyses run(llvm::Module &IR,

@@ -447,6 +447,11 @@ PreservedAnalyses SubSanitizers::run(Module &IR, ModuleAnalysisManager &AM) {
   return PA;
 }
 
+void SubSanitizers::dumpFinalIR(Module &IR) const {
+  if (Ctx)
+    Ctx->dumpNextIR(IR, "final");
+}
+
 SubSanitizers SubSanitizers::loadSubSanitizers(llvm::OptimizationLevel Level) {
   SubSanitizers Sanitizers(Level);
   Sanitizers.Ctx = std::make_shared<desan::SanitizingContext>();

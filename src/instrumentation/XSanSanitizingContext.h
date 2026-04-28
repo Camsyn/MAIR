@@ -170,6 +170,8 @@ struct SanitizerArchive {
 };
 
 struct SanitizingContext {
+  static constexpr unsigned NoDumpIndex = ~0u;
+
   UserBBsMap UserBBs;
   // Runtime archive order. Each entry is appended by DeSanPass::run and then
   // replayed by ReSan in the same dynamic order.
@@ -177,6 +179,16 @@ struct SanitizingContext {
 
   void clearArchives();
   SanitizerArchive &addArchive(const Sanitizer &San);
+
+  void resetDumpSequence() { NextDumpIndex = 0; }
+  unsigned reserveDumpIndex();
+  void dumpIR(llvm::Module &M, unsigned Index, const llvm::Twine &Name) const;
+  unsigned dumpNextIR(llvm::Module &M, const llvm::Twine &Name);
+  void dumpNestedIR(llvm::Module &M, unsigned ParentIndex,
+                    const llvm::Twine &Name) const;
+
+private:
+  unsigned NextDumpIndex = 0;
 };
 
 // Utilities.
@@ -191,7 +203,8 @@ bool replaceNonSanitizerUses(const Sanitizer &San, llvm::Value &From,
 
 // Main logic.
 void runDeSan(llvm::Module &M, SanitizerArchive &Archive, UserBBsMap &UserBBs);
-void runReSan(llvm::Module &M, SanitizingContext &Context);
+void runReSan(llvm::Module &M, SanitizingContext &Context,
+              unsigned DumpIndex = SanitizingContext::NoDumpIndex);
 
 // For debug and verification.
 void dumpArchive(const Sanitizer &San, const ReSanArchive &Archive,

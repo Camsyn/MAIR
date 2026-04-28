@@ -22,6 +22,9 @@ PreprocessPass::PreprocessPass(std::shared_ptr<SanitizingContext> Ctx)
 PreservedAnalyses PreprocessPass::run(Module &M, ModuleAnalysisManager &MAM) {
   requireOrDie(!!Ctx, "desan preprocess pass missing pipeline context");
 
+  Ctx->resetDumpSequence();
+  Ctx->dumpNextIR(M, "raw");
+
   resetSession();
 
   // Do dead code elimination first to avoid sanitizer remove user basic blocks,
@@ -49,8 +52,12 @@ DeSanPass::DeSanPass(llvm::StringRef SanName,
 PreservedAnalyses DeSanPass::run(Module &M, ModuleAnalysisManager &) {
   requireOrDie(!!Ctx, "desan restore pass missing pipeline context");
 
+  Ctx->dumpNextIR(M, San.name());
+
   SanitizerArchive &Archive = Ctx->addArchive(San);
   runDeSan(M, Archive, Ctx->UserBBs);
+
+  Ctx->dumpNextIR(M, "desan");
 
   return PreservedAnalyses::all();
 }

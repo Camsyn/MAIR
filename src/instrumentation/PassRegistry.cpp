@@ -147,7 +147,9 @@ bool Sanitizer::is(const Instruction &I) const {
 
 void Sanitizer::tag(Instruction &I) const {
   requireOrDie(!Name.empty(), "cannot tag instruction with empty sanitizer");
-  I.setMetadata(getSanID(I.getContext()), MDNode::get(I.getContext(), {}));
+  MDNode *NoneMDNode = MDNode::get(I.getContext(), {});
+  I.setMetadata(getSanID(I.getContext()), NoneMDNode);
+  I.setMetadata(LLVMContext::MD_nosanitize, NoneMDNode);
 }
 
 } // namespace __xsan::desan

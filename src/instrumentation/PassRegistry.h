@@ -1,6 +1,6 @@
 #pragma once
 
-#include "XSanDeSanPass.h"
+#include "XSanDeSanReSan.h"
 
 #include "llvm/ADT/SetVector.h"
 #include "llvm/IR/PassManager.h"
@@ -64,7 +64,7 @@ private:
   llvm::SmallSetVector<unsigned, 8> DeSanPassIndices;
   int FirstSanitizerPassIndex = -1;
   int ReSanPassIndex = -1;
-  std::shared_ptr<desan::SanitizingContext> State;
+  std::shared_ptr<desan::SanitizingContext> Ctx;
   bool Recording = false;
 
 public:

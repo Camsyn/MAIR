@@ -1,6 +1,6 @@
 #pragma once
 
-#include "livepatch/XSanSanitizingRecorder.h"
+#include "livepatch/record/SanitizingRecorder.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"

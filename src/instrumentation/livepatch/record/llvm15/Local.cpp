@@ -36,10 +36,11 @@
 #include <cassert>
 
 #include "PatchCore.h"
-#include "livepatch/XSanSanitizingRecorder.h"
+#include "livepatch/record/SanitizingRecorder.h"
 
 using namespace llvm;
 
+namespace __xsan::desan {
 namespace {
 
 BasicBlock *changeToInvokeAndSplitBasicBlock(CallInst *CI,
@@ -48,8 +49,7 @@ BasicBlock *changeToInvokeAndSplitBasicBlock(CallInst *CI,
 
 static __xsan::ManualInterception ChangeToInvokeAndSplitBasicBlockInterceptee(
     &changeToInvokeAndSplitBasicBlock, &llvm::changeToInvokeAndSplitBasicBlock,
-    __xsan::desan::InterceptionTargetProcesses,
-    __xsan::desan::InterceptionGroup);
+    InterceptionTargetProcesses, InterceptionGroup);
 
 // This function use `Split->getInstList().pop_front();` to remove the
 // instruction. But some interceptors need to record the delete event,
@@ -101,3 +101,4 @@ BasicBlock *changeToInvokeAndSplitBasicBlock(CallInst *CI,
 }
 
 } // namespace
+} // namespace __xsan::desan

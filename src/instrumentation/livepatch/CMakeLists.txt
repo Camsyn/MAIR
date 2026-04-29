@@ -6,13 +6,13 @@
 # over selected symbols via dynamic binary rewriting while a SubSanitizer is
 # running.
 set(instr_latepatch_impl_sources
-  ${CMAKE_CURRENT_SOURCE_DIR}/DeSanInterceptors.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/PassBuilderPipeline.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/record/Interception.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/registry/PassBuilderPipeline.cpp
 )
 
 if(XSAN_INSTRUMENTATION_VARIANT STREQUAL "llvm15")
   list(APPEND instr_latepatch_impl_sources
-    ${CMAKE_CURRENT_SOURCE_DIR}/llvm15/Local.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/record/llvm15/Local.cpp
   )
 endif()
 

@@ -2,8 +2,8 @@
 #include "AttributeTaggingPass.hpp"
 #include "PatchCore.h"
 #include "Utils/Options.h"
-#include "XSanDeSanPass.h"
-#include "livepatch/XSanSanitizingRecorder.h"
+#include "XSanDeSanReSan.h"
+#include "livepatch/record/SanitizingRecorder.h"
 
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Module.h"
@@ -118,6 +118,40 @@ static cl::opt<bool>
     ClAsanPoisonInternalGlobal("xsan-asan-poison-internal-global",
                                cl::desc("Poison internal globals with ASan"),
                                cl::Hidden, cl::init(false));
+
+namespace __xsan::desan {
+
+Sanitizer::Sanitizer(StringRef Name) : Name(Name.str()) {}
+
+Sanitizer Sanitizer::Create(StringRef Name) {
+  static size_t NextOrder = 0;
+  Sanitizer San(Name);
+  San.Order = NextOrder++;
+  return San;
+}
+
+unsigned Sanitizer::getSanID(LLVMContext &Ctx) const {
+  requireOrDie(!Name.empty(), "cannot get metadata ID for empty sanitizer");
+  if (!SanID || SanIDContext != &Ctx) {
+    SanID = Ctx.getMDKindID((Twine("xsan.") + Name).str());
+    SanIDContext = &Ctx;
+  }
+  return SanID;
+}
+
+bool Sanitizer::is(const Instruction &I) const {
+  if (Name.empty())
+    return false;
+  return I.hasMetadata(getSanID(I.getContext()));
+}
+
+void Sanitizer::tag(Instruction &I) const {
+  requireOrDie(!Name.empty(), "cannot tag instruction with empty sanitizer");
+  I.setMetadata(getSanID(I.getContext()), MDNode::get(I.getContext(), {}));
+}
+
+} // namespace __xsan::desan
+
 namespace __xsan {
 
 void PassRegistry::registerPassIntoOpt(StringRef Name, PassAdder AddPass) {
@@ -356,9 +390,9 @@ void SubSanitizers::resetRunState() { Recording = false; }
 
 void SubSanitizers::addSanitizerWithDeSan(llvm::StringRef SanName,
                                           PassAdder AddSanitizer) {
-  desan::requireOrDie(!!State,
+  desan::requireOrDie(!!Ctx,
                       "sub-sanitizer addSanitizerWithDeSan missing pipeline "
-                      "state");
+                      "context");
   if (FirstSanitizerPassIndex == -1)
     FirstSanitizerPassIndex = Passes.size();
   AddSanitizer(*this, Level);
@@ -366,19 +400,19 @@ void SubSanitizers::addSanitizerWithDeSan(llvm::StringRef SanName,
 }
 
 void SubSanitizers::addDeSanPass(llvm::StringRef SanName) {
-  desan::requireOrDie(!!State,
-                      "sub-sanitizer addDeSanPass missing pipeline state");
+  desan::requireOrDie(!!Ctx,
+                      "sub-sanitizer addDeSanPass missing pipeline context");
   DeSanPassIndices.insert(Passes.size());
-  addPass(desan::DeSanPass(SanName, State));
+  addPass(desan::DeSanPass(SanName, Ctx));
 }
 
 void SubSanitizers::addReSanPass() {
-  desan::requireOrDie(!!State,
-                      "sub-sanitizer addReSanPass missing pipeline state");
+  desan::requireOrDie(!!Ctx,
+                      "sub-sanitizer addReSanPass missing pipeline context");
   desan::requireOrDie(ReSanPassIndex == -1,
                       "sub-sanitizer addReSanPass called more than once");
   ReSanPassIndex = Passes.size();
-  addPass(desan::ReSanPass(State));
+  addPass(desan::ReSanPass(Ctx));
 }
 
 PreservedAnalyses SubSanitizers::run(Module &IR, ModuleAnalysisManager &AM) {
@@ -413,10 +447,10 @@ PreservedAnalyses SubSanitizers::run(Module &IR, ModuleAnalysisManager &AM) {
 
 SubSanitizers SubSanitizers::loadSubSanitizers(llvm::OptimizationLevel Level) {
   SubSanitizers Sanitizers(Level);
-  Sanitizers.State = std::make_shared<desan::SanitizingContext>();
+  Sanitizers.Ctx = std::make_shared<desan::SanitizingContext>();
 
   // PreprocessPass: mark user IR and collect user BBs.
-  Sanitizers.addPass(desan::PreprocessPass(Sanitizers.State));
+  Sanitizers.addPass(desan::PreprocessPass(Sanitizers.Ctx));
 
   // Deal with UBSan first, since UBSan is done by clang frontend.
   Sanitizers.addDeSanPass("ubsan");

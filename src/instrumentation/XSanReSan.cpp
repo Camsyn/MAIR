@@ -1,9 +1,10 @@
 #include "Utils/Options.h"
-#include "XSanDeSanState.h"
+#include "XSanDeSanReSan.h"
 #include "xsan_llvm_compat.h"
 
 #include "llvm/ADT/BitVector.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
@@ -414,6 +415,25 @@ void runReSan(Module &M, SanitizingContext &Context) {
   replayReplace(M, Context);
   replayDelete(M, Context);
   replayFunction(M, Context);
+}
+
+ReSanPass::ReSanPass(std::shared_ptr<SanitizingContext> Ctx)
+    : Ctx(std::move(Ctx)) {}
+
+PreservedAnalyses ReSanPass::run(Module &M, ModuleAnalysisManager &) {
+  requireOrDie(!!Ctx, "resan replay pass missing pipeline context");
+
+  if (options::ClDebug)
+    for (const SanitizerArchive &Entry : Ctx->SanitizerArchives)
+      validateArchive(Entry.San, Entry.Archive, Ctx->UserBBs);
+
+  runReSan(M, *Ctx);
+
+  if (options::ClDebug)
+    requireOrDie(!llvm::verifyModule(M, &llvm::errs()),
+                 "resan replay produced invalid IR");
+
+  return PreservedAnalyses::all();
 }
 
 } // namespace __xsan::desan

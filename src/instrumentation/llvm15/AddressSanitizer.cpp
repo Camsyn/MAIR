@@ -892,12 +892,12 @@ struct XsanAddressSanitizer : public AddressSanitizer {
 public:
   using AddressSanitizer::AddressSanitizer;
   bool instrumentFunction(Function &F, FunctionAnalysisManager &FAM);
+
 private:
   bool shouldSkipFunction(Function &F);
   bool collectTargetsToIntrument(Function &F, const TargetLibraryInfo *TLI,
                                  __xsan::AsanToInstrument &Targets);
-  bool prepareAsanTargetsToInstrument(Function &F,
-                                      FunctionAnalysisManager &FAM,
+  bool prepareAsanTargetsToInstrument(Function &F, FunctionAnalysisManager &FAM,
                                       const TargetLibraryInfo &TLI,
                                       __xsan::AsanToInstrument &Targets);
 };
@@ -3503,7 +3503,6 @@ bool AddressSanitizer::isSafeAccess(ObjectSizeOffsetVisitor &ObjSizeVis,
          Size - uint64_t(Offset) >= TypeSize / 8;
 }
 
-
 bool XsanAddressSanitizer::prepareAsanTargetsToInstrument(
     Function &F, FunctionAnalysisManager &FAM, const TargetLibraryInfo &TLI,
     __xsan::AsanToInstrument &Targets) {
@@ -3526,8 +3525,8 @@ bool XsanAddressSanitizer::prepareAsanTargetsToInstrument(
           NewOperandsToInstrument.push_back(Op);
         return IsInterestingMop;
       });
-  auto RngMap = map_range(RngFilter,
-                          [](InterestingMemoryOperand &Op) { return Op.getInsn(); });
+  auto RngMap = map_range(
+      RngFilter, [](InterestingMemoryOperand &Op) { return Op.getInsn(); });
   const SmallVector<const Instruction *, 16> TmpInsts(RngMap);
   SmallVector<const Instruction *, 16> DistilledLoadStores =
       MRC.distillRecurringChecks(TmpInsts, false);
@@ -3743,16 +3742,15 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
 #endif
 }
 
-
 static bool isUbsanRootGlobal(const GlobalVariable &G) {
   // UBSan's globals are anonymous
   if (!G.getName().empty()) {
     return false;
   }
 
-  // UBSan's root globals are used by __ubsan_handle_* 
+  // UBSan's root globals are used by __ubsan_handle_*
   const auto *User = *G.user_begin();
-  
+
   if (const auto *CB = dyn_cast<CallBase>(User)) {
     if (!CB->hasMetadata(LLVMContext::MD_nosanitize)) {
       return false;
@@ -3794,7 +3792,7 @@ static bool isUbsanGlobal(const GlobalVariable &G) {
   //   @0 = private unnamed_addr global
   //   { { ptr, i32, i32 }, { ptr, i32, i32 }, i32}
   //   { { ptr, i32, i32 } { ptr @.src, i32 10, i32 10 },
-  //     { ptr, i32, i32 } { ptr @.src.1, i32 61, i32 62 }, 
+  //     { ptr, i32, i32 } { ptr @.src.1, i32 61, i32 62 },
   //     i32 1 },
   //   no_sanitize_address
   //   */

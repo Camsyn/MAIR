@@ -1,7 +1,7 @@
 #include "Utils/MetaDataUtils.h"
 #include "Utils/Options.h"
 #include "Utils/UbsanUtils.h"
-#include "XSanDeSanState.h"
+#include "XSanDeSanReSan.h"
 #include "xsan_llvm_compat.h"
 
 #include "llvm/ADT/BitVector.h"
@@ -9,12 +9,51 @@
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Transforms/Utils/Local.h"
 
 #include <algorithm>
 
 using namespace llvm;
 
 namespace __xsan::desan {
+PreprocessPass::PreprocessPass(std::shared_ptr<SanitizingContext> Ctx)
+    : Ctx(std::move(Ctx)) {}
+
+PreservedAnalyses PreprocessPass::run(Module &M, ModuleAnalysisManager &MAM) {
+  requireOrDie(!!Ctx, "desan preprocess pass missing pipeline context");
+
+  resetSession();
+
+  // Do dead code elimination first to avoid sanitizer remove user basic blocks,
+  // which we can't deal with for now.
+  auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
+  for (Function &F : M) {
+    if (!F.isDeclaration() && llvm::removeUnreachableBlocks(F)) {
+      while (llvm::removeUnreachableBlocks(F))
+        ;
+      FAM.invalidate(F, PreservedAnalyses::none());
+    }
+  }
+
+  Ctx->clearArchives();
+  Ctx->UserBBs = collectUserBBs(M);
+  markUserIR(M);
+
+  return PreservedAnalyses::all();
+}
+
+DeSanPass::DeSanPass(llvm::StringRef SanName,
+                     std::shared_ptr<SanitizingContext> Ctx)
+    : San(Sanitizer::Create(SanName)), Ctx(std::move(Ctx)) {}
+
+PreservedAnalyses DeSanPass::run(Module &M, ModuleAnalysisManager &) {
+  requireOrDie(!!Ctx, "desan restore pass missing pipeline context");
+
+  SanitizerArchive &Archive = Ctx->addArchive(San);
+  runDeSan(M, Archive, Ctx->UserBBs);
+
+  return PreservedAnalyses::all();
+}
 
 static void restoreFunction(const Sanitizer &San, FunctionArchive &Archive,
                             Module &M, const UserBBsMap &UserBBsMap) {

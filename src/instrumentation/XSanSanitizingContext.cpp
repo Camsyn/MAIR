@@ -1,4 +1,4 @@
-#include "XSanDeSanState.h"
+#include "XSanSanitizingContext.h"
 #include "Utils/MetaDataUtils.h"
 #include "Utils/Options.h"
 
@@ -210,35 +210,6 @@ void requireOrDie(bool Condition, const Twine &Message) {
     report_fatal_error(Message, false);
 }
 
-Sanitizer::Sanitizer(StringRef Name) : Name(Name.str()) {}
-
-Sanitizer Sanitizer::Create(StringRef Name) {
-  static size_t NextOrder = 0;
-  Sanitizer San(Name);
-  San.Order = NextOrder++;
-  return San;
-}
-
-unsigned Sanitizer::getSanID(LLVMContext &Ctx) const {
-  requireOrDie(!Name.empty(), "cannot get metadata ID for empty sanitizer");
-  if (!SanID || SanIDContext != &Ctx) {
-    SanID = Ctx.getMDKindID((Twine("xsan.") + Name).str());
-    SanIDContext = &Ctx;
-  }
-  return SanID;
-}
-
-bool Sanitizer::is(const Instruction &I) const {
-  if (Name.empty())
-    return false;
-  return I.hasMetadata(getSanID(I.getContext()));
-}
-
-void Sanitizer::tag(Instruction &I) const {
-  requireOrDie(!Name.empty(), "cannot tag instruction with empty sanitizer");
-  I.setMetadata(getSanID(I.getContext()), MDNode::get(I.getContext(), {}));
-}
-
 void SanitizingContext::clearArchives() { SanitizerArchives.clear(); }
 
 SanitizerArchive &SanitizingContext::addArchive(const Sanitizer &San) {
@@ -389,8 +360,7 @@ void dumpArchive(const Sanitizer &San, const ReSanArchive &Archive,
 
       for (size_t J = 0; J < Records.size(); ++J) {
         const ReplaceRecord &Record = Records[J];
-        OS << "    [record#" << J << "] sanitizer=" << San.name()
-           << " value=";
+        OS << "    [record#" << J << "] sanitizer=" << San.name() << " value=";
         dumpValueRef(Record.SanitizerValue, OS);
         OS << "\n";
       }
@@ -421,8 +391,7 @@ void dumpArchive(const Sanitizer &San, const ReSanArchive &Archive,
       OS << " records=" << Records.size() << "\n";
 
       for (size_t J = 0; J < Records.size(); ++J) {
-        OS << "    [record#" << J << "] sanitizer=" << San.name()
-           << "\n";
+        OS << "    [record#" << J << "] sanitizer=" << San.name() << "\n";
       }
     }
   }
@@ -450,19 +419,16 @@ void validateArchive(const Sanitizer &San, const ReSanArchive &Archive,
          << ". Anchor == nullptr\n";
     } else {
       if (!Anchor->getParent()) {
-        OS << "[ReSan AddRecord] Sanitizer " << San.name()
-           << ". Anchor:\n";
+        OS << "[ReSan AddRecord] Sanitizer " << San.name() << ". Anchor:\n";
         dumpValueRef(Anchor, OS);
         OS << "\n has no parent block\n";
       } else if (!CacheUserBBs.contains(Anchor->getParent())) {
-        OS << "[ReSan AddRecord] Sanitizer " << San.name()
-           << ". Anchor:\n";
+        OS << "[ReSan AddRecord] Sanitizer " << San.name() << ". Anchor:\n";
         dumpValueRef(Anchor, OS);
         OS << "\n is not in user blocks set\n";
       }
       if (!__xsan::UserIR::is(*Anchor)) {
-        OS << "[ReSan AddRecord] Sanitizer " << San.name()
-           << ". Anchor:\n";
+        OS << "[ReSan AddRecord] Sanitizer " << San.name() << ". Anchor:\n";
         dumpValueRef(Anchor, OS);
         OS << "\n is not a user instruction\n";
       }

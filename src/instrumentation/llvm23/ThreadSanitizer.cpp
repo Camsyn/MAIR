@@ -871,8 +871,8 @@ bool XsanThreadSanitizer::prepareTsanTargetsToInstrument(
   if (!collectTargetsToIntrument(F, TLI, Targets))
     return false;
 
-  auto RngMap =
-      map_range(Targets.AllLoadsAndStores, [](const auto &II) { return II.Inst; });
+  auto RngMap = map_range(Targets.AllLoadsAndStores,
+                          [](const auto &II) { return II.Inst; });
   SmallVector<const Instruction *, 16> NewLdSt(RngMap);
   bool Changed = false;
   if (__xsan::options::opt::enableTsanOptStackObj()) {

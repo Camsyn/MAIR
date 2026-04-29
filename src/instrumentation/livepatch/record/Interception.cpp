@@ -1,5 +1,5 @@
 #include "PatchCore.h"
-#include "livepatch/XSanSanitizingRecorder.h"
+#include "livepatch/record/SanitizingRecorder.h"
 #include "xsan_llvm_compat.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -259,11 +259,11 @@ void recordReplaceEvent(llvm::Value *Old, llvm::Value *New) {
 
 } // namespace __xsan::desan
 
-namespace __xsan {
+namespace __xsan::desan {
 namespace {
 
-// DeSan deliberately keeps these interceptor bodies under __xsan with names
-// different from their LLVM interceptees.  We do not rely on DSO
+// DeSan deliberately keeps these interceptor bodies in the desan namespace with
+// names different from their LLVM interceptees. We do not rely on DSO
 // injection/interposition for interception; recording is enabled only when
 // needed by planting trampolines at run time, so matching LLVM's mangled names
 // is unnecessary and would hide that these are patch entry points.
@@ -272,22 +272,24 @@ compat::InstructionEraseIterator eraseFromParent(llvm::Instruction *Self);
 void replaceAllUsesWith(llvm::Value *Self, llvm::Value *V);
 void ReplaceInstWithInst(llvm::Instruction *From, llvm::Instruction *To);
 
-static ManualInterception RemoveFromParentInterceptee(
-    &removeFromParent, &llvm::Instruction::removeFromParent,
-    desan::InterceptionTargetProcesses, desan::InterceptionGroup);
+static __xsan::ManualInterception
+    RemoveFromParentInterceptee(&removeFromParent,
+                                &llvm::Instruction::removeFromParent,
+                                InterceptionTargetProcesses, InterceptionGroup);
 
 void removeFromParent(llvm::Instruction *Self) {
-  desan::recordDeleteEvent(Self);
+  recordDeleteEvent(Self);
   RemoveFromParentInterceptee(Self);
 }
 
-static ManualInterception EraseFromParentInterceptee(
-    &eraseFromParent, &llvm::Instruction::eraseFromParent,
-    desan::InterceptionTargetProcesses, desan::InterceptionGroup);
+static __xsan::ManualInterception
+    EraseFromParentInterceptee(&eraseFromParent,
+                               &llvm::Instruction::eraseFromParent,
+                               InterceptionTargetProcesses, InterceptionGroup);
 
 compat::InstructionEraseIterator eraseFromParent(llvm::Instruction *Self) {
-  desan::recordDeleteEvent(Self);
-  if (desan::isRecording() && desan::hasUserMark(*Self)) {
+  recordDeleteEvent(Self);
+  if (isRecording() && hasUserMark(*Self)) {
     auto Next = std::next(Self->getIterator());
     RemoveFromParentInterceptee(Self);
     return Next;
@@ -295,9 +297,9 @@ compat::InstructionEraseIterator eraseFromParent(llvm::Instruction *Self) {
   return EraseFromParentInterceptee(Self);
 }
 
-static ManualInterception ReplaceAllUsesWithInterceptee(
+static __xsan::ManualInterception ReplaceAllUsesWithInterceptee(
     &replaceAllUsesWith, &llvm::Value::replaceAllUsesWith,
-    desan::InterceptionTargetProcesses, desan::InterceptionGroup);
+    InterceptionTargetProcesses, InterceptionGroup);
 
 void replaceAllUsesWith(llvm::Value *Self, llvm::Value *V) {
   // RAUW can recurse when a Constant user needs to rebuild itself.
@@ -306,24 +308,24 @@ void replaceAllUsesWith(llvm::Value *Self, llvm::Value *V) {
   // rebuilt Constant/Global. We only record the outermost RAUW semantic event;
   // recursive RAUW calls reuse the same interceptor critical section.
   if (!ReplaceAllUsesWithInterceptee.isRecursive())
-    desan::recordReplaceEvent(Self, V);
+    recordReplaceEvent(Self, V);
   ReplaceAllUsesWithInterceptee(Self, V);
 }
 
-static ManualInterception ReplaceInstWithInstInterceptee(
+static __xsan::ManualInterception ReplaceInstWithInstInterceptee(
     &ReplaceInstWithInst,
     /* select one of the overloadings */
     static_cast<decltype(&ReplaceInstWithInst)>(&llvm::ReplaceInstWithInst),
-    desan::InterceptionTargetProcesses, desan::InterceptionGroup);
+    InterceptionTargetProcesses, InterceptionGroup);
 
 void ReplaceInstWithInst(llvm::Instruction *From, llvm::Instruction *To) {
-  if (desan::isRecording() && From && To) {
-    if (desan::hasUserMark(*From)) {
+  if (isRecording() && From && To) {
+    if (hasUserMark(*From)) {
       if (!To->getDebugLoc())
         To->setDebugLoc(From->getDebugLoc());
       compat::insertInstructionBefore(To, From);
       From->replaceAllUsesWith(To);
-      desan::recordDeleteEvent(From);
+      recordDeleteEvent(From);
       RemoveFromParentInterceptee(From);
       return;
     }
@@ -352,4 +354,4 @@ void ReplaceInstWithInst(llvm::Instruction *From, llvm::Instruction *To) {
 // }
 
 } // namespace
-} // namespace __xsan
+} // namespace __xsan::desan

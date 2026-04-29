@@ -1306,13 +1306,13 @@ struct XsanAddressSanitizer : public AddressSanitizer {
 public:
   using AddressSanitizer::AddressSanitizer;
   bool instrumentFunction(Function &F, FunctionAnalysisManager &FAM);
+
 private:
   bool shouldSkipFunction(Function &F);
   bool collectTargetsToIntrument(Function &F, const TargetLibraryInfo *TLI,
                                  const TargetTransformInfo *TTI,
                                  AsanToInstrument &Targets);
-  bool prepareAsanTargetsToInstrument(Function &F,
-                                      FunctionAnalysisManager &FAM,
+  bool prepareAsanTargetsToInstrument(Function &F, FunctionAnalysisManager &FAM,
                                       const TargetLibraryInfo *TLI,
                                       const TargetTransformInfo *TTI,
                                       AsanToInstrument &Targets);
@@ -4061,8 +4061,8 @@ bool XsanAddressSanitizer::prepareAsanTargetsToInstrument(
         }
         return IsInterestingMop;
       });
-  auto RngMap =
-      map_range(RngFilter, [](InterestingMemoryOperand &Op) { return Op.getInsn(); });
+  auto RngMap = map_range(
+      RngFilter, [](InterestingMemoryOperand &Op) { return Op.getInsn(); });
   const SmallVector<const Instruction *, 16> TmpInsts(RngMap);
   SmallVector<const Instruction *, 16> DistilledLoadStores =
       MRC.distillRecurringChecks(TmpInsts, false);

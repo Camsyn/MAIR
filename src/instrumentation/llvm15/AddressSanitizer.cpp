@@ -1186,7 +1186,7 @@ PreservedAnalyses ModuleAddressSanitizerPass::run(Module &M,
                                                   ModuleAnalysisManager &MAM) {
   // Return early if nosanitize_address module flag is present for the module.
   // This implies that asan pass has already run before.
-  if (__xsan::checkIfAlreadyInstrumented(M, "nosanitize_address"))
+  if (::__xsan::checkIfAlreadyInstrumented(M, "nosanitize_address"))
     return PreservedAnalyses::all();
 
   XsanModuleAddressSanitizer ModuleSanitizer(M, Options.CompileKernel,
@@ -3510,18 +3510,18 @@ bool XsanAddressSanitizer::prepareAsanTargetsToInstrument(
   if (!collectTargetsToIntrument(F, &TLI, Targets))
     return false;
 
-  if (!__xsan::options::opt::enableReccReductionAsan())
+  if (!::__xsan::options::opt::enableReccReductionAsan())
     return true;
 
-  __xsan::MopRecurrenceReducer MRC(F, FAM);
+  ::__xsan::MopRecurrenceReducer MRC(F, FAM);
   SmallVector<InterestingMemoryOperand, 16> NewOperandsToInstrument;
 
   auto RngFilter = make_filter_range(
       Targets.OperandsToInstrument, [&](InterestingMemoryOperand &Op) {
         Instruction &Insn = *Op.getInsn();
-        if (__xsan::DelegateToXSan::is(Insn))
+        if (::__xsan::DelegateToXSan::is(Insn))
           return false;
-        bool IsInterestingMop = __xsan::isInterestingMop(Insn);
+        bool IsInterestingMop = ::__xsan::isInterestingMop(Insn);
         if (!IsInterestingMop)
           NewOperandsToInstrument.push_back(Op);
         return IsInterestingMop;
@@ -3724,7 +3724,7 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
   // We must unpoison the stack before NoReturn calls (throw, _exit, etc).
   // See e.g. https://github.com/google/sanitizers/issues/37
   for (auto CI : NoReturnCalls) {
-    __xsan::InstrumentationIRBuilder IRB(CI);
+    IRBuilder<> IRB(CI);
     IRB.CreateCall(AsanHandleNoReturnFunc, {});
   }
 
@@ -3843,13 +3843,13 @@ collectSanitizerInteriorGlobals( Module &M) {
 bool XsanModuleAddressSanitizer::instrumentModule(Module &M) {
   markSanitizerGlobals(M);
   bool Changed = ModuleAddressSanitizer::instrumentModule(M);
-  __xsan::addNoInstrumentationAttr(
+  ::__xsan::addNoInstrumentationAttr(
       {this->AsanCtorFunction, this->AsanDtorFunction});
   return Changed;
 }
 
 bool XsanModuleAddressSanitizer::markSanitizerGlobals(Module &M) {
-  if (!__xsan::shouldAsanPoisonInternalGlobals()) {
+  if (!::__xsan::shouldAsanPoisonInternalGlobals()) {
     return false;
   }
 
@@ -4004,6 +4004,6 @@ bool XsanModuleAddressSanitizer::markSanitizerGlobalsElf(
 #ifndef XSAN_PASS
 extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
   return {LLVM_PLUGIN_API_VERSION, "ASan Pass", LLVM_VERSION_STRING,
-          __xsan::registerAsanForClangAndOpt};
+          ::__xsan::registerAsanForClangAndOpt};
 }
 #endif

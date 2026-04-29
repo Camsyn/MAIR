@@ -1,18 +1,20 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
+#include <cerrno>
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include <dlfcn.h>
 #include <elf.h>
 #include <filesystem>
 #include <limits.h>
 #include <link.h>
-#include <llvm/Support/Memory.h>
 #include <llvm/Support/Process.h>
 #include <optional>
 #include <string_view>
 #include <system_error>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <vector>
 
@@ -584,8 +586,6 @@ void *getInterceptorAddr(const char *MangledName, void *DsoAnchor) {
 }
 
 class ScopedApplyPatch {
-  using Memory = llvm::sys::Memory;
-
 public:
   enum class MemoryType {
     Exec,
@@ -593,33 +593,53 @@ public:
   };
 
 private:
-  void changeMemoryProtection(unsigned flags) {
-    if (auto Ret = Memory::protectMappedMemory(Mem, flags)) {
-      FATAL("Failed to protect memory for patching: %s", Ret.message().c_str());
+  static size_t getPageSize() {
+    long PageSize = sysconf(_SC_PAGESIZE);
+    if (PageSize <= 0)
+      FATAL("Failed to query page size for patching: %s", std::strerror(errno));
+    return static_cast<size_t>(PageSize);
+  }
+
+  static int getMemoryProtectionFlags(MemoryType Type, bool Writable) {
+    int Flags = PROT_READ;
+    if (Writable)
+      Flags |= PROT_WRITE;
+    if (Type == MemoryType::Exec)
+      Flags |= PROT_EXEC;
+    return Flags;
+  }
+
+  void changeMemoryProtection(bool Writable) {
+    if (Size == 0)
+      return;
+
+    const uintptr_t PageSize = getPageSize();
+    const uintptr_t PageMask = PageSize - 1;
+    const uintptr_t Begin = reinterpret_cast<uintptr_t>(Addr);
+    const uintptr_t End = Begin + Size;
+    const uintptr_t AlignedBegin = Begin & ~PageMask;
+    const uintptr_t AlignedEnd = (End + PageMask) & ~PageMask;
+
+    if (mprotect(reinterpret_cast<void *>(AlignedBegin),
+                 AlignedEnd - AlignedBegin,
+                 getMemoryProtectionFlags(Type, Writable)) != 0) {
+      FATAL("Failed to protect memory for patching: %s", std::strerror(errno));
     }
   }
 
 public:
-  unsigned getMemoryProtectionFlags(MemoryType type) {
-    switch (type) {
-    case MemoryType::Exec:
-      return Memory::MF_EXEC | Memory::MF_READ;
-    case MemoryType::RoData:
-      return Memory::MF_READ;
-    }
-  }
-
-  ScopedApplyPatch(void *FuncAddr, size_t n, MemoryType type = MemoryType::Exec)
-      : Mem(FuncAddr, n), type(type) {
-    changeMemoryProtection(Memory::MF_RWE_MASK);
+  ScopedApplyPatch(void *FuncAddr, size_t n, MemoryType Type = MemoryType::Exec)
+      : Addr(FuncAddr), Size(n), Type(Type) {
+    changeMemoryProtection(/*Writable=*/true);
   }
   ~ScopedApplyPatch() {
-    changeMemoryProtection(getMemoryProtectionFlags(type));
+    changeMemoryProtection(/*Writable=*/false);
   }
 
 private:
-  llvm::sys::MemoryBlock Mem;
-  MemoryType type;
+  void *Addr;
+  size_t Size;
+  MemoryType Type;
 };
 
 // Memcpy, but can run on address without write permission.

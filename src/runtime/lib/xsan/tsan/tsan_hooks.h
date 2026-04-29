@@ -8,7 +8,6 @@
 #include "tsan_interface_xsan.h"
 #include "tsan_platform.h"
 #include "tsan_rtl_extra.h"
-#include "xsan_stack_interface.h"
 
 namespace __tsan {
 
@@ -31,14 +30,11 @@ PSEUDO_MACRO void AccessMemoryRange(const TsanContext *ctx, const void *_offset,
   uptr offset = (uptr)_offset;
   if (size == 0)
     return;
-  if (ctx) {
-    __tsan::MemoryAccessRangeT<is_read>(ctx->thr_, __xsan::GetRealPc(ctx->pc_),
-                                        offset, size);
-  } else {
+  if (ctx)
+    __tsan::MemoryAccessRangeT<is_read>(ctx->thr_, ctx->pc_, offset, size);
+  else
     __tsan::MemoryAccessRangeT<is_read>(__tsan::cur_thread_init(),
-                                        __xsan::GetRealPc(GET_CURRENT_PC()),
-                                        offset, size);
-  }
+                                        GET_CURRENT_PC(), offset, size);
 }
 
 struct TsanHooks : ::__xsan::DefaultHooks<TsanContext, TsanThread> {

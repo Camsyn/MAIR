@@ -21,17 +21,6 @@ struct CommonFlags;
 
 namespace __xsan {
 
-// RAII guard to temporarily set the real PC value for sanitizer reporting.
-// This is needed to correct PC locations when loop optimizations cause
-// the reported PC to differ from the actual source location.
-// Usage: Create an instance at the start of instrumented functions that
-// receive a PC parameter.
-class ScopedRealPc {
- public:
-  ScopedRealPc(uptr pc) { real_pc = pc; };
-  ~ScopedRealPc() { real_pc = 0; };
-};
-
 // These structs is to hold the context of sub-sanitizers.
 // - TSan requires a thread state and a pc everywhere.
 // - ASan needs a BufferedStackTrace everywhere.

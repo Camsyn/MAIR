@@ -56,7 +56,6 @@
 #include <cstdint>
 #include <optional>
 
-
 #if LLVM_VERSION_MAJOR >= 20
 #include "llvm/TargetParser/Triple.h"
 #else
@@ -64,7 +63,6 @@
 #endif
 
 #include "xsan_llvm_compat.h"
-
 
 using namespace llvm;
 
@@ -473,8 +471,8 @@ Instruction *SplitBlockAndInsertIfThen(Value *Cond, Instruction *SplitBefore,
   if (DT)
     DTU.emplace(*DT, DomTreeUpdater::UpdateStrategy::Lazy);
   Instruction *Term = llvm::SplitBlockAndInsertIfThen(
-      Cond, SplitBefore, Unreachable, BranchWeights,
-      DTU ? &*DTU : nullptr, LI, ThenBlock);
+      Cond, SplitBefore, Unreachable, BranchWeights, DTU ? &*DTU : nullptr, LI,
+      ThenBlock);
   /*
   OldBB:
     ...
@@ -501,7 +499,8 @@ LoopInvariantChecker::LoopInvariantChecker(const DominatorTree &DT,
     : DT(DT), AA(AA) {
   const Module &M = *DT.getRoot()->getModule();
   UBSanExists = any_of(M.getFunctionList(), [&](const Function &F) {
-    return F.isDeclaration() && compat::startsWith(F.getName(), "__ubsan_handle");
+    return F.isDeclaration() &&
+           compat::startsWith(F.getName(), "__ubsan_handle");
   });
 }
 
@@ -1030,12 +1029,12 @@ LoopMopInstrumenter::LoopMopInstrumenter(Function &F,
 
   AttributeList Attr;
   Attr = Attr.addFnAttribute(Ctx, Attribute::NoUnwind);
-  XsanRangeRead = M.getOrInsertFunction("__xsan_read_range", Attr,
-                                        IRB.getVoidTy(), IRB.getPtrTy(),
-                                        IRB.getPtrTy(), IRB.getInt64Ty());
-  XsanRangeWrite = M.getOrInsertFunction("__xsan_write_range", Attr,
-                                         IRB.getVoidTy(), IRB.getPtrTy(),
-                                         IRB.getPtrTy(), IRB.getInt64Ty());
+  XsanRangeRead =
+      M.getOrInsertFunction("__xsan_read_range", Attr, IRB.getVoidTy(),
+                            IRB.getPtrTy(), IRB.getPtrTy());
+  XsanRangeWrite =
+      M.getOrInsertFunction("__xsan_write_range", Attr, IRB.getVoidTy(),
+                            IRB.getPtrTy(), IRB.getPtrTy());
 
   for (size_t i = 0; i < kNumberOfAccessSizes; i++) {
     const unsigned ByteSize = 1U << i;
@@ -1043,19 +1042,15 @@ LoopMopInstrumenter::LoopMopInstrumenter(Function &F,
 
     XsanPeriodRead[i] = M.getOrInsertFunction(
         "__xsan_period_read" + ByteSizeStr, Attr, IRB.getVoidTy(),
-        IRB.getPtrTy(), IRB.getPtrTy(), IRB.getInt64Ty(),
-        IRB.getInt64Ty());
+        IRB.getPtrTy(), IRB.getPtrTy(), IRB.getInt64Ty());
     XsanPeriodWrite[i] = M.getOrInsertFunction(
         "__xsan_period_write" + ByteSizeStr, Attr, IRB.getVoidTy(),
-        IRB.getPtrTy(), IRB.getPtrTy(), IRB.getInt64Ty(),
-        IRB.getInt64Ty());
+        IRB.getPtrTy(), IRB.getPtrTy(), IRB.getInt64Ty());
 
     XsanRead[i] = M.getOrInsertFunction("__xsan_read" + ByteSizeStr, Attr,
-                                        IRB.getVoidTy(), IRB.getPtrTy(),
-                                        IRB.getInt64Ty());
+                                        IRB.getVoidTy(), IRB.getPtrTy());
     XsanWrite[i] = M.getOrInsertFunction("__xsan_write" + ByteSizeStr, Attr,
-                                         IRB.getVoidTy(), IRB.getPtrTy(),
-                                         IRB.getInt64Ty());
+                                         IRB.getVoidTy(), IRB.getPtrTy());
   }
 }
 
@@ -1107,7 +1102,8 @@ static bool shouldInstrumentReadWriteFromAddress(const Module *M, Value *Addr) {
       StringRef SectionName = GV->getSection();
       // Check if the global is in the PGO counters section.
       auto OF = Triple(M->getTargetTriple()).getObjectFormat();
-      if (compat::endsWith(SectionName, 
+      if (compat::endsWith(
+              SectionName,
               getInstrProfSectionName(IPSK_cnts, OF, /*AddSegmentInfo=*/false)))
         return false;
     }
@@ -1460,22 +1456,20 @@ bool LoopMopInstrumenter::combinePeriodicChecks(bool RangeAccessOnly) {
       continue;
     }
 
-    // instrument the Mop
-    Constant *BlockAddr =
-        getBlockAddressOfInstruction(*Mop.Mop, &DT, &LI, &MSSAU);
-    Value *PcValue = IRB.CreatePtrToInt(BlockAddr, IRB.getInt64Ty());
-
     if (IsRangeAccess) {
       // void __xsan_read_range(const void *beg, const void *end) {
       // void __xsan_write_range(const void *beg, const void *end) {
-      IRB.CreateCall(IsWrite ? XsanRangeWrite : XsanRangeRead,
-                     {Beg, End, PcValue});
+      CallInst *Check =
+          IRB.CreateCall(IsWrite ? XsanRangeWrite : XsanRangeRead, {Beg, End});
+      Check->setDebugLoc(Mop.Mop->getDebugLoc());
     } else {
       size_t Idx = compat::countr_zero(MopSize);
       // __xsan_period_readX(const void *beg, const void *end, size_t step)
       // __xsan_period_writeX(const void *beg, const void *end, size_t step)
-      IRB.CreateCall(IsWrite ? XsanPeriodWrite[Idx] : XsanPeriodRead[Idx],
-                     {Beg, End, StepVal, PcValue});
+      CallInst *Check =
+          IRB.CreateCall(IsWrite ? XsanPeriodWrite[Idx] : XsanPeriodRead[Idx],
+                         {Beg, End, StepVal});
+      Check->setDebugLoc(Mop.Mop->getDebugLoc());
     }
 
     NumPeriodChecksCombinedDup += tagMopAsDelegated(Mop);
@@ -1631,14 +1625,11 @@ bool LoopMopInstrumenter::relocateInvariantChecks() {
 
     InstrumentationIRBuilder IRB(InsertPt);
 
-    // instrument the Mop
-    Constant *BlockAddr =
-        getBlockAddressOfInstruction(*Mop.Mop, &DT, &LI, &MSSAU);
-    Value *PcValue = IRB.CreatePtrToInt(BlockAddr, IRB.getInt64Ty());
-
     // __xsan_readX(const void *beg)
     // __xsan_writeX(const void *beg)
-    IRB.CreateCall(IsWrite ? XsanWrite[Idx] : XsanRead[Idx], {Addr, PcValue});
+    CallInst *Check =
+        IRB.CreateCall(IsWrite ? XsanWrite[Idx] : XsanRead[Idx], {Addr});
+    Check->setDebugLoc(Mop.Mop->getDebugLoc());
     NumInvChecksRelocatedDup += tagMopAsDelegated(Mop);
     NumInvChecksRelocated++;
 

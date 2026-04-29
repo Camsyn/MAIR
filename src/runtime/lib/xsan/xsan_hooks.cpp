@@ -26,8 +26,6 @@
 using namespace __xsan;
 // ---------------------- State/Ignoration Management Hooks --------------------
 namespace __xsan {
-// definition of real_pc
-THREADLOCAL uptr real_pc = 0;
 THREADLOCAL int xsan_in_internal = 0;
 THREADLOCAL int is_in_symbolizer = 0;
 THREADLOCAL int xsan_in_unwind = 0;

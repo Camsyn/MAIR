@@ -51,28 +51,23 @@ UNALIGNED_STORE(64)
 #undef UNALIGNED_STORE
 
 SANITIZER_INTERFACE_ATTRIBUTE
-void __xsan_read_range(const void *beg, const void *end, uptr pc = 0) {
+void __xsan_read_range(const void *beg, const void *end) {
   if (UNLIKELY(beg == end))
     return;
   /// The caller of __xsan_read_range should ensure that beg <= end
   DCHECK(beg < end && "Invalid range");
   uptr size = (uptr)end - (uptr)beg;
-  // Printf("beg: %p, end: %p, size: %lx\n", beg, end, size);
-  // set global pc to the scoped_pc one
-  ScopedRealPc scoped_pc(pc);
   /// TODO: use a more specific function to perform the check.
   XSAN_READ_RANGE((void *)nullptr, beg, size);
 }
 
 SANITIZER_INTERFACE_ATTRIBUTE
-void __xsan_write_range(const void *beg, const void *end, uptr pc = 0) {
+void __xsan_write_range(const void *beg, const void *end) {
   if (UNLIKELY(beg == end))
     return;
   /// The caller of __xsan_write_range should ensure that beg <= end
   DCHECK(beg < end && "Invalid range");
   uptr size = (uptr)end - (uptr)beg;
-  // set global pc to the scoped_pc one
-  ScopedRealPc scoped_pc(pc);
   XSAN_WRITE_RANGE((void *)nullptr, beg, size);
 }
 
@@ -80,24 +75,20 @@ void __xsan_write_range(const void *beg, const void *end, uptr pc = 0) {
 #define XSAN_PERIODICAL_OPERATION_CALLBACK_IMPL(operation, size_param)         \
   SANITIZER_INTERFACE_ATTRIBUTE                                                \
   void __xsan_period_##operation##size_param(const void *beg, const void *end, \
-                                             s64 step, uptr pc = 0) {          \
+                                             s64 step) {                       \
     if (UNLIKELY(beg == end))                                                  \
       return;                                                                  \
-    ScopedRealPc scoped_pc(pc);                                                \
     DCHECK(Abs(step) >= (size_param) && "Invalid arguments");                  \
     uptr L = (uptr)beg, R = (uptr)end;                                         \
     if (UNLIKELY((step) < 0)) {                                                \
       Swap(L, R);                                                              \
       L -= step;                                                               \
       R -= step;                                                               \
-      __xsan_period_##operation##size_param((const void *)L, (const void *)R,  \
-                                            -(step), pc);                      \
-      return;                                                                  \
+      step = -step;                                                            \
     }                                                                          \
-    if (UNLIKELY(step == (size_param))) {                                      \
-      __xsan_##operation##_range((const void *)L, (const void *)R, pc);        \
-      return;                                                                  \
-    }                                                                          \
+    if (UNLIKELY(step == (size_param)))                                        \
+      return (void)__xsan_##operation##_range((const void *)L,                 \
+                                              (const void *)R);                \
     DCHECK(L <= R && "Invalid arguments");                                     \
     for (uptr offset = L; offset < R; offset += step) {                        \
       XSAN_HOOKS_EXEC(__xsan_##operation<size_param>, offset);                 \
@@ -122,18 +113,16 @@ XSAN_PERIODICAL_WRITE_CALLBACK(8)
 XSAN_PERIODICAL_WRITE_CALLBACK(16)
 
 /// TODO: use a macro to perform the ASan check for better performance?
-#define XSAN_READ(size)                                \
-  SANITIZER_INTERFACE_ATTRIBUTE                        \
-  void __xsan_read##size(const void *p, uptr pc = 0) { \
-    ScopedRealPc scoped_pc(pc);                        \
-    XSAN_HOOKS_EXEC(__xsan_read<size>, (uptr)p);       \
+#define XSAN_READ(size)                          \
+  SANITIZER_INTERFACE_ATTRIBUTE                  \
+  void __xsan_read##size(const void *p) {        \
+    XSAN_HOOKS_EXEC(__xsan_read<size>, (uptr)p); \
   }
 
-#define XSAN_WRITE(size)                                \
-  SANITIZER_INTERFACE_ATTRIBUTE                         \
-  void __xsan_write##size(const void *p, uptr pc = 0) { \
-    ScopedRealPc scoped_pc(pc);                         \
-    XSAN_HOOKS_EXEC(__xsan_write<size>, (uptr)p);       \
+#define XSAN_WRITE(size)                          \
+  SANITIZER_INTERFACE_ATTRIBUTE                   \
+  void __xsan_write##size(const void *p) {        \
+    XSAN_HOOKS_EXEC(__xsan_write<size>, (uptr)p); \
   }
 
 XSAN_READ(1)

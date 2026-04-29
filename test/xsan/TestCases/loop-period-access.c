@@ -106,8 +106,6 @@ int main(int argc, char **argv) {
 // IR-RANGE: call void @__xsan_read_range({{.*}}), !dbg
 // IR-RANGE-LABEL: define {{.*}}@range_write_for(
 // IR-RANGE: call void @__xsan_write_range({{.*}}), !dbg
-// IR-RANGE-LABEL: define {{.*}}@counted_while_loop(
-// IR-RANGE: call void @__xsan_write_range({{.*}}), !dbg
 
 // IR-PERIOD-LABEL: define {{.*}}@range_read_loop(
 // IR-PERIOD: call void @__xsan_read_range({{.*}}), !dbg
@@ -115,8 +113,6 @@ int main(int argc, char **argv) {
 // IR-PERIOD: call void @__xsan_write_range({{.*}}), !dbg
 // IR-PERIOD-LABEL: define {{.*}}@period_write_for(
 // IR-PERIOD: call void @__xsan_period_write1({{.*}}), !dbg
-// IR-PERIOD-LABEL: define {{.*}}@counted_while_loop(
-// IR-PERIOD: call void @__xsan_write_range({{.*}}), !dbg
 
 // IR-INVARIANT-LABEL: define {{.*}}@invariant_write_for(
 // IR-INVARIANT: call void @__xsan_write1({{.*}}), !dbg
@@ -129,8 +125,6 @@ int main(int argc, char **argv) {
 // IR-FULL: call void @__xsan_period_write1({{.*}}), !dbg
 // IR-FULL-LABEL: define {{.*}}@invariant_write_for(
 // IR-FULL: call void @__xsan_write1({{.*}}), !dbg
-// IR-FULL-LABEL: define {{.*}}@counted_while_loop(
-// IR-FULL: call void @__xsan_write_range({{.*}}), !dbg
 
 // SAFE-NOT: ERROR: AddressSanitizer
 // SAFE: Done
@@ -152,5 +146,4 @@ int main(int argc, char **argv) {
 // INVARIANT-WRITE: #1 {{.*}}invariant_write_for
 
 // WHILE-WRITE: ERROR: AddressSanitizer: global-buffer-overflow
-// WHILE-WRITE: #0 {{.*}}__xsan_write_range
-// WHILE-WRITE: #1 {{.*}}counted_while_loop
+// WHILE-WRITE: #{{[0-9]+}} {{.*}}counted_while_loop

@@ -19,6 +19,11 @@
 
 namespace __xsan::desan {
 
+// A sanitizer is identified by the user-facing plan name ("asan", "msan",
+// ...). The order is assigned when the sanitizer is inserted into
+// SanitizingContext and is the replay order used by ReSan. Metadata is also
+// derived from the name as `xsan.<name>`, so adding a sanitizer no longer
+// requires a new hard-coded metadata kind.
 class Sanitizer {
 public:
   Sanitizer() = default;
@@ -28,6 +33,9 @@ public:
   llvm::StringRef name() const { return Name; }
   size_t order() const { return Order; }
   bool isUBSan() const { return Name == "ubsan"; }
+  bool sameAs(const Sanitizer &Other) const {
+    return Order == Other.Order && Name == Other.Name;
+  }
   bool isLaterThan(const Sanitizer &Other) const { return Order > Other.Order; }
 
   bool is(const llvm::Instruction &I) const;
@@ -37,7 +45,6 @@ private:
   explicit Sanitizer(llvm::StringRef Name);
   void setOrder(size_t NewOrder) { Order = NewOrder; }
   unsigned getSanID(llvm::LLVMContext &Ctx) const;
-  std::string metadataName() const;
 
   std::string Name;
   size_t Order = 0;
@@ -47,6 +54,10 @@ private:
   friend struct SanitizingContext;
 };
 
+// Describes sanitizer IR that was removed by DeSan and must be reinserted by
+// ReSan. An add can be either a pure instruction sequence before a user
+// instruction, or a split edge where sanitizer blocks were interleaved with
+// user blocks.
 struct AddRecord {
   constexpr static char MagicRecordBbName[] = "__xsan_desan_add_record_bb";
 
@@ -82,6 +93,10 @@ struct ReplaceRecord {
 
 struct DeleteRecord {};
 
+// Per-sanitizer archive of added IR. SanBBMap holds detached sanitizer-only
+// blocks keyed by their original insertion anchor. DenseMap cannot directly key
+// on a Function/BasicBlock variant, so the anchor is stored as a typed pointer
+// pair.
 struct AddArchive {
   AddArchive() = default;
   AddArchive(AddArchive &&) noexcept = default;
@@ -114,6 +129,9 @@ using ReplaceArchive =
 
 using FunctionArchive = llvm::SmallVector<llvm::Function *, 2>;
 
+// All ReSan replay material for one sanitizer. The owning sanitizer identity is
+// intentionally outside this struct (SanitizerArchive) so individual records do
+// not duplicate a stage/sanitizer field.
 struct ReSanArchive {
   ReSanArchive() = default;
   ReSanArchive(ReSanArchive &&) noexcept = default;
@@ -158,7 +176,10 @@ struct SanitizerArchive {
 
 struct SanitizingContext {
   UserBBsMap UserBBs;
-  std::vector<SanitizerArchive> SanitizerArchives;
+  // Tuple model: SanitizingContext = [(Sanitizer, ReSanArchive)...].
+  // The container order is sanitizer pipeline order and is used to resolve
+  // cross-sanitizer replacements during ReSan.
+  llvm::SmallVector<SanitizerArchive, 4> SanitizerArchives;
   Sanitizer ReSanitizer;
 
   void clearArchives();
@@ -173,9 +194,6 @@ void requireOrDie(bool Condition, const llvm::Twine &Message);
 
 void markUserIR(llvm::Module &M);
 UserBBsMap collectUserBBs(llvm::Module &M);
-
-bool isSanitizerIR(const Sanitizer &San, const llvm::Instruction &I);
-void setSanitizerIR(const Sanitizer &San, llvm::Instruction &I);
 
 bool replaceUserIRUses(llvm::Value &From, llvm::Value &To);
 bool replaceNonSanitizerUses(const Sanitizer &San, llvm::Value &From,

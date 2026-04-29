@@ -12,10 +12,6 @@ namespace __xsan::desan {
 
 namespace {
 
-static bool isSameSanitizer(const Sanitizer &LHS, const Sanitizer &RHS) {
-  return LHS.order() == RHS.order() && LHS.name() == RHS.name();
-}
-
 struct ReplaceRef {
   const Sanitizer *San = nullptr;
   const ReplaceRecord *Record = nullptr;
@@ -30,7 +26,7 @@ static bool isCandidateSanitizer(const Sanitizer &Candidate,
                                  const Sanitizer *Base, bool IncludeBase) {
   if (!Base)
     return true;
-  if (IncludeBase && isSameSanitizer(Candidate, *Base))
+  if (IncludeBase && Candidate.sameAs(*Base))
     return true;
   return Candidate.isLaterThan(*Base);
 }
@@ -62,7 +58,7 @@ static ReplaceRef findLatestOtherReplaceRecord(const SanitizingContext &Context,
                                                const Sanitizer &San) {
   ReplaceRef Selected;
   for (const SanitizerArchive &Entry : Context.SanitizerArchives) {
-    if (isSameSanitizer(Entry.San, San))
+    if (Entry.San.sameAs(San))
       continue;
 
     auto It = Entry.Archive.ReplaceRecords.find(UserValue);
@@ -139,12 +135,10 @@ collectArgumentReplaceInsts(const SanitizingContext &Context, Function &F) {
 
 // We need ReplaceArchive to redirect instruction anchors.
 static void replayAdd(Module &M, SanitizingContext &Context) {
-  // Some sanitizer replace arguments with their sanitized versions, but some
-  // sanitizer assume the arguments are prepared at the the beginning of the
-  // function, so we need to restrict the eariest anchor to be before the first
-  // non-alloca instruction in the entry block, and we also need to add a sentry
-  // anchor ensure the replacement can be earier than other non-argument-replace
-  // instructions.
+  // Some sanitizers replace arguments with sanitized versions and assume these
+  // replacements are prepared at the beginning of the function. The sentry
+  // anchor gives those argument replacements a stable position before the first
+  // non-alloca entry instruction and before other sanitizer add records.
   struct FunctionHeaderInfo {
     SmallPtrSet<AllocaInst *, 8> AllocaToBeRedirected;
     Instruction *SentryAnchor;
@@ -160,7 +154,7 @@ static void replayAdd(Module &M, SanitizingContext &Context) {
     if (F.isDeclaration())
       continue;
 
-    // Collect instructions replacing arguments in this function
+    // Collect instructions replacing arguments in this function.
     SmallVector<Instruction *, 8> ReplaceInsts =
         collectArgumentReplaceInsts(Context, F);
     if (ReplaceInsts.empty())
@@ -189,7 +183,7 @@ static void replayAdd(Module &M, SanitizingContext &Context) {
   }
 
   // Some add records' anchors may need to be redirected.
-  // 1. If the sanitizer parts contains a instruction replacing the argument, we
+  // 1. If the sanitizer part contains an instruction replacing the argument, we
   //    should redirect to the header sentry mentioned above.
   // 2. If the anchor is an alloca instruction at the function header, we should
   //    redirect to the instruction after the header sentry mentioned above.
@@ -292,7 +286,7 @@ static void replayAdd(Module &M, SanitizingContext &Context) {
 
       if (auto *Pure = std::get_if<AddRecord::PureRecord>(&Add.Record)) {
         for (Instruction &SanInst : *Pure->SanInsts) {
-          setSanitizerIR(San, SanInst);
+          San.tag(SanInst);
           if (auto *Phi = dyn_cast<PHINode>(&SanInst))
             PhiToUpdate.push_back(Phi);
         }
@@ -301,7 +295,7 @@ static void replayAdd(Module &M, SanitizingContext &Context) {
       } else if (auto *Split =
                      std::get_if<AddRecord::SplitRecord>(&Add.Record)) {
         for (Instruction &SanInst : *Split->SanInstsToAppend) {
-          setSanitizerIR(San, SanInst);
+          San.tag(SanInst);
           if (auto *Phi = dyn_cast<PHINode>(&SanInst))
             PhiToUpdate.push_back(Phi);
         }
@@ -345,8 +339,8 @@ static void replayAdd(Module &M, SanitizingContext &Context) {
     }
   }
 
-  // Add the sentry anchor to delete record so that it will be removed
-  // by delete replay.
+  // Sentry anchors are temporary ordering aids, not sanitizer records. Remove
+  // them after add replay unless debug mode keeps IR artifacts visible.
   if (!options::ClDebug)
     for (Instruction *Sentry : SentryAnchors)
       if (Sentry->getParent())
@@ -370,7 +364,7 @@ static void replayReplace(Module &M, SanitizingContext &Context) {
 }
 
 static bool shouldReplayDelete(const SanitizingContext &Context,
-                               const Sanitizer &San, Instruction &UserInst) {
+                               Instruction &UserInst) {
   ReplaceRef Replacement = findLatestReplaceRecord(Context, &UserInst, nullptr,
                                                    /*IncludeBase=*/true);
   if (!Replacement.Record)
@@ -386,7 +380,7 @@ static void replayDelete(Module &M, SanitizingContext &Context) {
     for (auto &[UserInst, Records] : Entry.Archive.DeleteRecords) {
       if (!UserInst->getParent())
         continue;
-      if (!shouldReplayDelete(Context, Entry.San, *UserInst))
+      if (!shouldReplayDelete(Context, *UserInst))
         continue;
       UserInst->eraseFromParent();
     }

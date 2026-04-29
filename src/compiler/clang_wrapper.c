@@ -409,18 +409,29 @@ static void regist_pass_plugin(enum SanitizerType sanTy) {
   /**
    * Transfer the option to pass by `-mllvm -<opt>`
    */
-  if (sanTy != XSan) {
+  if (sanTy != XSan)
     return;
-  }
-  if (!has(&act_sanitizers, ASan)) {
-    ADD_LLVM_MIDDLE_END_OPTION("-xsan-disable-asan");
-  }
-  if (!has(&act_sanitizers, TSan)) {
-    ADD_LLVM_MIDDLE_END_OPTION("-xsan-disable-tsan");
-  }
-  if (!has(&act_sanitizers, MSan)) {
-    ADD_LLVM_MIDDLE_END_OPTION("-xsan-disable-msan");
-  }
+
+  char xsan_sanitizers[32] = "";
+  const char *sep = "";
+#define ADD_XSAN_SANITIZER(NAME)                                               \
+  do {                                                                         \
+    snprintf(xsan_sanitizers + strlen(xsan_sanitizers),                        \
+             sizeof(xsan_sanitizers) - strlen(xsan_sanitizers), "%s" NAME,    \
+             sep);                                                             \
+    sep = ",";                                                                \
+  } while (0)
+
+  if (has(&act_sanitizers, ASan))
+    ADD_XSAN_SANITIZER("asan");
+  if (has(&act_sanitizers, TSan))
+    ADD_XSAN_SANITIZER("tsan");
+  if (has(&act_sanitizers, MSan))
+    ADD_XSAN_SANITIZER("msan");
+#undef ADD_XSAN_SANITIZER
+
+  ADD_LLVM_MIDDLE_END_OPTION(alloc_printf(
+      "-xsan-sanitizers=%s", xsan_sanitizers[0] ? xsan_sanitizers : "none"));
 }
 
 /* Copy argv to cc_params, making the necessary edits. */

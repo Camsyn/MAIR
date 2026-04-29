@@ -1,5 +1,9 @@
 #include "Options.h"
 
+#include <llvm/ADT/StringRef.h>
+#include <llvm/ADT/Twine.h>
+#include <llvm/Support/ErrorHandling.h>
+
 namespace __xsan {
 namespace options {
 
@@ -50,19 +54,40 @@ const cl::opt<bool> ClPostOpt(
 
 } // namespace opt
 
-const cl::opt<bool> ClDisableAsan("xsan-disable-asan", cl::init(false),
-                                  cl::desc("Disable ASan instrumentation"),
-                                  cl::Hidden);
+cl::list<std::string> ClSanitizers(
+    "xsan-sanitizers", cl::CommaSeparated, cl::ZeroOrMore,
+    cl::value_desc("asan,tsan,msan|none"),
+    cl::desc("Explicitly select XSan sub-sanitizers"),
+    cl::Hidden);
 
-const cl::opt<bool> ClDisableTsan("xsan-disable-tsan",
-                                  cl::init(false),
-                                  cl::desc("Disable TSan instrumentation"),
-                                  cl::Hidden);
+bool isSelectedSanitizer(llvm::StringRef Name) {
+  if (ClSanitizers.empty())
+    llvm::report_fatal_error("XSan requires explicit -xsan-sanitizers="
+                             "asan,tsan,msan selection");
+  if (Name != "asan" && Name != "tsan" && Name != "msan")
+    llvm::report_fatal_error(llvm::Twine("unknown XSan sanitizer name: ") +
+                             Name);
 
-const cl::opt<bool> ClDisableMsan("xsan-disable-msan",
-                                  cl::init(false),
-                                  cl::desc("Disable MSan instrumentation"),
-                                  cl::Hidden);
+  bool Selected = false;
+  bool HasNone = false;
+  for (const std::string &San : ClSanitizers) {
+    llvm::StringRef Value(San);
+    if (Value.empty())
+      continue;
+    if (Value == "none") {
+      HasNone = true;
+      continue;
+    }
+    if (Value != "asan" && Value != "tsan" && Value != "msan")
+      llvm::report_fatal_error(llvm::Twine("unknown -xsan-sanitizers entry: ") +
+                               Value);
+    Selected |= Value == Name;
+  }
+  if (HasNone && Selected)
+    llvm::report_fatal_error("-xsan-sanitizers=none cannot be combined with "
+                             "other sanitizer names");
+  return Selected;
+}
 
 cl::opt<bool> ClDebug("xsan-debug", cl::init(false),
                       cl::desc("Enable debug output for XSan"), cl::Hidden);

@@ -1,4 +1,5 @@
 #include "../Instrumentation.h"
+#include <llvm/ADT/StringRef.h>
 #include <llvm/Support/CommandLine.h>
 
 #include <string>
@@ -51,14 +52,13 @@ inline LoopOptLeval loopOptLevel() {
 }
 } // namespace opt
 
-/// Disable TSan instrumentation.
-extern const cl::opt<bool> ClDisableTsan;
+/// Positive sanitizer selection for XSan's composed sanitizer pipeline.
+///
+/// XSan intentionally uses an explicit allow-list instead of legacy
+/// disable-by-default-negation flags.  "none" selects no sub-sanitizer.
+extern cl::list<std::string> ClSanitizers;
 
-/// Disable ASan instrumentation.
-extern const cl::opt<bool> ClDisableAsan;
-
-/// Disable MSan instrumentation.
-extern const cl::opt<bool> ClDisableMsan;
+bool isSelectedSanitizer(llvm::StringRef Name);
 
 /// Enable debug output.
 extern cl::opt<bool> ClDebug;

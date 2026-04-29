@@ -72,8 +72,17 @@ void addXsanToMPM(ModulePassManager &MPM, OptimizationLevel Level) {
 static void addNoSanitizerPositionPasses(ModulePassManager &,
                                          OptimizationLevel) {}
 
+static void addSelectedXsanAttributeTaggingPasses(ModulePassManager &MPM) {
+  if (options::isSelectedSanitizer("asan"))
+    MPM.addPass(AttributeTaggingPass(SanitizerType::ASan));
+  if (options::isSelectedSanitizer("tsan"))
+    MPM.addPass(AttributeTaggingPass(SanitizerType::TSan));
+  if (options::isSelectedSanitizer("msan"))
+    MPM.addPass(AttributeTaggingPass(SanitizerType::MSan));
+}
+
 static void addXsanOptPasses(ModulePassManager &MPM, OptimizationLevel Level) {
-  MPM.addPass(AttributeTaggingPass(SanitizerType::XSan));
+  addSelectedXsanAttributeTaggingPasses(MPM);
   addXsanPipelineStartPasses(MPM);
   addXsanToMPM(MPM, Level);
 }

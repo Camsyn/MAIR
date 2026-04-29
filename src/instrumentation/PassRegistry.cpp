@@ -252,8 +252,6 @@ const MsanOption obtainMsanPassArgs() {
 
 void addAsanToMPM(ModulePassManager &MPM, OptimizationLevel Level) {
   (void)Level;
-  if (options::ClDisableAsan)
-    return;
 
   const auto &Opts = obtainAsanPassArgs();
 #if LLVM_VERSION_MAJOR >= 23
@@ -267,8 +265,6 @@ void addAsanToMPM(ModulePassManager &MPM, OptimizationLevel Level) {
 
 void addTsanToMPM(ModulePassManager &MPM, OptimizationLevel Level) {
   (void)Level;
-  if (options::ClDisableTsan)
-    return;
   // Create ctor and init functions.
   MPM.addPass(ModuleThreadSanitizerPass());
   // Function Pass to Module Pass. Instruments functions to detect race
@@ -277,9 +273,6 @@ void addTsanToMPM(ModulePassManager &MPM, OptimizationLevel Level) {
 }
 
 void addMsanToMPM(ModulePassManager &MPM, llvm::OptimizationLevel Level) {
-  if (options::ClDisableMsan)
-    return;
-
   const auto &Opts = obtainMsanPassArgs();
 #if LLVM_VERSION_MAJOR >= 23
   MPM.addPass(MemorySanitizerPass(Opts.Opts));
@@ -356,9 +349,12 @@ struct SanitizerInstrPlan {
 // The order matters: each enabled sanitizer is added to SanitizingContext in
 // this order, and ReSan uses that dynamic order when resolving replay records.
 const SanitizerInstrPlan SanitizerInstrPlans[] = {
-    {[] { return !options::ClDisableAsan; }, "asan", addAsanToMPM},
-    {[] { return !options::ClDisableTsan; }, "tsan", addTsanToMPM},
-    {[] { return !options::ClDisableMsan; }, "msan", addMsanToMPM},
+    {[] { return options::isSelectedSanitizer("asan"); }, "asan",
+     addAsanToMPM},
+    {[] { return options::isSelectedSanitizer("tsan"); }, "tsan",
+     addTsanToMPM},
+    {[] { return options::isSelectedSanitizer("msan"); }, "msan",
+     addMsanToMPM},
 };
 
 } // namespace

@@ -5,6 +5,7 @@
 #include "XSanDeSanReSan.h"
 #include "livepatch/record/SanitizingRecorder.h"
 
+#include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -18,17 +19,14 @@
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/GVN.h"
 #include "llvm/Transforms/Scalar/InstSimplifyPass.h"
+#include "llvm/Transforms/Scalar/JumpThreading.h"
+#include "llvm/Transforms/Scalar/LICM.h"
 #include "llvm/Transforms/Scalar/LoopLoadElimination.h"
+#include "llvm/Transforms/Scalar/LoopPassManager.h"
 #include "llvm/Transforms/Scalar/LoopSink.h"
 #include "llvm/Transforms/Scalar/SCCP.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
-#include "llvm/Transforms/Scalar/TailRecursionElimination.h"
 #include "llvm/Transforms/Utils/Mem2Reg.h"
-
-#if LLVM_VERSION_MAJOR >= 23
-#include "llvm/Analysis/GlobalsModRef.h"
-#include "llvm/Transforms/Scalar/JumpThreading.h"
-#endif
 
 using namespace llvm;
 
@@ -482,57 +480,54 @@ SubSanitizers SubSanitizers::loadSubSanitizers(llvm::OptimizationLevel Level) {
 
 /// TODO: explore a more efficient optimization pipeline for XSAN.
 llvm::ModulePassManager createPostOptimizationPasses(OptimizationLevel Level) {
+  (void)Level;
+
   ModulePassManager MPM;
   FunctionPassManager FPM;
 
-  // PromotePass: promote alloca/load/store instructions to registers,
-  // i.e., -mem2reg
+  // XSan runs this after DeSan/ReSan.  User IR has already gone through the
+  // normal optimization pipeline; the target here is sanitizer-generated IR:
+  // shadow/check address arithmetic, report-control CFG, and loop-local
+  // sanitizer computations introduced after the original optimization point.
+  MPM.addPass(RequireAnalysisPass<GlobalsAA, llvm::Module>());
+
+  // 1. Sanitizer-local scalar cleanup.
+
+  // Canonicalize sanitizer-generated local temporaries before memory-aware CSE.
+  // I.e., mem2reg
   FPM.addPass(PromotePass());
-  // SimplifyCFG: simplify the CFG to improve optimization
-  FPM.addPass(SimplifyCFGPass());
-  // InstSimplify: simplify instructions
   FPM.addPass(InstSimplifyPass());
-  // EarlyCSE: eliminate common subexpressions that are not loop-invariant
-  FPM.addPass(EarlyCSEPass());
-  FPM.addPass(SimplifyCFGPass());
-  // InstCombine: peep-hole optiimization of instructions
+  FPM.addPass(EarlyCSEPass(true /* Enable mem-ssa. */));
   FPM.addPass(InstCombinePass());
   FPM.addPass(SimplifyCFGPass());
 
-  if (Level.getSpeedupLevel() >= 2) {
-    // GVN: global value numbering, is a O2 optimization
-    // eliminates inter-blocks redundant computations by numbering.
-    FPM.addPass(GVNPass());
-    FPM.addPass(InstCombinePass());
-    FPM.addPass(SimplifyCFGPass());
-  }
+  // 2. Check/control-flow cleanup.
 
-  /* Loop Optimizations */
-
-  // LoopSimplify: simplify loops
-  FPM.addPass(LoopSimplifyPass());
-  // LCSSA: convert loops to static single assignment form
-  FPM.addPass(LCSSAPass());
-  // SCCPPass: detect and optimize single-condition critical sections
+  // Specialize sanitizer check CFG after the first round exposes constants and
+  // equivalent conditions.
   FPM.addPass(SCCPPass());
+  FPM.addPass(JumpThreadingPass());
+  FPM.addPass(InstCombinePass());
+  FPM.addPass(SimplifyCFGPass());
+
+  // 3. Cross-block redundancy cleanup.
+
+  // Remove cross-block sanitizer redundancy, then hoist loop-invariant
+  // sanitizer computations introduced into already-optimized user loops.
+  FPM.addPass(GVNPass());
+  FPM.addPass(InstCombinePass());
+
+  // 4. Loop IR cleanup.
+  FPM.addPass(createFunctionToLoopPassAdaptor(LICMPass(LICMOptions()),
+                                              /*UseMemorySSA=*/true));
   // LoopLoadElimination: load elimination in loops
   FPM.addPass(LoopLoadEliminationPass());
-  // LoopSink: sinking some inst in loops
   FPM.addPass(LoopSinkPass());
 
-  // // LICM: loop invariant code motion (O3 optimization)
-  // LICMPass pas;
-  // FPM.addPass(LICMPass());
-
-  /* Inst Combine */
-  // InstCombine: combine redundant instructions
+  // 5. Final cleanup.
+  // Clean up CFG and instruction forms exposed by GVN/LICM/LoopSink.
   FPM.addPass(InstCombinePass());
-  // SimplifyCFG: simplify the CFG after instcombine
   FPM.addPass(SimplifyCFGPass());
-
-  /* Tail Call Elimination */
-  /// TODO: figrue out is it OKay?
-  FPM.addPass(TailCallElimPass());
 
   MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
   return MPM;

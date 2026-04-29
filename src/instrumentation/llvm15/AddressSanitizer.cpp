@@ -880,10 +880,15 @@ private:
 struct XsanAddressSanitizer : public AddressSanitizer {
 public:
   using AddressSanitizer::AddressSanitizer;
-  bool shouldSkipFunction(Function &F);
   bool instrumentFunction(Function &F, FunctionAnalysisManager &FAM);
+private:
+  bool shouldSkipFunction(Function &F);
   bool collectTargetsToIntrument(Function &F, const TargetLibraryInfo *TLI,
                                  __xsan::AsanToInstrument &Targets);
+  bool prepareAsanTargetsToInstrument(Function &F,
+                                      FunctionAnalysisManager &FAM,
+                                      const TargetLibraryInfo &TLI,
+                                      __xsan::AsanToInstrument &Targets);
 };
 
 struct XsanModuleAddressSanitizer : public ModuleAddressSanitizer {
@@ -3496,173 +3501,62 @@ struct AsanToInstrument {
   SmallVector<Instruction *, 16> PointerComparisonsOrSubtracts;
   bool IsBug11395 = false;
 };
+} // namespace __xsan
 
-class AsanTargetsToInstrumentAnalysis
-    : public llvm::AnalysisInfoMixin<AsanTargetsToInstrumentAnalysis> {
-  friend AnalysisInfoMixin<AsanTargetsToInstrumentAnalysis>;
-  static llvm::AnalysisKey Key;
+bool XsanAddressSanitizer::prepareAsanTargetsToInstrument(
+    Function &F, FunctionAnalysisManager &FAM, const TargetLibraryInfo &TLI,
+    __xsan::AsanToInstrument &Targets) {
+  if (!collectTargetsToIntrument(F, &TLI, Targets))
+    return false;
 
-public:
-  /// Provide the result typedef for this analysis pass.
-  using Result = AsanToInstrument;
+  if (!__xsan::options::opt::enableReccReductionAsan())
+    return true;
 
-  /// Run the analysis pass over a function and produce a dominator tree.
-  AsanToInstrument run(llvm::Function &F, llvm::FunctionAnalysisManager &) {
-    /// Use this anlaysis pass only as the key to obtain the cached result,
-    /// where the concrete anlaysis is delegated to `AsanRequireAnalysisPass`.
-    /// See the comments above `AsanRequireAnalysisPass` for details.
-    AsanToInstrument Targets;
+  __xsan::MopRecurrenceReducer MRC(F, FAM);
+  SmallVector<InterestingMemoryOperand, 16> NewOperandsToInstrument;
 
-    // auto &MAM = FAM.getResult<ModuleAnalysisManagerFunctionProxy>(F);
-    // const auto *const SSGI =
-    // // const StackSafetyGlobalInfo *const SSGI =
-    //     ClUseStackSafety
-    //         ? MAM.getCachedResult<StackSafetyGlobalAnalysis>(*F.getParent())
-    //         : nullptr;
-    // XsanAddressSanitizer FunctionSanitizer(
-    //     *F.getParent(), SSGI, Options.CompileKernel, Options.Recover,
-    //     Options.UseAfterScope, Options.UseAfterReturn);
-
-    // const TargetLibraryInfo &TLI = FAM.getResult<TargetLibraryAnalysis>(F);
-
-    // if (!FunctionSanitizer.collectTargetsToIntrument(F, &TLI, Targets)) {
-    //   return Targets;
-    // }
-
-    return Targets;
-  }
-};
-AnalysisKey AsanTargetsToInstrumentAnalysis::Key;
-
-/*
-Cannot use RequireAnalysisPass<AsanTargetsToInstrumentAnalysis> because
-  1. The orignal `AsanTargetsToInstrumentAnalysis` uses `XsanAddressSanitizer`
-     to collect targets
-  2. `XsanAddressSanitizer` requires StackSafetyGlobalInfo to construct.
-  3. `StackSafetyGlobalInfo` is result of Module Analysis
-    `StackSafetyGlobalAnalysis`
-  4. We need a ModuleAnalysisManager to get the cached result of
-    `StackSafetyGlobalInfo`
-  5. FAM can only access MAM by MAM =
-    FAM.getResult<ModuleAnalysisManagerFunctionProxy>(F)
-  6. This **proxy** MAM only accept those Analysis::Result with `invalidate`
-    method, which is not provided by `StackSafetyGlobalInfo`.
-In short, we cannot obtain `StackSafetyGlobalInfo` via FAM.
-
-Therefore, we need to obtain `StackSafetyGlobalInfo` via MAM, adhering what
-`ModuleAddressSanitizer` does.
-
-Accordingly, we migrate the collecting of targets from
-`AsanTargetsToInstrumentAnalysis` to this proxy class `AsanRequireAnalysisPass`,
-only retaining analysis pass `AsanTargetsToInstrumentAnalysis` as the key to
-obtain the cached result.
-
-Notaly, `AsanTargetsToInstrumentAnalysis` should only run once in this proxy
-pass, i.e., this patch is tricky but there is nothing wrong with it.
-*/
-class AsanRequireAnalysisPass : public PassInfoMixin<AsanRequireAnalysisPass> {
-public:
-  AsanRequireAnalysisPass(const AddressSanitizerOptions &Options,
-                          bool UseGlobalGC, bool UseOdrIndicator,
-                          AsanDtorKind DestructorKind)
-      : Options(Options), UseGlobalGC(UseGlobalGC),
-        UseOdrIndicator(UseOdrIndicator), DestructorKind(DestructorKind) {}
-
-  PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM) {
-    const StackSafetyGlobalInfo *const SSGI =
-        ClUseStackSafety ? &MAM.getResult<StackSafetyGlobalAnalysis>(M)
-                         : nullptr;
-    auto &FAM =
-        MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
-    for (Function &F : M) {
-      XsanAddressSanitizer FunctionSanitizer(
-          M, SSGI, Options.CompileKernel, Options.Recover,
-          Options.UseAfterScope, Options.UseAfterReturn);
-      AsanToInstrument &Targets =
-          FAM.getResult<__xsan::AsanTargetsToInstrumentAnalysis>(F);
-      const TargetLibraryInfo &TLI = FAM.getResult<TargetLibraryAnalysis>(F);
-
-      if (!FunctionSanitizer.collectTargetsToIntrument(F, &TLI, Targets))
-        continue;
-
-      /// Reduce recurrence between load/store instructions.
-      if (__xsan::options::opt::enableReccReductionAsan()) {
-        MopRecurrenceReducer MRC(F, FAM);
-        SmallVector<InterestingMemoryOperand, 16> NewOperandsToInstrument;
-
-        auto RngFilter = make_filter_range(
-            Targets.OperandsToInstrument, [&](InterestingMemoryOperand &Op) {
-              Instruction &Insn = *Op.getInsn();
-              if (__xsan::DelegateToXSan::is(Insn))
-                return false;
-              bool IsInterestingMop = isInterestingMop(Insn);
-              if (!IsInterestingMop) {
-                NewOperandsToInstrument.push_back(Op);
-              }
-              return IsInterestingMop;
-            });
-        auto RngMap = map_range(RngFilter, [](InterestingMemoryOperand &Op) {
-          return Op.getInsn();
-        });
-        const SmallVector<const Instruction *, 16> TmpInsts(RngMap);
-        SmallVector<const Instruction *, 16> DistilledLoadStores =
-            MRC.distillRecurringChecks(TmpInsts, false);
-        auto RngMapBack =
-            map_range(DistilledLoadStores, [](const Instruction *Inst) {
-              Instruction *I = const_cast<Instruction *>(Inst);
-              if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
-                return InterestingMemoryOperand(I, LI->getPointerOperandIndex(),
-                                                false, LI->getType(),
-                                                LI->getAlign());
-              }
-              if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
-                return InterestingMemoryOperand(
-                    I, SI->getPointerOperandIndex(), true,
-                    SI->getValueOperand()->getType(), SI->getAlign());
-              }
-
-              llvm_unreachable("Unexpected instruction type of MOPs.");
-            });
-        NewOperandsToInstrument.append(RngMapBack.begin(), RngMapBack.end());
-
-        Targets.OperandsToInstrument = std::move(NewOperandsToInstrument);
-      }
+  auto RngFilter = make_filter_range(
+      Targets.OperandsToInstrument, [&](InterestingMemoryOperand &Op) {
+        Instruction &Insn = *Op.getInsn();
+        if (__xsan::DelegateToXSan::is(Insn))
+          return false;
+        bool IsInterestingMop = __xsan::isInterestingMop(Insn);
+        if (!IsInterestingMop)
+          NewOperandsToInstrument.push_back(Op);
+        return IsInterestingMop;
+      });
+  auto RngMap = map_range(RngFilter,
+                          [](InterestingMemoryOperand &Op) { return Op.getInsn(); });
+  const SmallVector<const Instruction *, 16> TmpInsts(RngMap);
+  SmallVector<const Instruction *, 16> DistilledLoadStores =
+      MRC.distillRecurringChecks(TmpInsts, false);
+  auto RngMapBack = map_range(DistilledLoadStores, [](const Instruction *Inst) {
+    Instruction *I = const_cast<Instruction *>(Inst);
+    if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
+      return InterestingMemoryOperand(I, LI->getPointerOperandIndex(), false,
+                                      LI->getType(), LI->getAlign());
     }
-    return PreservedAnalyses::all();
-  }
+    if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
+      return InterestingMemoryOperand(I, SI->getPointerOperandIndex(), true,
+                                      SI->getValueOperand()->getType(),
+                                      SI->getAlign());
+    }
 
-  static bool isRequired() { return true; }
-
-private:
-  AddressSanitizerOptions Options;
-  bool UseGlobalGC;
-  bool UseOdrIndicator;
-  AsanDtorKind DestructorKind;
-};
-
-void addAsanRequireAnalysisPass(SubSanitizers &MPM, FunctionPassManager &FPM) {
-  const auto &Opts = obtainAsanPassArgs();
-  MPM.addPass(AsanRequireAnalysisPass(
-      Opts.Opts, Opts.UseGlobalGC, Opts.UseOdrIndicator, Opts.DestructorKind));
-}
-
-/// Moved to this file, as the type information is needed there.
-void registerAnalysisForAsan(PassBuilder &PB) {
-  PB.registerAnalysisRegistrationCallback([](FunctionAnalysisManager &FAM) {
-    FAM.registerPass([&] { return AsanTargetsToInstrumentAnalysis(); });
+    llvm_unreachable("Unexpected instruction type of MOPs.");
   });
+  NewOperandsToInstrument.append(RngMapBack.begin(), RngMapBack.end());
+
+  Targets.OperandsToInstrument = std::move(NewOperandsToInstrument);
+  return true;
 }
 
+namespace __xsan {
 PreservedAnalyses runAsan(Module &M, ModuleAnalysisManager &MAM,
                           OptimizationLevel Level) {
   (void)Level;
   PreservedAnalyses PA = PreservedAnalyses::all();
   const auto &Opts = obtainAsanPassArgs();
 
-  PA.intersect(AsanRequireAnalysisPass(Opts.Opts, Opts.UseGlobalGC,
-                                       Opts.UseOdrIndicator,
-                                       Opts.DestructorKind)
-                   .run(M, MAM));
   PA.intersect(ModuleAddressSanitizerPass(Opts.Opts, Opts.UseGlobalGC,
                                           Opts.UseOdrIndicator,
                                           Opts.DestructorKind)
@@ -3773,13 +3667,11 @@ bool XsanAddressSanitizer::collectTargetsToIntrument(
 
 bool XsanAddressSanitizer::instrumentFunction(Function &F,
                                               FunctionAnalysisManager &FAM) {
-  __xsan::AsanToInstrument *Targets =
-      FAM.getCachedResult<__xsan::AsanTargetsToInstrumentAnalysis>(F);
   const TargetLibraryInfo *TLI = &FAM.getResult<TargetLibraryAnalysis>(F);
-  // For non-XSan ASan scenarios, the `Targets` is nullptr
-  if (!Targets) {
-    return AddressSanitizer::instrumentFunction(F, TLI);
-  }
+  // For non-XSan ASan scenarios, use original implementation.
+#ifndef XSAN_PASS
+  return AddressSanitizer::instrumentFunction(F, TLI);
+#else
 
   if (shouldSkipFunction(F)) {
     return false;
@@ -3812,18 +3704,15 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
   // can be passed to that intrinsic.
   markEscapedLocalAllocas(F);
 
-  // We want to instrument every address only once per basic block (unless there
-  // are calls between uses).
-  // __xsan::AsanToInstrument Targets;
-  // if (!collectTargetsToIntrument(F, TLI, Targets))
-  //   return false;
+  __xsan::AsanToInstrument Targets;
+  if (!prepareAsanTargetsToInstrument(F, FAM, *TLI, Targets))
+    return false;
 
   auto &[OperandsToInstrument, IntrinToInstrument, NoReturnCalls,
-         PointerComparisonsOrSubtracts, IsBug11395] = *Targets;
+         PointerComparisonsOrSubtracts, IsBug11395] = Targets;
 
-  if (IsBug11395) {
+  if (IsBug11395)
     return false;
-  }
 
   bool UseCalls = (ClInstrumentationWithCallsThreshold >= 0 &&
                    OperandsToInstrument.size() + IntrinToInstrument.size() >
@@ -3867,6 +3756,7 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
                     << F << "\n");
 
   return FunctionModified;
+#endif
 }
 
 

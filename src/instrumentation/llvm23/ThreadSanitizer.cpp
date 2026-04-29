@@ -108,6 +108,10 @@ STATISTIC(NumOmittedNonCaptured, "Number of accesses ignored due to capturing");
 const char kTsanModuleCtorName[] = "tsan.module_ctor";
 const char kTsanInitName[] = "__tsan_init";
 
+namespace __xsan {
+struct TsanToInstrument;
+} // namespace __xsan
+
 namespace {
 
 /// ThreadSanitizer: instrument the code in module to find races.
@@ -190,6 +194,9 @@ struct XsanThreadSanitizer : public ThreadSanitizer {
   bool sanitizeFunction(Function &F, FunctionAnalysisManager &FAM);
   bool collectTargetsToIntrument(Function &F, const TargetLibraryInfo &TLI,
                                  __xsan::TsanToInstrument &Targets);
+  bool prepareTsanTargetsToInstrument(Function &F, FunctionAnalysisManager &FAM,
+                                      const TargetLibraryInfo &TLI,
+                                      __xsan::TsanToInstrument &Targets);
 };
 
 void insertModuleCtor(Module &M) {
@@ -855,85 +862,55 @@ struct TsanToInstrument {
   SmallVector<Instruction *, 8> MemIntrinCalls;
   bool HasCalls = false;
 };
+} // namespace __xsan
 
-class TsanTargetsToInstrumentAnalysis
-    : public llvm::AnalysisInfoMixin<TsanTargetsToInstrumentAnalysis> {
-  friend AnalysisInfoMixin<TsanTargetsToInstrumentAnalysis>;
-  static llvm::AnalysisKey Key;
+namespace {
+bool XsanThreadSanitizer::prepareTsanTargetsToInstrument(
+    Function &F, FunctionAnalysisManager &FAM, const TargetLibraryInfo &TLI,
+    __xsan::TsanToInstrument &Targets) {
+  if (!collectTargetsToIntrument(F, TLI, Targets))
+    return false;
 
-public:
-  /// Provide the result typedef for this analysis pass.
-  using Result = TsanToInstrument;
-
-  /// Run the analysis pass over a function and produce a dominator tree.
-  TsanToInstrument run(llvm::Function &F, llvm::FunctionAnalysisManager &FAM) {
-    const TargetLibraryInfo &TLI = FAM.getResult<TargetLibraryAnalysis>(F);
-
-    XsanThreadSanitizer FunctionSanitizer;
-    TsanToInstrument Targets;
-
-    if (!FunctionSanitizer.collectTargetsToIntrument(F, TLI, Targets))
-      return Targets;
-
-    auto RngMap = map_range(Targets.AllLoadsAndStores,
-                            [](const auto &II) { return II.Inst; });
-    SmallVector<const Instruction *, 16> NewLdSt(RngMap);
-    bool Changed = false;
-    if (__xsan::options::opt::enableTsanOptStackObj()) {
-      const StackObjRaceResult &SOR = FAM.getResult<__xsan::StackObjRaceAnalysis>(F);
-      auto RngFilter = make_filter_range(NewLdSt, [&](const auto *Inst) -> bool{ 
-        return SOR.mightRace(Inst);
-      });
-      NewLdSt.assign(RngFilter.begin(), RngFilter.end());
-      Changed = true;
-    }
-
-    // Reduce recurrence of load/store instructions.
-    if (__xsan::options::opt::enableReccReductionTsan()) {
-      MopRecurrenceReducer MRC(F, FAM);
-      /// FIXME: we don't handle CompoundRW yet, as it is also not supported by
-      /// TSan as well.
-      SmallVector<const Instruction *, 16> DistilledLoadStores =
-          MRC.distillRecurringChecks(NewLdSt, true);
-      NewLdSt.swap(DistilledLoadStores);
-      Changed = true;
-    }
-
-    if (Changed) {
-      auto RngMapBack = map_range(NewLdSt, [](const auto *Inst) {
-        return TsanToInstrument::InstructionInfo(
-            const_cast<Instruction *>(Inst));
-      });
-      decltype(Targets.AllLoadsAndStores) NewLoadsAndStores(RngMapBack);
-      Targets.AllLoadsAndStores = std::move(NewLoadsAndStores);
-    }
-
-    return Targets;
+  auto RngMap =
+      map_range(Targets.AllLoadsAndStores, [](const auto &II) { return II.Inst; });
+  SmallVector<const Instruction *, 16> NewLdSt(RngMap);
+  bool Changed = false;
+  if (__xsan::options::opt::enableTsanOptStackObj()) {
+    const __xsan::StackObjRaceResult &SOR =
+        FAM.getResult<__xsan::StackObjRaceAnalysis>(F);
+    auto RngFilter = make_filter_range(
+        NewLdSt, [&](const auto *Inst) -> bool { return SOR.mightRace(Inst); });
+    NewLdSt.assign(RngFilter.begin(), RngFilter.end());
+    Changed = true;
   }
-};
 
-AnalysisKey TsanTargetsToInstrumentAnalysis::Key;
+  if (__xsan::options::opt::enableReccReductionTsan()) {
+    __xsan::MopRecurrenceReducer MRC(F, FAM);
+    SmallVector<const Instruction *, 16> DistilledLoadStores =
+        MRC.distillRecurringChecks(NewLdSt, true);
+    NewLdSt.swap(DistilledLoadStores);
+    Changed = true;
+  }
 
-/// Moved to this file, as the type information is needed there.
-void registerAnalysisForTsan(PassBuilder &PB) {
-  PB.registerAnalysisRegistrationCallback([](FunctionAnalysisManager &FAM) {
-    FAM.registerPass([&] { return TsanTargetsToInstrumentAnalysis(); });
+  if (!Changed)
+    return true;
+
+  auto RngMapBack = map_range(NewLdSt, [](const auto *Inst) {
+    return __xsan::TsanToInstrument::InstructionInfo(
+        const_cast<Instruction *>(Inst));
   });
+  decltype(Targets.AllLoadsAndStores) NewLoadsAndStores(RngMapBack);
+  Targets.AllLoadsAndStores = std::move(NewLoadsAndStores);
+  return true;
 }
+} // namespace
 
-void addTsanRequireAnalysisPass(SubSanitizers &MPM, FunctionPassManager &FPM) {
-  FPM.addPass(RequireAnalysisPass<TsanTargetsToInstrumentAnalysis, Function>());
-}
-
+namespace __xsan {
 PreservedAnalyses runTsan(Module &M, ModuleAnalysisManager &MAM,
                           OptimizationLevel Level) {
   (void)Level;
   PreservedAnalyses PA = PreservedAnalyses::all();
 
-  PA.intersect(
-      createModuleToFunctionPassAdaptor(
-          RequireAnalysisPass<TsanTargetsToInstrumentAnalysis, Function>())
-          .run(M, MAM));
   PA.intersect(ModuleThreadSanitizerPass().run(M, MAM));
   PA.intersect(
       createModuleToFunctionPassAdaptor(ThreadSanitizerPass()).run(M, MAM));
@@ -1009,23 +986,21 @@ bool XsanThreadSanitizer::collectTargetsToIntrument(
 
 bool XsanThreadSanitizer::sanitizeFunction(Function &F,
                                            FunctionAnalysisManager &FAM) {
-  __xsan::TsanToInstrument *Targets =
-      FAM.getCachedResult<__xsan::TsanTargetsToInstrumentAnalysis>(F);
   const TargetLibraryInfo &TLI = FAM.getResult<TargetLibraryAnalysis>(F);
-  // For non-XSan ASan scenarios, the `Targets` is nullptr
-  if (!Targets)
-    return ThreadSanitizer::sanitizeFunction(F, TLI);
 
+#ifndef XSAN_PASS
+  return ThreadSanitizer::sanitizeFunction(F, TLI);
+#else
   if (shouldSkipFunction(F))
     return false;
 
   initialize(*F.getParent(), TLI);
-  // SmallVector<InstructionInfo, 8> AllLoadsAndStores;
-  // SmallVector<Instruction*, 8> AtomicAccesses;
-  // SmallVector<Instruction*, 8> MemIntrinCalls;
 
-  auto &[AllLoadsAndStores, AtomicAccesses, MemIntrinCalls, HasCalls] =
-      *Targets;
+  __xsan::TsanToInstrument Targets;
+  if (!prepareTsanTargetsToInstrument(F, FAM, TLI, Targets))
+    return false;
+
+  auto &[AllLoadsAndStores, AtomicAccesses, MemIntrinCalls, HasCalls] = Targets;
 
   bool Res = false;
   bool SanitizeFunction = F.hasFnAttribute(Attribute::SanitizeThread);
@@ -1077,6 +1052,7 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
     Res = true;
   }
   return Res;
+#endif
 }
 
 #ifndef XSAN_PASS

@@ -5542,18 +5542,6 @@ bool MemorySanitizer::sanitizeFunction(Function &F, TargetLibraryInfo &TLI) {
 
 namespace __xsan {
 
-/// Moved to this file, as the type information is needed there.
-void registerAnalysisForMsan(PassBuilder &PB) {
-  // PB.registerAnalysisRegistrationCallback([](FunctionAnalysisManager &FAM) {
-  //   FAM.registerPass([&] { return TsanTargetsToInstrumentAnalysis(); });
-  // });
-}
-
-void addMsanRequireAnalysisPass(SubSanitizers &MPM, FunctionPassManager &FPM) {
-  // FPM.addPass(RequireAnalysisPass<TsanTargetsToInstrumentAnalysis,
-  // Function>());
-}
-
 PreservedAnalyses runMsan(Module &M, ModuleAnalysisManager &MAM,
                           OptimizationLevel Level) {
   PreservedAnalyses PA = PreservedAnalyses::all();

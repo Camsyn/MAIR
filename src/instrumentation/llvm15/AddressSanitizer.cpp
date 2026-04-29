@@ -877,6 +877,17 @@ private:
   Function *AsanDtorFunction = nullptr;
 };
 
+namespace __xsan {
+
+struct AsanToInstrument {
+  SmallVector<InterestingMemoryOperand, 16> OperandsToInstrument;
+  SmallVector<MemIntrinsic *, 16> IntrinToInstrument;
+  SmallVector<Instruction *, 8> NoReturnCalls;
+  SmallVector<Instruction *, 16> PointerComparisonsOrSubtracts;
+  bool IsBug11395 = false;
+};
+} // namespace __xsan
+
 struct XsanAddressSanitizer : public AddressSanitizer {
 public:
   using AddressSanitizer::AddressSanitizer;
@@ -3492,16 +3503,6 @@ bool AddressSanitizer::isSafeAccess(ObjectSizeOffsetVisitor &ObjSizeVis,
          Size - uint64_t(Offset) >= TypeSize / 8;
 }
 
-namespace __xsan {
-
-struct AsanToInstrument {
-  SmallVector<InterestingMemoryOperand, 16> OperandsToInstrument;
-  SmallVector<MemIntrinsic *, 16> IntrinToInstrument;
-  SmallVector<Instruction *, 8> NoReturnCalls;
-  SmallVector<Instruction *, 16> PointerComparisonsOrSubtracts;
-  bool IsBug11395 = false;
-};
-} // namespace __xsan
 
 bool XsanAddressSanitizer::prepareAsanTargetsToInstrument(
     Function &F, FunctionAnalysisManager &FAM, const TargetLibraryInfo &TLI,
@@ -3549,23 +3550,6 @@ bool XsanAddressSanitizer::prepareAsanTargetsToInstrument(
   Targets.OperandsToInstrument = std::move(NewOperandsToInstrument);
   return true;
 }
-
-namespace __xsan {
-PreservedAnalyses runAsan(Module &M, ModuleAnalysisManager &MAM,
-                          OptimizationLevel Level) {
-  (void)Level;
-  PreservedAnalyses PA = PreservedAnalyses::all();
-  const auto &Opts = obtainAsanPassArgs();
-
-  PA.intersect(ModuleAddressSanitizerPass(Opts.Opts, Opts.UseGlobalGC,
-                                          Opts.UseOdrIndicator,
-                                          Opts.DestructorKind)
-                   .run(M, MAM));
-
-  return PA;
-}
-
-} // namespace __xsan
 
 bool XsanAddressSanitizer::shouldSkipFunction(Function &F) {
   if (F.empty())

@@ -9379,21 +9379,6 @@ bool MemorySanitizer::sanitizeFunction(Function &F, TargetLibraryInfo &TLI) {
   return Visitor.runOnFunction();
 }
 
-namespace __xsan {
-
-PreservedAnalyses runMsan(Module &M, ModuleAnalysisManager &MAM,
-                          OptimizationLevel Level) {
-  PreservedAnalyses PA = PreservedAnalyses::all();
-
-  const auto &Opts = obtainMsanPassArgs();
-
-  PA.intersect(MemorySanitizerPass(Opts.Opts).run(M, MAM));
-
-  return PA;
-}
-
-} // namespace __xsan
-
 #ifndef XSAN_PASS
 extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
   return {LLVM_PLUGIN_API_VERSION, "MSan Pass", LLVM_VERSION_STRING,

@@ -917,21 +917,6 @@ bool XsanThreadSanitizer::prepareTsanTargetsToInstrument(
 }
 } // namespace
 
-namespace __xsan {
-PreservedAnalyses runTsan(Module &M, ModuleAnalysisManager &MAM,
-                          OptimizationLevel Level) {
-  (void)Level;
-  PreservedAnalyses PA = PreservedAnalyses::all();
-
-  PA.intersect(ModuleThreadSanitizerPass().run(M, MAM));
-  PA.intersect(
-      createModuleToFunctionPassAdaptor(ThreadSanitizerPass()).run(M, MAM));
-
-  return PA;
-}
-
-} // namespace __xsan
-
 bool XsanThreadSanitizer::shouldSkipFunction(Function &F) {
   // This is required to prevent instrumenting call to __tsan_init from within
   // the module constructor.

@@ -4180,22 +4180,6 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
 
 } // namespace
 
-namespace __xsan {
-PreservedAnalyses runAsan(Module &M, ModuleAnalysisManager &MAM,
-                          OptimizationLevel Level) {
-  (void)Level;
-  PreservedAnalyses PA = PreservedAnalyses::all();
-  const auto &Opts = obtainAsanPassArgs();
-
-  PA.intersect(AddressSanitizerPass(Opts.Opts, Opts.UseGlobalGC,
-                                    Opts.UseOdrIndicator, Opts.DestructorKind)
-                   .run(M, MAM));
-
-  return PA;
-}
-
-} // namespace __xsan
-
 #ifndef XSAN_PASS
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo() {

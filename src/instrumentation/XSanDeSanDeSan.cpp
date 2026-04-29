@@ -16,7 +16,7 @@ using namespace llvm;
 
 namespace __xsan::desan {
 
-static void restoreFunction(StageKind Stage, FunctionArchive &Archive,
+static void restoreFunction(const Sanitizer &San, FunctionArchive &Archive,
                             Module &M, const UserBBsMap &UserBBsMap) {
   size_t BeginSize = Archive.size();
 
@@ -25,15 +25,15 @@ static void restoreFunction(StageKind Stage, FunctionArchive &Archive,
       continue;
     if (UserBBsMap.count(&F))
       continue;
-    Archive.push_back({Stage, &F});
+    Archive.push_back(&F);
   }
 
   for (size_t I = BeginSize; I < Archive.size(); ++I) {
-    Archive[I].Func->removeFromParent();
+    Archive[I]->removeFromParent();
   }
 }
 
-static void restoreDelete(StageKind Stage, DeleteArchive &Archive,
+static void restoreDelete(const Sanitizer &San, DeleteArchive &Archive,
                           std::vector<DeleteEvent> &Events) {
 
   BitVector Restored(Events.size());
@@ -48,13 +48,13 @@ static void restoreDelete(StageKind Stage, DeleteArchive &Archive,
       requireOrDie(
           Event.DeletedValue && !Event.DeletedValue->getParent(),
           Twine("desan delete restore found a non-orphan deleted value in "
-                "stage ") +
-              getStageName(Stage));
+                "sanitizer ") +
+              San.name());
       requireOrDie(Event.DeletedValue->getNumOperands() ==
                        Event.Operands.size(),
                    Twine("desan delete restore found operand count mismatch in "
-                         "stage ") +
-                       getStageName(Stage));
+                         "sanitizer ") +
+                       San.name());
 
       for (size_t j = 0; j < Event.Operands.size(); ++j) {
         llvm::Value *Operand = Event.Operands[j];
@@ -81,22 +81,22 @@ static void restoreDelete(StageKind Stage, DeleteArchive &Archive,
         __xsan::compat::insertInstructionBefore(Event.DeletedValue, I);
       }
 
-      Archive[Event.DeletedValue].push_back({Stage});
+      Archive[Event.DeletedValue].push_back({});
       Restored.set(i);
       --Remaining;
       Progress = true;
     }
     requireOrDie(Progress,
-                 Twine("desan could not resolve delete anchors in stage ") +
-                     getStageName(Stage));
+                 Twine("desan could not resolve delete anchors in sanitizer ") +
+                     San.name());
   }
 }
 
-static void restoreReplace(StageKind Stage, ReplaceArchive &Archive,
+static void restoreReplace(const Sanitizer &San, ReplaceArchive &Archive,
                            std::vector<ReplaceEvent> &Events) {
   for (const auto &Event : Events) {
     replaceUserIRUses(*Event.ReplaceValue, *Event.UserValue);
-    Archive[Event.UserValue].push_back({Stage, Event.ReplaceValue});
+    Archive[Event.UserValue].push_back({Event.ReplaceValue});
   }
 }
 
@@ -129,7 +129,7 @@ findUserBBForSplit(BasicBlock *SplitBB, const UserBBsSet &UserBBs,
   return nullptr;
 }
 
-static void restoreAdd(StageKind Stage, AddArchive &Archive, Module &M,
+static void restoreAdd(const Sanitizer &San, AddArchive &Archive, Module &M,
                        const UserBBsMap &UserBBsMap) {
   for (Function &F : M) {
     if (F.isDeclaration())
@@ -192,13 +192,13 @@ static void restoreAdd(StageKind Stage, AddArchive &Archive, Module &M,
       auto *UserBB = findUserBBForSplit(BB, UserBBs, HasUserInsts);
       requireOrDie(UserBB != nullptr,
                    Twine("desan add restore could not find a user block anchor "
-                         "for a split add in stage ") +
-                       getStageName(Stage));
+                         "for a split add in sanitizer ") +
+                       San.name());
       requireOrDie(
           UserBB != BB,
           Twine("desan add restore found the split block itself as the "
-                "user block anchor for a split add in stage ") +
-              getStageName(Stage));
+                "user block anchor for a split add in sanitizer ") +
+              San.name());
 
       // Find the first sanitizer instruction after the last user instruction in
       // the user block.
@@ -214,8 +214,8 @@ static void restoreAdd(StageKind Stage, AddArchive &Archive, Module &M,
       requireOrDie(
           FirstSanI,
           Twine("desan add restore could not find a sanitizer instruction in "
-                "the user block anchor for a split add in stage ") +
-              getStageName(Stage));
+                "the user block anchor for a split add in sanitizer ") +
+              San.name());
 
       // Store the rest sanitizer instructions in the user block and
       // restore all instructions in the last sanitizer block.
@@ -232,7 +232,7 @@ static void restoreAdd(StageKind Stage, AddArchive &Archive, Module &M,
       UserBB->replaceSuccessorsPhiUsesWith(BB, UserBB);
 
       Archive.Records.push_back(
-          {Stage, AddRecord::AddRecordKind::Split, UserI, std::move(Record)});
+          {AddRecord::AddRecordKind::Split, UserI, std::move(Record)});
 
       HasUserInsts.erase(BB);
     }
@@ -256,8 +256,8 @@ static void restoreAdd(StageKind Stage, AddArchive &Archive, Module &M,
         });
         requireOrDie(SanItEnd != BB.end(),
                      Twine("desan add restore could not find a user "
-                           "instruction after a pure add in stage ") +
-                         getStageName(Stage));
+                           "instruction after a pure add in sanitizer ") +
+                         San.name());
 
         AddRecord::PureRecord Record;
         Record.SanInsts.reset(
@@ -265,8 +265,8 @@ static void restoreAdd(StageKind Stage, AddArchive &Archive, Module &M,
         __xsan::compat::spliceInstructions(Record.SanInsts.get(),
                                            Record.SanInsts->end(), &BB,
                                            SanItBegin, SanItEnd);
-        Archive.Records.push_back({Stage, AddRecord::AddRecordKind::Pure,
-                                   &*SanItEnd, std::move(Record)});
+        Archive.Records.push_back(
+            {AddRecord::AddRecordKind::Pure, &*SanItEnd, std::move(Record)});
         SanItBegin = std::find_if(SanItEnd, BB.end(), [&](Instruction &I) {
           return !__xsan::UserIR::is(I);
         });
@@ -292,7 +292,7 @@ static bool isUbsanArithmeticIntrinsic(const IntrinsicInst &II) {
 static bool hasNonUbsanUses(const Value &V) {
   return llvm::any_of(V.users(), [](const User *U) {
     const auto *UserI = dyn_cast<Instruction>(U);
-    return !UserI || !isStageIR(StageKind::UBSan, *UserI);
+    return !UserI || !__xsan::UBSanInst::is(*UserI);
   });
 }
 
@@ -326,7 +326,8 @@ static Instruction *createRestoredUbsanArithmetic(ExtractValueInst &EI,
   return Restored;
 }
 
-static void restoreUbsanArithmetic(ReSanArchive &Archive, Module &M) {
+static void restoreUbsanArithmetic(const Sanitizer &San, ReSanArchive &Archive,
+                                   Module &M) {
   SmallVector<ExtractValueInst *, 16> Worklist;
 
   for (Function &F : M) {
@@ -350,33 +351,32 @@ static void restoreUbsanArithmetic(ReSanArchive &Archive, Module &M) {
   for (ExtractValueInst *EI : Worklist) {
     auto *II = dyn_cast<IntrinsicInst>(EI->getAggregateOperand());
     auto *Restored = createRestoredUbsanArithmetic(*EI, *II);
-    replaceNonStageIRUses(StageKind::UBSan, *EI, *Restored);
-    Archive.ReplaceRecords[Restored].push_back({StageKind::UBSan, EI});
-    Archive.DeleteRecords[Restored].push_back({StageKind::UBSan});
+    replaceNonSanitizerUses(San, *EI, *Restored);
+    Archive.ReplaceRecords[Restored].push_back({EI});
+    Archive.DeleteRecords[Restored].push_back({});
   }
 }
 
-void runDeSan(Module &M, StageKind Stage, ReSanArchive &Archive,
+void runDeSan(Module &M, const Sanitizer &San, ReSanArchive &Archive,
               UserBBsMap &UserBBsMap) {
-  if (Stage == StageKind::UBSan) {
-    restoreUbsanArithmetic(Archive, M);
+  if (San.isUBSan()) {
+    restoreUbsanArithmetic(San, Archive, M);
     return;
   }
 
   auto DeleteEvents = getDeleteEvents();
   auto ReplaceEvents = getReplaceEvents();
 
-  restoreFunction(Stage, Archive.FunctionRecords, M, UserBBsMap);
-  restoreDelete(Stage, Archive.DeleteRecords, DeleteEvents);
-  restoreReplace(Stage, Archive.ReplaceRecords, ReplaceEvents);
-  restoreAdd(Stage, Archive.AddRecords, M, UserBBsMap);
+  restoreFunction(San, Archive.FunctionRecords, M, UserBBsMap);
+  restoreDelete(San, Archive.DeleteRecords, DeleteEvents);
+  restoreReplace(San, Archive.ReplaceRecords, ReplaceEvents);
+  restoreAdd(San, Archive.AddRecords, M, UserBBsMap);
 
   if (options::ClDebug) {
     std::error_code EC;
-    llvm::raw_fd_ostream OS(
-        (llvm::Twine(getStageName(Stage)) + ".archive.txt").str(), EC,
-        llvm::sys::fs::OF_None);
-    dumpArchive(Archive, OS);
+    llvm::raw_fd_ostream OS((llvm::Twine(San.name()) + ".archive.txt").str(),
+                            EC, llvm::sys::fs::OF_None);
+    dumpArchive(San, Archive, OS);
   }
 }
 

@@ -5,7 +5,6 @@
 
 #include "llvm/IR/PassManager.h"
 
-#include <functional>
 #include <memory>
 
 namespace __xsan::desan {
@@ -22,32 +21,16 @@ private:
   std::shared_ptr<SanitizingContext> State;
 };
 
-class StagePass : public llvm::PassInfoMixin<StagePass> {
-public:
-  using StageRunner = std::function<llvm::PreservedAnalyses(
-      llvm::Module &, llvm::ModuleAnalysisManager &)>;
-
-  StagePass(StageKind Stage, StageRunner Runner);
-
-  llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
-
-  static bool isRequired() { return true; }
-
-private:
-  StageKind Stage;
-  StageRunner Runner;
-};
-
 class DeSanPass : public llvm::PassInfoMixin<DeSanPass> {
 public:
-  DeSanPass(StageKind Stage, std::shared_ptr<SanitizingContext> State);
+  DeSanPass(const Sanitizer &San, std::shared_ptr<SanitizingContext> State);
 
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 
   static bool isRequired() { return true; }
 
 private:
-  StageKind Stage;
+  const Sanitizer &San;
   std::shared_ptr<SanitizingContext> State;
 };
 

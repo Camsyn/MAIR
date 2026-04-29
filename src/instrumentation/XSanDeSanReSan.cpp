@@ -2,6 +2,7 @@
 #include "XSanDeSanState.h"
 #include "xsan_llvm_compat.h"
 
+#include "llvm/ADT/BitVector.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -11,55 +12,133 @@ namespace __xsan::desan {
 
 namespace {
 
-static bool isLaterStage(StageKind LHS, StageKind RHS) {
-  return static_cast<uint32_t>(LHS) > static_cast<uint32_t>(RHS);
+static bool isSameSanitizer(const Sanitizer &LHS, const Sanitizer &RHS) {
+  return LHS.order() == RHS.order() && LHS.name() == RHS.name();
 }
 
-static Value *resolveReplayReplacement(StageKind Stage, Value *SanitizerValue,
-                                       const ReplaceArchive &ReplaceArchive,
-                                       const DeleteArchive &DeleteArchive) {
+struct ReplaceRef {
+  const Sanitizer *San = nullptr;
+  const ReplaceRecord *Record = nullptr;
+};
+
+struct AddRecordRef {
+  const Sanitizer *San = nullptr;
+  AddRecord *Record = nullptr;
+};
+
+static bool isCandidateSanitizer(const Sanitizer &Candidate,
+                                 const Sanitizer *Base, bool IncludeBase) {
+  if (!Base)
+    return true;
+  if (IncludeBase && isSameSanitizer(Candidate, *Base))
+    return true;
+  return Candidate.isLaterThan(*Base);
+}
+
+static ReplaceRef findLatestReplaceRecord(const SanitizingContext &Context,
+                                          Value *UserValue,
+                                          const Sanitizer *Base,
+                                          bool IncludeBase) {
+  ReplaceRef Selected;
+  for (const SanitizerArchive &Entry : Context.SanitizerArchives) {
+    if (!isCandidateSanitizer(Entry.San, Base, IncludeBase))
+      continue;
+
+    auto It = Entry.Archive.ReplaceRecords.find(UserValue);
+    if (It == Entry.Archive.ReplaceRecords.end())
+      continue;
+    requireOrDie(It->second.size() == 1,
+                 Twine("resan found multiple replace records in sanitizer ") +
+                     Entry.San.name());
+
+    if (!Selected.Record || Entry.San.isLaterThan(*Selected.San))
+      Selected = {&Entry.San, &It->second.front()};
+  }
+  return Selected;
+}
+
+static ReplaceRef findLatestOtherReplaceRecord(const SanitizingContext &Context,
+                                               Value *UserValue,
+                                               const Sanitizer &San) {
+  ReplaceRef Selected;
+  for (const SanitizerArchive &Entry : Context.SanitizerArchives) {
+    if (isSameSanitizer(Entry.San, San))
+      continue;
+
+    auto It = Entry.Archive.ReplaceRecords.find(UserValue);
+    if (It == Entry.Archive.ReplaceRecords.end())
+      continue;
+    requireOrDie(It->second.size() == 1,
+                 Twine("resan found multiple replace records in sanitizer ") +
+                     Entry.San.name());
+
+    if (!Selected.Record || Entry.San.isLaterThan(*Selected.San))
+      Selected = {&Entry.San, &It->second.front()};
+  }
+  return Selected;
+}
+
+static bool isDeletedByLaterSanitizer(const SanitizingContext &Context,
+                                      Instruction &I, const Sanitizer &Base) {
+  for (const SanitizerArchive &Entry : Context.SanitizerArchives) {
+    if (!Entry.San.isLaterThan(Base))
+      continue;
+    if (Entry.Archive.DeleteRecords.find(&I) !=
+        Entry.Archive.DeleteRecords.end())
+      return true;
+  }
+  return false;
+}
+
+static Value *resolveReplayReplacement(const SanitizingContext &Context,
+                                       const Sanitizer &San,
+                                       Value *SanitizerValue) {
   if (!SanitizerValue)
     return nullptr;
 
   SmallPtrSet<Value *, 8> Visited;
   Value *CurrentValue = SanitizerValue;
-  StageKind CurrentStage = Stage;
+  const Sanitizer *CurrentSan = &San;
 
   while (Visited.insert(CurrentValue).second) {
-    bool Advanced = false;
-    if (auto It = ReplaceArchive.find(CurrentValue);
-        It != ReplaceArchive.end()) {
-      const auto &Next = It->second.front();
-      if (isLaterStage(Next.Stage, CurrentStage) && Next.SanitizerValue) {
-        CurrentValue = Next.SanitizerValue;
-        CurrentStage = Next.Stage;
-        Advanced = true;
-      }
-    }
-    if (Advanced)
+    ReplaceRef Next = findLatestReplaceRecord(Context, CurrentValue, CurrentSan,
+                                              /*IncludeBase=*/false);
+    if (Next.Record && Next.Record->SanitizerValue) {
+      CurrentValue = Next.Record->SanitizerValue;
+      CurrentSan = Next.San;
       continue;
-
-    if (auto *I = dyn_cast<Instruction>(CurrentValue)) {
-      if (auto It = DeleteArchive.find(I); It != DeleteArchive.end()) {
-        if (llvm::any_of(It->second, [&](const DeleteRecord &Record) {
-              return isLaterStage(Record.Stage, CurrentStage);
-            }))
-          return nullptr;
-      }
     }
+
+    if (auto *I = dyn_cast<Instruction>(CurrentValue))
+      if (isDeletedByLaterSanitizer(Context, *I, *CurrentSan))
+        return nullptr;
+
     return CurrentValue;
   }
 
   return nullptr;
 }
 
+static SmallVector<Instruction *, 8>
+collectArgumentReplaceInsts(const SanitizingContext &Context, Function &F) {
+  SmallVector<Instruction *, 8> ReplaceInsts;
+  for (Argument &Arg : F.args()) {
+    for (const SanitizerArchive &Entry : Context.SanitizerArchives) {
+      auto It = Entry.Archive.ReplaceRecords.find(&Arg);
+      if (It == Entry.Archive.ReplaceRecords.end())
+        continue;
+      for (const ReplaceRecord &Record : It->second)
+        if (auto *Inst = dyn_cast<Instruction>(Record.SanitizerValue))
+          ReplaceInsts.push_back(Inst);
+    }
+  }
+  return ReplaceInsts;
+}
+
 } // namespace
 
-// We need ReplaceArchive to redirect instruction anchor, and DeleteArchive to
-// add the sentry anchor into it.
-static void replayAdd(Module &M, AddArchive &Archive,
-                      DeleteArchive &DeleteArchive,
-                      const ReplaceArchive &ReplaceArchive) {
+// We need ReplaceArchive to redirect instruction anchors.
+static void replayAdd(Module &M, SanitizingContext &Context) {
   // Some sanitizer replace arguments with their sanitized versions, but some
   // sanitizer assume the arguments are prepared at the the beginning of the
   // function, so we need to restrict the eariest anchor to be before the first
@@ -75,30 +154,26 @@ static void replayAdd(Module &M, AddArchive &Archive,
     SmallPtrSet<BasicBlock *, 8> BBsContainingReplace;
   };
   DenseMap<Function *, FunctionHeaderInfo> FunctionHeaderMap;
-  for (auto &F : M) {
+  SmallVector<Instruction *, 8> SentryAnchors;
+
+  for (Function &F : M) {
     if (F.isDeclaration())
       continue;
 
     // Collect instructions replacing arguments in this function
-    SmallVector<Instruction *, 8> ReplaceInsts;
-    for (auto &Arg : F.args()) {
-      if (auto It = ReplaceArchive.find(&Arg); It != ReplaceArchive.end()) {
-        const auto &Record = It->second.front();
-        if (auto *Inst = dyn_cast<Instruction>(Record.SanitizerValue))
-          ReplaceInsts.push_back(Inst);
-      }
-    }
+    SmallVector<Instruction *, 8> ReplaceInsts =
+        collectArgumentReplaceInsts(Context, F);
     if (ReplaceInsts.empty())
       continue;
 
     auto &EntryBB = F.getEntryBlock();
     auto &HeaderInfo = FunctionHeaderMap[&F];
 
-    // Collect basic blocks containing these replacements
+    // Collect basic blocks containing these replacements.
     for (Instruction *Inst : ReplaceInsts)
       HeaderInfo.BBsContainingReplace.insert(Inst->getParent());
 
-    // Build the sentry anchor and collect the alloca to be redirected
+    // Build the sentry anchor and collect the alloca to be redirected.
     auto It = llvm::find_if(
         EntryBB, [](const Instruction &I) { return !isa<AllocaInst>(I); });
     requireOrDie(It != EntryBB.end(), "resan add replay found a BB without a "
@@ -107,14 +182,10 @@ static void replayAdd(Module &M, AddArchive &Archive,
         __xsan::compat::getOrInsertDeclaration(&M, Intrinsic::donothing);
     HeaderInfo.SentryAnchor = CallInst::Create(DoNothingFunc);
     __xsan::compat::insertInstructionBefore(HeaderInfo.SentryAnchor, &*It);
+    SentryAnchors.push_back(HeaderInfo.SentryAnchor);
     for (Instruction &I : llvm::make_range(
              EntryBB.begin(), HeaderInfo.SentryAnchor->getIterator()))
       HeaderInfo.AllocaToBeRedirected.insert(cast<AllocaInst>(&I));
-
-    // Add the sentry anchor to delete record so that it will be removed
-    // by delete replay.
-    if (!options::ClDebug)
-      DeleteArchive[HeaderInfo.SentryAnchor].push_back({StageKind::ReSan});
   }
 
   // Some add records' anchors may need to be redirected.
@@ -122,11 +193,12 @@ static void replayAdd(Module &M, AddArchive &Archive,
   //    should redirect to the header sentry mentioned above.
   // 2. If the anchor is an alloca instruction at the function header, we should
   //    redirect to the instruction after the header sentry mentioned above.
-  // 3. If anchor is replaced by another sanitizer, we should redirect to the
+  // 3. If anchor is replaced by a later sanitizer, we should redirect to the
   //    new one. Because the add anchor means the add record should be before
   //    the anchor.
-  const auto RedirectAnchor = [&ReplaceArchive, &FunctionHeaderMap](
-                                  const AddRecord &Record) -> Instruction * {
+  const auto RedirectAnchor =
+      [&Context, &FunctionHeaderMap](const Sanitizer &San,
+                                     const AddRecord &Record) -> Instruction * {
     auto *F = Record.Anchor->getFunction();
     requireOrDie(F, "resan add replay get anchor without a parent function");
     if (auto It = FunctionHeaderMap.find(F); It != FunctionHeaderMap.end()) {
@@ -150,43 +222,49 @@ static void replayAdd(Module &M, AddArchive &Archive,
         return HeaderInfo.SentryAnchor->getNextNode();
     }
 
-    if (auto It = ReplaceArchive.find(Record.Anchor);
-        It != ReplaceArchive.end()) {
-      const auto &ReplaceRecord = It->second.front();
-      if (ReplaceRecord.Stage != Record.Stage)
-        if (auto *I = dyn_cast<Instruction>(ReplaceRecord.SanitizerValue))
-          return I;
-    }
+    ReplaceRef Replacement =
+        findLatestOtherReplaceRecord(Context, Record.Anchor, San);
+    if (Replacement.Record)
+      if (auto *I = dyn_cast<Instruction>(Replacement.Record->SanitizerValue))
+        return I;
 
     return Record.Anchor;
   };
 
-  // Replay sanitizer blocks
-  for (auto &[Anchor, Pair] : Archive.SanBBMap) {
-    Function *F;
-    BasicBlock *InsertBefore;
-    auto &[AnchorType, BBs] = Pair;
+  // Replay sanitizer blocks.
+  for (SanitizerArchive &Entry : Context.SanitizerArchives) {
+    AddArchive &Archive = Entry.Archive.AddRecords;
+    for (auto &[Anchor, Pair] : Archive.SanBBMap) {
+      Function *F;
+      BasicBlock *InsertBefore;
+      auto &[AnchorType, BBs] = Pair;
 
-    if (AnchorType == AddArchive::FunctionAnchor) {
-      requireOrDie(Anchor, "resan add replay lost a function anchor");
-      F = static_cast<Function *>(Anchor);
-      InsertBefore = nullptr;
-    } else if (AnchorType == AddArchive::BasicBlockAnchor) {
-      requireOrDie(Anchor, "resan add replay lost a user block anchor");
-      InsertBefore = static_cast<BasicBlock *>(Anchor);
-      F = InsertBefore->getParent();
-    } else {
-      report_fatal_error("unreachable code in resan add replay anchor");
-    }
+      if (AnchorType == AddArchive::FunctionAnchor) {
+        requireOrDie(Anchor, "resan add replay lost a function anchor");
+        F = static_cast<Function *>(Anchor);
+        InsertBefore = nullptr;
+      } else if (AnchorType == AddArchive::BasicBlockAnchor) {
+        requireOrDie(Anchor, "resan add replay lost a user block anchor");
+        InsertBefore = static_cast<BasicBlock *>(Anchor);
+        F = InsertBefore->getParent();
+      } else {
+        report_fatal_error("unreachable code in resan add replay anchor");
+      }
 
-    for (BasicBlock *BB : BBs) {
-      requireOrDie(BB, "resan add replay lost a sanitizer block");
-      requireOrDie(
-          !BB->getParent(),
-          "resan add replay found a sanitizer block already in a function");
-      BB->insertInto(F, InsertBefore);
+      for (BasicBlock *BB : BBs) {
+        requireOrDie(BB, "resan add replay lost a sanitizer block");
+        requireOrDie(
+            !BB->getParent(),
+            "resan add replay found a sanitizer block already in a function");
+        BB->insertInto(F, InsertBefore);
+      }
     }
   }
+
+  SmallVector<AddRecordRef, 64> Records;
+  for (SanitizerArchive &Entry : Context.SanitizerArchives)
+    for (AddRecord &Record : Entry.Archive.AddRecords.Records)
+      Records.push_back({&Entry.San, &Record});
 
   // Replay add records.
   // We need to record how CFG changed after replay split type add record to
@@ -194,16 +272,17 @@ static void replayAdd(Module &M, AddArchive &Archive,
   DenseMap<BasicBlock *, SmallVector<std::pair<BasicBlock *, BasicBlock *>>>
       PhiUpdateMap;
   SmallVector<PHINode *, 16> PhiToUpdate;
-  BitVector Restored(Archive.Records.size());
-  size_t Remaining = Archive.Records.size();
+  BitVector Restored(Records.size());
+  size_t Remaining = Records.size();
   while (Remaining != 0) {
     bool Progress = false;
-    for (size_t i = 0; i < Archive.Records.size(); ++i) {
-      if (Restored.test(i))
+    for (size_t I = 0; I < Records.size(); ++I) {
+      if (Restored.test(I))
         continue;
 
-      auto &[Stage, Kind, _, Record] = Archive.Records[i];
-      Instruction *Anchor = RedirectAnchor(Archive.Records[i]);
+      const Sanitizer &San = *Records[I].San;
+      AddRecord &Add = *Records[I].Record;
+      Instruction *Anchor = RedirectAnchor(San, Add);
       BasicBlock *UserBB = Anchor->getParent();
       requireOrDie(UserBB,
                    "resan add replay get anchor without a parent block");
@@ -211,17 +290,18 @@ static void replayAdd(Module &M, AddArchive &Archive,
       if (UserBB->getName() == AddRecord::MagicRecordBbName)
         continue;
 
-      if (auto *Pure = std::get_if<AddRecord::PureRecord>(&Record)) {
+      if (auto *Pure = std::get_if<AddRecord::PureRecord>(&Add.Record)) {
         for (Instruction &SanInst : *Pure->SanInsts) {
-          setStageIR(Stage, SanInst);
+          setSanitizerIR(San, SanInst);
           if (auto *Phi = dyn_cast<PHINode>(&SanInst))
             PhiToUpdate.push_back(Phi);
         }
         __xsan::compat::spliceInstructions(UserBB, Anchor->getIterator(),
                                            Pure->SanInsts.get());
-      } else if (auto *Split = std::get_if<AddRecord::SplitRecord>(&Record)) {
+      } else if (auto *Split =
+                     std::get_if<AddRecord::SplitRecord>(&Add.Record)) {
         for (Instruction &SanInst : *Split->SanInstsToAppend) {
-          setStageIR(Stage, SanInst);
+          setSanitizerIR(San, SanInst);
           if (auto *Phi = dyn_cast<PHINode>(&SanInst))
             PhiToUpdate.push_back(Phi);
         }
@@ -248,7 +328,7 @@ static void replayAdd(Module &M, AddArchive &Archive,
         report_fatal_error("unreachable code in resan add replay record");
       }
 
-      Restored.set(i);
+      Restored.set(I);
       --Remaining;
       Progress = true;
     }
@@ -264,73 +344,82 @@ static void replayAdd(Module &M, AddArchive &Archive,
         Phi->replaceIncomingBlockWith(OldBB, NewBB);
     }
   }
+
+  // Add the sentry anchor to delete record so that it will be removed
+  // by delete replay.
+  if (!options::ClDebug)
+    for (Instruction *Sentry : SentryAnchors)
+      if (Sentry->getParent())
+        Sentry->eraseFromParent();
 }
 
-static void replayReplace(Module &M, ReplaceArchive &Archive,
-                          const DeleteArchive &DeleteArchive) {
-  for (auto &[UserValue, Records] : Archive) {
-    auto &Record = Records.front();
-    Value *ResolvedValue = resolveReplayReplacement(
-        Record.Stage, Record.SanitizerValue, Archive, DeleteArchive);
-    if (!ResolvedValue)
-      continue;
-    replaceNonStageIRUses(Record.Stage, *UserValue, *ResolvedValue);
+static void replayReplace(Module &M, SanitizingContext &Context) {
+  for (SanitizerArchive &Entry : Context.SanitizerArchives) {
+    for (auto &[UserValue, Records] : Entry.Archive.ReplaceRecords) {
+      requireOrDie(Records.size() == 1,
+                   Twine("resan found multiple replace records in sanitizer ") +
+                       Entry.San.name());
+      ReplaceRecord &Record = Records.front();
+      Value *ResolvedValue =
+          resolveReplayReplacement(Context, Entry.San, Record.SanitizerValue);
+      if (!ResolvedValue)
+        continue;
+      replaceNonSanitizerUses(Entry.San, *UserValue, *ResolvedValue);
+    }
   }
 }
 
-static bool shouldReplayDelete(Instruction &UserInst,
-                               const ReplaceArchive &ReplaceArchive,
-                               const DeleteArchive &DeleteArchive) {
-  auto It = ReplaceArchive.find(&UserInst);
-  if (It == ReplaceArchive.end())
+static bool shouldReplayDelete(const SanitizingContext &Context,
+                               const Sanitizer &San, Instruction &UserInst) {
+  ReplaceRef Replacement = findLatestReplaceRecord(Context, &UserInst, nullptr,
+                                                   /*IncludeBase=*/true);
+  if (!Replacement.Record)
     return true;
 
-  const auto &Record = It->second.front();
   Value *ResolvedValue = resolveReplayReplacement(
-      Record.Stage, Record.SanitizerValue, ReplaceArchive, DeleteArchive);
+      Context, *Replacement.San, Replacement.Record->SanitizerValue);
   return ResolvedValue && ResolvedValue != &UserInst;
 }
 
-static void replayDelete(Module &M, DeleteArchive &Archive,
-                         const ReplaceArchive &ReplaceArchive) {
-  for (auto &[UserInst, Records] : Archive) {
-    if (!shouldReplayDelete(*UserInst, ReplaceArchive, Archive))
-      continue;
-    UserInst->eraseFromParent();
+static void replayDelete(Module &M, SanitizingContext &Context) {
+  for (SanitizerArchive &Entry : Context.SanitizerArchives) {
+    for (auto &[UserInst, Records] : Entry.Archive.DeleteRecords) {
+      if (!UserInst->getParent())
+        continue;
+      if (!shouldReplayDelete(Context, Entry.San, *UserInst))
+        continue;
+      UserInst->eraseFromParent();
+    }
   }
 }
 
-static void replayFunction(Module &M, FunctionArchive &Archive) {
-  for (auto &[Stage, F] : Archive) {
-    M.getFunctionList().push_back(F);
-  }
+static void replayFunction(Module &M, SanitizingContext &Context) {
+  for (SanitizerArchive &Entry : Context.SanitizerArchives)
+    for (Function *F : Entry.Archive.FunctionRecords)
+      M.getFunctionList().push_back(F);
 }
 
-// Both replayAdd and replayReplace use the ReSanArchive.
-// So we do the validation before both of them.
-static void validateReplaceArchive(const ReplaceArchive &Archive) {
+static void validateReplaceArchive(const Sanitizer &San,
+                                   const ReplaceArchive &Archive) {
   for (auto &[UserValue, Records] : Archive) {
     if (Records.size() > 1) {
       std::string S;
       llvm::raw_string_ostream OS(S);
       UserValue->print(OS);
-      OS << "\nEach record belongs to stage:\n";
-      for (const ReplaceRecord &Record : Records)
-        OS << "  " << getStageName(Record.Stage) << "\n";
+      OS << "\nMultiple records in sanitizer: " << San.name() << "\n";
       report_fatal_error(OS.str().c_str());
     }
   }
 }
 
-void runReSan(Module &M, ReSanArchive &Archive) {
-  validateReplaceArchive(Archive.ReplaceRecords);
+void runReSan(Module &M, SanitizingContext &Context) {
+  for (const SanitizerArchive &Entry : Context.SanitizerArchives)
+    validateReplaceArchive(Entry.San, Entry.Archive.ReplaceRecords);
 
-  replayAdd(M, Archive.AddRecords, Archive.DeleteRecords,
-            Archive.ReplaceRecords);
-  replayReplace(M, Archive.ReplaceRecords, Archive.DeleteRecords);
-  replayDelete(M, Archive.DeleteRecords, Archive.ReplaceRecords);
-
-  replayFunction(M, Archive.FunctionRecords);
+  replayAdd(M, Context);
+  replayReplace(M, Context);
+  replayDelete(M, Context);
+  replayFunction(M, Context);
 }
 
 } // namespace __xsan::desan

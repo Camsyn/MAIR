@@ -4,6 +4,7 @@
 #include <llvm/IR/Argument.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Value.h>
 #include <optional>
@@ -202,24 +203,6 @@ struct UBSanInstMeta {
   static constexpr char Name[] = "xsan.ubsan";
 };
 
-// ---------------------- ASan Instrumented -------------------------
-
-struct ASanInstMeta {
-  static constexpr char Name[] = "xsan.asan";
-};
-
-// ---------------------- TSan Instrumented -------------------------
-
-struct TSanInstMeta {
-  static constexpr char Name[] = "xsan.tsan";
-};
-
-// ---------------------- MSan Instrumented -------------------------
-
-struct MSanInstMeta {
-  static constexpr char Name[] = "xsan.msan";
-};
-
 // ---------------------- NoSanitize --------------------------------
 
 struct NoSanitizeMeta {
@@ -246,9 +229,6 @@ using CopyArgs = MetaDataHelper<CopyArgsMeta, llvm::MemCpyInst>;
 using ReplacedAtomic = MetaDataHelper<ReplacedAtomicMeta>;
 using UserIR = MetaDataHelper<UserIRMeta>;
 using UBSanInst = MetaDataHelper<UBSanInstMeta>;
-using ASanInst = MetaDataHelper<ASanInstMeta>;
-using TSanInst = MetaDataHelper<TSanInstMeta>;
-using MSanInst = MetaDataHelper<MSanInstMeta>;
 using NoSanitize = MetaDataHelper<NoSanitizeMeta>;
 
 /// ---------------------- Util Functions ----------------------------

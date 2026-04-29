@@ -31,6 +31,8 @@ static const char *getAddRecordKindName(AddRecord::AddRecordKind Kind) {
   return "<unknown>";
 }
 
+static StringRef getSanitizerName(const Sanitizer &San) { return San.name(); }
+
 static void dumpFunctionRef(const Function *F, raw_ostream &OS) {
   if (!F) {
     OS << "<null>";
@@ -210,6 +212,60 @@ void requireOrDie(bool Condition, const Twine &Message) {
     report_fatal_error(Message, false);
 }
 
+Sanitizer::Sanitizer(StringRef Name) : Name(Name.str()) {}
+
+Sanitizer Sanitizer::Create(StringRef Name) { return Sanitizer(Name); }
+
+std::string Sanitizer::metadataName() const {
+  return (Twine("xsan.") + Name).str();
+}
+
+unsigned Sanitizer::getSanID(LLVMContext &Ctx) const {
+  requireOrDie(!Name.empty(), "cannot get metadata ID for empty sanitizer");
+  if (!SanID || SanIDContext != &Ctx) {
+    SanID = Ctx.getMDKindID(metadataName());
+    SanIDContext = &Ctx;
+  }
+  return SanID;
+}
+
+bool Sanitizer::is(const Instruction &I) const {
+  if (Name.empty())
+    return false;
+  return I.hasMetadata(getSanID(I.getContext()));
+}
+
+void Sanitizer::tag(Instruction &I) const {
+  requireOrDie(!Name.empty(), "cannot tag instruction with empty sanitizer");
+  I.setMetadata(getSanID(I.getContext()), MDNode::get(I.getContext(), {}));
+}
+
+Sanitizer &SanitizingContext::addSanitizer(StringRef Name) {
+  SanitizerArchives.emplace_back();
+  SanitizerArchive &Entry = SanitizerArchives.back();
+  Entry.San = Sanitizer::Create(Name);
+  Entry.San.setOrder(SanitizerArchives.size() - 1);
+  return Entry.San;
+}
+
+void SanitizingContext::clearArchives() {
+  for (SanitizerArchive &Entry : SanitizerArchives)
+    Entry.Archive.clear();
+}
+
+ReSanArchive &SanitizingContext::archiveFor(const Sanitizer &San) {
+  for (SanitizerArchive &Entry : SanitizerArchives)
+    if (Entry.San.order() == San.order() && Entry.San.name() == San.name())
+      return Entry.Archive;
+  report_fatal_error(Twine("missing ReSanArchive for sanitizer ") + San.name());
+}
+
+Sanitizer &SanitizingContext::setReSanitizer(StringRef Name) {
+  ReSanitizer = Sanitizer::Create(Name);
+  ReSanitizer.setOrder(SanitizerArchives.size());
+  return ReSanitizer;
+}
+
 void markUserIR(Module &M) {
   for (Function &F : M) {
     if (F.isDeclaration())
@@ -232,40 +288,11 @@ UserBBsMap collectUserBBs(llvm::Module &M) {
   return UserBBsMap;
 }
 
-bool isStageIR(StageKind Stage, const llvm::Instruction &I) {
-  switch (Stage) {
-  case StageKind::UBSan:
-    return __xsan::UBSanInst::is(I);
-  case StageKind::ASan:
-    return __xsan::ASanInst::is(I);
-  case StageKind::TSan:
-    return __xsan::TSanInst::is(I);
-  case StageKind::MSan:
-    return __xsan::MSanInst::is(I);
-  default:
-    return false;
-  }
-  llvm_unreachable("invalid stage");
+bool isSanitizerIR(const Sanitizer &San, const llvm::Instruction &I) {
+  return San.is(I);
 }
 
-void setStageIR(StageKind Stage, llvm::Instruction &I) {
-  switch (Stage) {
-  case StageKind::UBSan:
-    __xsan::UBSanInst::set(I);
-    return;
-  case StageKind::ASan:
-    __xsan::ASanInst::set(I);
-    return;
-  case StageKind::TSan:
-    __xsan::TSanInst::set(I);
-    return;
-  case StageKind::MSan:
-    __xsan::MSanInst::set(I);
-    return;
-  default:
-    llvm_unreachable("invalid stage");
-  }
-}
+void setSanitizerIR(const Sanitizer &San, llvm::Instruction &I) { San.tag(I); }
 
 bool replaceUserIRUses(Value &From, Value &To) {
   bool Changed = false;
@@ -278,19 +305,21 @@ bool replaceUserIRUses(Value &From, Value &To) {
   return Changed;
 }
 
-bool replaceNonStageIRUses(StageKind Stage, Value &From, Value &To) {
+bool replaceNonSanitizerUses(const Sanitizer &San, Value &From, Value &To) {
   bool Changed = false;
   From.replaceUsesWithIf(&To, [&](Use &U) -> bool {
     auto *UserI = dyn_cast<Instruction>(U.getUser());
-    const bool IsStageUse = UserI && isStageIR(Stage, *UserI);
-    Changed |= !IsStageUse;
-    return !IsStageUse;
+    const bool IsSanitizerUse = UserI && isSanitizerIR(San, *UserI);
+    Changed |= !IsSanitizerUse;
+    return !IsSanitizerUse;
   });
   return Changed;
 }
 
-void dumpArchive(const ReSanArchive &Archive, llvm::raw_ostream &OS) {
-  OS << "[ReSanArchive] add_records=" << Archive.AddRecords.Records.size()
+void dumpArchive(const Sanitizer &San, const ReSanArchive &Archive,
+                 llvm::raw_ostream &OS) {
+  OS << "[ReSanArchive] sanitizer=" << getSanitizerName(San)
+     << " add_records=" << Archive.AddRecords.Records.size()
      << " san_bb_anchors=" << Archive.AddRecords.SanBBMap.size()
      << " delete_records=" << Archive.DeleteRecords.size()
      << " replace_records=" << Archive.ReplaceRecords.size() << "\n";
@@ -300,8 +329,8 @@ void dumpArchive(const ReSanArchive &Archive, llvm::raw_ostream &OS) {
     OS << "  <empty>\n";
   } else {
     for (size_t I = 0; I < Archive.AddRecords.Records.size(); ++I) {
-      const auto &[Stage, Kind, Anchor, Record] = Archive.AddRecords.Records[I];
-      OS << "  [add#" << I << "] stage=" << getStageName(Stage)
+      const auto &[Kind, Anchor, Record] = Archive.AddRecords.Records[I];
+      OS << "  [add#" << I << "] sanitizer=" << getSanitizerName(San)
          << " kind=" << getAddRecordKindName(Kind) << " anchor=";
       dumpValueRef(Anchor, OS);
       OS << "\n";
@@ -357,11 +386,12 @@ void dumpArchive(const ReSanArchive &Archive, llvm::raw_ostream &OS) {
     }
   }
 
-  using ReplaceEntry = std::pair<Value *, llvm::SmallVector<ReplaceRecord, 2>>;
+  using ReplaceEntry =
+      std::pair<Value *, const llvm::SmallVector<ReplaceRecord, 2> *>;
   std::vector<ReplaceEntry> ReplaceEntries;
   ReplaceEntries.reserve(Archive.ReplaceRecords.size());
   for (const auto &Entry : Archive.ReplaceRecords)
-    ReplaceEntries.push_back({Entry.first, Entry.second});
+    ReplaceEntries.push_back({Entry.first, &Entry.second});
 
   std::sort(ReplaceEntries.begin(), ReplaceEntries.end(),
             [](const ReplaceEntry &L, const ReplaceEntry &R) {
@@ -373,15 +403,16 @@ void dumpArchive(const ReSanArchive &Archive, llvm::raw_ostream &OS) {
     OS << "  <empty>\n";
   } else {
     for (size_t I = 0; I < ReplaceEntries.size(); ++I) {
-      const auto &[UserValue, Records] = ReplaceEntries[I];
+      const auto &[UserValue, RecordsPtr] = ReplaceEntries[I];
+      const auto &Records = *RecordsPtr;
       OS << "  [replace#" << I << "] user=";
       dumpValueRef(UserValue, OS);
       OS << " records=" << Records.size() << "\n";
 
       for (size_t J = 0; J < Records.size(); ++J) {
         const ReplaceRecord &Record = Records[J];
-        OS << "    [record#" << J << "] stage=" << getStageName(Record.Stage)
-           << " sanitizer=";
+        OS << "    [record#" << J << "] sanitizer=" << getSanitizerName(San)
+           << " value=";
         dumpValueRef(Record.SanitizerValue, OS);
         OS << "\n";
       }
@@ -389,11 +420,11 @@ void dumpArchive(const ReSanArchive &Archive, llvm::raw_ostream &OS) {
   }
 
   using DeleteEntry =
-      std::pair<Instruction *, llvm::SmallVector<DeleteRecord, 2>>;
+      std::pair<Instruction *, const llvm::SmallVector<DeleteRecord, 2> *>;
   std::vector<DeleteEntry> DeleteEntries;
   DeleteEntries.reserve(Archive.DeleteRecords.size());
   for (const auto &Entry : Archive.DeleteRecords)
-    DeleteEntries.push_back({Entry.first, Entry.second});
+    DeleteEntries.push_back({Entry.first, &Entry.second});
 
   std::sort(DeleteEntries.begin(), DeleteEntries.end(),
             [](const DeleteEntry &L, const DeleteEntry &R) {
@@ -405,20 +436,21 @@ void dumpArchive(const ReSanArchive &Archive, llvm::raw_ostream &OS) {
     OS << "  <empty>\n";
   } else {
     for (size_t I = 0; I < DeleteEntries.size(); ++I) {
-      const auto &[UserInst, Records] = DeleteEntries[I];
+      const auto &[UserInst, RecordsPtr] = DeleteEntries[I];
+      const auto &Records = *RecordsPtr;
       OS << "  [delete#" << I << "] user_inst=";
       dumpValueRef(UserInst, OS);
       OS << " records=" << Records.size() << "\n";
 
       for (size_t J = 0; J < Records.size(); ++J) {
-        OS << "    [record#" << J
-           << "] stage=" << getStageName(Records[J].Stage) << "\n";
+        OS << "    [record#" << J << "] sanitizer=" << getSanitizerName(San)
+           << "\n";
       }
     }
   }
 }
 
-void validateArchive(const ReSanArchive &Archive,
+void validateArchive(const Sanitizer &San, const ReSanArchive &Archive,
                      const UserBBsMap &UserBBsMap) {
   std::string S;
   llvm::raw_string_ostream OS(S);
@@ -433,25 +465,25 @@ void validateArchive(const ReSanArchive &Archive,
     CacheUserBBsMap = &UserBBsMap;
   }
 
-  for (const auto &[Stage, Kind, Anchor, Record] : Archive.AddRecords.Records) {
+  for (const auto &[Kind, Anchor, Record] : Archive.AddRecords.Records) {
     // Check anchor
     if (!Anchor) {
-      OS << "[ReSan AddRecord] Stage " << getStageName(Stage)
+      OS << "[ReSan AddRecord] Sanitizer " << getSanitizerName(San)
          << ". Anchor == nullptr\n";
     } else {
       if (!Anchor->getParent()) {
-        OS << "[ReSan AddRecord] Stage " << getStageName(Stage)
+        OS << "[ReSan AddRecord] Sanitizer " << getSanitizerName(San)
            << ". Anchor:\n";
         dumpValueRef(Anchor, OS);
         OS << "\n has no parent block\n";
       } else if (!CacheUserBBs.contains(Anchor->getParent())) {
-        OS << "[ReSan AddRecord] Stage " << getStageName(Stage)
+        OS << "[ReSan AddRecord] Sanitizer " << getSanitizerName(San)
            << ". Anchor:\n";
         dumpValueRef(Anchor, OS);
         OS << "\n is not in user blocks set\n";
       }
       if (!__xsan::UserIR::is(*Anchor)) {
-        OS << "[ReSan AddRecord] Stage " << getStageName(Stage)
+        OS << "[ReSan AddRecord] Sanitizer " << getSanitizerName(San)
            << ". Anchor:\n";
         dumpValueRef(Anchor, OS);
         OS << "\n is not a user instruction\n";
@@ -460,13 +492,13 @@ void validateArchive(const ReSanArchive &Archive,
     // Check record
     if (auto *Pure = std::get_if<AddRecord::PureRecord>(&Record)) {
       if (Pure->SanInsts->empty()) {
-        OS << "[ReSan AddRecord] Stage " << getStageName(Stage)
+        OS << "[ReSan AddRecord] Sanitizer " << getSanitizerName(San)
            << ". PureRecord has no instructions\n";
       }
       if (llvm::any_of(*Pure->SanInsts, [](const Instruction &I) {
             return __xsan::UserIR::is(I);
           })) {
-        OS << "[ReSan AddRecord] Stage " << getStageName(Stage)
+        OS << "[ReSan AddRecord] Sanitizer " << getSanitizerName(San)
            << ". PureRecord has user instructions:\n";
         for (const Instruction &I : *Pure->SanInsts) {
           dumpValueRef(&I, OS);
@@ -475,14 +507,14 @@ void validateArchive(const ReSanArchive &Archive,
       }
     } else if (auto *Split = std::get_if<AddRecord::SplitRecord>(&Record)) {
       if (Split->SanInstsToAppend->empty()) {
-        OS << "[ReSan AddRecord] Stage " << getStageName(Stage)
+        OS << "[ReSan AddRecord] Sanitizer " << getSanitizerName(San)
            << ". SplitRecord has no sanitizer instructions to append\n";
         continue;
       }
       if (llvm::any_of(*Split->SanInstsToAppend, [](const Instruction &I) {
             return __xsan::UserIR::is(I);
           })) {
-        OS << "[ReSan AddRecord] Stage " << getStageName(Stage)
+        OS << "[ReSan AddRecord] Sanitizer " << getSanitizerName(San)
            << ". SplitRecord has user instructions in SanInstsToAppend:\n";
         for (const Instruction &I : *Split->SanInstsToAppend) {
           dumpValueRef(&I, OS);
@@ -490,16 +522,16 @@ void validateArchive(const ReSanArchive &Archive,
         }
       }
       if (!Split->LastBB) {
-        OS << "[ReSan AddRecord] Stage " << getStageName(Stage)
+        OS << "[ReSan AddRecord] Sanitizer " << getSanitizerName(San)
            << ". SplitRecord has null LastBB\n";
       } else if (CacheUserBBs.contains(Split->LastBB)) {
-        OS << "[ReSan AddRecord] Stage " << getStageName(Stage)
+        OS << "[ReSan AddRecord] Sanitizer " << getSanitizerName(San)
            << ". SplitRecord LastBB:\n";
         dumpBasicBlockRef(Split->LastBB, OS);
         OS << "\n is in user blocks set\n";
       }
     } else {
-      OS << "[ReSan AddRecord] Stage " << getStageName(Stage)
+      OS << "[ReSan AddRecord] Sanitizer " << getSanitizerName(San)
          << ". Record has an invalid variant type\n";
     }
   }
@@ -560,20 +592,19 @@ void validateArchive(const ReSanArchive &Archive,
     }
     for (const ReplaceRecord &Record : Records) {
       if (!Record.SanitizerValue) {
-        OS << "[ReSan ReplaceRecord] Stage " << getStageName(Record.Stage)
+        OS << "[ReSan ReplaceRecord] Sanitizer " << getSanitizerName(San)
            << ". has null SanitizerValue\n";
       } else if (isa<Instruction>(Record.SanitizerValue) &&
                  __xsan::UserIR::is(
                      *cast<Instruction>(Record.SanitizerValue)) &&
-                 !(Record.Stage == StageKind::UBSan &&
-                   isStageIR(Record.Stage,
-                             *cast<Instruction>(Record.SanitizerValue)))) {
-        OS << "[ReSan ReplaceRecord] Stage " << getStageName(Record.Stage)
+                 !(San.isUBSan() && __xsan::UBSanInst::is(*cast<Instruction>(
+                                        Record.SanitizerValue)))) {
+        OS << "[ReSan ReplaceRecord] Sanitizer " << getSanitizerName(San)
            << ". SanitizerValue is an unexpected user instruction:\n";
         dumpValueRef(Record.SanitizerValue, OS);
         OS << "\n";
       } else if (isa<Argument>(Record.SanitizerValue)) {
-        OS << "[ReSan ReplaceRecord] Stage " << getStageName(Record.Stage)
+        OS << "[ReSan ReplaceRecord] Sanitizer " << getSanitizerName(San)
            << ". SanitizerValue is an user instruction or argument:\n";
         dumpValueRef(Record.SanitizerValue, OS);
         OS << "\n";

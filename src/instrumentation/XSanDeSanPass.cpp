@@ -1,9 +1,7 @@
 #include "XSanDeSanPass.h"
 
-#include "PatchCore.h"
 #include "Utils/Options.h"
 #include "Utils/UbsanUtils.h"
-#include "livepatch/XSanSanitizingRecorder.h"
 
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/FileSystem.h"
@@ -32,7 +30,7 @@ PreservedAnalyses PreprocessPass::run(Module &M, ModuleAnalysisManager &MAM) {
     }
   }
 
-  State->Archive = ReSanArchive();
+  State->clearArchives();
   State->UserBBs = collectUserBBs(M);
   markUserIR(M);
 
@@ -45,41 +43,26 @@ PreservedAnalyses PreprocessPass::run(Module &M, ModuleAnalysisManager &MAM) {
   return PreservedAnalyses::all();
 }
 
-StagePass::StagePass(StageKind Stage, StageRunner Runner)
-    : Stage(Stage), Runner(std::move(Runner)) {}
-
-PreservedAnalyses StagePass::run(Module &M, ModuleAnalysisManager &AM) {
-  requireOrDie(!!Runner, Twine("desan stage pass missing runner for stage ") +
-                             getStageName(Stage));
-
-  beginStage(Stage);
-  __xsan::InterceptionScope Scope(__xsan::desan::InterceptionGroup);
-  PreservedAnalyses PA = Runner(M, AM);
-  endStage();
-  return PA;
-}
-
-DeSanPass::DeSanPass(StageKind Stage, std::shared_ptr<SanitizingContext> State)
-    : Stage(Stage), State(std::move(State)) {}
+DeSanPass::DeSanPass(const Sanitizer &San,
+                     std::shared_ptr<SanitizingContext> State)
+    : San(San), State(std::move(State)) {}
 
 PreservedAnalyses DeSanPass::run(Module &M, ModuleAnalysisManager &) {
   requireOrDie(!!State, "desan restore pass missing pipeline state");
 
   if (options::ClDebug) {
     std::error_code EC;
-    llvm::raw_fd_ostream OS(
-        (llvm::Twine(getStageName(Stage)) + ".before.ll").str(), EC,
-        llvm::sys::fs::OF_None);
+    llvm::raw_fd_ostream OS((llvm::Twine(San.name()) + ".before.ll").str(), EC,
+                            llvm::sys::fs::OF_None);
     M.print(OS, nullptr);
   }
 
-  runDeSan(M, Stage, State->Archive, State->UserBBs);
+  runDeSan(M, San, State->archiveFor(San), State->UserBBs);
 
   if (options::ClDebug) {
     std::error_code EC;
-    llvm::raw_fd_ostream OS(
-        (llvm::Twine(getStageName(Stage)) + ".after.ll").str(), EC,
-        llvm::sys::fs::OF_None);
+    llvm::raw_fd_ostream OS((llvm::Twine(San.name()) + ".after.ll").str(), EC,
+                            llvm::sys::fs::OF_None);
     M.print(OS, nullptr);
   }
 
@@ -93,9 +76,10 @@ PreservedAnalyses ReSanPass::run(Module &M, ModuleAnalysisManager &) {
   requireOrDie(!!State, "resan replay pass missing pipeline state");
 
   if (options::ClDebug)
-    validateArchive(State->Archive, State->UserBBs);
+    for (const SanitizerArchive &Entry : State->SanitizerArchives)
+      validateArchive(Entry.San, Entry.Archive, State->UserBBs);
 
-  runReSan(M, State->Archive);
+  runReSan(M, *State);
 
   if (options::ClDebug)
     requireOrDie(!llvm::verifyModule(M, &llvm::errs()),

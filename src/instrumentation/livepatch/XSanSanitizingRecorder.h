@@ -6,7 +6,6 @@
 #include <llvm/IR/Value.h>
 
 #include <array>
-#include <cstdint>
 #include <variant>
 #include <vector>
 
@@ -16,15 +15,6 @@ inline constexpr char UserInstMDKind[] = "xsan.user";
 inline constexpr std::array<const char *, 3> InterceptionTargetProcesses{
     "clang", "clang++", "opt"};
 inline constexpr char InterceptionGroup[] = "desan";
-
-enum class StageKind : uint32_t {
-  None = 0,
-  UBSan = 1,
-  ASan = 2,
-  TSan = 3,
-  MSan = 4,
-  ReSan = 5,
-};
 
 struct DeleteEvent {
   llvm::Instruction *DeletedValue = nullptr;
@@ -40,10 +30,9 @@ struct ReplaceEvent {
 };
 
 void resetSession();
-void beginStage(StageKind Stage);
-void endStage();
-bool isStageActive();
-const char *getStageName(StageKind Stage);
+void beginRecording();
+void endRecording();
+bool isRecording();
 std::vector<DeleteEvent> getDeleteEvents();
 std::vector<ReplaceEvent> getReplaceEvents();
 

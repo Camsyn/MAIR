@@ -71,7 +71,7 @@ private:
   llvm::DenseMap<AnchorT, IndexList> AnchorMap;
 };
 
-struct StageRecorder {
+struct SanitizingRecorder {
   std::mutex Mutex;
   bool Active = false;
   AnchoredEventStore<DeleteEvent, const llvm::Instruction *> DeleteEvents;
@@ -80,18 +80,18 @@ struct StageRecorder {
       CachedOperandMap;
 };
 
-StageRecorder &getRecorder() {
-  static StageRecorder Recorder;
+SanitizingRecorder &getRecorder() {
+  static SanitizingRecorder Recorder;
   return Recorder;
 }
 
-void resetStatsLocked(StageRecorder &Recorder) {
+void resetStatsLocked(SanitizingRecorder &Recorder) {
   Recorder.DeleteEvents.clear();
   Recorder.ReplaceEvents.clear();
   Recorder.CachedOperandMap.clear();
 }
 
-bool shouldRecordLocked(const StageRecorder &Recorder) {
+bool shouldRecordLocked(const SanitizingRecorder &Recorder) {
   return Recorder.Active;
 }
 
@@ -130,7 +130,7 @@ bool shouldRecordReplaceSource(const llvm::Value &Old) {
   return false;
 }
 
-void saveAndUndefineOperands(StageRecorder &Recorder, llvm::Instruction &I,
+void saveAndUndefineOperands(SanitizingRecorder &Recorder, llvm::Instruction &I,
                              DeleteEvent &Event) {
   llvm::SmallVector<llvm::Value *, 4> *CachedOperands = nullptr;
   if (auto It = Recorder.CachedOperandMap.find(&I);
@@ -145,7 +145,7 @@ void saveAndUndefineOperands(StageRecorder &Recorder, llvm::Instruction &I,
   }
 }
 
-void cacheUserOperandsUsing(StageRecorder &Recorder, llvm::Value &Old) {
+void cacheUserOperandsUsing(SanitizingRecorder &Recorder, llvm::Value &Old) {
   for (llvm::User *U : Old.users()) {
     auto *UserInst = llvm::dyn_cast<llvm::Instruction>(U);
     if (!UserInst || !hasUserMark(*UserInst))
@@ -170,41 +170,23 @@ void resetSession() {
   resetStatsLocked(Recorder);
 }
 
-void beginStage(StageKind) {
+void beginRecording() {
   auto &Recorder = getRecorder();
   std::lock_guard<std::mutex> Lock(Recorder.Mutex);
   Recorder.Active = true;
   resetStatsLocked(Recorder);
 }
 
-void endStage() {
+void endRecording() {
   auto &Recorder = getRecorder();
   std::lock_guard<std::mutex> Lock(Recorder.Mutex);
   Recorder.Active = false;
 }
 
-bool isStageActive() {
+bool isRecording() {
   auto &Recorder = getRecorder();
   std::lock_guard<std::mutex> Lock(Recorder.Mutex);
   return Recorder.Active;
-}
-
-const char *getStageName(StageKind Stage) {
-  switch (Stage) {
-  case StageKind::UBSan:
-    return "ubsan";
-  case StageKind::ASan:
-    return "asan";
-  case StageKind::TSan:
-    return "tsan";
-  case StageKind::MSan:
-    return "msan";
-  case StageKind::ReSan:
-    return "resan";
-  case StageKind::None:
-  default:
-    return "none";
-  }
 }
 
 std::vector<DeleteEvent> getDeleteEvents() {
@@ -305,7 +287,7 @@ static ManualInterception EraseFromParentInterceptee(
 
 compat::InstructionEraseIterator eraseFromParent(llvm::Instruction *Self) {
   desan::recordDeleteEvent(Self);
-  if (desan::isStageActive() && desan::hasUserMark(*Self)) {
+  if (desan::isRecording() && desan::hasUserMark(*Self)) {
     auto Next = std::next(Self->getIterator());
     RemoveFromParentInterceptee(Self);
     return Next;
@@ -335,7 +317,7 @@ static ManualInterception ReplaceInstWithInstInterceptee(
     desan::InterceptionTargetProcesses, desan::InterceptionGroup);
 
 void ReplaceInstWithInst(llvm::Instruction *From, llvm::Instruction *To) {
-  if (desan::isStageActive() && From && To) {
+  if (desan::isRecording() && From && To) {
     if (desan::hasUserMark(*From)) {
       if (!To->getDebugLoc())
         To->setDebugLoc(From->getDebugLoc());
@@ -361,7 +343,7 @@ void ReplaceInstWithInst(llvm::Instruction *From, llvm::Instruction *To) {
 //                                          {"clang", "clang++"});
 
 // SymbolTableList<BasicBlock>::iterator BasicBlock::eraseFromParent() {
-//   if (desan::isStageActive() && !getParent()->isDeclaration()) {
+//   if (desan::isRecording() && !getParent()->isDeclaration()) {
 //     auto Next = std::next(getIterator());
 //     BasicBlockRemoveFromParentInterception(this);
 //     return Next;

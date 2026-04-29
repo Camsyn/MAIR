@@ -3997,6 +3997,8 @@ bool XsanAddressSanitizer::shouldSkipFunction(Function &F) {
     return true;
   if (F.getName().starts_with("__asan_"))
     return true;
+  if (F.isPresplitCoroutine())
+    return true;
   return false;
 }
 
@@ -4101,14 +4103,23 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
   // Leave if the function doesn't need instrumentation.
   if (!F.hasFnAttribute(Attribute::SanitizeAddress))
     return FunctionModified;
+
   if (F.hasFnAttribute(Attribute::DisableSanitizerInstrumentation))
     return FunctionModified;
 
   LLVM_DEBUG(dbgs() << "ASAN instrumenting:\n" << F << "\n");
+
   initializeCallbacks(TLI);
+
   FunctionStateRAII CleanupObj(this);
+
+  RuntimeCallInserter RTCI(F);
+
   FunctionModified |= maybeInsertDynamicShadowAtFunctionEntry(F);
   markEscapedLocalAllocas(F);
+
+  if (TargetTriple.isOSWindows())
+    markCatchParametersAsUninteresting(F);
 
   auto &[OperandsToInstrument, IntrinToInstrument, NoReturnCalls,
          PointerComparisonsOrSubtracts, IsBug11395] = *Targets;
@@ -4121,12 +4132,11 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
                        (unsigned)InstrumentationWithCallsThreshold);
   const DataLayout &DL = F.getDataLayout();
   ObjectSizeOffsetVisitor ObjSizeVis(DL, TLI, F.getContext());
-  RuntimeCallInserter RTCI(F);
 
   int NumInstrumented = 0;
   for (auto &Operand : OperandsToInstrument) {
     if (!suppressInstrumentationSiteForDebug(NumInstrumented))
-      instrumentMop(ObjSizeVis, Operand, UseCalls, DL, RTCI);
+      instrumentMop(ObjSizeVis, Operand, UseCalls, F.getDataLayout(), RTCI);
     FunctionModified = true;
   }
   for (auto *Inst : IntrinToInstrument) {
@@ -4139,11 +4149,11 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
   bool ChangedStack = FSP.runOnFunction();
 
   for (auto *CI : NoReturnCalls) {
-    ::__xsan::InstrumentationIRBuilder IRB(CI);
+    IRBuilder<> IRB(CI);
     RTCI.createRuntimeCall(IRB, AsanHandleNoReturnFunc, {});
   }
 
-  for (auto Inst : PointerComparisonsOrSubtracts) {
+  for (auto *Inst : PointerComparisonsOrSubtracts) {
     instrumentPointerComparisonOrSubtraction(Inst, RTCI);
     FunctionModified = true;
   }

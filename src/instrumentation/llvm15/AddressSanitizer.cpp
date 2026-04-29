@@ -3700,14 +3700,6 @@ bool XsanAddressSanitizer::collectTargetsToIntrument(
   if (F.hasFnAttribute(Attribute::DisableSanitizerInstrumentation))
     return false;
 
-  // initializeCallbacks(*F.getParent());
-
-  FunctionStateRAII CleanupObj(this);
-
-  // We can't instrument allocas used with llvm.localescape. Only static allocas
-  // can be passed to that intrinsic.
-  markEscapedLocalAllocas(F);
-
   // We want to instrument every address only once per basic block (unless there
   // are calls between uses).
   SmallPtrSet<Value *, 16> TempsToInstrument;

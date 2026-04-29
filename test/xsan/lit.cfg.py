@@ -119,6 +119,20 @@ config.substitutions.append(
 config.substitutions.append(
     ("%clangxx_xsan_lto ", build_invocation(clang_xsan_cxxflags, True))
 )
+
+xsan_build_root = os.path.dirname(config.clang.strip())
+xsan_opt = os.path.join(config.llvm_tools_dir.strip(), "opt")
+xsan_pass_plugin = os.path.join(xsan_build_root, "pass", "XSanInstPass.so")
+config.substitutions.append(
+    (
+        "%xsan_opt ",
+        shlex.quote(xsan_opt)
+        + " -load-pass-plugin="
+        + shlex.quote(xsan_pass_plugin)
+        + " ",
+    )
+)
+
 if config.xsan_dynamic:
     if config.host_os in ["Linux", "FreeBSD", "NetBSD", "SunOS"]:
         shared_libxsan_path = os.path.join(

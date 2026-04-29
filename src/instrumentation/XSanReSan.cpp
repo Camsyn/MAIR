@@ -251,6 +251,8 @@ static void replayAdd(Module &M, SanitizingContext &Context) {
         requireOrDie(
             !BB->getParent(),
             "resan add replay found a sanitizer block already in a function");
+        for (Instruction &SanInst : *BB)
+          Entry.San.tag(SanInst);
         BB->insertInto(F, InsertBefore);
       }
     }

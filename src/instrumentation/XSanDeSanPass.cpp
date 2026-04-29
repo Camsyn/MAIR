@@ -4,7 +4,6 @@
 #include "Utils/UbsanUtils.h"
 
 #include "llvm/IR/Verifier.h"
-#include "llvm/Support/FileSystem.h"
 #include "llvm/Transforms/Utils/Local.h"
 
 using namespace llvm;
@@ -34,37 +33,18 @@ PreservedAnalyses PreprocessPass::run(Module &M, ModuleAnalysisManager &MAM) {
   State->UserBBs = collectUserBBs(M);
   markUserIR(M);
 
-  if (options::ClDebug) {
-    std::error_code EC;
-    llvm::raw_fd_ostream OS("before.ll", EC, llvm::sys::fs::OF_None);
-    M.print(OS, nullptr);
-  }
-
   return PreservedAnalyses::all();
 }
 
-DeSanPass::DeSanPass(const Sanitizer &San,
+DeSanPass::DeSanPass(llvm::StringRef SanName,
                      std::shared_ptr<SanitizingContext> State)
-    : San(San), State(std::move(State)) {}
+    : San(Sanitizer::Create(SanName)), State(std::move(State)) {}
 
 PreservedAnalyses DeSanPass::run(Module &M, ModuleAnalysisManager &) {
   requireOrDie(!!State, "desan restore pass missing pipeline state");
 
-  if (options::ClDebug) {
-    std::error_code EC;
-    llvm::raw_fd_ostream OS((llvm::Twine(San.name()) + ".before.ll").str(), EC,
-                            llvm::sys::fs::OF_None);
-    M.print(OS, nullptr);
-  }
-
-  runDeSan(M, San, State->archiveFor(San), State->UserBBs);
-
-  if (options::ClDebug) {
-    std::error_code EC;
-    llvm::raw_fd_ostream OS((llvm::Twine(San.name()) + ".after.ll").str(), EC,
-                            llvm::sys::fs::OF_None);
-    M.print(OS, nullptr);
-  }
+  SanitizerArchive &Archive = State->addArchive(San);
+  runDeSan(M, Archive, State->UserBBs);
 
   return PreservedAnalyses::all();
 }
@@ -84,12 +64,6 @@ PreservedAnalyses ReSanPass::run(Module &M, ModuleAnalysisManager &) {
   if (options::ClDebug)
     requireOrDie(!llvm::verifyModule(M, &llvm::errs()),
                  "resan replay produced invalid IR");
-
-  if (options::ClDebug) {
-    std::error_code EC;
-    llvm::raw_fd_ostream OS("resan.ll", EC, llvm::sys::fs::OF_None);
-    M.print(OS, nullptr);
-  }
 
   return PreservedAnalyses::all();
 }

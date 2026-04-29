@@ -17,6 +17,8 @@
 
 #include <functional>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace llvm {
 struct AddressSanitizerOptions;
@@ -24,6 +26,8 @@ enum class AsanDtorKind;
 } // namespace llvm
 
 namespace __xsan {
+
+class MPMRewriter;
 
 struct AsanOption {
   llvm::AddressSanitizerOptions Opts;
@@ -52,9 +56,8 @@ private:
   bool isInSanitizing(unsigned PassIndex) const;
   void beginPass(unsigned PassIndex);
   void resetRunState();
-  void addSanitizerWithDeSan(const desan::Sanitizer &San,
-                             PassAdder AddSanitizer);
-  void addDeSanPass(const desan::Sanitizer &San);
+  void addSanitizerWithDeSan(llvm::StringRef SanName, PassAdder AddSanitizer);
+  void addDeSanPass(llvm::StringRef SanName);
   void addReSanPass();
 
   llvm::OptimizationLevel Level;
@@ -89,6 +92,46 @@ createPostOptimizationPasses(llvm::OptimizationLevel Level);
 
 const AsanOption obtainAsanPassArgs();
 const MsanOption obtainMsanPassArgs();
+
+// --------- Build sanitizer pass groups in an existing MPM -----------
+// The basic logic of add*sanToMPM comes from addSanitizer@BackendUtil.cpp
+void addAsanToMPM(llvm::ModulePassManager &MPM, llvm::OptimizationLevel Level);
+void addTsanToMPM(llvm::ModulePassManager &MPM, llvm::OptimizationLevel Level);
+void addMsanToMPM(llvm::ModulePassManager &MPM, llvm::OptimizationLevel Level);
+void addXsanToMPM(llvm::ModulePassManager &MPM, llvm::OptimizationLevel Level);
+void addXsanPipelineStartPasses(llvm::ModulePassManager &MPM);
+
+// The livepatch rewriter is intentionally sanitizer-agnostic: each pass plugin
+// registers the callbacks that own each insertion site.  The rewriter only
+// accesses the sanitizer-position adder through friendship; callers use the
+// explicit registration API below.
+class PassRegistry {
+public:
+  using PassAdder = void (*)(llvm::ModulePassManager &,
+                             llvm::OptimizationLevel);
+
+  void registerPassIntoOpt(llvm::StringRef Name, PassAdder AddPass);
+  void registerStartPassIntoClang(PassAdder AddPass);
+  void registerSanitizerPassIntoClang(PassAdder AddPass);
+
+  void delegateNonSanPassTo(llvm::PassBuilder &PB);
+
+private:
+  friend class MPMRewriter;
+
+  struct NamedPassAdder {
+    std::string Name;
+    PassAdder AddPass;
+  };
+
+  std::vector<NamedPassAdder> OptPassAdders;
+  std::vector<PassAdder> StartPassAdders;
+  bool NonSanPassDelegated = false;
+  bool HasSanitizerPassAdder = false;
+  PassAdder SanitizerPassAdder = nullptr;
+};
+
+extern PassRegistry PassRegistry;
 
 // --------- Implemented in PassRegistry.cpp -----------
 void registerAsanForClangAndOpt(llvm::PassBuilder &PB);

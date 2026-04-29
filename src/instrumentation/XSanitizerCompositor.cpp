@@ -78,17 +78,7 @@ static void addXsanOptPasses(ModulePassManager &MPM, OptimizationLevel Level) {
   addXsanToMPM(MPM, Level);
 }
 
-void registerAnalysisForXsan(PassBuilder &PB) {
-  if (!options::ClDisableAsan)
-    registerAnalysisForAsan(PB);
-  if (!options::ClDisableTsan)
-    registerAnalysisForTsan(PB);
-  if (!options::ClDisableMsan)
-    registerAnalysisForMsan(PB);
-}
-
 void registerXsanForClangAndOpt(llvm::PassBuilder &PB) {
-  registerAnalysisForXsan(PB);
 
   // Clang sanitizer-position passes are not registered through OptimizerLast
   // here.  Even if we choose the same OptimizerLast extension point as Clang's

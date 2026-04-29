@@ -212,7 +212,12 @@ void requireOrDie(bool Condition, const Twine &Message) {
 
 Sanitizer::Sanitizer(StringRef Name) : Name(Name.str()) {}
 
-Sanitizer Sanitizer::Create(StringRef Name) { return Sanitizer(Name); }
+Sanitizer Sanitizer::Create(StringRef Name) {
+  static size_t NextOrder = 0;
+  Sanitizer San(Name);
+  San.Order = NextOrder++;
+  return San;
+}
 
 unsigned Sanitizer::getSanID(LLVMContext &Ctx) const {
   requireOrDie(!Name.empty(), "cannot get metadata ID for empty sanitizer");
@@ -234,30 +239,15 @@ void Sanitizer::tag(Instruction &I) const {
   I.setMetadata(getSanID(I.getContext()), MDNode::get(I.getContext(), {}));
 }
 
-Sanitizer &SanitizingContext::addSanitizer(StringRef Name) {
-  SanitizerArchives.emplace_back();
-  SanitizerArchive &Entry = SanitizerArchives.back();
-  Entry.San = Sanitizer::Create(Name);
-  Entry.San.setOrder(SanitizerArchives.size() - 1);
-  return Entry.San;
-}
+void SanitizingContext::clearArchives() { SanitizerArchives.clear(); }
 
-void SanitizingContext::clearArchives() {
-  for (SanitizerArchive &Entry : SanitizerArchives)
-    Entry.Archive.clear();
-}
-
-ReSanArchive &SanitizingContext::archiveFor(const Sanitizer &San) {
-  for (SanitizerArchive &Entry : SanitizerArchives)
+SanitizerArchive &SanitizingContext::addArchive(const Sanitizer &San) {
+  for (const SanitizerArchive &Entry : SanitizerArchives)
     if (Entry.San.sameAs(San))
-      return Entry.Archive;
-  report_fatal_error(Twine("missing ReSanArchive for sanitizer ") + San.name());
-}
+      report_fatal_error(Twine("duplicate ReSanArchive for sanitizer ") +
+                         San.name());
 
-Sanitizer &SanitizingContext::setReSanitizer(StringRef Name) {
-  ReSanitizer = Sanitizer::Create(Name);
-  ReSanitizer.setOrder(SanitizerArchives.size());
-  return ReSanitizer;
+  return SanitizerArchives.emplace_back(San);
 }
 
 void markUserIR(Module &M) {

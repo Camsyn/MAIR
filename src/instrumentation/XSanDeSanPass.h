@@ -23,14 +23,15 @@ private:
 
 class DeSanPass : public llvm::PassInfoMixin<DeSanPass> {
 public:
-  DeSanPass(const Sanitizer &San, std::shared_ptr<SanitizingContext> State);
+  DeSanPass(llvm::StringRef SanName,
+            std::shared_ptr<SanitizingContext> State);
 
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 
   static bool isRequired() { return true; }
 
 private:
-  const Sanitizer &San;
+  const Sanitizer San;
   std::shared_ptr<SanitizingContext> State;
 };
 

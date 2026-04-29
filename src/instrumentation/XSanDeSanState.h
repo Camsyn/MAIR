@@ -20,10 +20,9 @@
 namespace __xsan::desan {
 
 // A sanitizer is identified by the user-facing plan name ("asan", "msan",
-// ...). The order is assigned when the sanitizer is inserted into
-// SanitizingContext and is the replay order used by ReSan. Metadata is also
-// derived from the name as `xsan.<name>`, so adding a sanitizer no longer
-// requires a new hard-coded metadata kind.
+// ...). Creation order is the replay order used by ReSan. Metadata is derived
+// from the name as `xsan.<name>`, so adding a sanitizer no longer requires a
+// new hard-coded metadata kind.
 class Sanitizer {
 public:
   Sanitizer() = default;
@@ -43,15 +42,12 @@ public:
 
 private:
   explicit Sanitizer(llvm::StringRef Name);
-  void setOrder(size_t NewOrder) { Order = NewOrder; }
   unsigned getSanID(llvm::LLVMContext &Ctx) const;
 
   std::string Name;
   size_t Order = 0;
   mutable unsigned SanID = 0;
   mutable const llvm::LLVMContext *SanIDContext = nullptr;
-
-  friend struct SanitizingContext;
 };
 
 // Describes sanitizer IR that was removed by DeSan and must be reinserted by
@@ -164,9 +160,8 @@ using UserBBsSet = llvm::SmallPtrSet<llvm::BasicBlock *, 8>;
 using UserBBsMap = llvm::DenseMap<llvm::Function *, UserBBsSet>;
 
 struct SanitizerArchive {
-  SanitizerArchive() = default;
+  SanitizerArchive(const Sanitizer &San) : San(San) {}
   SanitizerArchive(SanitizerArchive &&) noexcept = default;
-  SanitizerArchive &operator=(SanitizerArchive &&) noexcept = default;
   SanitizerArchive(const SanitizerArchive &) = delete;
   SanitizerArchive &operator=(const SanitizerArchive &) = delete;
 
@@ -176,17 +171,12 @@ struct SanitizerArchive {
 
 struct SanitizingContext {
   UserBBsMap UserBBs;
-  // Tuple model: SanitizingContext = [(Sanitizer, ReSanArchive)...].
-  // The container order is sanitizer pipeline order and is used to resolve
-  // cross-sanitizer replacements during ReSan.
+  // Runtime archive order. Each entry is appended by DeSanPass::run and then
+  // replayed by ReSan in the same dynamic order.
   llvm::SmallVector<SanitizerArchive, 4> SanitizerArchives;
-  Sanitizer ReSanitizer;
 
   void clearArchives();
-  void reserveSanitizers(size_t Count) { SanitizerArchives.reserve(Count); }
-  Sanitizer &addSanitizer(llvm::StringRef Name);
-  ReSanArchive &archiveFor(const Sanitizer &San);
-  Sanitizer &setReSanitizer(llvm::StringRef Name);
+  SanitizerArchive &addArchive(const Sanitizer &San);
 };
 
 // Utilities.
@@ -200,8 +190,7 @@ bool replaceNonSanitizerUses(const Sanitizer &San, llvm::Value &From,
                              llvm::Value &To);
 
 // Main logic.
-void runDeSan(llvm::Module &M, const Sanitizer &San, ReSanArchive &Archive,
-              UserBBsMap &UserBBs);
+void runDeSan(llvm::Module &M, SanitizerArchive &Archive, UserBBsMap &UserBBs);
 void runReSan(llvm::Module &M, SanitizingContext &Context);
 
 // For debug and verification.

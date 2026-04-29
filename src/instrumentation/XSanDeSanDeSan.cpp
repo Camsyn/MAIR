@@ -357,8 +357,10 @@ static void restoreUbsanArithmetic(const Sanitizer &San, ReSanArchive &Archive,
   }
 }
 
-void runDeSan(Module &M, const Sanitizer &San, ReSanArchive &Archive,
-              UserBBsMap &UserBBsMap) {
+void runDeSan(Module &M, SanitizerArchive &Entry, UserBBsMap &UserBBsMap) {
+  const Sanitizer &San = Entry.San;
+  ReSanArchive &Archive = Entry.Archive;
+
   if (San.isUBSan()) {
     restoreUbsanArithmetic(San, Archive, M);
     return;

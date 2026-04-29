@@ -57,7 +57,7 @@ int get_exit_code(const void *ctx) {
 namespace __asan {
 
 SANITIZER_WEAK_ATTRIBUTE
-bool GetASanMallocStackTrace(u32& stack_trace_id, uptr addr,
+bool GetASanMallocStackTrace(u32 &stack_trace_id, uptr addr,
                              bool set_stack_trace_id) {
   return false;
 }
@@ -66,7 +66,7 @@ bool GetASanMallocStackTrace(u32& stack_trace_id, uptr addr,
 
 namespace __xsan {
 
-bool GetMallocStackTrace(u32& stack_trace_id, uptr addr,
+bool GetMallocStackTrace(u32 &stack_trace_id, uptr addr,
                          bool set_stack_trace_id) {
   return __asan::GetASanMallocStackTrace(stack_trace_id, addr,
                                          set_stack_trace_id);

@@ -2,8 +2,8 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include <cerrno>
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
 #include <elf.h>
@@ -13,8 +13,8 @@
 #include <llvm/Support/Process.h>
 #include <optional>
 #include <string_view>
-#include <system_error>
 #include <sys/mman.h>
+#include <system_error>
 #include <unistd.h>
 #include <vector>
 
@@ -632,9 +632,7 @@ public:
       : Addr(FuncAddr), Size(n), Type(Type) {
     changeMemoryProtection(/*Writable=*/true);
   }
-  ~ScopedApplyPatch() {
-    changeMemoryProtection(/*Writable=*/false);
-  }
+  ~ScopedApplyPatch() { changeMemoryProtection(/*Writable=*/false); }
 
 private:
   void *Addr;

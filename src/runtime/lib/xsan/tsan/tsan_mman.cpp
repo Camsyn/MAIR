@@ -199,8 +199,7 @@ void SignalUnsafeCall(ThreadState *thr, uptr pc) {
   OutputReport(thr, rep);
 }
 
-
-void* user_alloc_internal(ThreadState* thr, uptr pc, uptr sz, uptr align,
+void *user_alloc_internal(ThreadState *thr, uptr pc, uptr sz, uptr align,
                           bool signal) {
   /// Call from tsan_fd.cpp
   BufferedStackTrace stack;

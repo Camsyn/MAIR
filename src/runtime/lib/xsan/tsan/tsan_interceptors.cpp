@@ -464,11 +464,13 @@ DECLARE_REAL(int, atexit, void (*f)())
 #endif
 
 DECLARE_REAL(int, __cxa_atexit, void (*f)(void *a), void *arg, void *dso)
-// TSAN_INTERCEPTOR(int, __cxa_atexit, void (*f)(void *a), void *arg, void *dso) {
+// TSAN_INTERCEPTOR(int, __cxa_atexit, void (*f)(void *a), void *arg, void *dso)
+// {
 //   if (in_symbolizer())
 //     return 0;
 //   SCOPED_TSAN_INTERCEPTOR(__cxa_atexit, f, arg, dso);
-//   return setup_at_exit_wrapper(thr, GET_CALLER_PC(), (void (*)())f, arg, dso);
+//   return setup_at_exit_wrapper(thr, GET_CALLER_PC(), (void (*)())f, arg,
+//   dso);
 // }
 
 // static int setup_at_exit_wrapper(ThreadState *thr, uptr pc, void(*f)(),
@@ -533,7 +535,7 @@ DECLARE_REAL(int, on_exit, void(*f)(int, void*), void *arg);
 //   ThreadIgnoreEnd(thr);
 //   return res;
 // }
-#define TSAN_MAYBE_INTERCEPT_ON_EXIT TSAN_INTERCEPT(on_exit)
+#  define TSAN_MAYBE_INTERCEPT_ON_EXIT TSAN_INTERCEPT(on_exit)
 #else
 #define TSAN_MAYBE_INTERCEPT_ON_EXIT
 #endif
@@ -889,7 +891,7 @@ DECLARE_REAL(void*, memalign, uptr align, uptr sz)
 //   SCOPED_INTERCEPTOR_RAW(memalign, align, sz);
 //   return user_memalign(thr, pc, align, sz);
 // }
-#define TSAN_MAYBE_INTERCEPT_MEMALIGN TSAN_INTERCEPT(memalign)
+#  define TSAN_MAYBE_INTERCEPT_MEMALIGN TSAN_INTERCEPT(memalign)
 #else
 #define TSAN_MAYBE_INTERCEPT_MEMALIGN
 #endif
@@ -925,7 +927,7 @@ DECLARE_REAL(void*, pvalloc, uptr sz)
 //   SCOPED_INTERCEPTOR_RAW(pvalloc, sz);
 //   return user_pvalloc(thr, pc, sz);
 // }
-#define TSAN_MAYBE_INTERCEPT_PVALLOC TSAN_INTERCEPT(pvalloc)
+#  define TSAN_MAYBE_INTERCEPT_PVALLOC TSAN_INTERCEPT(pvalloc)
 #else
 #define TSAN_MAYBE_INTERCEPT_PVALLOC
 #endif
@@ -1120,7 +1122,8 @@ DECLARE_REAL(int, pthread_create,
 //   if (ctx->after_multithreaded_fork) {
 //     if (flags()->die_after_fork) {
 //       Report("ThreadSanitizer: starting new threads after multi-threaded "
-//           "fork is not supported. Dying (set die_after_fork=0 to override)\n");
+//           "fork is not supported. Dying (set die_after_fork=0 to
+//           override)\n");
 //       Die();
 //     } else {
 //       VPrintf(1,
@@ -1160,9 +1163,8 @@ DECLARE_REAL(int, pthread_create,
 //     //    identifier is not yet registered in ThreadRegistry by ThreadCreate.
 //     // 2. ThreadStart must finish before this thread continues.
 //     //    Otherwise, this thread can call pthread_detach and reset thr->sync
-//     //    before the new thread got a chance to acquire from it in ThreadStart.
-//     p.created.Post();
-//     p.started.Wait();
+//     //    before the new thread got a chance to acquire from it in
+//     ThreadStart. p.created.Post(); p.started.Wait();
 //   }
 //   if (attr == &myattr)
 //     pthread_attr_destroy(&myattr);

@@ -240,7 +240,7 @@ ALWAYS_INLINE void SetSanitizerThreadNameByUserId(uptr uid, const char *name) {
   XSAN_HOOKS_EXEC(SetThreadNameByUserId, uid, name);
 }
 
-bool GetMallocStackTrace(u32& stack_trace_id, uptr addr,
+bool GetMallocStackTrace(u32 &stack_trace_id, uptr addr,
                          bool set_stack_trace_id);
 
 ALWAYS_INLINE void AfterMmap(const XsanInterceptorContext &ctx, void *res,

@@ -1317,7 +1317,7 @@ void asan_mz_force_unlock() SANITIZER_NO_THREAD_SAFETY_ANALYSIS {
 }
 
 // ---------------------- Hook for other Sanitizers -------------------
-bool GetASanMallocStackTrace(u32& stack_trace_id, uptr addr,
+bool GetASanMallocStackTrace(u32 &stack_trace_id, uptr addr,
                              bool set_stack_trace_id) {
   __asan::AsanChunkView chunk = __asan::FindHeapChunkByAddress(addr);
   if (chunk.IsValid()) {

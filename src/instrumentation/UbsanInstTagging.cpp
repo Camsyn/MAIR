@@ -78,7 +78,7 @@ PreservedAnalyses UbsanInstTaggingPass::run(Module &M,
                                             ModuleAnalysisManager &_) {
   // If any function is UBSan function, we need to tag the module.
   // Otherwise, we can skip the module.
-  if (!any_of(M.functions(), __xsan::isUbsanFunction)) {
+  if (!__xsan::hasUbsanFunction(M)) {
     return PreservedAnalyses::all();
   }
 
@@ -111,12 +111,10 @@ PreservedAnalyses UbsanInstTaggingPass::run(Module &M,
 
   for (auto &F : M) {
     for (auto &BB : F) {
-      if (!__xsan::isUbsanFallbackBlock(BB)) {
+      if (!__xsan::isUbsanFallbackBlock(BB))
         continue;
-      }
-      for (auto &I : BB) {
+      for (auto &I : BB)
         __xsan::UBSanInst::set(I);
-      }
       auto *Pred = BB.getSinglePredecessor();
       assert(Pred && "UBSan fallback block should have only one predecessor");
       // Find the branch instruction in the predecessor block.

@@ -5,6 +5,7 @@
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/Casting.h"
 
@@ -48,6 +49,10 @@ bool isUbsanFunction(const Function &F) {
 
 bool isUbsanReportFunction(const Function &F) {
   return compat::startsWith(F.getName(), UbsanReportPrefix);
+}
+
+bool hasUbsanFunction(const Module &M) {
+  return any_of(M.functions(), isUbsanFunction);
 }
 
 /*

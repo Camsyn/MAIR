@@ -5,6 +5,7 @@ namespace llvm {
 class Instruction;
 class BasicBlock;
 class Function;
+class Module;
 } // namespace llvm
 
 namespace __xsan {
@@ -22,6 +23,8 @@ bool isCheckedIntegerOverflowIntrinsicCall(llvm::Instruction &I);
 bool isUbsanFallbackBlock(const llvm::BasicBlock &BB);
 // E.g., __ubsan_XXXXX
 bool isUbsanFunction(const llvm::Function &F);
+/// Check if the module contains UBSan runtime/interface functions.
+bool hasUbsanFunction(const llvm::Module &M);
 // E.g., __ubsan_handle_XXXXX
 bool isUbsanReportFunction(const llvm::Function &F);
 } // namespace __xsan

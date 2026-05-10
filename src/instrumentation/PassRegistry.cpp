@@ -1,6 +1,7 @@
 #include "PassRegistry.h"
 #include "AttributeTaggingPass.hpp"
 #include "PatchCore.h"
+#include "UbsanInstTagging.hpp"
 #include "Utils/Options.h"
 #include "XSanDeSanReSan.h"
 #include "livepatch/record/SanitizingRecorder.h"
@@ -349,12 +350,9 @@ struct SanitizerInstrPlan {
 // The order matters: each enabled sanitizer is added to SanitizingContext in
 // this order, and ReSan uses that dynamic order when resolving replay records.
 const SanitizerInstrPlan SanitizerInstrPlans[] = {
-    {[] { return options::isSelectedSanitizer("asan"); }, "asan",
-     addAsanToMPM},
-    {[] { return options::isSelectedSanitizer("tsan"); }, "tsan",
-     addTsanToMPM},
-    {[] { return options::isSelectedSanitizer("msan"); }, "msan",
-     addMsanToMPM},
+    {[] { return options::isSelectedSanitizer("asan"); }, "asan", addAsanToMPM},
+    {[] { return options::isSelectedSanitizer("tsan"); }, "tsan", addTsanToMPM},
+    {[] { return options::isSelectedSanitizer("msan"); }, "msan", addMsanToMPM},
 };
 
 } // namespace
@@ -455,6 +453,9 @@ SubSanitizers SubSanitizers::loadSubSanitizers(llvm::OptimizationLevel Level) {
   // sanitizing edits; do these cleanups before any DeSan/Sanitizing step.
   Sanitizers.addPass(desan::PreprocessPass(Sanitizers.Ctx));
 
+  // Post-tag UBSan's instructions, as it is instrumented by the compiler frontend, which
+  // cannot be controlled by XSan.
+  Sanitizers.addPass(UbsanInstTaggingPass());
 
   // Deal with UBSan first, since UBSan is done by clang frontend.
   Sanitizers.addDeSanPass("ubsan");

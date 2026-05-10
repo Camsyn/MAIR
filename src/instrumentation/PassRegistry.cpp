@@ -450,11 +450,19 @@ SubSanitizers SubSanitizers::loadSubSanitizers(llvm::OptimizationLevel Level) {
   SubSanitizers Sanitizers(Level);
   Sanitizers.Ctx = std::make_shared<desan::SanitizingContext>();
 
-  // PreprocessPass: mark user IR and collect user BBs.
+  // PreprocessPass: run pre-sanitizing cleanups only.  Some frontend
+  // sanitizers carry optimization-shaped IR, while DeSan/ReSan models only
+  // sanitizing edits; do these cleanups before any DeSan/Sanitizing step.
   Sanitizers.addPass(desan::PreprocessPass(Sanitizers.Ctx));
+
 
   // Deal with UBSan first, since UBSan is done by clang frontend.
   Sanitizers.addDeSanPass("ubsan");
+
+  // UserTaggingPass: after UBSan DeSan restores frontend-lowered user IR, mark
+  // the true user instructions/basic blocks for all later generic DeSan/ReSan
+  // steps.
+  Sanitizers.addPass(desan::UserTaggingPass(Sanitizers.Ctx));
 
   for (const auto &[IsEnabled, Name, AddSanitizer] : SanitizerInstrPlans) {
     if (!IsEnabled())

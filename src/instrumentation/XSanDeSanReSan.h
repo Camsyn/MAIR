@@ -21,6 +21,18 @@ private:
   std::shared_ptr<SanitizingContext> Ctx;
 };
 
+class UserTaggingPass : public llvm::PassInfoMixin<UserTaggingPass> {
+public:
+  explicit UserTaggingPass(std::shared_ptr<SanitizingContext> Ctx);
+
+  llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
+
+  static bool isRequired() { return true; }
+
+private:
+  std::shared_ptr<SanitizingContext> Ctx;
+};
+
 class DeSanPass : public llvm::PassInfoMixin<DeSanPass> {
 public:
   DeSanPass(llvm::StringRef SanName, std::shared_ptr<SanitizingContext> Ctx);

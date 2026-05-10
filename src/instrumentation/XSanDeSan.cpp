@@ -39,10 +39,20 @@ PreservedAnalyses PreprocessPass::run(Module &M, ModuleAnalysisManager &MAM) {
   }
 
   Ctx->clearArchives();
-  Ctx->UserBBs = collectUserBBs(M);
-  markUserIR(M);
 
-  return PreservedAnalyses::all();
+  return PreservedAnalyses::none();
+}
+
+UserTaggingPass::UserTaggingPass(std::shared_ptr<SanitizingContext> Ctx)
+    : Ctx(std::move(Ctx)) {}
+
+PreservedAnalyses UserTaggingPass::run(Module &M, ModuleAnalysisManager &) {
+  requireOrDie(!!Ctx, "desan user tagging pass missing pipeline context");
+
+  markUserIR(M);
+  Ctx->UserBBs = collectUserBBs(M);
+
+  return PreservedAnalyses::none();
 }
 
 DeSanPass::DeSanPass(llvm::StringRef SanName,

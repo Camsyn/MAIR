@@ -311,7 +311,7 @@ if config.compiler_id == "MSVC":
     )
 
 # Default test suffixes.
-config.suffixes = [".c", ".cpp"]
+config.suffixes = [".c", ".cpp", ".ll"]
 
 if config.host_os == "Darwin":
     config.suffixes.append(".mm")

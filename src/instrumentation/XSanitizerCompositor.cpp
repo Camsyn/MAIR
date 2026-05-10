@@ -118,6 +118,10 @@ void registerXsanForClangAndOpt(llvm::PassBuilder &PB) {
       getXsanMask().none() ? addNoSanitizerPositionPasses : addXsanToMPM);
   PassRegistry.registerStartPassIntoClang(addXsanPipelineStartPassesIntoClang);
   PassRegistry.registerPassIntoOpt("xsan", addXsanOptPasses);
+  PassRegistry.registerPassIntoOpt(
+      "xsan-ubsan-tagging", [](ModulePassManager &MPM, OptimizationLevel) {
+        MPM.addPass(UbsanInstTaggingPass());
+      });
   PassRegistry.delegateNonSanPassTo(PB);
 }
 

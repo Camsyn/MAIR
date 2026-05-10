@@ -1,6 +1,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -13,7 +14,9 @@
 #include <llvm/Support/Process.h>
 #include <optional>
 #include <string_view>
+#include <sys/mman.h>
 #include <system_error>
+#include <unistd.h>
 #include <vector>
 
 #if LLVM_VERSION_MAJOR >= 22
@@ -584,8 +587,6 @@ void *getInterceptorAddr(const char *MangledName, void *DsoAnchor) {
 }
 
 class ScopedApplyPatch {
-  using Memory = llvm::sys::Memory;
-
 public:
   enum class MemoryType {
     Exec,
@@ -593,32 +594,62 @@ public:
   };
 
 private:
-  void changeMemoryProtection(unsigned Flags) {
-    if (auto Ret = Memory::protectMappedMemory(Mem, Flags)) {
-      FATAL("Failed to protect memory for patching: %s", Ret.message().c_str());
+  static size_t getPageSize() {
+    long PageSize = ::sysconf(_SC_PAGESIZE);
+    if (PageSize <= 0)
+      FATAL("Failed to query page size for patching");
+    return static_cast<size_t>(PageSize);
+  }
+
+  // Equivalent to llvm::sys::Memory::protectMappedMemory(Mem, Flags)
+  // We use this native implementation as opt-15 does not provide
+  // llvm::sys::Memory::protectMappedMemory.
+  void changeMemoryProtection(int Prot) {
+    const size_t PageSize = getPageSize();
+    uintptr_t Begin = reinterpret_cast<uintptr_t>(Addr);
+    uintptr_t End = Begin + Size;
+    uintptr_t PageBegin = Begin & ~(static_cast<uintptr_t>(PageSize) - 1);
+    uintptr_t PageEnd =
+        (End + PageSize - 1) & ~(static_cast<uintptr_t>(PageSize) - 1);
+    if (::mprotect(reinterpret_cast<void *>(PageBegin), PageEnd - PageBegin,
+                   Prot) != 0) {
+      FATAL("Failed to protect memory for patching: %s", std::strerror(errno));
     }
   }
 
 public:
-  unsigned getMemoryProtectionFlags(MemoryType Type) {
+  static void invalidateInstructionCache(void *Addr, size_t Size) {
+#if defined(__GNUC__) || defined(__clang__)
+    char *Begin = static_cast<char *>(Addr);
+    __builtin___clear_cache(Begin, Begin + Size);
+#else
+    (void)Addr;
+    (void)Size;
+#endif
+  }
+
+  int getMemoryProtectionFlags(MemoryType Type) {
     switch (Type) {
     case MemoryType::Exec:
-      return Memory::MF_EXEC | Memory::MF_READ;
+      return PROT_EXEC | PROT_READ;
     case MemoryType::RoData:
-      return Memory::MF_READ;
+      return PROT_READ;
     }
   }
 
   ScopedApplyPatch(void *FuncAddr, size_t n, MemoryType Type = MemoryType::Exec)
-      : Mem(FuncAddr, n), Type(Type) {
-    changeMemoryProtection(Memory::MF_RWE_MASK);
+      : Addr(FuncAddr), Size(n), Type(Type) {
+    changeMemoryProtection(PROT_READ | PROT_WRITE | PROT_EXEC);
   }
   ~ScopedApplyPatch() {
     changeMemoryProtection(getMemoryProtectionFlags(Type));
+    if (Type == MemoryType::Exec)
+      invalidateInstructionCache(Addr, Size);
   }
 
 private:
-  llvm::sys::MemoryBlock Mem;
+  void *Addr;
+  size_t Size;
   MemoryType Type;
 };
 

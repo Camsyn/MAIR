@@ -93,8 +93,8 @@ cl::opt<bool> ClDebug("xsan-debug", cl::init(false),
                       cl::desc("Enable debug output for XSan"), cl::Hidden);
 
 cl::opt<std::string> ClDumpDeSanReSan(
-    "dump-desan-resan", cl::init(""), cl::value_desc("dir"),
-    cl::desc("Dump DeSan/ReSan IR snapshots into the given directory"),
+    "xsan-dump", cl::init(""), cl::value_desc("dir"),
+    cl::desc("Dump the whole XSan instrumentation pipeline into the given directory"),
     cl::Hidden);
 } // namespace options
 

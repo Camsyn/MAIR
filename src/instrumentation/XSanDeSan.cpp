@@ -5,9 +5,12 @@
 #include "xsan_llvm_compat.h"
 
 #include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/PatternMatch.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Transforms/Utils/Local.h"
 
@@ -156,6 +159,36 @@ static void restoreReplace(const Sanitizer &San, ReplaceArchive &Archive,
   }
 }
 
+static bool isCurrentSanitizerInst(const Sanitizer &San, const Instruction &I) {
+  if (San.isUBSan())
+    return San.is(I);
+  return !__xsan::UserIR::is(I);
+}
+
+static UserBBsMap collectUserBBs(const Sanitizer &San, Module &M) {
+  UserBBsMap Result;
+  for (Function &F : M) {
+    if (F.isDeclaration())
+      continue;
+    const bool HasUserInst = llvm::any_of(instructions(F), [](Instruction &I) {
+      return __xsan::UserIR::is(I) && !isa<DbgInfoIntrinsic>(I);
+    });
+    for (BasicBlock &BB : F) {
+      if (pred_empty(&BB)) {
+        if (HasUserInst)
+          Result[&F].insert(&BB);
+        continue;
+      }
+      if (llvm::any_of(predecessors(&BB), [&](BasicBlock *Pred) {
+            Instruction *Term = Pred->getTerminator();
+            return !Term || !isCurrentSanitizerInst(San, *Term);
+          }))
+        Result[&F].insert(&BB);
+    }
+  }
+  return Result;
+}
+
 static BasicBlock *
 findUserBBForSplit(BasicBlock *SplitBB, const UserBBsSet &UserBBs,
                    const llvm::SmallPtrSetImpl<BasicBlock *> &HasUserInsts) {
@@ -249,7 +282,8 @@ static void restoreAdd(const Sanitizer &San, AddArchive &Archive, Module &M,
       requireOrDie(UserBB != nullptr,
                    Twine("desan add restore could not find a user block anchor "
                          "for a split add in sanitizer ") +
-                       San.name());
+                       San.name() + " function " + F.getName() + " block " +
+                       BB->getName());
       requireOrDie(
           UserBB != BB,
           Twine("desan add restore found the split block itself as the "
@@ -313,7 +347,8 @@ static void restoreAdd(const Sanitizer &San, AddArchive &Archive, Module &M,
         requireOrDie(SanItEnd != BB.end(),
                      Twine("desan add restore could not find a user "
                            "instruction after a pure add in sanitizer ") +
-                         San.name());
+                         San.name() + " function " + F.getName() + " block " +
+                         BB.getName());
 
         AddRecord::PureRecord Record;
         Record.SanInsts.reset(
@@ -331,84 +366,152 @@ static void restoreAdd(const Sanitizer &San, AddArchive &Archive, Module &M,
   }
 }
 
-static bool isUbsanArithmeticIntrinsic(const IntrinsicInst &II) {
-  switch (II.getIntrinsicID()) {
+struct UbsanReplaceRule {
+  Instruction::BinaryOps Opcode;
+  bool HasNoSignedWrap;
+};
+
+static bool getUbsanReplaceRule(Intrinsic::ID ID, UbsanReplaceRule &Rule) {
+  switch (ID) {
   case Intrinsic::sadd_with_overflow:
+    Rule = {Instruction::Add, true};
+    return true;
   case Intrinsic::uadd_with_overflow:
+    Rule = {Instruction::Add, false};
+    return true;
   case Intrinsic::ssub_with_overflow:
+    Rule = {Instruction::Sub, true};
+    return true;
   case Intrinsic::usub_with_overflow:
+    Rule = {Instruction::Sub, false};
+    return true;
   case Intrinsic::smul_with_overflow:
+    Rule = {Instruction::Mul, true};
+    return true;
   case Intrinsic::umul_with_overflow:
-    return __xsan::UBSanInst::is(II);
+    Rule = {Instruction::Mul, false};
+    return true;
   default:
     return false;
   }
 }
 
-static bool hasNonUbsanUses(const Value &V) {
-  return llvm::any_of(V.users(), [](const User *U) {
+static bool allInstructionUsesAreUbsan(const Value &V) {
+  for (const User *U : V.users()) {
     const auto *UserI = dyn_cast<Instruction>(U);
-    return !UserI || !__xsan::UBSanInst::is(*UserI);
+    if (!UserI || !__xsan::UBSanInst::is(*UserI))
+      return false;
+  }
+  return true;
+}
+
+static bool hasTaggedUbsanOverflowExtract(const WithOverflowInst &WOI) {
+  return llvm::any_of(WOI.users(), [](const User *U) {
+    const auto *EI = dyn_cast<ExtractValueInst>(U);
+    return EI && EI->getNumIndices() == 1 && EI->getIndices()[0] == 1 &&
+           __xsan::UBSanInst::is(*EI);
   });
 }
 
-static Instruction *createRestoredUbsanArithmetic(ExtractValueInst &EI,
-                                                  IntrinsicInst &II) {
-  Value *LHS = II.getArgOperand(0);
-  Value *RHS = II.getArgOperand(1);
-  Instruction *Restored = nullptr;
+static WithOverflowInst *matchUBSanReplacement(Instruction &I,
+                                               UbsanReplaceRule &Rule) {
+  using namespace llvm::PatternMatch;
+
+  WithOverflowInst *WOI = nullptr;
+  if (!match(&I, m_ExtractValue<0>(m_WithOverflowInst(WOI))))
+    return nullptr;
+  if (!getUbsanReplaceRule(WOI->getIntrinsicID(), Rule))
+    return nullptr;
+  if (!hasTaggedUbsanOverflowExtract(*WOI))
+    return nullptr;
+  return WOI;
+}
+
+static Instruction *foldUBSanReplacement(
+    Instruction &I, const DenseMap<Value *, Value *> &RestoredValues) {
+  UbsanReplaceRule Rule;
+  WithOverflowInst *WOI = matchUBSanReplacement(I, Rule);
+  if (!WOI)
+    return nullptr;
+
+  auto &EI = cast<ExtractValueInst>(I);
+
+  auto resolveOperand = [&](Value *V) -> Value * {
+    auto It = RestoredValues.find(V);
+    return It == RestoredValues.end() ? V : It->second;
+  };
+  Value *LHS = resolveOperand(WOI->getArgOperand(0));
+  Value *RHS = resolveOperand(WOI->getArgOperand(1));
   Twine Name = EI.hasName() ? EI.getName() : "";
 
-  switch (II.getIntrinsicID()) {
-  case Intrinsic::sadd_with_overflow:
-  case Intrinsic::uadd_with_overflow:
-    Restored = BinaryOperator::Create(Instruction::Add, LHS, RHS, Name);
-    break;
-  case Intrinsic::ssub_with_overflow:
-  case Intrinsic::usub_with_overflow:
-    Restored = BinaryOperator::Create(Instruction::Sub, LHS, RHS, Name);
-    break;
-  case Intrinsic::smul_with_overflow:
-  case Intrinsic::umul_with_overflow:
-    Restored = BinaryOperator::Create(Instruction::Mul, LHS, RHS, Name);
-    break;
-  default:
-    llvm_unreachable("unexpected UBSan arithmetic intrinsic");
-  }
+  auto *Restored = BinaryOperator::Create(Rule.Opcode, LHS, RHS, Name);
+  if (Rule.HasNoSignedWrap)
+    Restored->setHasNoSignedWrap();
 
-  __xsan::compat::insertInstructionBefore(Restored, &EI);
+  __xsan::compat::insertInstructionBefore(Restored, WOI);
   Restored->setDebugLoc(EI.getDebugLoc());
   __xsan::UserIR::set(*Restored);
   return Restored;
 }
 
+static void markUbsanReplaceOperandChainAsUser(Instruction &Root) {
+  SmallVector<Instruction *, 8> Worklist;
+  SmallPtrSet<Instruction *, 16> Visited;
+  Worklist.push_back(&Root);
+
+  while (!Worklist.empty()) {
+    Instruction *I = Worklist.pop_back_val();
+    if (!Visited.insert(I).second)
+      continue;
+
+    __xsan::UBSanInst::drop(*I);
+    __xsan::UserIR::set(*I);
+
+    for (Value *Operand : I->operands())
+      if (auto *OperandI = dyn_cast<Instruction>(Operand))
+        if (__xsan::UBSanInst::is(*OperandI))
+          Worklist.push_back(OperandI);
+  }
+}
+
 static void restoreUbsanArithmetic(const Sanitizer &San, ReSanArchive &Archive,
                                    Module &M) {
-  SmallVector<ExtractValueInst *, 16> Worklist;
+  SmallVector<Instruction *, 16> Worklist;
 
   for (Function &F : M) {
     if (F.isDeclaration())
       continue;
     for (BasicBlock &BB : F) {
       for (Instruction &I : BB) {
-        auto *EI = dyn_cast<ExtractValueInst>(&I);
-        if (!EI || EI->getNumIndices() != 1 || EI->getIndices()[0] != 0)
-          continue;
-
-        auto *II = dyn_cast<IntrinsicInst>(EI->getAggregateOperand());
-        if (!II || !isUbsanArithmeticIntrinsic(*II) || !hasNonUbsanUses(*EI))
-          continue;
-
-        Worklist.push_back(EI);
+        UbsanReplaceRule Rule;
+        if (matchUBSanReplacement(I, Rule))
+          Worklist.push_back(&I);
       }
     }
   }
 
-  for (ExtractValueInst *EI : Worklist) {
-    auto *II = dyn_cast<IntrinsicInst>(EI->getAggregateOperand());
-    auto *Restored = createRestoredUbsanArithmetic(*EI, *II);
-    replaceNonSanitizerUses(San, *EI, *Restored);
-    Archive.ReplaceRecords[Restored].push_back({EI});
+  DenseMap<Value *, Value *> RestoredValues;
+  for (Instruction *I : Worklist) {
+    UbsanReplaceRule Rule;
+    auto *WOI = matchUBSanReplacement(*I, Rule);
+    if (!WOI)
+      continue;
+    auto &EI = cast<ExtractValueInst>(*I);
+    auto *Restored = foldUBSanReplacement(EI, RestoredValues);
+    requireOrDie(Restored, "desan ubsan arithmetic restore lost its pattern");
+    RestoredValues[&EI] = Restored;
+    markUbsanReplaceOperandChainAsUser(*Restored);
+    replaceNonSanitizerUses(San, EI, *Restored);
+    replaceDbgUsesWithUndef(&EI);
+    if (allInstructionUsesAreUbsan(EI)) {
+      __xsan::UBSanInst::set(EI);
+      __xsan::UserIR::drop(EI);
+    }
+    if (allInstructionUsesAreUbsan(*WOI)) {
+      __xsan::UBSanInst::set(*WOI);
+      __xsan::UserIR::drop(*WOI);
+    }
+    Archive.ReplaceRecords[Restored].push_back({&EI});
     Archive.DeleteRecords[Restored].push_back({});
   }
 }
@@ -417,8 +520,16 @@ void runDeSan(Module &M, SanitizerArchive &Entry, UserBBsMap &UserBBsMap) {
   const Sanitizer &San = Entry.San;
   ReSanArchive &Archive = Entry.Archive;
 
+  UserBBsMap = collectUserBBs(San, M);
+
   if (San.isUBSan()) {
+    if (!__xsan::hasUbsanFunction(M))
+      return;
+    markUserIR(M);
+    UserBBsMap = collectUserBBs(San, M);
     restoreUbsanArithmetic(San, Archive, M);
+    UserBBsMap = collectUserBBs(San, M);
+    restoreAdd(San, Archive.AddRecords, M, UserBBsMap);
     return;
   }
 

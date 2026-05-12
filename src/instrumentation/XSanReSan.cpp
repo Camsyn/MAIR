@@ -3,6 +3,7 @@
 #include "xsan_llvm_compat.h"
 
 #include "llvm/ADT/BitVector.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/raw_ostream.h"
@@ -134,6 +135,9 @@ collectArgumentReplaceInsts(const SanitizingContext &Context, Function &F) {
 
 } // namespace
 
+static void updateSuccessorPhisAfterSplit(BasicBlock &UserBB,
+                                          BasicBlock &LastBB);
+
 // We need ReplaceArchive to redirect instruction anchors.
 static void replayAdd(Module &M, SanitizingContext &Context,
                       unsigned DumpIndex) {
@@ -193,10 +197,20 @@ static void replayAdd(Module &M, SanitizingContext &Context,
   //    new one. Because the add anchor means the add record should be before
   //    the anchor.
   const auto RedirectAnchor =
-      [&Context, &FunctionHeaderMap](const Sanitizer &San,
-                                     const AddRecord &Record) -> Instruction * {
+      [&M, &Context, &FunctionHeaderMap](const Sanitizer &San,
+                                         const AddRecord &Record)
+      -> Instruction * {
+    if (!Record.Anchor->getParent()) {
+      ReplaceRef Replacement =
+          findLatestOtherReplaceRecord(Context, Record.Anchor, San);
+      if (Replacement.Record)
+        if (auto *I = dyn_cast<Instruction>(Replacement.Record->SanitizerValue))
+          return I;
+    }
+
     auto *F = Record.Anchor->getFunction();
-    requireOrDie(F, "resan add replay get anchor without a parent function");
+    if (!F || F->getParent() != &M)
+      return nullptr;
     if (auto It = FunctionHeaderMap.find(F); It != FunctionHeaderMap.end()) {
       auto &HeaderInfo = It->second;
 
@@ -238,11 +252,15 @@ static void replayAdd(Module &M, SanitizingContext &Context,
       if (AnchorType == AddArchive::FunctionAnchor) {
         requireOrDie(Anchor, "resan add replay lost a function anchor");
         F = static_cast<Function *>(Anchor);
+        if (F->getParent() != &M)
+          continue;
         InsertBefore = nullptr;
       } else if (AnchorType == AddArchive::BasicBlockAnchor) {
         requireOrDie(Anchor, "resan add replay lost a user block anchor");
         InsertBefore = static_cast<BasicBlock *>(Anchor);
         F = InsertBefore->getParent();
+        if (!F || F->getParent() != &M)
+          continue;
       } else {
         report_fatal_error("unreachable code in resan add replay anchor");
       }
@@ -283,6 +301,12 @@ static void replayAdd(Module &M, SanitizingContext &Context,
       const Sanitizer &San = *Records[I].San;
       AddRecord &Add = *Records[I].Record;
       Instruction *Anchor = RedirectAnchor(San, Add);
+      if (!Anchor) {
+        Restored.set(I);
+        --Remaining;
+        Progress = true;
+        continue;
+      }
       BasicBlock *UserBB = Anchor->getParent();
       requireOrDie(UserBB,
                    "resan add replay get anchor without a parent block");
@@ -311,7 +335,7 @@ static void replayAdd(Module &M, SanitizingContext &Context,
         __xsan::compat::spliceInstructions(UserBB, UserBB->end(),
                                            Split->SanInstsToAppend.get());
 
-        Split->LastBB->replaceSuccessorsPhiUsesWith(UserBB, Split->LastBB);
+        updateSuccessorPhisAfterSplit(*UserBB, *Split->LastBB);
         for (BasicBlock *Succ : successors(Split->LastBB)) {
           auto &Vec = PhiUpdateMap[Succ];
           bool NeedInsert = true;
@@ -345,12 +369,9 @@ static void replayAdd(Module &M, SanitizingContext &Context,
     }
   }
 
-  // Sentry anchors are temporary ordering aids, not sanitizer records. Remove
-  // them after add replay unless debug mode keeps IR artifacts visible.
-  if (!options::ClDebug)
-    for (Instruction *Sentry : SentryAnchors)
-      if (Sentry->getParent())
-        Sentry->eraseFromParent();
+  // Keep sentry anchors until the post-optimization pipeline.  They are
+  // llvm.donothing calls used only as stable insertion points, and the normal
+  // cleanup passes remove them after all replayed records have settled.
 
   Context.dumpNestedIR(M, DumpIndex, "1-2-resan-add-inst");
 }
@@ -366,7 +387,10 @@ static void replayReplace(Module &M, SanitizingContext &Context) {
           resolveReplayReplacement(Context, Entry.San, Record.SanitizerValue);
       if (!ResolvedValue)
         continue;
-      replaceNonSanitizerUses(Entry.San, *UserValue, *ResolvedValue);
+      if (Entry.San.isUBSan())
+        UserValue->replaceAllUsesWith(ResolvedValue);
+      else
+        replaceNonSanitizerUses(Entry.San, *UserValue, *ResolvedValue);
     }
   }
 }
@@ -399,6 +423,34 @@ static void replayFunction(Module &M, SanitizingContext &Context) {
   for (SanitizerArchive &Entry : Context.SanitizerArchives)
     for (Function *F : Entry.Archive.FunctionRecords)
       M.getFunctionList().push_back(F);
+}
+
+
+static bool isInstructionDefinedInBlock(Value *V, BasicBlock &BB) {
+  auto *I = dyn_cast<Instruction>(V);
+  return I && I->getParent() == &BB;
+}
+
+static bool hasSuccessor(BasicBlock &Pred, BasicBlock &Succ) {
+  return llvm::any_of(successors(&Pred), [&](BasicBlock *Candidate) {
+    return Candidate == &Succ;
+  });
+}
+
+static void updateSuccessorPhisAfterSplit(BasicBlock &UserBB,
+                                          BasicBlock &LastBB) {
+  for (BasicBlock *Succ : successors(&LastBB)) {
+    bool UserStillPred = hasSuccessor(UserBB, *Succ);
+    for (PHINode &Phi : Succ->phis()) {
+      for (unsigned I = 0, E = Phi.getNumIncomingValues(); I != E; ++I) {
+        if (Phi.getIncomingBlock(I) != &UserBB)
+          continue;
+        if (!UserStillPred ||
+            isInstructionDefinedInBlock(Phi.getIncomingValue(I), LastBB))
+          Phi.setIncomingBlock(I, &LastBB);
+      }
+    }
+  }
 }
 
 static void validateReplaceArchive(const Sanitizer &San,

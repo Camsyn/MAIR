@@ -274,7 +274,8 @@ void markUserIR(Module &M) {
       continue;
     for (BasicBlock &BB : F)
       for (Instruction &I : BB)
-        __xsan::UserIR::set(I);
+        if (!__xsan::UBSanInst::is(I))
+          __xsan::UserIR::set(I);
   }
 }
 

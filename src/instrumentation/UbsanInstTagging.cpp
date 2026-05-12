@@ -25,7 +25,9 @@
 //    `UBSanUseDefDomTree`.
 // 2. Tag the initial UBSan closure so UBSan-only handler blocks are visible.
 // 3. Promote handler-block control roots: the handler block must end in an
-//    unconditional branch, and conditional predecessor branches need `!prof`.
+//    unconditional branch. Conditional predecessor branches normally need
+//    `!prof`; optimized pointer-overflow switch guards are also promoted as a
+//    single UBSan control chain.
 // 4. Batch-update the root edges and dominator tree, then tag final
 //    `UBSanVRoot` descendants as UBSan and drop stale `UserIR`.
 //
@@ -57,9 +59,6 @@
 #include "llvm/Support/GenericDomTree.h"
 #include "llvm/Support/GenericDomTreeConstruction.h" // IWYU pragma: keep
 #include <array>
-#include <type_traits>
-#include <utility>
-#include <variant>
 
 using namespace llvm;
 
@@ -69,6 +68,17 @@ namespace {
 
 bool isUserRootInstruction(const Instruction &I);
 bool isIgnorableForUbsanBlock(const Instruction &I);
+bool isIgnorableForDefUseGraph(const Instruction &I);
+
+unsigned countInstructionNodes(const Function &F) {
+  unsigned Count = 0;
+  for (const Instruction &I : instructions(F)) {
+    if (isIgnorableForDefUseGraph(I))
+      continue;
+    ++Count;
+  }
+  return Count;
+}
 
 struct InstUseDefGraph;
 class UBSanUseDefDomTree;
@@ -151,17 +161,23 @@ private:
       InstToNode.reserve(ReservedSize);
     }
     InstDefUseNode &createNode(Instruction &I) {
+      assert(Storage.size() < Storage.capacity() &&
+             "InstDefUseNode pointers must stay stable");
       Storage.emplace_back(Graph, I);
       auto &Node = Storage.back();
       InstToNode[&I] = &Node;
       return Node;
     }
     InstDefUseNode &createNode(Tag Tag) {
+      assert(Storage.size() < Storage.capacity() &&
+             "InstDefUseNode pointers must stay stable");
       Storage.emplace_back(Graph, Tag);
       return Storage.back();
     }
 
     InstDefUseNode *getNode(const Instruction &I) const {
+      assert(!isIgnorableForDefUseGraph(I) &&
+             "debug intrinsics should not enter the def-use graph");
       const auto It = InstToNode.find(&I);
       assert(It != InstToNode.end() && "instruction node should already exist");
       return It->second;
@@ -187,13 +203,16 @@ public:
   template <typename UBSanRootRangeT, typename UserRootRangeT>
   InstUseDefGraph(Function &F, const UBSanRootRangeT &UBSanRoots,
                   const UserRootRangeT &UserRoots)
-      : F(F), Storage(*this, F.getInstructionCount()),
+      : F(F), Storage(*this, countInstructionNodes(F)),
         VEntry(&Storage.createNode(Tag::VEntry)),
         UBSanVRoot(&Storage.createNode(Tag::UBSanVRoot)),
         UserVRoot(&Storage.createNode(Tag::UserVRoot)),
         VRoots({UBSanVRoot, UserVRoot}) {
-    for (Instruction &I : instructions(F))
+    for (Instruction &I : instructions(F)) {
+      if (isIgnorableForDefUseGraph(I))
+        continue;
       Storage.createNode(I);
+    }
 
     addUBSanRoots(UBSanRoots);
     addUserRoots(UserRoots);
@@ -206,6 +225,8 @@ public:
   template <typename RootsT> void addUBSanRoots(const RootsT &Roots) {
     UBSanRoots.reserve(UBSanRoots.size() + Roots.size());
     for (Instruction *I : Roots) {
+      if (isIgnorableForDefUseGraph(*I))
+        continue;
       InstDefUseNode *const Node = getNode(*I);
       Node->NodeTag = InstDefUseNode::Tag::UBSanRoot;
       UBSanRoots.push_back(Node);
@@ -217,6 +238,8 @@ public:
                      SmallVectorImpl<InstDefUseNode *> &AddedNodes) {
     UBSanRoots.reserve(UBSanRoots.size() + Roots.size());
     for (Instruction *I : Roots) {
+      if (isIgnorableForDefUseGraph(*I))
+        continue;
       InstDefUseNode *const Node = getNode(*I);
       if (llvm::is_contained(UBSanRoots, Node))
         continue;
@@ -229,6 +252,8 @@ public:
   template <typename RootsT> void addUserRoots(const RootsT &Roots) {
     UserRoots.reserve(UserRoots.size() + Roots.size());
     for (Instruction *I : Roots) {
+      if (isIgnorableForDefUseGraph(*I))
+        continue;
       InstDefUseNode *const Node = getNode(*I);
       Node->NodeTag = InstDefUseNode::Tag::UserRoot;
       UserRoots.push_back(Node);
@@ -261,7 +286,7 @@ public:
   auto children(const Instruction &I) const {
     auto mapped = map_range(I.operand_values(), [this](const Value *V) {
       const auto *OpI = dyn_cast<Instruction>(V);
-      if (!OpI)
+      if (!OpI || isIgnorableForDefUseGraph(*OpI))
         return static_cast<InstDefUseNode *>(nullptr);
       return this->getNode(*OpI);
     });
@@ -283,7 +308,7 @@ public:
   auto parents(const Instruction &I) const {
     auto mapped = map_range(I.users(), [this](const User *V) {
       const auto *UserI = dyn_cast<Instruction>(V);
-      if (!UserI)
+      if (!UserI || isIgnorableForDefUseGraph(*UserI))
         return static_cast<InstDefUseNode *>(nullptr);
       return this->getNode(*UserI);
     });
@@ -316,19 +341,10 @@ public:
 
 // A interator to unifiy different types of iterators.
 class InstDefUseChildIterator {
-  using ArrayIter = ArrayRef<InstDefUseNode *>::iterator;
-  using ChildRange = decltype(std::declval<const InstUseDefGraph &>().children(
-      std::declval<const Instruction &>()));
-  using ChildIter = decltype(std::declval<ChildRange>().begin());
-  using ParentRange = decltype(std::declval<const InstUseDefGraph &>().parents(
-      std::declval<const Instruction &>()));
-  using ParentIter = decltype(std::declval<ParentRange>().begin());
-  using IteratorState =
-      std::variant<std::monostate, ArrayIter, ChildIter, ParentIter>;
-
   InstDefUseNode *Owner = nullptr;
   bool Inverse = false;
-  IteratorState State;
+  SmallVector<InstDefUseNode *, 8> Nodes;
+  unsigned Index = 0;
 
 public:
   using iterator_category = std::bidirectional_iterator_tag;
@@ -342,24 +358,28 @@ public:
                           bool Inverse, bool End)
       : Owner(Node), Inverse(Inverse) {
     if (!Inverse && Node->canTrackUseDef()) {
-      auto Range = Graph.children(*Node->Inst);
-      State.emplace<ChildIter>(End ? Range.end() : Range.begin());
-      return;
+      for (Value *V : Node->Inst->operand_values()) {
+        auto *OpI = dyn_cast<Instruction>(V);
+        if (OpI && !isIgnorableForDefUseGraph(*OpI))
+          Nodes.push_back(Graph.getNode(*OpI));
+      }
+    } else if (Inverse && Node->canTrackDefUse()) {
+      for (User *U : Node->Inst->users()) {
+        auto *UserI = dyn_cast<Instruction>(U);
+        if (UserI && !isIgnorableForDefUseGraph(*UserI))
+          Nodes.push_back(Graph.getNode(*UserI));
+      }
+    } else {
+      ArrayRef<InstDefUseNode *> Range =
+          Inverse ? Graph.parents(Node->NodeTag) : Graph.children(Node->NodeTag);
+      Nodes.append(Range.begin(), Range.end());
     }
-    if (Inverse && Node->canTrackDefUse()) {
-      auto Range = Graph.parents(*Node->Inst);
-      State.emplace<ParentIter>(End ? Range.end() : Range.begin());
-      return;
-    }
-
-    auto Range =
-        Inverse ? Graph.parents(Node->NodeTag) : Graph.children(Node->NodeTag);
-    State.emplace<ArrayIter>(End ? Range.end() : Range.begin());
+    Index = End ? Nodes.size() : 0;
   }
 
   bool operator==(const InstDefUseChildIterator &Other) const {
     return Owner == Other.Owner && Inverse == Other.Inverse &&
-           State == Other.State;
+           Index == Other.Index;
   }
 
   bool operator!=(const InstDefUseChildIterator &Other) const {
@@ -367,27 +387,13 @@ public:
   }
 
   InstDefUseNode *operator*() const {
-    return std::visit(
-        [](const auto &It) -> InstDefUseNode * {
-          using IteratorT = std::decay_t<decltype(It)>;
-          if constexpr (std::is_same_v<IteratorT, std::monostate>)
-            llvm_unreachable("cannot dereference empty def-use iterator");
-          else
-            return *It;
-        },
-        State);
+    assert(Index < Nodes.size() && "cannot dereference end def-use iterator");
+    return Nodes[Index];
   }
 
   InstDefUseChildIterator &operator++() {
-    std::visit(
-        [](auto &It) {
-          using IteratorT = std::decay_t<decltype(It)>;
-          if constexpr (std::is_same_v<IteratorT, std::monostate>)
-            llvm_unreachable("cannot increment empty def-use iterator");
-          else
-            ++It;
-        },
-        State);
+    assert(Index <= Nodes.size() && "cannot increment invalid def-use iterator");
+    ++Index;
     return *this;
   }
 
@@ -398,20 +404,8 @@ public:
   }
 
   InstDefUseChildIterator &operator--() {
-    std::visit(
-        [](auto &It) {
-          using IteratorT = std::decay_t<decltype(It)>;
-          if constexpr (std::is_same_v<IteratorT, std::monostate>)
-            llvm_unreachable("cannot decrement empty def-use iterator");
-          else if constexpr (!std::is_base_of_v<
-                                 std::bidirectional_iterator_tag,
-                                 typename std::iterator_traits<
-                                     IteratorT>::iterator_category>)
-            llvm_unreachable("cannot decrement forward-only def-use iterator");
-          else
-            --It;
-        },
-        State);
+    assert(Index > 0 && "cannot decrement begin def-use iterator");
+    --Index;
     return *this;
   }
 
@@ -519,7 +513,20 @@ void getNewRootsFromUBSanBB(ArrayRef<Instruction *> UbsanCallAnchors,
     NewRoots.insert(BB->getTerminator());
 
     for (BasicBlock *Pred : predecessors(BB)) {
-      auto *Br = dyn_cast<BranchInst>(Pred->getTerminator());
+      Instruction *PredTerm = Pred->getTerminator();
+      if (auto *SI = dyn_cast<SwitchInst>(PredTerm)) {
+        NewRoots.insert(SI);
+        for (BasicBlock *SwitchPred : predecessors(Pred)) {
+          auto *Br = dyn_cast<BranchInst>(SwitchPred->getTerminator());
+          if (!Br || !Br->isConditional())
+            continue;
+          if (Br->getSuccessor(0) == BB || Br->getSuccessor(1) == BB)
+            NewRoots.insert(Br);
+        }
+        continue;
+      }
+
+      auto *Br = dyn_cast<BranchInst>(PredTerm);
       // UBSan handle call must be guarded by a UNLIKELY predicate.
       if (!Br || !Br->isConditional() || !Br->getMetadata(LLVMContext::MD_prof))
         continue;
@@ -561,6 +568,10 @@ bool isIgnorableForUbsanBlock(const Instruction &I) {
   return isa<DbgInfoIntrinsic>(I);
 }
 
+bool isIgnorableForDefUseGraph(const Instruction &I) {
+  return isa<DbgInfoIntrinsic>(I);
+}
+
 bool tagUbsanInstructions(Function &F) {
   if (F.isDeclaration())
     return false;
@@ -570,6 +581,8 @@ bool tagUbsanInstructions(Function &F) {
   //===------------------------------------------------------------------===//
   SmallVector<Instruction *, 8> UBSanHandlerRoots, UserRoots;
   for (Instruction &I : instructions(F)) {
+    if (isIgnorableForDefUseGraph(I))
+      continue;
     if (__xsan::isUbsanInterfaceCall(I))
       UBSanHandlerRoots.push_back(&I);
     else if (isUserRootInstruction(I))

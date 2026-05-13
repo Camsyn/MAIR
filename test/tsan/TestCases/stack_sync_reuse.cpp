@@ -1,4 +1,4 @@
-// RUN: %clang_tsan -fno-sanitize=address -O1 %s -o %t && ASAN_OPTIONS=detect_stack_use_after_return=0 %run %t 2>&1 | FileCheck %s
+// RUN: %clang_tsan -fno-sanitize=address -fno-sanitize-recover=memory -O1 %s -o %t && ASAN_OPTIONS=detect_stack_use_after_return=0 %run %t 2>&1 | FileCheck %s
 #include "test.h"
 
 // Test case https://github.com/google/sanitizers/issues/494

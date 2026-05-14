@@ -24,10 +24,9 @@
 // 1. Collect UBSan handler-call roots and user-exit roots, then build the first
 //    `UBSanUseDefDomTree`.
 // 2. Tag the initial UBSan closure so UBSan-only handler blocks are visible.
-// 3. Promote handler-block control roots: the handler block must end in an
-//    unconditional branch. Conditional predecessor branches normally need
-//    `!prof`; optimized pointer-overflow switch guards are also promoted as a
-//    single UBSan control chain.
+// 3. Promote handler-block control roots only when the control edge is a safe
+//    sanitizer split: the handler either traps, or its single successor is also
+//    the predecessor branch's other successor.
 // 4. Batch-update the root edges and dominator tree, then tag final
 //    `UBSanVRoot` descendants as UBSan and drop stale `UserIR`.
 //
@@ -44,15 +43,14 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/iterator.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
-#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Use.h"
 #include "llvm/Support/Casting.h"
@@ -370,8 +368,9 @@ public:
           Nodes.push_back(Graph.getNode(*UserI));
       }
     } else {
-      ArrayRef<InstDefUseNode *> Range =
-          Inverse ? Graph.parents(Node->NodeTag) : Graph.children(Node->NodeTag);
+      ArrayRef<InstDefUseNode *> Range = Inverse
+                                             ? Graph.parents(Node->NodeTag)
+                                             : Graph.children(Node->NodeTag);
       Nodes.append(Range.begin(), Range.end());
     }
     Index = End ? Nodes.size() : 0;
@@ -392,7 +391,8 @@ public:
   }
 
   InstDefUseChildIterator &operator++() {
-    assert(Index <= Nodes.size() && "cannot increment invalid def-use iterator");
+    assert(Index <= Nodes.size() &&
+           "cannot increment invalid def-use iterator");
     ++Index;
     return *this;
   }
@@ -490,14 +490,58 @@ public:
 };
 
 bool isUBSanBlock(const BasicBlock &BB) {
-  const auto *Term = dyn_cast<BranchInst>(BB.getTerminator());
-  if (!Term || Term->isConditional())
+  return all_of(BB, [](const Instruction &I) {
+    return
+        /* 1. unreachable or uncond br */
+        (I.isTerminator() &&
+         (isa<UnreachableInst>(I) ||
+          isa<BranchInst>(I) && cast<BranchInst>(I).isUnconditional())) ||
+        /* 2. dbg instrinsic */
+        isIgnorableForUbsanBlock(I) ||
+        /* 3. UBSan instruction */
+        __xsan::UBSanInst::is(I);
+  });
+}
+
+BasicBlock *getSingleSuccessor(const BasicBlock &BB) {
+  const auto *Br = dyn_cast<BranchInst>(BB.getTerminator());
+  if (!Br || Br->isConditional())
+    return nullptr;
+  return Br->getSuccessor(0);
+}
+
+/// Match the following 2 cases.
+/// Case 1:
+///   Pred:
+///     br %cond, CurBB, SinkBB
+///   CurBB:
+///     br SinkBB
+///   SinkBB:
+///     ...
+///
+/// Case 2:
+///   Pred:
+///     br %cond, CurBB, SinkBB
+///   CurBB:
+///     unreachable
+///   SinkBB:
+///     ...
+bool isSanityCheckCondBr(const BasicBlock &SanBB, const BranchInst &PredBr) {
+  assert(PredBr.isConditional() &&
+         "only conditional branches need UBSan split validation");
+  if (isa<UnreachableInst>(SanBB.getTerminator()))
+    return true;
+
+  BasicBlock *SanSucc = getSingleSuccessor(SanBB);
+  if (!SanSucc)
     return false;
 
-  return all_of(BB, [](const Instruction &I) {
-    return I.isTerminator() || isIgnorableForUbsanBlock(I) ||
-           __xsan::UBSanInst::is(I);
-  });
+  BasicBlock *OtherSucc = nullptr;
+  if (PredBr.getSuccessor(0) == &SanBB)
+    return SanSucc == PredBr.getSuccessor(1);
+  if (PredBr.getSuccessor(1) == &SanBB)
+    return SanSucc == PredBr.getSuccessor(0);
+  return false;
 }
 
 void getNewRootsFromUBSanBB(ArrayRef<Instruction *> UbsanCallAnchors,
@@ -514,21 +558,9 @@ void getNewRootsFromUBSanBB(ArrayRef<Instruction *> UbsanCallAnchors,
 
     for (BasicBlock *Pred : predecessors(BB)) {
       Instruction *PredTerm = Pred->getTerminator();
-      if (auto *SI = dyn_cast<SwitchInst>(PredTerm)) {
-        NewRoots.insert(SI);
-        for (BasicBlock *SwitchPred : predecessors(Pred)) {
-          auto *Br = dyn_cast<BranchInst>(SwitchPred->getTerminator());
-          if (!Br || !Br->isConditional())
-            continue;
-          if (Br->getSuccessor(0) == BB || Br->getSuccessor(1) == BB)
-            NewRoots.insert(Br);
-        }
-        continue;
-      }
-
       auto *Br = dyn_cast<BranchInst>(PredTerm);
-      // UBSan handle call must be guarded by a UNLIKELY predicate.
-      if (!Br || !Br->isConditional() || !Br->getMetadata(LLVMContext::MD_prof))
+      // Only conditional pred branch can be NewRoot
+      if (!Br || !Br->isConditional() || !isSanityCheckCondBr(*BB, *Br))
         continue;
       NewRoots.insert(Br);
     }

@@ -29,3 +29,7 @@ foreach(_xsan_clang_driver_target compiler xclang)
       XSanInstPass)
   endif()
 endforeach()
+
+if(TARGET xsan)
+  add_dependencies(xsan compiler)
+endif()

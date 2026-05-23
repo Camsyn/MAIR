@@ -58,12 +58,12 @@ macro(get_bits_for_arch arch bits)
 endmacro()
 
 set(XSAN_TEST_DEPS ${SANITIZER_COMMON_LIT_TEST_DEPS})
-# testing XSan depends on targets XSanInstPass, xsan, compiler
-# If you want to test original sanitizers, as the test does not 
+# testing XSan depends on umbrella target xsan.
+# If you want to test original sanitizers, as the test does not
 # depend on the original sanitizers, you should run
 #     cmake --build build -j 
 # to build all targets.
-list(APPEND XSAN_TEST_DEPS XSanInstPass xsan compiler)
+list(APPEND XSAN_TEST_DEPS xsan)
 set(XSAN_DYNAMIC_TEST_DEPS ${XSAN_TEST_DEPS})
 
 ## TODO: support different architectures

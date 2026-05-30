@@ -1,7 +1,7 @@
 // Verify the composed XSan DeSan/ReSan flow.  The test only checks the final
 // DeSan snapshot and the immediately-after-ReSan snapshot.
 // RUN: %clang -O0 -g -S -emit-llvm %s -o %t.raw.ll
-// RUN: %xsan_opt -passes=xsan -xsan-sanitizers=asan,tsan,msan -dump-desan-resan=%t.dump -S %t.raw.ll -o %t.out.ll
+// RUN: %xsan_opt -passes=xsan -xsan-sanitizers=asan,tsan,msan -xsan-dump=%t.dump -S %t.raw.ll -o %t.out.ll
 // RUN: FileCheck %s --check-prefix=DESAN --input-file=%t.dump/08-desan.ll
 // RUN: FileCheck %s --check-prefix=RESAN --input-file=%t.dump/09-resan.ll
 
@@ -29,10 +29,10 @@ __attribute__((noinline)) long full_xsan(struct Big b, long *p, int c) {
 // DESAN: }
 
 // RESAN-LABEL: define dso_local i64 @full_xsan(
-// RESAN: call void @llvm.memcpy.p0.p0.i64{{.*}}!xsan.asan
-// RESAN: call void @__tsan_func_entry{{.*}}!xsan.tsan
-// RESAN: call void @llvm.memset.p0.i64{{.*}}!xsan.msan
-// RESAN: call void @__tsan_write4{{.*}}!xsan.tsan
-// RESAN: call void @__asan_report_load8{{.*}}!xsan.asan
-// RESAN: call void @__msan_warning_noreturn{{.*}}!xsan.msan
+// RESAN-DAG: call void @__tsan_func_entry{{.*}}!xsan.tsan
+// RESAN-DAG: call void @llvm.memset.p0.i64{{.*}}!xsan.msan
+// RESAN-DAG: call void @llvm.memcpy.p0.p0.i64{{.*}}!xsan.asan
+// RESAN-DAG: call void @__tsan_write4{{.*}}!xsan.tsan
+// RESAN-DAG: call void @__asan_report_load8{{.*}}!xsan.asan
+// RESAN-DAG: call void @__msan_warning_noreturn{{.*}}!xsan.msan
 // RESAN: }

@@ -5,7 +5,7 @@
 // must preserve function-entry/exit instrumentation and multiple memory access
 // callbacks.
 // RUN: %clang -O0 -g -S -emit-llvm %s -o %t.raw.ll
-// RUN: %xsan_opt -passes=xsan -xsan-sanitizers=tsan -dump-desan-resan=%t.dump -S %t.raw.ll -o %t.out.ll
+// RUN: %xsan_opt -passes=xsan -xsan-sanitizers=tsan -xsan-dump=%t.dump -S %t.raw.ll -o %t.out.ll
 // RUN: FileCheck %s --check-prefix=TSAN --input-file=%t.dump/03-tsan.ll
 // RUN: FileCheck %s --check-prefix=DESAN --input-file=%t.dump/04-desan.ll
 // RUN: FileCheck %s --check-prefix=RESAN --input-file=%t.dump/05-resan.ll

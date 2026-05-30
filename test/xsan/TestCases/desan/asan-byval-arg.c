@@ -5,7 +5,7 @@
 // copy.  DeSan must restore the original user argument, and ReSan must replay
 // the ASan replacement without corrupting the memcpy source (%0).
 // RUN: %clang -O0 -g -S -emit-llvm %s -o %t.raw.ll
-// RUN: %xsan_opt -passes=xsan -xsan-sanitizers=asan -dump-desan-resan=%t.dump -S %t.raw.ll -o %t.out.ll
+// RUN: %xsan_opt -passes=xsan -xsan-sanitizers=asan -xsan-dump=%t.dump -S %t.raw.ll -o %t.out.ll
 // RUN: FileCheck %s --check-prefix=ASAN --input-file=%t.dump/03-asan.ll
 // RUN: FileCheck %s --check-prefix=DESAN --input-file=%t.dump/04-desan.ll
 // RUN: FileCheck %s --check-prefix=RESAN --input-file=%t.dump/05-resan.ll

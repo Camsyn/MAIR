@@ -92,6 +92,8 @@ struct AddRecord {
     llvm::SmallSetVector<llvm::BasicBlock *, 2> DetachedEdges;
     void removeEdgesOfSanBB2Sink(llvm::BasicBlock &SourceBB,
                                  llvm::BasicBlock &SanInsts);
+    void replayEdgesOfSanBB2Sink(llvm::BasicBlock &SourceBB,
+                                 llvm::BasicBlock &SanInsts);
   };
 
   AddRecord(AddRecord &&) noexcept = default;
@@ -107,6 +109,8 @@ struct AddRecord {
   // The related SanBBs.
   SanBBsVec SanBBs;
   std::variant<PureExtra, SplitExtra, RedirectExtra> ExtraRecord;
+  bool EnableReplay = true;
+  bool Replayed = false;
 
   // Construct a pure add record and move SrcBB[Fr:To) into it.
   static AddRecord extractFrom(llvm::BasicBlock &SrcBB,
@@ -126,6 +130,16 @@ struct AddRecord {
               llvm::SmallSetVector<llvm::BasicBlock *, 2> &&DetachedEdges,
               SanBBsVec &&SanBBs);
 
+  /// Obtain the related SanBBs. Return {} if this is PureRecord.
+  llvm::ArrayRef<llvm::BasicBlock *> getSanBBs() { return SanBBs; }
+  bool enable() { return !std::exchange(EnableReplay, true); }
+  bool disable() { return std::exchange(EnableReplay, false); }
+  void replayPHiUses();
+  void replay();
+  /// @return the begin instruction of SanInsts
+  llvm::Instruction &replayPure();
+  void replaySplit();
+  void replayRedirect();
 };
 
 /// Represents SanPhis inserted on UsrBB
@@ -138,6 +152,7 @@ struct PHIAddRecord {
 
   static std::optional<PHIAddRecord> extractFrom(const Sanitizer &San,
                                                  llvm::BasicBlock &TargetUsrBB);
+  void replay();
 };
 
 /// Represents SanBBs
@@ -151,6 +166,7 @@ struct BlockAddRecord {
   bool Replayed = false;
 
   void revert();
+  void replay(llvm::Module &M);
 };
 
 struct ReplaceRecord {

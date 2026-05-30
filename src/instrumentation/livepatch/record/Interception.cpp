@@ -1,11 +1,9 @@
 #include "PatchCore.h"
+#include "Utils/MetaDataUtils.h"
 #include "livepatch/record/SanitizingRecorder.h"
 #include "xsan_llvm_compat.h"
-
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/Argument.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/Constants.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/User.h"
@@ -17,49 +15,51 @@
 #include <vector>
 
 namespace __xsan::desan {
-namespace {
 
+/// Manages the events and notify them when anchor updates.
 template <typename EventT, typename AnchorT> class AnchoredEventStore {
 public:
   using IndexList = llvm::SmallVector<size_t, 1>;
 
-  size_t append(EventT Event) {
+  void track(AnchorT Anchor, EventT &&Event) {
+    const size_t EventIndex = Events.size();
     Events.push_back(std::move(Event));
-    return Events.size() - 1;
-  }
-
-  void track(AnchorT Anchor, size_t EventIndex) {
     if (Anchor)
       AnchorMap[Anchor].push_back(EventIndex);
   }
 
-  template <typename UpdateEventFn>
-  void updateTracked(AnchorT OldAnchor, AnchorT NewAnchor,
-                     UpdateEventFn UpdateEvent) {
+  const EventT *getLastEventAnchoredBy(AnchorT Anchor) {
+    if (!Anchor)
+      return nullptr;
+    auto It = AnchorMap.find(Anchor);
+    if (It == AnchorMap.end() || It->second.empty())
+      return nullptr;
+    return &Events[It->second.back()];
+  }
+
+  void notifyAnchorChange(AnchorT OldAnchor, AnchorT NewAnchor) {
+    if (NewAnchor == OldAnchor)
+      return;
+
     auto It = AnchorMap.find(OldAnchor);
     if (It == AnchorMap.end())
       return;
 
+    // Update the anchor
     for (size_t EventIndex : It->second)
-      UpdateEvent(Events[EventIndex]);
+      Events[EventIndex].update(OldAnchor, NewAnchor);
 
-    if (!NewAnchor) {
-      AnchorMap.erase(It);
-      return;
-    }
-
-    if (NewAnchor == OldAnchor)
-      return;
-
+    // EventIndicesByAnchor[OldAnchor] --> EventIndicesByAnchor[NewAnchor]
     IndexList EventIndices = std::move(It->second);
     AnchorMap.erase(It);
-    auto &NewIndices = AnchorMap[NewAnchor];
-    NewIndices.append(EventIndices.begin(), EventIndices.end());
+    auto NewIt = AnchorMap.find(NewAnchor);
+    if (NewIt == AnchorMap.end())
+      AnchorMap.try_emplace(NewAnchor, std::move(EventIndices));
+    else
+      NewIt->second.append(EventIndices.begin(), EventIndices.end());
   }
 
-  std::vector<EventT> copyEvents() const {
-    return {Events.begin(), Events.end()};
-  }
+  const std::vector<EventT> &getEvents() const { return Events; }
 
   void clear() {
     Events.clear();
@@ -71,13 +71,13 @@ private:
   llvm::DenseMap<AnchorT, IndexList> AnchorMap;
 };
 
+namespace {
+
 struct SanitizingRecorder {
   std::mutex Mutex;
   bool Active = false;
   AnchoredEventStore<DeleteEvent, const llvm::Instruction *> DeleteEvents;
   AnchoredEventStore<ReplaceEvent, const llvm::Value *> ReplaceEvents;
-  llvm::DenseMap<const llvm::Instruction *, llvm::SmallVector<llvm::Value *, 4>>
-      CachedOperandMap;
 };
 
 SanitizingRecorder &getRecorder() {
@@ -88,80 +88,35 @@ SanitizingRecorder &getRecorder() {
 void resetStatsLocked(SanitizingRecorder &Recorder) {
   Recorder.DeleteEvents.clear();
   Recorder.ReplaceEvents.clear();
-  Recorder.CachedOperandMap.clear();
 }
 
 bool shouldRecordLocked(const SanitizingRecorder &Recorder) {
   return Recorder.Active;
 }
 
-DeleteEvent buildDeleteEvent(const llvm::Instruction &I) {
-  DeleteEvent Event;
-  Event.DeletedValue = const_cast<llvm::Instruction *>(&I);
-  if (&I == &I.getParent()->back())
-    Event.Anchor = const_cast<llvm::BasicBlock *>(I.getParent());
-  else
-    Event.Anchor = const_cast<llvm::Instruction *>(I.getNextNode());
-  return Event;
+DeleteEvent buildDeleteEvent(llvm::Instruction &I) {
+  // We need to also eliminate operands in case the operands can find the
+  // deleted instruction through their user list.
+  llvm::SmallVector<llvm::Value *, 4> Operands;
+  Operands.reserve(I.getNumOperands());
+  for (auto &Use : I.operands()) {
+    Operands.push_back(Use.get());
+    Use.set(nullptr);
+  }
+  return {&I, I.getParent(), I.getNextNode(), std::move(Operands)};
 }
 
 ReplaceEvent buildReplaceEvent(const llvm::Value &Old, const llvm::Value &New) {
   return {const_cast<llvm::Value *>(&Old), const_cast<llvm::Value *>(&New)};
 }
 
-llvm::Instruction *getInstructionAnchor(const DeleteEvent &Event) {
-  if (auto *Anchor = std::get_if<llvm::Instruction *>(&Event.Anchor))
-    return *Anchor;
-  return nullptr;
-}
-
-const llvm::Instruction *getTrackableDeleteAnchor(const DeleteEvent &Event) {
-  llvm::Instruction *Anchor = getInstructionAnchor(Event);
-  if (Anchor && !hasUserMark(*Anchor))
-    return Anchor;
-  return nullptr;
-}
-
-bool shouldRecordReplaceSource(const llvm::Value &Old) {
-  if (llvm::isa<llvm::Argument>(Old))
-    return true;
-  if (auto *I = llvm::dyn_cast<llvm::Instruction>(&Old))
-    return hasUserMark(*I);
-  return false;
-}
-
-void saveAndUndefineOperands(SanitizingRecorder &Recorder, llvm::Instruction &I,
-                             DeleteEvent &Event) {
-  llvm::SmallVector<llvm::Value *, 4> *CachedOperands = nullptr;
-  if (auto It = Recorder.CachedOperandMap.find(&I);
-      It != Recorder.CachedOperandMap.end())
-    CachedOperands = &It->second;
-
-  for (size_t IOp = 0; IOp < I.getNumOperands(); ++IOp) {
-    llvm::Value *Operand =
-        CachedOperands ? (*CachedOperands)[IOp] : I.getOperand(IOp);
-    Event.Operands.push_back(Operand);
-    I.setOperand(IOp, llvm::PoisonValue::get(Operand->getType()));
-  }
-}
-
-void cacheUserOperandsUsing(SanitizingRecorder &Recorder, llvm::Value &Old) {
-  for (llvm::User *U : Old.users()) {
-    auto *UserInst = llvm::dyn_cast<llvm::Instruction>(U);
-    if (!UserInst || !hasUserMark(*UserInst))
-      continue;
-
-    auto [It, Inserted] = Recorder.CachedOperandMap.try_emplace(UserInst);
-    if (Inserted)
-      It->second.append(UserInst->op_begin(), UserInst->op_end());
-  }
+bool isUserReplacee(const llvm::Value &Replacee) {
+  return llvm::isa<llvm::Argument>(Replacee) ||
+         (llvm::isa<llvm::Instruction>(Replacee) &&
+          __xsan::UserIR::is(llvm::cast<llvm::Instruction>(Replacee)));
 }
 
 } // namespace
-
-bool hasUserMark(const llvm::Instruction &I) {
-  return I.hasMetadata(UserInstMDKind);
-}
 
 void resetSession() {
   auto &Recorder = getRecorder();
@@ -189,16 +144,16 @@ bool isRecording() {
   return Recorder.Active;
 }
 
-std::vector<DeleteEvent> getDeleteEvents() {
+const std::vector<DeleteEvent> &getDeleteEvents() {
   auto &Recorder = getRecorder();
   std::lock_guard<std::mutex> Lock(Recorder.Mutex);
-  return Recorder.DeleteEvents.copyEvents();
+  return Recorder.DeleteEvents.getEvents();
 }
 
-std::vector<ReplaceEvent> getReplaceEvents() {
+const std::vector<ReplaceEvent> &getReplaceEvents() {
   auto &Recorder = getRecorder();
   std::lock_guard<std::mutex> Lock(Recorder.Mutex);
-  return Recorder.ReplaceEvents.copyEvents();
+  return Recorder.ReplaceEvents.getEvents();
 }
 
 void recordDeleteEvent(llvm::Instruction *I) {
@@ -207,29 +162,21 @@ void recordDeleteEvent(llvm::Instruction *I) {
   if (!shouldRecordLocked(Recorder) || !I || !I->getParent())
     return;
 
-  if (!hasUserMark(*I)) {
+  if (!__xsan::UserIR::is(*I)) {
     // This non-user instruction was already an anchor, update all events
     // anchored to it. We don't do update for user instructions because
     // their order should be preserved and we can restore them unlike deleted
     // non-user instructions.
-    auto UpdatedEvent = buildDeleteEvent(*I);
-    Recorder.DeleteEvents.updateTracked(I,
-                                        getTrackableDeleteAnchor(UpdatedEvent),
-                                        [&UpdatedEvent](DeleteEvent &Event) {
-                                          Event.Anchor = UpdatedEvent.Anchor;
-                                        });
+    Recorder.DeleteEvents.notifyAnchorChange(I, I->getNextNode());
   } else {
     auto Event = buildDeleteEvent(*I);
-    // We need to also eliminate operands in case the operands can find the
-    // deleted instruction through their user list.
-    saveAndUndefineOperands(Recorder, *I, Event);
-
-    const llvm::Instruction *AnchorInst = getTrackableDeleteAnchor(Event);
-    const size_t SavedEventIndex =
-        Recorder.DeleteEvents.append(std::move(Event));
-
-    // If new anchor is a non-user instruction, update its mapped events.
-    Recorder.DeleteEvents.track(AnchorInst, SavedEventIndex);
+    auto *RawAnchor = Event.Anchor;
+    // If some Inst2Removes has binded to the RawAnchor, we set the anchor of
+    // the new event as the last Inst2Remove.
+    if (auto *LastEvent =
+            Recorder.DeleteEvents.getLastEventAnchoredBy(Event.Anchor))
+      const_cast<llvm::Instruction *&>(Event.Anchor) = LastEvent->Inst2Remove;
+    Recorder.DeleteEvents.track(RawAnchor, std::move(Event));
   }
 }
 
@@ -239,19 +186,10 @@ void recordReplaceEvent(llvm::Value *Old, llvm::Value *New) {
   if (!shouldRecordLocked(Recorder) || !Old || !New)
     return;
 
-  if (!shouldRecordReplaceSource(*Old)) {
-    Recorder.ReplaceEvents.updateTracked(
-        Old, New, [New](ReplaceEvent &Event) { Event.SanReplacer = New; });
-  } else {
-    size_t EventIndex =
-        Recorder.ReplaceEvents.append(buildReplaceEvent(*Old, *New));
-    Recorder.ReplaceEvents.track(New, EventIndex);
-
-    // If the old value is used as operand of any user instruction, we also need
-    // to cache the operand list of that user instruction so that we can collect
-    // correct operands when the user instruction is deleted.
-    cacheUserOperandsUsing(Recorder, *Old);
-  }
+  if (isUserReplacee(*Old))
+    Recorder.ReplaceEvents.track(New, buildReplaceEvent(*Old, *New));
+  else
+    Recorder.ReplaceEvents.notifyAnchorChange(Old, New);
 }
 
 } // namespace __xsan::desan
@@ -286,7 +224,7 @@ static __xsan::ManualInterception
 
 compat::InstructionEraseIterator eraseFromParent(llvm::Instruction *Self) {
   recordDeleteEvent(Self);
-  if (isRecording() && hasUserMark(*Self)) {
+  if (isRecording() && __xsan::UserIR::is(*Self)) {
     auto Next = std::next(Self->getIterator());
     RemoveFromParentInterceptee(Self);
     return Next;
@@ -317,7 +255,7 @@ static __xsan::ManualInterception ReplaceInstWithInstInterceptee(
 
 void ReplaceInstWithInst(llvm::Instruction *From, llvm::Instruction *To) {
   if (isRecording() && From && To) {
-    if (hasUserMark(*From)) {
+    if (__xsan::UserIR::is(*From)) {
       if (!To->getDebugLoc())
         To->setDebugLoc(From->getDebugLoc());
       compat::insertInstructionBefore(To, From);

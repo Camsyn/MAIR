@@ -6,10 +6,11 @@
 #include <llvm/IR/Value.h>
 
 #include <array>
-#include <variant>
 #include <vector>
 
 namespace __xsan::desan {
+
+template <typename EventT, typename AnchorT> class AnchoredEventStore;
 
 inline constexpr char UserInstMDKind[] = "xsan.user";
 inline constexpr std::array<const char *, 3> InterceptionTargetProcesses{
@@ -17,27 +18,49 @@ inline constexpr std::array<const char *, 3> InterceptionTargetProcesses{
 inline constexpr char InterceptionGroup[] = "desan";
 
 struct DeleteEvent {
-  llvm::Instruction *DeletedValue = nullptr;
-  llvm::SmallVector<llvm::Value *, 4> Operands;
-  // When BasicBlock ptr is used, the anchor is at the end of the block.
-  // Otherwise, the anchor is before the Instruction ptr.
-  std::variant<llvm::BasicBlock *, llvm::Instruction *> Anchor;
+  friend class AnchoredEventStore<DeleteEvent, const llvm::Instruction *>;
+
+  llvm::Instruction *const Inst2Remove = nullptr;
+  llvm::BasicBlock *const Block = nullptr;
+  llvm::Instruction *const Anchor = nullptr;
+  const llvm::SmallVector<llvm::Value *, 4> Operands;
+
+private:
+  void update(const llvm::Instruction *OldAnchor,
+              const llvm::Instruction *NewAnchor) {
+    // If OldAnchor != Anchor, it means that the Anchor points to other
+    // DeleteEvent
+    if (OldAnchor != Anchor) {
+      assert((!Anchor || !Anchor->getParent()) &&
+             "Current anchor should have been deleted");
+      return;
+    }
+    const_cast<llvm::Instruction *&>(Anchor) =
+        const_cast<llvm::Instruction *>(NewAnchor);
+  }
 };
 
 struct ReplaceEvent {
+  friend class AnchoredEventStore<ReplaceEvent, const llvm::Value *>;
+
   llvm::Value *UserReplacee = nullptr;
   llvm::Value *SanReplacer = nullptr;
+
+private:
+  void update(const llvm::Value *OldReplacer, const llvm::Value *Replacer) {
+    (void)OldReplacer;
+    SanReplacer = const_cast<llvm::Value *>(Replacer);
+  }
 };
 
 void resetSession();
 void beginRecording();
 void endRecording();
 bool isRecording();
-std::vector<DeleteEvent> getDeleteEvents();
-std::vector<ReplaceEvent> getReplaceEvents();
+const std::vector<DeleteEvent> &getDeleteEvents();
+const std::vector<ReplaceEvent> &getReplaceEvents();
 
 void recordDeleteEvent(llvm::Instruction *I);
 void recordReplaceEvent(llvm::Value *Old, llvm::Value *New);
-bool hasUserMark(const llvm::Instruction &I);
 
 } // namespace __xsan::desan

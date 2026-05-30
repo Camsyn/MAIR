@@ -207,6 +207,7 @@ PreservedAnalyses SanitizerCompositorPass::run(Module &M,
   }
 
   Log.displayLogs(M.getName());
+  Sanitizers.dumpFinalIR(M);
 
   return PA;
 }

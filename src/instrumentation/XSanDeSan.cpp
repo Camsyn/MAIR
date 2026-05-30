@@ -4,7 +4,6 @@
 #include "XSanDeSanReSan.h"
 #include "xsan_llvm_compat.h"
 
-#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/CFG.h"
@@ -14,11 +13,35 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Transforms/Utils/Local.h"
 
-#include <algorithm>
+#include <cassert>
+#include <cstdint>
+#include <optional>
 
 using namespace llvm;
 
 namespace __xsan::desan {
+namespace {
+bool isSanInst(const Sanitizer &San, const Instruction &I) {
+  return San.isUBSan() ? UBSanInst::is(I) : !__xsan::UserIR::is(I);
+}
+bool isUsrInst(const Sanitizer &San, const Instruction &I) {
+  return !isSanInst(San, I);
+}
+
+bool replaceNonSanInstUses(const Sanitizer &San, Value &From, Value &To) {
+  if (From.use_empty())
+    return false;
+  bool Changed = false;
+  From.replaceUsesWithIf(&To, [&](Use &U) -> bool {
+    auto *I = dyn_cast<Instruction>(U.getUser());
+    const bool IsSanUse = I && isSanInst(San, *I);
+    Changed |= !IsSanUse;
+    return !IsSanUse;
+  });
+  return Changed;
+}
+} // namespace
+
 PreprocessPass::PreprocessPass(std::shared_ptr<SanitizingContext> Ctx)
     : Ctx(std::move(Ctx)) {}
 
@@ -51,6 +74,8 @@ UserTaggingPass::UserTaggingPass(std::shared_ptr<SanitizingContext> Ctx)
 
 PreservedAnalyses UserTaggingPass::run(Module &M, ModuleAnalysisManager &) {
   requireOrDie(!!Ctx, "desan user tagging pass missing pipeline context");
+  requireOrDie(Ctx->UBSanDeSanCompleted,
+               "user tagging must run after UBSan DeSan");
 
   markUserIR(M);
   Ctx->UserBBs = collectUserBBs(M);
@@ -61,17 +86,24 @@ PreservedAnalyses UserTaggingPass::run(Module &M, ModuleAnalysisManager &) {
 DeSanPass::DeSanPass(Sanitizer San, std::shared_ptr<SanitizingContext> Ctx)
     : San(San), Ctx(std::move(Ctx)) {}
 
-PreservedAnalyses DeSanPass::run(Module &M, ModuleAnalysisManager &) {
+PreservedAnalyses DeSanPass::run(Module &M, ModuleAnalysisManager &MAM) {
   requireOrDie(!!Ctx, "desan restore pass missing pipeline context");
 
-  Ctx->dumpNextIR(M, San.name());
+  if (San.isUBSan() && !__xsan::hasUbsanFunction(M)) {
+    Ctx->UBSanDeSanCompleted = true;
+    return PreservedAnalyses::all();
+  }
+
+  Ctx->dumpNextIR(M, San.isUBSan() ? "ubsan-tagging" : San.name());
 
   SanitizerArchive &Archive = Ctx->addArchive(San);
   runDeSan(M, Archive, Ctx->UserBBs);
+  if (San.isUBSan())
+    Ctx->UBSanDeSanCompleted = true;
 
   Ctx->dumpNextIR(M, "desan");
 
-  return PreservedAnalyses::all();
+  return PreservedAnalyses::none();
 }
 
 static void restoreFunction(const Sanitizer &San, FunctionArchive &Archive,
@@ -143,31 +175,49 @@ static void restoreReplace(const Sanitizer &San, ReplaceArchive &Archive,
   }
 }
 
-static bool isCurrentSanitizerInst(const Sanitizer &San, const Instruction &I) {
-  if (San.isUBSan())
-    return San.is(I);
-  return !__xsan::UserIR::is(I);
-}
-
-static UserBBsMap collectUserBBs(const Sanitizer &San, Module &M) {
+static UserBBsMap collectUserBBsForUBSan(Module &M) {
   UserBBsMap Result;
   for (Function &F : M) {
     if (F.isDeclaration())
       continue;
-    const bool HasUserInst = llvm::any_of(instructions(F), [](Instruction &I) {
-      return __xsan::UserIR::is(I) && !isa<DbgInfoIntrinsic>(I);
-    });
-    for (BasicBlock &BB : F) {
-      if (pred_empty(&BB)) {
-        if (HasUserInst)
-          Result[&F].insert(&BB);
+    auto &UserBBsSet = Result[&F];
+    // 1. Rule ONE: Function entry must be user BB.
+    UserBBsSet.insert(&F.getEntryBlock());
+    // Traverse the function on topological order.
+    ReversePostOrderTraversal RPO(&F);
+    auto TermNonUBSan = [](const BasicBlock *BB) {
+      assert(BB->getTerminator() && "Pathological BB without Terminator");
+      return !UBSanInst::is(*BB->getTerminator());
+    };
+    for (auto *BB : llvm::make_range(RPO.begin(), RPO.end())) {
+      if (UserBBsSet.contains(BB))
+        continue;
+      // 2. Rule TWO: BBs with pred_term_non_ubsan be user BBs.
+      if (any_of(predecessors(BB), TermNonUBSan)) {
+        UserBBsSet.insert(BB);
         continue;
       }
-      if (llvm::any_of(predecessors(&BB), [&](BasicBlock *Pred) {
-            Instruction *Term = Pred->getTerminator();
-            return !Term || !isCurrentSanitizerInst(San, *Term);
-          }))
-        Result[&F].insert(&BB);
+      // 3. Rule THREE: BB with 1) user inst and 2) >1 user entries
+      //    The SinkBB is the only SanBB allowing user inst, but it must has
+      //    just ONE entry.
+      if (all_of(*BB, [](const Instruction &I) { return UBSanInst::is(I); }))
+        continue;
+      uint8_t NumUserEntry = 0;
+      auto It = idf_begin(BB);
+      ++It;
+      for (auto End = idf_end(BB); It != End;) {
+        BasicBlock *BB = *It;
+        if (UserBBsSet.contains(BB)) {
+          // >1 user entries, dirtecly break the loop.
+          if (++NumUserEntry > 1)
+            break;
+          It.skipChildren();
+        } else {
+          ++It;
+        }
+      }
+      if (NumUserEntry > 1)
+        UserBBsSet.insert(BB);
     }
   }
   return Result;
@@ -380,13 +430,10 @@ static bool getUbsanReplaceRule(Intrinsic::ID ID, UbsanReplaceRule &Rule) {
   }
 }
 
-static bool allInstructionUsesAreUbsan(const Value &V) {
-  for (const User *U : V.users()) {
-    const auto *UserI = dyn_cast<Instruction>(U);
-    if (!UserI || !__xsan::UBSanInst::is(*UserI))
-      return false;
-  }
-  return true;
+static bool allUsesAreUbsan(const Value &V) {
+  return all_of(V.users(), [](const User *U) {
+    return isa<Instruction>(U) && __xsan::UBSanInst::is(*cast<Instruction>(U));
+  });
 }
 
 static bool hasTaggedUbsanOverflowExtract(const WithOverflowInst &WOI) {
@@ -411,92 +458,61 @@ static WithOverflowInst *matchUBSanReplacement(Instruction &I,
   return WOI;
 }
 
-static Instruction *foldUBSanReplacement(
-    Instruction &I, const DenseMap<Value *, Value *> &RestoredValues) {
-  UbsanReplaceRule Rule;
-  WithOverflowInst *WOI = matchUBSanReplacement(I, Rule);
-  if (!WOI)
-    return nullptr;
+static Instruction *foldUBSanReplacement(ExtractValueInst &Replacer,
+                                         WithOverflowInst &WithOverflow,
+                                         const UbsanReplaceRule &Rule) {
+  Twine Name = Replacer.hasName() ? Replacer.getName() : "";
 
-  auto &EI = cast<ExtractValueInst>(I);
-
-  auto resolveOperand = [&](Value *V) -> Value * {
-    auto It = RestoredValues.find(V);
-    return It == RestoredValues.end() ? V : It->second;
-  };
-  Value *LHS = resolveOperand(WOI->getArgOperand(0));
-  Value *RHS = resolveOperand(WOI->getArgOperand(1));
-  Twine Name = EI.hasName() ? EI.getName() : "";
-
-  auto *Restored = BinaryOperator::Create(Rule.Opcode, LHS, RHS, Name);
+  auto *Replacee = BinaryOperator::Create(
+      Rule.Opcode, WithOverflow.getArgOperand(0), WithOverflow.getArgOperand(1),
+      Name);
   if (Rule.HasNoSignedWrap)
-    Restored->setHasNoSignedWrap();
+    Replacee->setHasNoSignedWrap();
 
-  __xsan::compat::insertInstructionBefore(Restored, WOI);
-  Restored->setDebugLoc(EI.getDebugLoc());
-  __xsan::UserIR::set(*Restored);
-  return Restored;
-}
-
-static void markUbsanReplaceOperandChainAsUser(Instruction &Root) {
-  SmallVector<Instruction *, 8> Worklist;
-  SmallPtrSet<Instruction *, 16> Visited;
-  Worklist.push_back(&Root);
-
-  while (!Worklist.empty()) {
-    Instruction *I = Worklist.pop_back_val();
-    if (!Visited.insert(I).second)
-      continue;
-
-    __xsan::UBSanInst::drop(*I);
-    __xsan::UserIR::set(*I);
-
-    for (Value *Operand : I->operands())
-      if (auto *OperandI = dyn_cast<Instruction>(Operand))
-        if (__xsan::UBSanInst::is(*OperandI))
-          Worklist.push_back(OperandI);
-  }
+  __xsan::compat::insertInstructionBefore(Replacee, &WithOverflow);
+  Replacee->setDebugLoc(Replacer.getDebugLoc());
+  __xsan::UserIR::set(*Replacee);
+  return Replacee;
 }
 
 static void restoreUbsanArithmetic(const Sanitizer &San, ReSanArchive &Archive,
                                    Module &M) {
-  SmallVector<Instruction *, 16> Worklist;
+  struct UbsanArithmeticReplacement {
+    ExtractValueInst *Replacer;
+    WithOverflowInst *WithOverflow;
+    UbsanReplaceRule Rule;
+    Instruction *Replacee;
+  };
 
+  // Collect target replacements
+  SmallVector<UbsanArithmeticReplacement, 16> Worklist;
   for (Function &F : M) {
-    if (F.isDeclaration())
-      continue;
-    for (BasicBlock &BB : F) {
-      for (Instruction &I : BB) {
-        UbsanReplaceRule Rule;
-        if (matchUBSanReplacement(I, Rule))
-          Worklist.push_back(&I);
-      }
+    for (Instruction &I : instructions(F)) {
+      UbsanReplaceRule Rule;
+      if (auto *WOI = matchUBSanReplacement(I, Rule))
+        Worklist.push_back({cast<ExtractValueInst>(&I), WOI, Rule, nullptr});
     }
   }
 
-  DenseMap<Value *, Value *> RestoredValues;
-  for (Instruction *I : Worklist) {
-    UbsanReplaceRule Rule;
-    auto *WOI = matchUBSanReplacement(*I, Rule);
-    if (!WOI)
-      continue;
-    auto &EI = cast<ExtractValueInst>(*I);
-    auto *Restored = foldUBSanReplacement(EI, RestoredValues);
-    requireOrDie(Restored, "desan ubsan arithmetic restore lost its pattern");
-    RestoredValues[&EI] = Restored;
-    markUbsanReplaceOperandChainAsUser(*Restored);
-    replaceNonSanitizerUses(San, EI, *Restored);
-    replaceDbgUsesWithUndef(&EI);
-    if (allInstructionUsesAreUbsan(EI)) {
-      __xsan::UBSanInst::set(EI);
-      __xsan::UserIR::drop(EI);
+  // Restore deletion
+  for (auto &[Replacer, WOI, Rule, Replacee] : Worklist) {
+    Replacee = foldUBSanReplacement(*Replacer, *WOI, Rule);
+    requireOrDie(Replacee, "desan ubsan arithmetic restore lost its pattern");
+    Archive.DeleteRecords.insert(Replacee);
+  }
+
+  // Restore replacement
+  for (auto &[Replacer, WOI, _, Replacee] : Worklist) {
+    const bool RealReplace = replaceNonSanInstUses(San, *Replacer, *Replacee);
+    if (allUsesAreUbsan(*Replacer)) {
+      __xsan::UBSanInst::set(*Replacer);
+      __xsan::UserIR::drop(*Replacer);
     }
-    if (allInstructionUsesAreUbsan(*WOI)) {
+    if (allUsesAreUbsan(*WOI)) {
       __xsan::UBSanInst::set(*WOI);
       __xsan::UserIR::drop(*WOI);
     }
-    Archive.ReplaceRecords[Restored].push_back({&EI});
-    Archive.DeleteRecords[Restored].push_back({});
+    Archive.ReplaceRecords[Replacee].push_back({Replacer, RealReplace});
   }
 }
 
@@ -504,16 +520,17 @@ void runDeSan(Module &M, SanitizerArchive &Entry, UserBBsMap &UserBBsMap) {
   const Sanitizer &San = Entry.San;
   ReSanArchive &Archive = Entry.Archive;
 
-  UserBBsMap = collectUserBBs(San, M);
-
   if (San.isUBSan()) {
+    // UBSan is not enabled.
     if (!__xsan::hasUbsanFunction(M))
       return;
-    markUserIR(M);
-    UserBBsMap = collectUserBBs(San, M);
+    // UBSan performs sanitizing instrumentation on compiler-frontend, and thus
+    // might be affected by optimization. We need to specialize the handling of
+    // UBSan.
     restoreUbsanArithmetic(San, Archive, M);
-    UserBBsMap = collectUserBBs(San, M);
-    restoreAdd(San, Archive.AddRecords, M, UserBBsMap);
+    auto UBSanUserBBsMap = collectUserBBsForUBSan(M);
+    restoreAdd(San, Archive.AddRecords, Archive.DeleteRecords, M,
+               UBSanUserBBsMap);
     return;
   }
 

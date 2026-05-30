@@ -45,9 +45,11 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/iterator.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -544,13 +546,31 @@ bool isSanityCheckCondBr(const BasicBlock &SanBB, const BranchInst &PredBr) {
   return false;
 }
 
-void getNewRootsFromUBSanBB(ArrayRef<Instruction *> UbsanCallAnchors,
+bool isNotUBSanSanityCall(const CallBase &CB) {
+  static constexpr std::array<StringRef, 1> NotSanityFun{
+      "__ubsan_handle_builtin_unreachable"};
+  return llvm::any_of(NotSanityFun, [&CB](StringRef NotSanity) {
+    return CB.getCalledFunction() &&
+           NotSanity == CB.getCalledFunction()->getName();
+  });
+}
+
+/// TODO: make this recursively. I.e., NewRoots's parent can derive otehr new
+/// roots.
+void getNewRootsFromUBSanBB(ArrayRef<CallBase *> UbsanCallAnchors,
                             SmallSetVector<Instruction *, 8> &NewRoots) {
-  SmallVector<BasicBlock *, 8> UbsanBlocks;
-  for (Instruction *Anchor : UbsanCallAnchors) {
+  SmallSetVector<BasicBlock *, 8> UbsanBlocks;
+  for (CallBase *Anchor : UbsanCallAnchors) {
+    // E.g.,
+    //   BB:
+    //    call __ubsan_handle_builtin_unreachable()
+    //    unreachable
+    // is not a UBSan BB
+    if (isNotUBSanSanityCall(*Anchor))
+      continue;
     BasicBlock *BB = Anchor->getParent();
-    if (isUBSanBlock(*BB) && !llvm::is_contained(UbsanBlocks, BB))
-      UbsanBlocks.push_back(BB);
+    if (isUBSanBlock(*BB))
+      UbsanBlocks.insert(BB);
   }
 
   for (BasicBlock *BB : UbsanBlocks) {
@@ -611,12 +631,13 @@ bool tagUbsanInstructions(Function &F) {
   //===------------------------------------------------------------------===//
   // Phase 1: seed explicit UBSan handler calls.
   //===------------------------------------------------------------------===//
-  SmallVector<Instruction *, 8> UBSanHandlerRoots, UserRoots;
+  SmallVector<CallBase *, 8> UBSanHandlerRoots;
+  SmallVector<Instruction *, 8> UserRoots;
   for (Instruction &I : instructions(F)) {
     if (isIgnorableForDefUseGraph(I))
       continue;
     if (__xsan::isUbsanInterfaceCall(I))
-      UBSanHandlerRoots.push_back(&I);
+      UBSanHandlerRoots.push_back(cast<CallBase>(&I));
     else if (isUserRootInstruction(I))
       UserRoots.push_back(&I);
   }

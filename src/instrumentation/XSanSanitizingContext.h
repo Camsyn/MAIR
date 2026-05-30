@@ -98,10 +98,11 @@ struct AddRecord {
 };
 
 struct ReplaceRecord {
-  llvm::Value *SanitizerValue = nullptr;
+  llvm::Value *Replacer = nullptr;
+  // If RealReplace = false, the replacement happens logically without any
+  // effects. E.g., the replacement of `void` instruction.
+  bool RealReplace = false;
 };
-
-struct DeleteRecord {};
 
 // Per-sanitizer archive of added IR. SanBBMap holds detached sanitizer-only
 // blocks keyed by their original insertion anchor. DenseMap cannot directly key
@@ -190,6 +191,7 @@ struct SanitizingContext {
   static constexpr unsigned NoDumpIndex = ~0u;
 
   UserBBsMap UserBBs;
+  bool UBSanDeSanCompleted = false;
   // Runtime archive order. Each entry is appended by DeSanPass::run and then
   // replayed by ReSan in the same dynamic order.
   llvm::SmallVector<SanitizerArchive, 4> SanitizerArchives;

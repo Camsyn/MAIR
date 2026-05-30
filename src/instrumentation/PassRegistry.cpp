@@ -4,6 +4,7 @@
 #include "UbsanInstTagging.hpp"
 #include "Utils/Options.h"
 #include "XSanDeSanReSan.h"
+#include "XSanSanitizingContext.h"
 #include "livepatch/record/SanitizingRecorder.h"
 
 #include "llvm/Analysis/GlobalsModRef.h"

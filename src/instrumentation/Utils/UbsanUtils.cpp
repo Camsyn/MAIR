@@ -23,12 +23,10 @@ namespace __xsan {
 
 // E.g., __ubsan_handle_add_overflow
 bool isUbsanInterfaceCall(const Instruction &I) {
-  if (!isa<CallBase>(I)) {
+  if (!isa<CallBase>(I))
     return false;
-  }
-  if (!isNoSanitize(I)) {
+  if (!isNoSanitize(I))
     return false;
-  }
   auto &CB = cast<CallBase>(I);
   auto *CalledFunction = CB.getCalledFunction();
   return CalledFunction && isUbsanFunction(*CalledFunction);

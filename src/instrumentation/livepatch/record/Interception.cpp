@@ -240,11 +240,8 @@ void recordReplaceEvent(llvm::Value *Old, llvm::Value *New) {
     return;
 
   if (!shouldRecordReplaceSource(*Old)) {
-    auto UpdatedEvent = buildReplaceEvent(*Old, *New);
     Recorder.ReplaceEvents.updateTracked(
-        Old, New, [&UpdatedEvent](ReplaceEvent &Event) {
-          Event.ReplaceValue = UpdatedEvent.ReplaceValue;
-        });
+        Old, New, [New](ReplaceEvent &Event) { Event.SanReplacer = New; });
   } else {
     size_t EventIndex =
         Recorder.ReplaceEvents.append(buildReplaceEvent(*Old, *New));

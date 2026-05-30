@@ -153,8 +153,9 @@ static void restoreDelete(const Sanitizer &San, DeleteArchive &Archive,
 static void restoreReplace(const Sanitizer &San, ReplaceArchive &Archive,
                            std::vector<ReplaceEvent> &Events) {
   for (const auto &Event : Events) {
-    replaceUserIRUses(*Event.ReplaceValue, *Event.UserValue);
-    Archive[Event.UserValue].push_back({Event.ReplaceValue});
+    const bool RealReplacement =
+        replaceNonSanInstUses(San, *Event.SanReplacer, *Event.UserReplacee);
+    Archive[Event.UserReplacee].push_back({Event.SanReplacer, RealReplacement});
   }
 }
 

@@ -25,8 +25,8 @@ struct DeleteEvent {
 };
 
 struct ReplaceEvent {
-  llvm::Value *UserValue = nullptr;
-  llvm::Value *ReplaceValue = nullptr;
+  llvm::Value *UserReplacee = nullptr;
+  llvm::Value *SanReplacer = nullptr;
 };
 
 void resetSession();

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "XSanDeSanReSan.h"
+#include "XSanSanitizingContext.h"
 
 #include "llvm/ADT/SetVector.h"
 #include "llvm/IR/PassManager.h"

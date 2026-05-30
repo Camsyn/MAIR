@@ -35,7 +35,7 @@ private:
 
 class DeSanPass : public llvm::PassInfoMixin<DeSanPass> {
 public:
-  DeSanPass(llvm::StringRef SanName, std::shared_ptr<SanitizingContext> Ctx);
+  DeSanPass(Sanitizer San, std::shared_ptr<SanitizingContext> Ctx);
 
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

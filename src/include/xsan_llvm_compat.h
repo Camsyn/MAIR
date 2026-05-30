@@ -3,10 +3,12 @@
 #include <cstdint>
 #include <utility>
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Instruction.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 
 namespace __xsan {
@@ -76,7 +78,16 @@ inline llvm::Instruction *getFirstNonPHIIt(llvm::BasicBlock *BB) {
 }
 
 using InstructionEraseIterator =
-    decltype(std::declval<llvm::Instruction &>().eraseFromParent());
+    decltype(std::declval<llvm::Instruction&>().eraseFromParent());
+
+inline void moveBefore(llvm::Instruction* I, llvm::Instruction* MovePos) {
+#if LLVM_VERSION_MAJOR >= 22
+  I->moveBefore(MovePos->getIterator());
+#else
+  I->moveBefore(MovePos);
+
+#endif
+}
 
 inline void insertInstructionBefore(llvm::Instruction *I,
                                     llvm::Instruction *InsertPos) {
@@ -124,6 +135,30 @@ inline llvm::Function *getOrInsertDeclaration(
   return llvm::Intrinsic::getOrInsertDeclaration(M, id, Tys);
 #else
   return llvm::Intrinsic::getDeclaration(M, id, Tys);
+#endif
+}
+
+template <typename RangeT> inline auto sumOf(RangeT &&Range) {
+#if LLVM_VERSION_MAJOR >= 18
+  return llvm::sum_of(std::forward<RangeT>(Range));
+#else
+  using ResultT = decltype(*std::begin(Range));
+  std::decay_t<ResultT> Result = 0;
+  for (auto &&Value : Range)
+    Result += Value;
+  return Result;
+#endif
+}
+
+template <typename ShouldRemove>
+inline void removeIncomingValueIf(llvm::PHINode &PN,
+                                  ShouldRemove ShouldRemoveIncoming) {
+#if LLVM_VERSION_MAJOR >= 18
+  PN.removeIncomingValueIf(ShouldRemoveIncoming);
+#else
+  for (int I = static_cast<int>(PN.getNumIncomingValues()) - 1; I >= 0; --I)
+    if (ShouldRemoveIncoming(static_cast<unsigned>(I)))
+      PN.removeIncomingValue(static_cast<unsigned>(I), false);
 #endif
 }
 

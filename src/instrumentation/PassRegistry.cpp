@@ -426,9 +426,12 @@ PreservedAnalyses SubSanitizers::run(Module &IR, ModuleAnalysisManager &AM) {
       PassPA = P->run(IR, AM);
     }
 
-    // // Update the analysis manager as each pass runs and potentially
-    // // invalidates analyses.
-    // AM.invalidate(IR, PassPA);
+    // Update the analysis manager as each pass runs and potentially
+    // invalidates analyses.
+    /// If the sanitizer change the IR, the DeSan would restore it, therefore,
+    /// we do not invalidate the AM to speedup the analysis.
+    if (!isInSanitizing(Idx))
+      AM.invalidate(IR, PassPA);
 
     // Finally, intersect the preserved analyses to compute the aggregate
     // preserved set for this pass manager.

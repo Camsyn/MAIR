@@ -177,7 +177,7 @@ PreservedAnalyses PreprocessPass::run(Module &M, ModuleAnalysisManager &MAM) {
 
   Ctx->clearArchives();
 
-  return PreservedAnalyses::none();
+  return PreservedAnalyses::all();
 }
 
 UserTaggingPass::UserTaggingPass(std::shared_ptr<SanitizingContext> Ctx)
@@ -191,7 +191,7 @@ PreservedAnalyses UserTaggingPass::run(Module &M, ModuleAnalysisManager &) {
   markUserIR(M);
   Ctx->UserBBs = collectUserBBs(M);
 
-  return PreservedAnalyses::none();
+  return PreservedAnalyses::all();
 }
 
 DeSanPass::DeSanPass(Sanitizer San, std::shared_ptr<SanitizingContext> Ctx)

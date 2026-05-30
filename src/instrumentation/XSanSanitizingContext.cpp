@@ -2,8 +2,11 @@
 #include "Utils/MetaDataUtils.h"
 #include "Utils/Options.h"
 
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileSystem.h"
@@ -30,6 +33,8 @@ static const char *getAddRecordKindName(AddRecord::AddRecordKind Kind) {
     return "Pure";
   case AddRecord::AddRecordKind::Split:
     return "Split";
+  case AddRecord::AddRecordKind::Redirect:
+    return "Redirect";
   }
   return "<unknown>";
 }
@@ -189,23 +194,6 @@ static void dumpBasicBlockBody(const BasicBlock *BB, raw_ostream &OS,
   }
 }
 
-static void dumpBBAnchor(AddArchive::BBAnchor Anchor,
-                         AddArchive::BBAnchorType AnchorType, raw_ostream &OS) {
-  switch (AnchorType) {
-  case AddArchive::FunctionAnchor:
-    OS << "function ";
-    dumpFunctionRef(static_cast<const Function *>(Anchor), OS);
-    return;
-  case AddArchive::BasicBlockAnchor:
-    OS << "basic_block ";
-    dumpBasicBlockRef(static_cast<const BasicBlock *>(Anchor), OS);
-    return;
-  }
-
-  OS << "invalid ptr=" << Anchor
-     << " type=" << static_cast<unsigned>(AnchorType);
-}
-
 } // namespace
 
 void requireOrDie(bool Condition, const Twine &Message) {
@@ -213,15 +201,43 @@ void requireOrDie(bool Condition, const Twine &Message) {
     report_fatal_error(Message, false);
 }
 
-void SanitizingContext::clearArchives() { SanitizerArchives.clear(); }
+void SanitizingContext::clearArchives() {
+  UserBBs.clear();
+  UBSanDeSanCompleted = false;
+  SanitizerArchives.clear();
+}
 
 SanitizerArchive &SanitizingContext::addArchive(const Sanitizer &San) {
-  for (const SanitizerArchive &Entry : SanitizerArchives)
-    if (Entry.San.sameAs(San))
-      report_fatal_error(Twine("duplicate ReSanArchive for sanitizer ") +
-                         San.name());
+  if (any_of(SanitizerArchives, [&San](const SanitizerArchive &Enrty) {
+        return Enrty.San.sameAs(San);
+      }))
+    report_fatal_error(Twine("duplicate ReSanArchive for sanitizer ") +
+                       San.name());
 
-  return SanitizerArchives.emplace_back(San);
+  return SanitizerArchives.emplace_back(*this, San);
+}
+
+void AddArchive::tagAs(const Sanitizer &San) {
+  if (San.isUBSan())
+    return;
+  auto TagBB = [&San](BasicBlock &BB) {
+    for (auto &I : BB)
+      San.tag(I);
+  };
+  for (AddRecord &Record : Records)
+    TagBB(*Record.SanInsts);
+
+  for (PHIAddRecord &Record : PhiRecords)
+    for (PHINode *Phi : Record.SanPhis)
+      San.tag(*Phi);
+
+  for (BlockAddRecord &BBRecord : BBRecords)
+    for (BasicBlock *BB : BBRecord.SanBBs)
+      TagBB(*BB);
+}
+
+void AddArchive::addRecord(AddRecord &&Add) {
+  Records.emplace_back(std::move(Add));
 }
 
 static void dumpIRToFile(Module &M, const Twine &FileName) {
@@ -272,10 +288,8 @@ void markUserIR(Module &M) {
   for (Function &F : M) {
     if (F.isDeclaration())
       continue;
-    for (BasicBlock &BB : F)
-      for (Instruction &I : BB)
-        if (!__xsan::UBSanInst::is(I))
-          __xsan::UserIR::set(I);
+    for (auto &I : instructions(F))
+      __xsan::UserIR::set(I);
   }
 }
 
@@ -317,7 +331,8 @@ void dumpArchive(const Sanitizer &San, const ReSanArchive &Archive,
                  llvm::raw_ostream &OS) {
   OS << "[ReSanArchive] sanitizer=" << San.name()
      << " add_records=" << Archive.AddRecords.Records.size()
-     << " san_bb_anchors=" << Archive.AddRecords.SanBBMap.size()
+     << " bb_records=" << Archive.AddRecords.BBRecords.size()
+     << " phi_records=" << Archive.AddRecords.PhiRecords.size()
      << " delete_records=" << Archive.DeleteRecords.size()
      << " replace_records=" << Archive.ReplaceRecords.size() << "\n";
 
@@ -326,59 +341,63 @@ void dumpArchive(const Sanitizer &San, const ReSanArchive &Archive,
     OS << "  <empty>\n";
   } else {
     for (size_t I = 0; I < Archive.AddRecords.Records.size(); ++I) {
-      const auto &[Kind, Anchor, Record] = Archive.AddRecords.Records[I];
+      const AddRecord &Add = Archive.AddRecords.Records[I];
       OS << "  [add#" << I << "] sanitizer=" << San.name()
-         << " kind=" << getAddRecordKindName(Kind) << " anchor=";
-      dumpValueRef(Anchor, OS);
+         << " kind=" << getAddRecordKindName(Add.Kind) << " anchor=";
+      dumpValueRef(Add.Anchor, OS);
       OS << "\n";
 
-      if (const auto *Pure = std::get_if<AddRecord::PureRecord>(&Record)) {
-        OS << "    san_insts=" << Pure->SanInsts->size() << "\n";
-        dumpInstList(*Pure->SanInsts, OS, "      ");
+      if (std::holds_alternative<AddRecord::PureExtra>(Add.ExtraRecord)) {
+        OS << "    san_insts=" << Add.SanInsts->size() << "\n";
+        dumpInstList(*Add.SanInsts, OS, "      ");
       } else if (const auto *Split =
-                     std::get_if<AddRecord::SplitRecord>(&Record)) {
-        OS << "    san_append_insts=" << Split->SanInstsToAppend->size()
-           << " last_bb=";
-        dumpBasicBlockRef(Split->LastBB, OS);
+                     std::get_if<AddRecord::SplitExtra>(&Add.ExtraRecord)) {
+        OS << "    san_append_insts=" << Add.SanInsts->size() << " last_bb=";
+        dumpBasicBlockRef(Split->SinkBB, OS);
         OS << "\n";
-        dumpInstList(*Split->SanInstsToAppend, OS, "      ");
+        dumpInstList(*Add.SanInsts, OS, "      ");
+        dumpBasicBlockBody(Split->SinkBB, OS, "      ");
       } else {
         OS << "    <invalid add record variant>\n";
       }
     }
   }
 
-  using SanBBEntry =
-      std::pair<AddArchive::BBAnchor,
-                std::pair<AddArchive::BBAnchorType, std::vector<BasicBlock *>>>;
-  std::vector<SanBBEntry> SanBBEntries;
-  SanBBEntries.reserve(Archive.AddRecords.SanBBMap.size());
-  for (const auto &Entry : Archive.AddRecords.SanBBMap)
-    SanBBEntries.push_back({Entry.first, Entry.second});
-
-  std::sort(SanBBEntries.begin(), SanBBEntries.end(),
-            [](const SanBBEntry &L, const SanBBEntry &R) {
-              if (L.second.first != R.second.first)
-                return L.second.first < R.second.first;
-              return pointerOrderKey(L.first) < pointerOrderKey(R.first);
-            });
-
-  OS << "[ReSanArchive] SanBBMap\n";
-  if (SanBBEntries.empty()) {
+  OS << "[ReSanArchive] PhiRecords\n";
+  if (Archive.AddRecords.PhiRecords.empty()) {
     OS << "  <empty>\n";
   } else {
-    for (size_t I = 0; I < SanBBEntries.size(); ++I) {
-      const auto &[Anchor, Pair] = SanBBEntries[I];
-      const auto &[AnchorType, BBs] = Pair;
-      OS << "  [bb_anchor#" << I << "] anchor=";
-      dumpBBAnchor(Anchor, AnchorType, OS);
-      OS << " san_bbs=" << BBs.size() << "\n";
+    for (size_t I = 0; I < Archive.AddRecords.PhiRecords.size(); ++I) {
+      const PHIAddRecord &Record = Archive.AddRecords.PhiRecords[I];
+      OS << "  [phi_record#" << I << "] target=";
+      dumpBasicBlockRef(Record.TargetUsrBB, OS);
+      OS << " phis=" << Record.SanPhis.size() << "\n";
 
-      for (size_t J = 0; J < BBs.size(); ++J) {
-        OS << "    [bb#" << J << "] ";
-        dumpBasicBlockRef(BBs[J], OS);
+      for (size_t J = 0; J < Record.SanPhis.size(); ++J) {
+        OS << "    [phi#" << J << "] ";
+        dumpValueRef(Record.SanPhis[J], OS);
         OS << "\n";
-        dumpBasicBlockBody(BBs[J], OS, "      ");
+      }
+    }
+  }
+
+  OS << "[ReSanArchive] BBRecords\n";
+  if (Archive.AddRecords.BBRecords.empty()) {
+    OS << "  <empty>\n";
+  } else {
+    for (size_t I = 0; I < Archive.AddRecords.BBRecords.size(); ++I) {
+      const BlockAddRecord &Record = Archive.AddRecords.BBRecords[I];
+      OS << "  [bb_record#" << I << "] parent=";
+      dumpFunctionRef(Record.Parent, OS);
+      OS << " insert_pt=";
+      dumpBasicBlockRef(Record.InsertPt, OS);
+      OS << " san_bbs=" << Record.SanBBs.size() << "\n";
+
+      for (size_t J = 0; J < Record.SanBBs.size(); ++J) {
+        OS << "    [bb#" << J << "] ";
+        dumpBasicBlockRef(Record.SanBBs[J], OS);
+        OS << "\n";
+        dumpBasicBlockBody(Record.SanBBs[J], OS, "      ");
       }
     }
   }
@@ -409,22 +428,20 @@ void dumpArchive(const Sanitizer &San, const ReSanArchive &Archive,
       for (size_t J = 0; J < Records.size(); ++J) {
         const ReplaceRecord &Record = Records[J];
         OS << "    [record#" << J << "] sanitizer=" << San.name() << " value=";
-        dumpValueRef(Record.SanitizerValue, OS);
+        dumpValueRef(Record.Replacer, OS);
         OS << "\n";
       }
     }
   }
 
-  using DeleteEntry =
-      std::pair<Instruction *, const llvm::SmallVector<DeleteRecord, 2> *>;
-  std::vector<DeleteEntry> DeleteEntries;
+  std::vector<Instruction *> DeleteEntries;
   DeleteEntries.reserve(Archive.DeleteRecords.size());
-  for (const auto &Entry : Archive.DeleteRecords)
-    DeleteEntries.push_back({Entry.first, &Entry.second});
+  for (Instruction *DeletedInst : Archive.DeleteRecords)
+    DeleteEntries.push_back(DeletedInst);
 
   std::sort(DeleteEntries.begin(), DeleteEntries.end(),
-            [](const DeleteEntry &L, const DeleteEntry &R) {
-              return pointerOrderKey(L.first) < pointerOrderKey(R.first);
+            [](const Instruction *L, const Instruction *R) {
+              return pointerOrderKey(L) < pointerOrderKey(R);
             });
 
   OS << "[ReSanArchive] DeleteRecords\n";
@@ -432,15 +449,10 @@ void dumpArchive(const Sanitizer &San, const ReSanArchive &Archive,
     OS << "  <empty>\n";
   } else {
     for (size_t I = 0; I < DeleteEntries.size(); ++I) {
-      const auto &[UserInst, RecordsPtr] = DeleteEntries[I];
-      const auto &Records = *RecordsPtr;
+      Instruction *UserInst = DeleteEntries[I];
       OS << "  [delete#" << I << "] user_inst=";
       dumpValueRef(UserInst, OS);
-      OS << " records=" << Records.size() << "\n";
-
-      for (size_t J = 0; J < Records.size(); ++J) {
-        OS << "    [record#" << J << "] sanitizer=" << San.name() << "\n";
-      }
+      OS << "\n";
     }
   }
 }
@@ -460,67 +472,102 @@ void validateArchive(const Sanitizer &San, const ReSanArchive &Archive,
     CacheUserBBsMap = &UserBBsMap;
   }
 
-  for (const auto &[Kind, Anchor, Record] : Archive.AddRecords.Records) {
+  for (const AddRecord &Add : Archive.AddRecords.Records) {
+    const Instruction *Anchor = Add.Anchor;
     // Check anchor
     if (!Anchor) {
       OS << "[ReSan AddRecord] Sanitizer " << San.name()
          << ". Anchor == nullptr\n";
-    } else {
-      if (!Anchor->getParent()) {
-        OS << "[ReSan AddRecord] Sanitizer " << San.name() << ". Anchor:\n";
-        dumpValueRef(Anchor, OS);
-        OS << "\n has no parent block\n";
-      } else if (!CacheUserBBs.contains(Anchor->getParent())) {
-        OS << "[ReSan AddRecord] Sanitizer " << San.name() << ". Anchor:\n";
-        dumpValueRef(Anchor, OS);
-        OS << "\n is not in user blocks set\n";
-      }
-      if (!__xsan::UserIR::is(*Anchor)) {
-        OS << "[ReSan AddRecord] Sanitizer " << San.name() << ". Anchor:\n";
-        dumpValueRef(Anchor, OS);
-        OS << "\n is not a user instruction\n";
-      }
+    } else if (!Anchor->getParent()) {
+      OS << "[ReSan AddRecord] Sanitizer " << San.name() << ". Anchor:\n";
+      dumpValueRef(Anchor, OS);
+      OS << "\n has no parent block\n";
+    } else if (!CacheUserBBs.contains(Anchor->getParent())) {
+      OS << "[ReSan AddRecord] Sanitizer " << San.name() << ". Anchor:\n";
+      dumpValueRef(Anchor, OS);
+      OS << "\n is not in user blocks set\n";
+    }
+    if (Anchor && !__xsan::UserIR::is(*Anchor)) {
+      OS << "[ReSan AddRecord] Sanitizer " << San.name() << ". Anchor:\n";
+      dumpValueRef(Anchor, OS);
+      OS << "\n is not a user instruction\n";
     }
     // Check record
-    if (auto *Pure = std::get_if<AddRecord::PureRecord>(&Record)) {
-      if (Pure->SanInsts->empty()) {
+    if (std::holds_alternative<AddRecord::PureExtra>(Add.ExtraRecord)) {
+      if (Add.SanInsts->empty()) {
         OS << "[ReSan AddRecord] Sanitizer " << San.name()
            << ". PureRecord has no instructions\n";
       }
-      if (llvm::any_of(*Pure->SanInsts, [](const Instruction &I) {
+      if (llvm::any_of(*Add.SanInsts, [](const Instruction &I) {
             return __xsan::UserIR::is(I);
           })) {
         OS << "[ReSan AddRecord] Sanitizer " << San.name()
            << ". PureRecord has user instructions:\n";
-        for (const Instruction &I : *Pure->SanInsts) {
+        for (const Instruction &I : *Add.SanInsts) {
           dumpValueRef(&I, OS);
           OS << "\n";
         }
       }
-    } else if (auto *Split = std::get_if<AddRecord::SplitRecord>(&Record)) {
-      if (Split->SanInstsToAppend->empty()) {
+    } else if (auto *Split =
+                   std::get_if<AddRecord::SplitExtra>(&Add.ExtraRecord)) {
+      if (Add.SanInsts->empty()) {
         OS << "[ReSan AddRecord] Sanitizer " << San.name()
            << ". SplitRecord has no sanitizer instructions to append\n";
         continue;
       }
-      if (llvm::any_of(*Split->SanInstsToAppend, [](const Instruction &I) {
+      if (llvm::any_of(*Add.SanInsts, [](const Instruction &I) {
             return __xsan::UserIR::is(I);
           })) {
         OS << "[ReSan AddRecord] Sanitizer " << San.name()
            << ". SplitRecord has user instructions in SanInstsToAppend:\n";
-        for (const Instruction &I : *Split->SanInstsToAppend) {
+        for (const Instruction &I : *Add.SanInsts) {
           dumpValueRef(&I, OS);
           OS << "\n";
         }
       }
-      if (!Split->LastBB) {
+      if (!Split->SinkBB) {
         OS << "[ReSan AddRecord] Sanitizer " << San.name()
            << ". SplitRecord has null LastBB\n";
-      } else if (CacheUserBBs.contains(Split->LastBB)) {
+      } else if (CacheUserBBs.contains(Split->SinkBB)) {
         OS << "[ReSan AddRecord] Sanitizer " << San.name()
            << ". SplitRecord LastBB:\n";
-        dumpBasicBlockRef(Split->LastBB, OS);
+        dumpBasicBlockRef(Split->SinkBB, OS);
         OS << "\n is in user blocks set\n";
+      } else {
+        for (const Instruction &I : *Split->SinkBB) {
+          if (__xsan::UserIR::is(I)) {
+            OS << "[ReSan AddRecord] Sanitizer " << San.name()
+               << ". SplitRecord sink block contains user instruction:\n";
+            dumpValueRef(&I, OS);
+            OS << "\n";
+          }
+        }
+      }
+    } else if (auto *Redirect =
+                   std::get_if<AddRecord::RedirectExtra>(&Add.ExtraRecord)) {
+      if (Add.SanInsts->empty()) {
+        OS << "[ReSan AddRecord] Sanitizer " << San.name()
+           << ". RedirectRecord has no sanitizer instructions to append\n";
+        continue;
+      }
+      if (llvm::any_of(*Add.SanInsts, [](const Instruction &I) {
+            return __xsan::UserIR::is(I);
+          })) {
+        OS << "[ReSan AddRecord] Sanitizer " << San.name()
+           << ". RedirectRecord has user instructions in SanInsts:\n";
+        for (const Instruction &I : *Add.SanInsts) {
+          dumpValueRef(&I, OS);
+          OS << "\n";
+        }
+      }
+      if (!Redirect->SinkBB) {
+        OS << "[ReSan AddRecord] Sanitizer " << San.name()
+           << ". RedirectRecord has null SinkBB\n";
+      } else if (!CacheUserBBs.contains(Redirect->SinkBB)) {
+        OS << "[ReSan AddRecord] Sanitizer " << San.name()
+           << ". RedirectRecord SinkBB:\n";
+        dumpBasicBlockRef(Redirect->SinkBB, OS);
+        OS << "\n is not in user blocks set\n";
       }
     } else {
       OS << "[ReSan AddRecord] Sanitizer " << San.name()
@@ -528,41 +575,61 @@ void validateArchive(const Sanitizer &San, const ReSanArchive &Archive,
     }
   }
 
-  for (const auto &[Anchor, Pair] : Archive.AddRecords.SanBBMap) {
-    // Check anchor
-    auto &[AnchorType, BBs] = Pair;
-    if (AnchorType == AddArchive::FunctionAnchor) {
-      const auto *F = static_cast<Function *>(Anchor);
-      if (!F) {
-        OS << "[ReSan AddArchive] BB Anchor == nullptr\n";
-      } else if (F->isDeclaration()) {
-        OS << "[ReSan AddArchive] BB Anchor in a declaration function:\n";
-        dumpFunctionRef(F, OS);
-        OS << "\n";
-      } else if (!F->getParent()) {
-        OS << "[ReSan AddArchive] BB Anchor function:\n";
-        dumpFunctionRef(F, OS);
-        OS << "\n has no parent module\n";
-      }
-    } else if (AnchorType == AddArchive::BasicBlockAnchor) {
-      const auto *BB = static_cast<BasicBlock *>(Anchor);
-      if (!BB) {
-        OS << "[ReSan AddArchive] BB Anchor == nullptr\n";
-      } else {
-        if (!CacheUserBBs.contains(BB)) {
-          OS << "[ReSan AddArchive] BB Anchor:\n";
-          dumpBasicBlockRef(BB, OS);
-          OS << "\n is not in user blocks set\n";
-        }
-      }
-    } else {
-      OS << "[ReSan AddArchive] BB Anchor has an invalid variant type\n";
+  for (const PHIAddRecord &Record : Archive.AddRecords.PhiRecords) {
+    if (!Record.TargetUsrBB) {
+      OS << "[ReSan PhiAddRecord] Sanitizer " << San.name()
+         << ". TargetUsrBB == nullptr\n";
+    } else if (!CacheUserBBs.contains(Record.TargetUsrBB)) {
+      OS << "[ReSan PhiAddRecord] Sanitizer " << San.name()
+         << ". TargetUsrBB is not in user blocks set:\n";
+      dumpBasicBlockRef(Record.TargetUsrBB, OS);
+      OS << "\n";
     }
 
-    // Check BBs
-    for (const BasicBlock *BB : BBs) {
+    if (Record.SanPhis.empty()) {
+      OS << "[ReSan PhiAddRecord] Sanitizer " << San.name()
+         << ". has no PHIs\n";
+    }
+    for (const PHINode *Phi : Record.SanPhis) {
+      if (!Phi) {
+        OS << "[ReSan PhiAddRecord] Sanitizer " << San.name()
+           << ". has null PHI\n";
+      } else if (Phi->getParent()) {
+        OS << "[ReSan PhiAddRecord] Sanitizer " << San.name()
+           << ". PHI is still in a block:\n";
+        dumpValueRef(Phi, OS);
+        OS << "\n";
+      } else if (__xsan::UserIR::is(*Phi)) {
+        OS << "[ReSan PhiAddRecord] Sanitizer " << San.name()
+           << ". PHI is an unexpected user instruction:\n";
+        dumpValueRef(Phi, OS);
+        OS << "\n";
+      }
+    }
+  }
+
+  for (const BlockAddRecord &Record : Archive.AddRecords.BBRecords) {
+    if (!Record.Parent) {
+      OS << "[ReSan AddArchive] BBRecord has null parent function\n";
+    } else if (Record.Parent->isDeclaration()) {
+      OS << "[ReSan AddArchive] BBRecord parent is declaration:\n";
+      dumpFunctionRef(Record.Parent, OS);
+      OS << "\n";
+    } else if (!Record.Parent->getParent()) {
+      OS << "[ReSan AddArchive] BBRecord parent has no parent module:\n";
+      dumpFunctionRef(Record.Parent, OS);
+      OS << "\n";
+    }
+
+    if (Record.InsertPt && !CacheUserBBs.contains(Record.InsertPt)) {
+      OS << "[ReSan AddArchive] BBRecord insert point is not a user block:\n";
+      dumpBasicBlockRef(Record.InsertPt, OS);
+      OS << "\n";
+    }
+
+    for (const BasicBlock *BB : Record.SanBBs) {
       if (!BB) {
-        OS << "[ReSan AddArchive] has null BB in SanBBMap\n";
+        OS << "[ReSan AddArchive] has null BB in BBRecords\n";
       } else if (BB->getParent()) {
         OS << "[ReSan AddArchive] BB:\n";
         dumpBasicBlockRef(BB, OS);
@@ -583,28 +650,27 @@ void validateArchive(const Sanitizer &San, const ReSanArchive &Archive,
       OS << "\n";
     }
     for (const ReplaceRecord &Record : Records) {
-      if (!Record.SanitizerValue) {
+      if (!Record.Replacer) {
         OS << "[ReSan ReplaceRecord] Sanitizer " << San.name()
            << ". has null SanitizerValue\n";
-      } else if (isa<Instruction>(Record.SanitizerValue) &&
-                 __xsan::UserIR::is(
-                     *cast<Instruction>(Record.SanitizerValue)) &&
-                 !(San.isUBSan() && __xsan::UBSanInst::is(*cast<Instruction>(
-                                        Record.SanitizerValue)))) {
+      } else if (isa<Instruction>(Record.Replacer) &&
+                 __xsan::UserIR::is(*cast<Instruction>(Record.Replacer)) &&
+                 !(San.isUBSan() && __xsan::UBSanInst::is(
+                                        *cast<Instruction>(Record.Replacer)))) {
         OS << "[ReSan ReplaceRecord] Sanitizer " << San.name()
            << ". SanitizerValue is an unexpected user instruction:\n";
-        dumpValueRef(Record.SanitizerValue, OS);
+        dumpValueRef(Record.Replacer, OS);
         OS << "\n";
-      } else if (isa<Argument>(Record.SanitizerValue)) {
+      } else if (isa<Argument>(Record.Replacer)) {
         OS << "[ReSan ReplaceRecord] Sanitizer " << San.name()
            << ". SanitizerValue is an user instruction or argument:\n";
-        dumpValueRef(Record.SanitizerValue, OS);
+        dumpValueRef(Record.Replacer, OS);
         OS << "\n";
       }
     }
   }
 
-  for (const auto &[DeletedInst, Records] : Archive.DeleteRecords) {
+  for (Instruction *DeletedInst : Archive.DeleteRecords) {
     if (!DeletedInst) {
       OS << "[ReSan DeleteRecord] has null DeletedInst\n";
     } else if (!(isa<Instruction>(DeletedInst) &&

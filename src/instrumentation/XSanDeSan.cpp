@@ -1,15 +1,76 @@
+//===----------------------------------------------------------------------===//
+// DeSan workflow
+//===----------------------------------------------------------------------===//
+//
+// XSan runs each normal sanitizer pass on top of the current user IR, then
+// immediately runs DeSan for that sanitizer. DeSan restores the module back to
+// the user IR shape required by the next sanitizer and archives the removed
+// sanitizer semantics for ReSan.
+//
+// 1. Sanitizer pass: run one sanitizer on the current user IR.
+//    1.1. Livepatch sanitizers: record add/delete/replace/function edits.
+//    1.2. UBSan: rely on frontend UBSanInst tags because clang emits checks
+//         before XSan can record livepatch events.
+//
+// 2. Generic DeSan restore: for ASan/TSan/MSan, use UserIR marks as the
+//    boundary and restore livepatch events in dependency order.
+//    2.1. restoreFunction: detach sanitizer-only functions.
+//    2.2. restoreDelete: restore deleted user instructions.
+//    2.3. restoreReplace: restore replaced user values.
+//    2.4. restoreAdd: extract sanitizer additions after user IR is restored.
+//
+// 3. restoreAdd / SanInsts: scan each function while CFG is still intact.
+//    3.1. Pure add: detach sanitizer instructions from a user BB.
+//    3.2. Split add: move user suffix instructions back from sink blocks.
+//    3.3. Redirect add: fold sanitizer-only edges to the user sink and record
+//         the edges needed by ReSan.
+//
+// 4. restoreAdd / SanPHIs: scan each function again after SanInst extraction.
+//    4.1. Find sanitizer PHIs that still live in user BB PHI lists.
+//    4.2. Detach those PHIs into PHIAddRecords before SanBBs are removed.
+//
+// 5. restoreAdd / SanBBs: detach sanitizer-only basic blocks last.
+//    5.1. Preserve block insertion order in BlockAddRecords.
+//    5.2. Break sanitizer CFG edges only after SanInsts and SanPHIs are
+//         archived.
+//
+// 6. UBSan frontend recovery: run before UBSan restoreAdd.
+//    6.1. Fold frontend overflow intrinsics back into user arithmetic.
+//    6.2. Record paired replace/delete facts for ReSan.
+//    6.3. Collect UBSan user BBs, then reuse the same AddArchive extraction.
+//    6.4. Keep UBSan split classification because optimized frontend IR can
+//         obscure the original user CFG shape.
+//
+//===----------------------------------------------------------------------===//
+
 #include "Utils/MetaDataUtils.h"
 #include "Utils/Options.h"
 #include "Utils/UbsanUtils.h"
 #include "XSanDeSanReSan.h"
+#include "XSanSanitizingContext.h"
+#include "livepatch/record/SanitizingRecorder.h"
 #include "xsan_llvm_compat.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DepthFirstIterator.h"
+#include "llvm/ADT/PostOrderIterator.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/iterator.h"
+#include "llvm/ADT/iterator_range.h"
+#include "llvm/IR/Attributes.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
-#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instruction.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/Value.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Transforms/Utils/Local.h"
 
@@ -39,6 +100,56 @@ bool replaceNonSanInstUses(const Sanitizer &San, Value &From, Value &To) {
     return !IsSanUse;
   });
   return Changed;
+}
+
+BasicBlock::iterator nextSanInst(BasicBlock::iterator SI,
+                                 BasicBlock::iterator EI,
+                                 const Sanitizer &San) {
+  return llvm::find_if(
+      llvm::make_range(SI, EI),
+      [&San](const Instruction &I) -> bool { return isSanInst(San, I); });
+}
+
+BasicBlock::iterator nextUsrInst(BasicBlock::iterator SI,
+                                 BasicBlock::iterator EI,
+                                 const Sanitizer &San) {
+  return llvm::find_if(
+      llvm::make_range(SI, EI),
+      [&San](const Instruction &I) -> bool { return isUsrInst(San, I); });
+}
+
+Instruction *nextUsrInst(BasicBlock &BB, const Sanitizer &San) {
+  auto End = BB.end();
+  auto It = nextUsrInst(BB.begin(), End, San);
+  return It == End ? nullptr : &*It;
+}
+
+// Return if all IVs of preds ∈ (preds(BB) ∩ Visisted), and pass (preds(BB) ∩
+// Visisted) as mutable argument.
+bool AllSpecifiedPredIVsEquals(
+    const BasicBlock &BB, const SmallPtrSetImpl<BasicBlock *> &Visited,
+    SmallSetVector<BasicBlock *, 2> &SpecifiedPreds) {
+  // This sink is the only user exit and we have finished the DFS.
+  SpecifiedPreds.clear();
+  for (const auto *Pred : predecessors(&BB))
+    if (Visited.contains(Pred))
+      SpecifiedPreds.insert(const_cast<BasicBlock *>(Pred));
+  auto AllIVsEq = [&](const PHINode &PHi) {
+    const unsigned NumIV = PHi.getNumIncomingValues();
+    Value *IV = nullptr;
+    for (unsigned Idx = 0; Idx != NumIV; ++Idx) {
+      BasicBlock *Pred = PHi.getIncomingBlock(Idx);
+      if (!SpecifiedPreds.contains(Pred))
+        continue;
+      Value *CurIV = PHi.getIncomingValue(Idx);
+      if (!IV)
+        IV = CurIV;
+      else if (IV != CurIV)
+        return false;
+    }
+    return true;
+  };
+  return all_of(BB.phis(), AllIVsEq);
 }
 } // namespace
 
@@ -162,7 +273,7 @@ static void restoreDelete(const Sanitizer &San, DeleteArchive &Archive,
     }
     Worklist.swap(Pending);
     Pending.clear();
-  } while (Changed) ;
+  } while (Changed);
   requireOrDie(Worklist.empty(), "Cannot restore some Inst2Remove");
 }
 
@@ -223,181 +334,321 @@ static UserBBsMap collectUserBBsForUBSan(Module &M) {
   return Result;
 }
 
-static BasicBlock *
-findUserBBForSplit(BasicBlock *SplitBB, const UserBBsSet &UserBBs,
-                   const llvm::SmallPtrSetImpl<BasicBlock *> &HasUserInsts) {
-  llvm::SmallVector<BasicBlock *, 8> Worklist;
-  llvm::SmallPtrSet<BasicBlock *, 16> Visited;
-
-  for (BasicBlock *Pred : predecessors(SplitBB)) {
-    if (Pred == SplitBB)
-      continue;
-    if (Visited.insert(Pred).second)
-      Worklist.push_back(Pred);
-  }
-
-  while (!Worklist.empty()) {
-    BasicBlock *Cur = Worklist.pop_back_val();
-    if (UserBBs.contains(Cur) || HasUserInsts.contains(Cur))
-      return Cur;
-
-    for (BasicBlock *Pred : predecessors(Cur)) {
-      if (Pred == Cur || Pred == SplitBB)
-        continue;
-      if (Visited.insert(Pred).second)
-        Worklist.push_back(Pred);
-    }
-  }
-
-  return nullptr;
+AddRecord AddRecord::extractFrom(BasicBlock &SrcBB, BasicBlock::iterator Fr,
+                                 BasicBlock::iterator To) {
+  requireOrDie(Fr != To, "desan pure add resume got empty instruction range");
+  auto SanInsts = std::unique_ptr<BasicBlock>(
+      BasicBlock::Create(SrcBB.getContext(), MagicRecordBbName));
+  __xsan::compat::spliceInstructions(SanInsts.get(), SanInsts->end(), &SrcBB,
+                                     Fr, To);
+  return {AddRecordKind::Pure, &*To, std::move(SanInsts), {}, PureExtra()};
 }
 
-static void restoreAdd(const Sanitizer &San, AddArchive &Archive, Module &M,
+AddRecord AddRecord::extractFrom(llvm::BasicBlock &SrcBB,
+                                 llvm::BasicBlock::iterator Fr,
+                                 llvm::BasicBlock &SinkBB,
+                                 llvm::BasicBlock::iterator To,
+                                 SanBBsVec &&SanBBs) {
+  requireOrDie(Fr != SrcBB.end(),
+               "desan split add resume got empty source suffix");
+  requireOrDie(To != SinkBB.end(),
+               "desan split add resume got sink without user suffix");
+  SplitExtra Split{&SrcBB, &SinkBB};
+
+  // Expected: Src -> Sink would be merged as Src, hence we need to update phis
+  // of successors.
+  SinkBB.replaceSuccessorsPhiUsesWith(&SinkBB, &SrcBB);
+
+  auto SanInsts = std::unique_ptr<BasicBlock>(
+      BasicBlock::Create(SrcBB.getContext(), MagicRecordBbName));
+
+  // Merge SrcBB -> ... -> SinkBB as SrcBB
+
+  // SanInsts = SrcBB[Fr:]
+  // SrcBB'   = SrcBB[:Fr]
+  __xsan::compat::spliceInstructions(SanInsts.get(), SanInsts->end(), &SrcBB,
+                                     Fr, SrcBB.end());
+  // SrcBB'  = SrcBB[:Fr] : SinkBB[To:]
+  // SinkBB' = SinkBB[:To]
+  __xsan::compat::spliceInstructions(&SrcBB, SrcBB.end(), &SinkBB, To,
+                                     SinkBB.end());
+
+  requireOrDie(SanInsts->getTerminator() != nullptr,
+               "desan split add lost archived terminator");
+  return {AddRecordKind::Split, &*To, std::move(SanInsts), std::move(SanBBs),
+          std::move(Split)};
+}
+
+AddRecord AddRecord::extractFrom(
+    BasicBlock &SrcBB, BasicBlock::iterator Fr, BasicBlock &SinkBB,
+    SmallSetVector<BasicBlock *, 2> &&DetachedEdges, SanBBsVec &&SanBBs) {
+  requireOrDie(Fr != SrcBB.end(),
+               "desan split redirect got empty source suffix");
+
+  auto SanInsts = std::unique_ptr<BasicBlock>(
+      BasicBlock::Create(SrcBB.getContext(), MagicRecordBbName));
+  __xsan::compat::spliceInstructions(SanInsts.get(), SanInsts->end(), &SrcBB,
+                                     Fr, SrcBB.end());
+  auto *NewBr = BranchInst::Create(&SinkBB, &SrcBB);
+  __xsan::UserIR::set(*NewBr);
+  // User SrcBB is unstable for replay, remove it.
+  DetachedEdges.remove(&SrcBB);
+  RedirectExtra Redirect{&SrcBB, &SinkBB, std::move(DetachedEdges)};
+
+  // Fold Phi IVs in Sink BB.
+  Redirect.removeEdgesOfSanBB2Sink(SrcBB, *SanInsts);
+  requireOrDie(SanInsts->getTerminator() != nullptr,
+               "desan split add lost archived terminator");
+  return {AddRecordKind::Redirect, NewBr, std::move(SanInsts),
+          std::move(SanBBs), std::move(Redirect)};
+}
+
+void BlockAddRecord::revert() {
+  for (BasicBlock *BB : SanBBs)
+    if (BB && BB->getParent())
+      BB->removeFromParent();
+}
+
+std::optional<PHIAddRecord> PHIAddRecord::extractFrom(const Sanitizer &San,
+                                                      BasicBlock &TargetUsrBB) {
+  SmallVector<PHINode *, 2> SanPhis(make_pointer_range(
+      make_filter_range(TargetUsrBB.phis(), [&San](const PHINode &PHI) {
+        return isSanInst(San, PHI);
+      })));
+  if (SanPhis.empty())
+    return std::nullopt;
+  // detach
+  for (PHINode *Phi : SanPhis)
+    Phi->removeFromParent();
+  return PHIAddRecord{std::move(SanPhis), &TargetUsrBB};
+}
+
+namespace {
+struct SplitAddExtraction {
+  BasicBlock &SinkBB;
+  Instruction *SinkUserI = nullptr;
+  bool ReuseExistingSink = false;
+  AddRecord::SanBBsVec SanBBs;
+  SmallSetVector<BasicBlock *, 2> SinkSanPreds;
+};
+
+std::optional<SplitAddExtraction> extractSplitAdd(const Sanitizer &San,
+                                                  BasicBlock &SourceBB,
+                                                  const UserBBsSet &Users) {
+  df_iterator_default_set<BasicBlock *, 8> Visited;
+  auto It = /* Skip Root*/ df_ext_begin(&SourceBB, Visited),
+       End = df_ext_end(&SourceBB, Visited);
+  ++It;
+  // Find the next user exit of current source BB.
+  // Use DFS to search.
+  auto NextSink = [&]() -> std::optional<SplitAddExtraction> {
+    while (It != End) {
+      BasicBlock &Cur = **It;
+      if (Users.contains(&Cur)) {
+        It.skipChildren();
+        // If the sink BB is a user BB, we need to retain it from Functon.
+        return SplitAddExtraction{Cur, nullptr,
+                                  /*ReuseExistingSink=*/true};
+      }
+      if (Instruction *UserI = nextUsrInst(Cur, San)) {
+        It.skipChildren();
+        return SplitAddExtraction{Cur, UserI,
+                                  /*ReuseExistingSink=*/false};
+      }
+      ++It;
+    }
+    return std::nullopt;
+  };
+  // For Non-UBSan sanitizer, we assume that there is only one user exit.
+  auto Sink = NextSink();
+  // After optimization, some UBSan San entry might has no exit.
+  if (!Sink.has_value() && San.isUBSan())
+    return std::nullopt;
+
+  requireOrDie(Sink.has_value(), "[DeSan] No sink found in fun: " +
+                                     SourceBB.getParent()->getName() +
+                                     "\n\tSourceBB: " + SourceBB.getName() +
+                                     "\n\tSan     : " + San.name() + "\n");
+  if (NextSink()) {
+    // UBSan sanitizing might be affected by optimization, causing >1 user
+    // exits. For this case, we bail out conservatively.
+    requireOrDie(San.isUBSan(), "[DeSan] Found >1 sinks for a SourceBB: " +
+                                    SourceBB.getName() +
+                                    "\n\tSan: " + San.name() + "\n");
+    return std::nullopt;
+  }
+  if (Sink->ReuseExistingSink) {
+    // This sink is the only user exit and we have finished the DFS.
+    // Any of IVs not equal, cannot merge.
+    if (!AllSpecifiedPredIVsEquals(Sink->SinkBB, Visited, Sink->SinkSanPreds))
+      return std::nullopt;
+    Visited.erase(&Sink->SinkBB);
+  }
+  Visited.erase(&SourceBB);
+  // The retained Visisted BBs are all SanBBs.
+  Sink->SanBBs.append(Visited.begin(), Visited.end());
+  return *Sink;
+}
+} // namespace
+
+void AddRecord::RedirectExtra::removeEdgesOfSanBB2Sink(
+    BasicBlock &SourceBB, BasicBlock &SanInsts) {
+  auto FoldPhi = [&](PHINode &PHI) {
+    Value *IV = nullptr;
+    __xsan::compat::removeIncomingValueIf(PHI, [&](const unsigned Idx) -> bool {
+      auto *IncomingBB = PHI.getIncomingBlock(Idx);
+      bool Remove =
+          DetachedEdges.contains(IncomingBB) || IncomingBB == &SourceBB;
+      if (Remove && !IV)
+        IV = PHI.getIncomingValue(Idx);
+      return Remove;
+    });
+    requireOrDie(IV, "[DeSan] Unexpected strange PHI");
+    PHI.addIncoming(IV, &SourceBB);
+  };
+  // Handle PHis
+  for (PHINode &PHI : SinkBB->phis())
+    FoldPhi(PHI);
+  // Handle implict edge SanBB -> SinkBB
+  for (auto *Pred : DetachedEdges)
+    Pred->getTerminator()->replaceSuccessorWith(SinkBB, nullptr);
+  SanInsts.getTerminator()->replaceSuccessorWith(SinkBB, nullptr);
+}
+
+static void extractPhiAddSeq(const Sanitizer &San, AddArchive &Archive,
+                             BasicBlock &BB) {
+  auto PhiRecord = PHIAddRecord::extractFrom(San, BB);
+  if (PhiRecord.has_value())
+    Archive.PhiRecords.push_back(std::move(*PhiRecord));
+}
+
+/// Extract Add Sequence from current user BB.
+/// Use mutable @p BIt to record the progress.
+/// @return a bool to indicate whether we can further extract add sequence from
+/// this BB.
+static bool extractInstsAddSeq(const Sanitizer &San, AddArchive &Adds,
+                               DeleteArchive &Deletes, BasicBlock &SrcBB,
+                               BasicBlock::iterator &BIt,
+                               const UserBBsSet &Users) {
+  assert(Users.contains(&SrcBB) &&
+         "The source BB of SanAddSeq must be user BB");
+  assert(BIt != SrcBB.end());
+  // ================================================================
+  // 1. SrcBB[SanItBegin:SanItEnd] = SrcBB.nextSplice(isSanSlice)
+  // ================================================================
+  auto SanItBegin = nextSanInst(BIt, SrcBB.end(), San);
+  if (SanItBegin == SrcBB.end())
+    return false;
+  auto SanItEnd = nextUsrInst(SanItBegin, SrcBB.end(), San);
+
+  if (SanItEnd != SrcBB.end()) {
+    // =================================================================
+    // 2. Extract pure add sequence if !SourceBB.endswith(SanItEnd)
+    // =================================================================
+    // Old: BIt ----usr------ SanItBegin ----san---- SanItEnd ---- usr ----
+    // New:     --- usr ----                         BIt      ---- usr ----
+    Instruction &NextUsr = *SanItEnd;
+    Adds.addRecord(AddRecord::extractFrom(SrcBB, SanItBegin, SanItEnd));
+    BIt = NextUsr.getIterator();
+    return true;
+  }
+
+  Instruction *Term = SrcBB.getTerminator();
+  assert(Term && isSanInst(San, *Term) && "Unexpect non-San terminator");
+
+  // ================================================================
+  // 3. Extract split add sequence if SourceBB.endswith(SanItEnd)
+  // ================================================================
+  auto MaybeSplit = extractSplitAdd(San, SrcBB, Users);
+  if (!MaybeSplit) {
+    requireOrDie(
+        San.isUBSan(),
+        "[DeSan] Strange non-split adds for non-UBSan scenario.\n\t BB: " +
+            SrcBB.getName() + "\n\tSan: " + San.name());
+    return false;
+  }
+  auto Split = std::move(*MaybeSplit);
+  if (Split.ReuseExistingSink) {
+    Adds.addRecord(AddRecord::extractFrom(
+        SrcBB, SanItBegin, Split.SinkBB, std::move(Split.SinkSanPreds),
+        std::move(Split.SanBBs)));
+    // The br is newly created, should being deleted after add-replaying.
+    Deletes.insert(SrcBB.getTerminator());
+    return false;
+  }
+
+  assert(Split.SinkUserI != nullptr &&
+         "desan split add extraction lost its sink user anchor");
+  // Old: BIt ----usr------ SanItBegin ----san---- BBEnd
+  // New:     --- usr ----                         BIt  ---- usr ----
+  Adds.addRecord(AddRecord::extractFrom(
+      SrcBB, SanItBegin, Split.SinkBB, Split.SinkUserI->getIterator(),
+      std::move(Split.SanBBs)));
+  assert(Split.SinkUserI->getParent() == &SrcBB &&
+         "Sink User Inst must be moved to SrcBB");
+  BIt = Split.SinkUserI->getIterator();
+  return true;
+}
+
+static void restoreAdd(const Sanitizer &San, AddArchive &Adds,
+                       DeleteArchive &Deletes, Module &M,
                        const UserBBsMap &UserBBsMap) {
   for (Function &F : M) {
-    if (F.isDeclaration())
+    if (F.isDeclaration() ||
+        /* UBSan does not support DisableSanitizerInstrumentation */
+        !San.isUBSan() &&
+            F.hasFnAttribute(
+                Attribute::AttrKind::DisableSanitizerInstrumentation))
       continue;
 
     const auto UserBBsIt = UserBBsMap.find(&F);
-    if (UserBBsIt == UserBBsMap.end())
-      continue;
+    requireOrDie(UserBBsIt != UserBBsMap.end(),
+                 "Unexpected non-user function found: " + F.getName());
     const UserBBsSet &UserBBs = UserBBsIt->second;
+    BlockAddRecord::SanBBVec PendingSanBBs;
+    auto FlushPending = [&](BasicBlock *InsertPt) {
+      if (PendingSanBBs.empty())
+        return;
+      Adds.BBRecords.push_back(BlockAddRecord{&F, PendingSanBBs, InsertPt});
+      PendingSanBBs.clear();
+    };
 
-    // ------ Collect split type add blocks ------
-
-    // Collect sanitizer add blocks.
-    llvm::SmallVector<std::pair<BasicBlock *, Instruction *>> FirstUserInsts;
-    llvm::SmallPtrSet<BasicBlock *, 8> HasUserInsts;
-    llvm::SmallVector<BasicBlock *, 8> SanitizerBBs;
-
-    llvm::Function::iterator SanBBsBegin, SanBBsEnd;
-    SanBBsEnd = F.begin();
-    while (SanBBsEnd != F.end()) {
-      SanBBsBegin = std::find_if(SanBBsEnd, F.end(), [&](BasicBlock &BB) {
-        return !UserBBs.contains(&BB);
-      });
-      if (SanBBsBegin == F.end())
-        break;
-      SanBBsEnd = std::find_if(SanBBsBegin, F.end(), [&](BasicBlock &BB) {
-        return UserBBs.contains(&BB);
-      });
-
-      AddArchive::BBAnchor Anchor;
-      AddArchive::BBAnchorType AnchorType;
-      if (SanBBsEnd == F.end()) {
-        Anchor = &F;
-        AnchorType = AddArchive::BBAnchorType::FunctionAnchor;
-      } else {
-        Anchor = &*SanBBsEnd;
-        AnchorType = AddArchive::BBAnchorType::BasicBlockAnchor;
-      }
-
-      auto [It, Inserted] = Archive.SanBBMap.insert({Anchor, {AnchorType, {}}});
-      if (Inserted)
-        It->second.first = AnchorType;
-      for (BasicBlock &BB : llvm::make_range(SanBBsBegin, SanBBsEnd)) {
-        It->second.second.push_back(&BB);
-        SanitizerBBs.push_back(&BB);
-        // Sanitizer blocks with user instructions mean user block are split.
-        // Check and collect for the later restoration.
-        if (auto It = llvm::find_if(
-                BB, [&](Instruction &I) { return __xsan::UserIR::is(I); });
-            It != BB.end()) {
-          FirstUserInsts.push_back({&BB, &*It});
-          HasUserInsts.insert(&BB);
-        }
-      }
-    }
-
-    // Collect split type add blocks
-    for (auto [BB, UserI] : FirstUserInsts) {
-      // Find the nearest user/split anchor block before this split block.
-      auto *UserBB = findUserBBForSplit(BB, UserBBs, HasUserInsts);
-      requireOrDie(UserBB != nullptr,
-                   Twine("desan add restore could not find a user block anchor "
-                         "for a split add in sanitizer ") +
-                       San.name() + " function " + F.getName() + " block " +
-                       BB->getName());
-      requireOrDie(
-          UserBB != BB,
-          Twine("desan add restore found the split block itself as the "
-                "user block anchor for a split add in sanitizer ") +
-              San.name());
-
-      // Find the first sanitizer instruction after the last user instruction in
-      // the user block.
-      Instruction *FirstSanI;
-      if (auto It = llvm::find_if(
-              llvm::reverse(*UserBB),
-              [&](Instruction &I) { return __xsan::UserIR::is(I); });
-          It != UserBB->rend()) {
-        FirstSanI = It->getNextNode();
-      } else {
-        FirstSanI = &UserBB->front();
-      }
-      requireOrDie(
-          FirstSanI,
-          Twine("desan add restore could not find a sanitizer instruction in "
-                "the user block anchor for a split add in sanitizer ") +
-              San.name());
-
-      // Store the rest sanitizer instructions in the user block and
-      // restore all instructions in the last sanitizer block.
-      AddRecord::SplitRecord Record;
-      Record.SanInstsToAppend.reset(
-          BasicBlock::Create(F.getContext(), AddRecord::MagicRecordBbName));
-      __xsan::compat::spliceInstructions(
-          Record.SanInstsToAppend.get(), Record.SanInstsToAppend->end(), UserBB,
-          FirstSanI->getIterator(), UserBB->end());
-
-      Record.LastBB = BB;
-      __xsan::compat::spliceInstructions(UserBB, UserBB->end(), BB,
-                                         UserI->getIterator(), BB->end());
-      UserBB->replaceSuccessorsPhiUsesWith(BB, UserBB);
-
-      Archive.Records.push_back(
-          {AddRecord::AddRecordKind::Split, UserI, std::move(Record)});
-
-      HasUserInsts.erase(BB);
-    }
-
-    // Remove the collected sanitizer add blocks without user instructions.
-    for (BasicBlock *BB : SanitizerBBs)
-      BB->removeFromParent();
-
-    // ------ Collect pure type add blocks ------
-
+    // ================================================================
+    //    1. Extract SanInsts from BB and move UserInsts (CFG stable)
+    // ================================================================
     for (BasicBlock &BB : F) {
-      if (!UserBBs.contains(&BB))
+      if (!UserBBs.contains(&BB)) {
+        // Collect SanBBs.
+        PendingSanBBs.push_back(&BB);
         continue;
-
-      BasicBlock::iterator SanItBegin, SanItEnd;
-      SanItBegin = llvm::find_if(
-          BB, [&](Instruction &I) { return !__xsan::UserIR::is(I); });
-      while (SanItBegin != BB.end()) {
-        SanItEnd = std::find_if(SanItBegin, BB.end(), [&](Instruction &I) {
-          return __xsan::UserIR::is(I);
-        });
-        requireOrDie(SanItEnd != BB.end(),
-                     Twine("desan add restore could not find a user "
-                           "instruction after a pure add in sanitizer ") +
-                         San.name() + " function " + F.getName() + " block " +
-                         BB.getName());
-
-        AddRecord::PureRecord Record;
-        Record.SanInsts.reset(
-            BasicBlock::Create(BB.getContext(), AddRecord::MagicRecordBbName));
-        __xsan::compat::spliceInstructions(Record.SanInsts.get(),
-                                           Record.SanInsts->end(), &BB,
-                                           SanItBegin, SanItEnd);
-        Archive.Records.push_back(
-            {AddRecord::AddRecordKind::Pure, &*SanItEnd, std::move(Record)});
-        SanItBegin = std::find_if(SanItEnd, BB.end(), [&](Instruction &I) {
-          return !__xsan::UserIR::is(I);
-        });
       }
+      FlushPending(&BB);
+
+      auto BIt = compat::getFirstNonPHIIt(&BB)->getIterator();
+      while (BIt != BB.end() &&
+             extractInstsAddSeq(San, Adds, Deletes, BB, BIt, UserBBs))
+        ;
     }
+
+    FlushPending(nullptr);
+
+    // ================================================================
+    //    2. Extract SanPHIs from the UserBB PHI list.
+    // ================================================================
+    for (BasicBlock &BB : F)
+      if (UserBBs.contains(&BB))
+        extractPhiAddSeq(San, Adds, BB);
   }
+  // ===============================================================
+  //    3. Remove SanBBs from Function F (break CFG)
+  // ===============================================================
+  /// TODO: what if split add record extraction fails and the related
+  /// SanBBs are removed?
+  for (auto &BBRecord : Adds.BBRecords)
+    BBRecord.revert();
+
+  if (!San.isUBSan())
+    Adds.tagAs(San);
 }
 
 struct UbsanReplaceRule {
@@ -463,9 +714,9 @@ static Instruction *foldUBSanReplacement(ExtractValueInst &Replacer,
                                          const UbsanReplaceRule &Rule) {
   Twine Name = Replacer.hasName() ? Replacer.getName() : "";
 
-  auto *Replacee = BinaryOperator::Create(
-      Rule.Opcode, WithOverflow.getArgOperand(0), WithOverflow.getArgOperand(1),
-      Name);
+  auto *Replacee =
+      BinaryOperator::Create(Rule.Opcode, WithOverflow.getArgOperand(0),
+                             WithOverflow.getArgOperand(1), Name);
   if (Rule.HasNoSignedWrap)
     Replacee->setHasNoSignedWrap();
 
@@ -540,7 +791,7 @@ void runDeSan(Module &M, SanitizerArchive &Entry, UserBBsMap &UserBBsMap) {
   restoreFunction(San, Archive.FunctionRecords, M, UserBBsMap);
   restoreDelete(San, Archive.DeleteRecords, DeleteEvents);
   restoreReplace(San, Archive.ReplaceRecords, ReplaceEvents);
-  restoreAdd(San, Archive.AddRecords, M, UserBBsMap);
+  restoreAdd(San, Archive.AddRecords, Archive.DeleteRecords, M, UserBBsMap);
 
   if (options::ClDebug) {
     std::error_code EC;

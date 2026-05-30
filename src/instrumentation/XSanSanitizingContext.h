@@ -64,37 +64,93 @@ private:
   mutable const llvm::LLVMContext *SanIDContext = nullptr;
 };
 
-// Describes sanitizer IR that was removed by DeSan and must be reinserted by
-// ReSan. An add can be either a pure instruction sequence before a user
-// instruction, or a split edge where sanitizer blocks were interleaved with
-// user blocks.
+/// Represents SanInsts
+///  ([SanInst,...], UsrInstAnchor)
 struct AddRecord {
   constexpr static char MagicRecordBbName[] = "__xsan_desan_add_record_bb";
+  using SanBBsVec = llvm::SmallVector<llvm::BasicBlock *, 2>;
 
   enum class AddRecordKind : uint8_t {
-    Pure,
-    Split,
+    Pure,     // Add Seq inside a user BB
+    Split,    // Add Seq split a user BB to source -> sanBB -> sink
+    Redirect, // Add Seq redirect source -> sink to source -> sanBB -> sink
   };
 
-  struct PureRecord {
-    std::unique_ptr<llvm::BasicBlock> SanInsts;
+  struct PureExtra {};
+
+  struct SplitExtra {
+    // Source User BB, unstable.
+    // When replaying, the real source BB, i.e., BB(Anchor), might be another
+    // SinkBB.
+    llvm::BasicBlock *const SrcBB;
+    // Sink San BB, stable.
+    llvm::BasicBlock *const SinkBB;
   };
 
-  struct SplitRecord {
-    std::unique_ptr<llvm::BasicBlock> SanInstsToAppend;
-    llvm::BasicBlock *LastBB;
+  struct RedirectExtra : SplitExtra {
+    // not contains SourceBB, as it is unstable while replaying.
+    llvm::SmallSetVector<llvm::BasicBlock *, 2> DetachedEdges;
+    void removeEdgesOfSanBB2Sink(llvm::BasicBlock &SourceBB,
+                                 llvm::BasicBlock &SanInsts);
   };
 
-  AddRecord() = default;
   AddRecord(AddRecord &&) noexcept = default;
-  AddRecord &operator=(AddRecord &&) noexcept = default;
+  AddRecord &operator=(AddRecord &&) noexcept = delete;
   AddRecord(const AddRecord &) = delete;
   AddRecord &operator=(const AddRecord &) = delete;
 
   AddRecordKind Kind;
   // The first user instruction after the added parts.
-  llvm::Instruction *Anchor;
-  std::variant<PureRecord, SplitRecord> Record;
+  llvm::Instruction *const Anchor;
+  // The related SanInsts
+  std::unique_ptr<llvm::BasicBlock> SanInsts;
+  // The related SanBBs.
+  SanBBsVec SanBBs;
+  std::variant<PureExtra, SplitExtra, RedirectExtra> ExtraRecord;
+
+  // Construct a pure add record and move SrcBB[Fr:To) into it.
+  static AddRecord extractFrom(llvm::BasicBlock &SrcBB,
+                               llvm::BasicBlock::iterator Fr,
+                               llvm::BasicBlock::iterator To);
+  // Construct a split add record, move SrcBB[Fr:end) into it, then move
+  // SinkBB[To:end) back to SrcBB.end().
+  static AddRecord
+  extractFrom(llvm::BasicBlock &SrcBB, llvm::BasicBlock::iterator Fr,
+              llvm::BasicBlock &SinkBB, llvm::BasicBlock::iterator To,
+              SanBBsVec &&SanBBs);
+  // Construct a shared-sink split record, move SrcBB[Fr:end) into it,
+  // and replace the source suffix with an unconditional branch to SinkBB.
+  static AddRecord
+  extractFrom(llvm::BasicBlock &SrcBB, llvm::BasicBlock::iterator Fr,
+              llvm::BasicBlock &SinkBB,
+              llvm::SmallSetVector<llvm::BasicBlock *, 2> &&DetachedEdges,
+              SanBBsVec &&SanBBs);
+
+};
+
+/// Represents SanPhis inserted on UsrBB
+///  ([SanPhi,...], UsrBB)
+struct PHIAddRecord {
+  /// The size of SanPhis should be small, vec is enough, not requiring linked
+  /// list BasicBlock.
+  llvm::SmallVector<llvm::PHINode *, 2> SanPhis;
+  llvm::BasicBlock *const TargetUsrBB;
+
+  static std::optional<PHIAddRecord> extractFrom(const Sanitizer &San,
+                                                 llvm::BasicBlock &TargetUsrBB);
+};
+
+/// Represents SanBBs
+///  ([SanBB,...], UsrBB)
+struct BlockAddRecord {
+  using SanBBVec = llvm::SmallVector<llvm::BasicBlock *, 2>;
+  llvm::Function *Parent = nullptr;
+  SanBBVec SanBBs;
+  // Null means append to Parent->end().
+  llvm::BasicBlock *InsertPt = nullptr;
+  bool Replayed = false;
+
+  void revert();
 };
 
 struct ReplaceRecord {
@@ -104,32 +160,24 @@ struct ReplaceRecord {
   bool RealReplace = false;
 };
 
-// Per-sanitizer archive of added IR. SanBBMap holds detached sanitizer-only
-// blocks keyed by their original insertion anchor. DenseMap cannot directly key
-// on a Function/BasicBlock variant, so the anchor is stored as a typed pointer
-// pair.
+struct SanitizingContext;
+
+// Per-sanitizer archive of added IR. Records stores in-block sanitizer
+// instruction sequences, while BBRecords stores detached sanitizer-only blocks
+// in original order together with their reinsertion point.
 struct AddArchive {
-  AddArchive() = default;
+  AddArchive(SanitizingContext &Ctx) : Ctx(Ctx) {};
   AddArchive(AddArchive &&) noexcept = default;
-  AddArchive &operator=(AddArchive &&) noexcept = default;
   AddArchive(const AddArchive &) = delete;
   AddArchive &operator=(const AddArchive &) = delete;
 
-  // When Function ptr is used, the anchor is at the end of the function.
-  // Otherwise, the anchor is before the BasicBlock ptr.
-  using BBAnchor = void *;
-  enum BBAnchorType {
-    FunctionAnchor,
-    BasicBlockAnchor,
-  };
-
   std::vector<AddRecord> Records;
-  // We don't use std::variant for the anchor type because llvm::DenseMap
-  // doesn't support it as the key type. And write a custom DenseMapInfo is too
-  // long.
-  llvm::DenseMap<BBAnchor,
-                 std::pair<BBAnchorType, std::vector<llvm::BasicBlock *>>>
-      SanBBMap;
+  std::vector<BlockAddRecord> BBRecords;
+  std::vector<PHIAddRecord> PhiRecords;
+  SanitizingContext &Ctx;
+
+  void addRecord(AddRecord &&Add);
+  void tagAs(const Sanitizer &San);
 };
 
 class DeleteArchive : public llvm::SmallSetVector<llvm::Instruction *, 8> {
@@ -147,9 +195,8 @@ using FunctionArchive = llvm::SmallVector<llvm::Function *, 2>;
 // intentionally outside this struct (SanitizerArchive) so individual records do
 // not duplicate a stage/sanitizer field.
 struct ReSanArchive {
-  ReSanArchive() = default;
+  ReSanArchive(SanitizingContext &Ctx) : AddRecords(Ctx) {}
   ReSanArchive(ReSanArchive &&) noexcept = default;
-  ReSanArchive &operator=(ReSanArchive &&) noexcept = default;
   ReSanArchive(const ReSanArchive &) = delete;
   ReSanArchive &operator=(const ReSanArchive &) = delete;
 
@@ -160,7 +207,8 @@ struct ReSanArchive {
 
   void clear() {
     AddRecords.Records.clear();
-    AddRecords.SanBBMap.clear();
+    AddRecords.BBRecords.clear();
+    AddRecords.PhiRecords.clear();
     DeleteRecords.clear();
     ReplaceRecords.clear();
     FunctionRecords.clear();
@@ -178,11 +226,13 @@ using UserBBsSet = llvm::SmallPtrSet<llvm::BasicBlock *, 8>;
 using UserBBsMap = llvm::DenseMap<llvm::Function *, UserBBsSet>;
 
 struct SanitizerArchive {
-  SanitizerArchive(const Sanitizer &San) : San(San) {}
+  SanitizerArchive(SanitizingContext &Context, const Sanitizer &San)
+      : Context(Context), San(San), Archive{Context} {}
   SanitizerArchive(SanitizerArchive &&) noexcept = default;
   SanitizerArchive(const SanitizerArchive &) = delete;
   SanitizerArchive &operator=(const SanitizerArchive &) = delete;
 
+  SanitizingContext &Context;
   Sanitizer San;
   ReSanArchive Archive;
 };

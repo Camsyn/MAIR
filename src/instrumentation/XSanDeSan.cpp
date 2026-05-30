@@ -91,67 +91,51 @@ static void restoreFunction(const Sanitizer &San, FunctionArchive &Archive,
   }
 }
 
+bool DeleteArchive::restoreEvent(DeleteEvent &Event) {
+  // The prerequisite anchor has not been restore.
+  if (Event.Anchor && !Event.Anchor->getParent())
+    return false;
+
+  // Restore the instruction before anchor
+  if (!Event.Anchor)
+    __xsan::compat::appendInstruction(Event.Block, Event.Inst2Remove);
+  else
+    __xsan::compat::insertInstructionBefore(Event.Inst2Remove, Event.Anchor);
+  // Restore the operands
+  for (auto [Op, OpUse] :
+       llvm::zip(Event.Operands, Event.Inst2Remove->operands()))
+    OpUse.set(Op);
+  // Add to archive
+  this->insert(Event.Inst2Remove);
+  return true;
+}
+
 static void restoreDelete(const Sanitizer &San, DeleteArchive &Archive,
-                          std::vector<DeleteEvent> &Events) {
+                          const std::vector<DeleteEvent> &Events) {
+  llvm::SmallVector<DeleteEvent *, 8> Worklist, Pending;
+  Worklist.reserve(Events.size());
+  for (const auto &Event : Events)
+    Worklist.push_back(const_cast<DeleteEvent *>(&Event));
 
-  BitVector Restored(Events.size());
-  size_t Remaining = Events.size();
-  while (Remaining != 0) {
-    bool Progress = false;
-    for (size_t i = 0; i < Events.size(); ++i) {
-      if (Restored.test(i))
-        continue;
-
-      auto &Event = Events[i];
-      requireOrDie(
-          Event.DeletedValue && !Event.DeletedValue->getParent(),
-          Twine("desan delete restore found a non-orphan deleted value in "
-                "sanitizer ") +
-              San.name());
-      requireOrDie(Event.DeletedValue->getNumOperands() ==
-                       Event.Operands.size(),
-                   Twine("desan delete restore found operand count mismatch in "
-                         "sanitizer ") +
-                       San.name());
-
-      for (size_t j = 0; j < Event.Operands.size(); ++j) {
-        llvm::Value *Operand = Event.Operands[j];
-
-        // invoke instructions' BB operands may be replaced with unreachable
-        // instructions (removeUnreachableBlocks), which are not marked as user
-        // IR.
-        requireOrDie(
-            !llvm::isa<llvm::Instruction>(Operand) ||
-                llvm::isa<llvm::UnreachableInst>(Operand) ||
-                __xsan::UserIR::is(*llvm::cast<llvm::Instruction>(Operand)),
-            "desan delete restore found a non-user operand");
-
-        Event.DeletedValue->setOperand(j, Operand);
-      }
-
-      if (std::holds_alternative<BasicBlock *>(Event.Anchor)) {
-        BasicBlock *BB = std::get<BasicBlock *>(Event.Anchor);
-        __xsan::compat::appendInstruction(BB, Event.DeletedValue);
-      } else {
-        Instruction *I = std::get<Instruction *>(Event.Anchor);
-        if (!I->getParent())
-          continue;
-        __xsan::compat::insertInstructionBefore(Event.DeletedValue, I);
-      }
-
-      Archive[Event.DeletedValue].push_back({});
-      Restored.set(i);
-      --Remaining;
-      Progress = true;
+  // Some restore of DeleteEvent might depend on other DeleteEvent's restore.
+  // Hence, we use Worklist to reach the fixpoint.
+  bool Changed;
+  do {
+    Changed = false;
+    for (auto &Event : make_pointee_range(Worklist)) {
+      if (Archive.restoreEvent(Event))
+        Changed = true;
+      else
+        Pending.push_back(&Event);
     }
-    requireOrDie(Progress,
-                 Twine("desan could not resolve delete anchors in sanitizer ") +
-                     San.name());
-  }
+    Worklist.swap(Pending);
+    Pending.clear();
+  } while (Changed) ;
+  requireOrDie(Worklist.empty(), "Cannot restore some Inst2Remove");
 }
 
 static void restoreReplace(const Sanitizer &San, ReplaceArchive &Archive,
-                           std::vector<ReplaceEvent> &Events) {
+                           const std::vector<ReplaceEvent> &Events) {
   for (const auto &Event : Events) {
     const bool RealReplacement =
         replaceNonSanInstUses(San, *Event.SanReplacer, *Event.UserReplacee);
@@ -533,8 +517,8 @@ void runDeSan(Module &M, SanitizerArchive &Entry, UserBBsMap &UserBBsMap) {
     return;
   }
 
-  auto DeleteEvents = getDeleteEvents();
-  auto ReplaceEvents = getReplaceEvents();
+  const auto &DeleteEvents = getDeleteEvents();
+  const auto &ReplaceEvents = getReplaceEvents();
 
   restoreFunction(San, Archive.FunctionRecords, M, UserBBsMap);
   restoreDelete(San, Archive.DeleteRecords, DeleteEvents);

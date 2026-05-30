@@ -1,5 +1,6 @@
 #pragma once
 
+#include "livepatch/record/SanitizingRecorder.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SetVector.h"
@@ -130,8 +131,11 @@ struct AddArchive {
       SanBBMap;
 };
 
-using DeleteArchive =
-    llvm::DenseMap<llvm::Instruction *, llvm::SmallVector<DeleteRecord, 2>>;
+class DeleteArchive : public llvm::SmallSetVector<llvm::Instruction *, 8> {
+public:
+  /// @return restore successfully or not.
+  bool restoreEvent(DeleteEvent &);
+};
 
 using ReplaceArchive =
     llvm::DenseMap<llvm::Value *, llvm::SmallVector<ReplaceRecord, 2>>;

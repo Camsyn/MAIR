@@ -393,11 +393,11 @@ void SubSanitizers::addSanitizerWithDeSan(llvm::StringRef SanName,
   addDeSanPass(SanName);
 }
 
-void SubSanitizers::addDeSanPass(llvm::StringRef SanName) {
+void SubSanitizers::addDeSanPass(desan::Sanitizer San) {
   desan::requireOrDie(!!Ctx,
                       "sub-sanitizer addDeSanPass missing pipeline context");
   DeSanPassIndices.insert(Passes.size());
-  addPass(desan::DeSanPass(SanName, Ctx));
+  addPass(desan::DeSanPass(San, Ctx));
 }
 
 void SubSanitizers::addReSanPass() {
@@ -458,7 +458,7 @@ SubSanitizers SubSanitizers::loadSubSanitizers(llvm::OptimizationLevel Level) {
   Sanitizers.addPass(UbsanInstTaggingPass());
 
   // Deal with UBSan first, since UBSan is done by clang frontend.
-  Sanitizers.addDeSanPass("ubsan");
+  Sanitizers.addDeSanPassForUBSan();
 
   // UserTaggingPass: after UBSan DeSan restores frontend-lowered user IR, mark
   // the true user instructions/basic blocks for all later generic DeSan/ReSan

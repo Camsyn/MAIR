@@ -57,7 +57,11 @@ private:
   void beginPass(unsigned PassIndex);
   void resetRunState();
   void addSanitizerWithDeSan(llvm::StringRef SanName, PassAdder AddSanitizer);
-  void addDeSanPass(llvm::StringRef SanName);
+  void addDeSanPass(llvm::StringRef SanName) {
+    addDeSanPass(desan::Sanitizer::Create(SanName));
+  }
+  void addDeSanPassForUBSan() { addDeSanPass(desan::Sanitizer::UBSan()); }
+  void addDeSanPass(desan::Sanitizer San);
   void addReSanPass();
 
   llvm::OptimizationLevel Level;

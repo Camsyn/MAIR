@@ -1,17 +1,19 @@
 #pragma once
 
-#include "livepatch/record/SanitizingRecorder.h"
-
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <variant>
@@ -24,14 +26,24 @@ namespace __xsan::desan {
 // from the name as `xsan.<name>`, so adding a sanitizer no longer requires a
 // new hard-coded metadata kind.
 class Sanitizer {
+  static constexpr const char *UBSanName = "ubsan";
+
 public:
   Sanitizer() = default;
 
   static Sanitizer Create(llvm::StringRef Name);
+  static const Sanitizer &UBSan() {
+    static Sanitizer UBSan = []() {
+      Sanitizer San = Create(UBSanName);
+      San.IsUBSan = true;
+      return San;
+    }();
+    return UBSan;
+  }
 
   llvm::StringRef name() const { return Name; }
   size_t order() const { return Order; }
-  bool isUBSan() const { return Name == "ubsan"; }
+  bool isUBSan() const { return IsUBSan; }
   bool sameAs(const Sanitizer &Other) const {
     return Order == Other.Order && Name == Other.Name;
   }
@@ -45,6 +57,7 @@ private:
   unsigned getSanID(llvm::LLVMContext &Ctx) const;
 
   std::string Name;
+  bool IsUBSan = false;
   size_t Order = 0;
   mutable unsigned SanID = 0;
   mutable const llvm::LLVMContext *SanIDContext = nullptr;

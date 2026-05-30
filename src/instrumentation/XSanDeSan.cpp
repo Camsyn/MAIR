@@ -58,9 +58,8 @@ PreservedAnalyses UserTaggingPass::run(Module &M, ModuleAnalysisManager &) {
   return PreservedAnalyses::none();
 }
 
-DeSanPass::DeSanPass(llvm::StringRef SanName,
-                     std::shared_ptr<SanitizingContext> Ctx)
-    : San(Sanitizer::Create(SanName)), Ctx(std::move(Ctx)) {}
+DeSanPass::DeSanPass(Sanitizer San, std::shared_ptr<SanitizingContext> Ctx)
+    : San(San), Ctx(std::move(Ctx)) {}
 
 PreservedAnalyses DeSanPass::run(Module &M, ModuleAnalysisManager &) {
   requireOrDie(!!Ctx, "desan restore pass missing pipeline context");

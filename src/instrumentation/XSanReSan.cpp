@@ -176,16 +176,21 @@ void AddRecord::replaySplit() {
 
 void AddRecord::RedirectExtra::replayEdgesOfSanBB2Sink(BasicBlock &SrcBB,
                                                        BasicBlock &SanInsts) {
+  // If there is no null successor in SanInsts. it means SrcBB is not a
+  // predecessor of SinkBB.
+  assert(SanInsts.getTerminator() &&
+         "This step should be done before addition replay");
+  const bool IsSrcAsPred = llvm::is_contained(successors(&SanInsts), nullptr);
   // Handle implict edge SanBB -> SinkBB
-  SanInsts.getTerminator()->replaceSuccessorWith(nullptr, SinkBB);
+  if (IsSrcAsPred)
+    SanInsts.getTerminator()->replaceSuccessorWith(nullptr, SinkBB);
   for (auto *Pred : DetachedEdges)
     Pred->getTerminator()->replaceSuccessorWith(nullptr, SinkBB);
-  const bool isSrcAsPred = llvm::is_contained(successors(&SrcBB), SinkBB);
   for (PHINode &PHI : SinkBB->phis()) {
     const int Idx = PHI.getBasicBlockIndex(&SrcBB);
     requireOrDie(Idx >= 0, "resan redirect replay lost folded source PHI");
     Value *IV = PHI.getIncomingValue(Idx);
-    if (!isSrcAsPred)
+    if (!IsSrcAsPred)
       PHI.removeIncomingValue(Idx);
     for (auto *Detached : DetachedEdges)
       PHI.addIncoming(IV, Detached);

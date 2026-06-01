@@ -118,10 +118,11 @@ struct AddRecord {
                                llvm::BasicBlock::iterator To);
   // Construct a split add record, move SrcBB[Fr:end) into it, then move
   // SinkBB[To:end) back to SrcBB.end().
-  static AddRecord
-  extractFrom(llvm::BasicBlock &SrcBB, llvm::BasicBlock::iterator Fr,
-              llvm::BasicBlock &SinkBB, llvm::BasicBlock::iterator To,
-              SanBBsVec &&SanBBs);
+  static AddRecord extractFrom(llvm::BasicBlock &SrcBB,
+                               llvm::BasicBlock::iterator Fr,
+                               llvm::BasicBlock &SinkBB,
+                               llvm::BasicBlock::iterator To,
+                               SanBBsVec &&SanBBs);
   // Construct a shared-sink split record, move SrcBB[Fr:end) into it,
   // and replace the source suffix with an unconditional branch to SinkBB.
   static AddRecord
@@ -158,7 +159,17 @@ struct PHIAddRecord {
 /// Represents SanBBs
 ///  ([SanBB,...], UsrBB)
 struct BlockAddRecord {
-  using SanBBVec = llvm::SmallVector<llvm::BasicBlock *, 2>;
+  struct SanBBRecord {
+    llvm::BasicBlock *SanBB;
+    // Assumption: a SanBB should has <=1 user successor.
+    // If the SanBB has a user successor, set this.
+    // nullptr represents no user successor.
+    llvm::BasicBlock *UserSucc;
+
+    SanBBRecord(llvm::BasicBlock *SanBB, llvm::BasicBlock *UserSucc)
+        : SanBB(SanBB), UserSucc(UserSucc) {}
+  };
+  using SanBBVec = llvm::SmallVector<SanBBRecord, 2>;
   llvm::Function *Parent = nullptr;
   SanBBVec SanBBs;
   // Null means append to Parent->end().

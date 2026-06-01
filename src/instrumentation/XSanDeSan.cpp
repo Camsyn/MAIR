@@ -420,9 +420,14 @@ AddRecord AddRecord::extractFrom(
 }
 
 void BlockAddRecord::revert() {
-  for (BasicBlock *BB : SanBBs)
-    if (BB && BB->getParent())
-      BB->removeFromParent();
+  for (auto [SanBB, UserSucc] : SanBBs) {
+    assert(SanBB && SanBB->getParent());
+    // Hide the edge SanBB -> UserSucc to avoid predecessors(UserSucc) noticing
+    // SanBB.
+    if (UserSucc)
+      SanBB->getTerminator()->replaceSuccessorWith(UserSucc, nullptr);
+    SanBB->removeFromParent();
+  }
 }
 
 std::optional<PHIAddRecord> PHIAddRecord::extractFrom(const Sanitizer &San,
@@ -525,10 +530,19 @@ void AddRecord::RedirectExtra::removeEdgesOfSanBB2Sink(BasicBlock &SourceBB,
   // Handle PHis
   for (PHINode &PHI : SinkBB->phis())
     FoldPhi(PHI);
-  // Handle implict edge SanBB -> SinkBB
-  for (auto *Pred : DetachedEdges)
-    Pred->getTerminator()->replaceSuccessorWith(SinkBB, nullptr);
+
+  // Handle implict edge SanInsts -> SinkBB
   SanInsts.getTerminator()->replaceSuccessorWith(SinkBB, nullptr);
+
+  // AddRecord does not own SanBBs (which are owned by BlockAddRecord).
+  // Therefore, we should not modify DetachedEdges's implict edge at this place;
+  // they should be modified at BlockAddRecord::revert.
+  // All in all, we cannot add the following code here due to ownership
+  // violation:
+  // ```
+  //   for (auto *Pred : DetachedEdges)
+  //     Pred->getTerminator()->replaceSuccessorWith(SinkBB, nullptr);
+  // ```
 }
 
 static void extractPhiAddSeq(const Sanitizer &San, AddArchive &Archive,
@@ -628,6 +642,13 @@ static void restoreAdd(const Sanitizer &San, AddArchive &Adds,
       Adds.BBRecords.push_back(BlockAddRecord{&F, PendingSanBBs, InsertPt});
       PendingSanBBs.clear();
     };
+    auto FindUserSucc = [&](const BasicBlock &BB) {
+      auto Successors = successors(&BB);
+      auto It = find_if(Successors, [&](const BasicBlock *Succ) {
+        return UserBBs.contains(Succ);
+      });
+      return It == Successors.end() ? nullptr : const_cast<BasicBlock *>(*It);
+    };
 
     // ================================================================
     //    1. Extract SanInsts from BB and move UserInsts (CFG stable)
@@ -635,7 +656,7 @@ static void restoreAdd(const Sanitizer &San, AddArchive &Adds,
     for (BasicBlock &BB : F) {
       if (!UserBBs.contains(&BB)) {
         // Collect SanBBs.
-        PendingSanBBs.push_back(&BB);
+        PendingSanBBs.emplace_back(&BB, FindUserSucc(BB));
         continue;
       }
       FlushPending(&BB);

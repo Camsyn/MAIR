@@ -89,12 +89,15 @@ void BlockAddRecord::replay(Module &M) {
   if (InsertBefore && InsertBefore->getParent() != F)
     return;
 
-  for (BasicBlock *BB : SanBBs) {
-    requireOrDie(BB, "resan add replay lost a sanitizer block");
+  for (auto [SanBB, UserSucc] : SanBBs) {
+    assert(SanBB && "resan add replay lost a sanitizer block");
     requireOrDie(
-        !BB->getParent(),
+        !SanBB->getParent(),
         "resan add replay found a sanitizer block already in a function");
-    BB->insertInto(F, InsertBefore);
+    SanBB->insertInto(F, InsertBefore);
+    auto *Term = SanBB->getTerminator();
+    if (UserSucc && Term)
+      Term->replaceSuccessorWith(nullptr, UserSucc);
   }
   Replayed = true;
 }
@@ -181,11 +184,18 @@ void AddRecord::RedirectExtra::replayEdgesOfSanBB2Sink(BasicBlock &SrcBB,
   assert(SanInsts.getTerminator() &&
          "This step should be done before addition replay");
   const bool IsSrcAsPred = llvm::is_contained(successors(&SanInsts), nullptr);
-  // Handle implict edge SanBB -> SinkBB
+  // Recover hidden edge SanBB -> SinkBB
   if (IsSrcAsPred)
     SanInsts.getTerminator()->replaceSuccessorWith(nullptr, SinkBB);
-  for (auto *Pred : DetachedEdges)
-    Pred->getTerminator()->replaceSuccessorWith(nullptr, SinkBB);
+  // AddRecord does not own SanBBs (which are owned by BlockAddRecord).
+  // Therefore, we should not modify DetachedEdges's implict edge at this place;
+  // they should be modified at BlockAddRecord::replay.
+  // All in all, we cannot add the following code here due to ownership
+  // violation:
+  // ```
+  // for (auto *Pred : DetachedEdges)
+  //   Pred->getTerminator()->replaceSuccessorWith(nullptr, SinkBB);
+  // ```
   for (PHINode &PHI : SinkBB->phis()) {
     const int Idx = PHI.getBasicBlockIndex(&SrcBB);
     requireOrDie(Idx >= 0, "resan redirect replay lost folded source PHI");

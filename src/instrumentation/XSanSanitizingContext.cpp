@@ -232,8 +232,8 @@ void AddArchive::tagAs(const Sanitizer &San) {
       San.tag(*Phi);
 
   for (BlockAddRecord &BBRecord : BBRecords)
-    for (BasicBlock *BB : BBRecord.SanBBs)
-      TagBB(*BB);
+    for (auto [SanBB, _] : BBRecord.SanBBs)
+      TagBB(*SanBB);
 }
 
 void AddArchive::addRecord(AddRecord &&Add) {
@@ -395,9 +395,9 @@ void dumpArchive(const Sanitizer &San, const ReSanArchive &Archive,
 
       for (size_t J = 0; J < Record.SanBBs.size(); ++J) {
         OS << "    [bb#" << J << "] ";
-        dumpBasicBlockRef(Record.SanBBs[J], OS);
+        dumpBasicBlockRef(Record.SanBBs[J].SanBB, OS);
         OS << "\n";
-        dumpBasicBlockBody(Record.SanBBs[J], OS, "      ");
+        dumpBasicBlockBody(Record.SanBBs[J].SanBB, OS, "      ");
       }
     }
   }
@@ -627,7 +627,7 @@ void validateArchive(const Sanitizer &San, const ReSanArchive &Archive,
       OS << "\n";
     }
 
-    for (const BasicBlock *BB : Record.SanBBs) {
+    for (const auto [BB, _] : Record.SanBBs) {
       if (!BB) {
         OS << "[ReSan AddArchive] has null BB in BBRecords\n";
       } else if (BB->getParent()) {

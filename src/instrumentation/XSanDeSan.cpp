@@ -55,6 +55,7 @@
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/STLForwardCompat.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -633,11 +634,39 @@ static void restoreAdd(const Sanitizer &San, AddArchive &Adds,
     requireOrDie(UserBBsIt != UserBBsMap.end(),
                  "Unexpected non-user function found: " + F.getName());
     const UserBBsSet &UserBBs = UserBBsIt->second;
+
+    // ================================================================
+    //    1. Extract SanInsts from BB and move UserInsts (BBs stable)
+    // ================================================================
+    for (BasicBlock &BB : F) {
+      if (!UserBBs.contains(&BB))
+        continue;
+
+      auto BIt = compat::getFirstNonPHIIt(&BB)->getIterator();
+      while (BIt != BB.end() &&
+             extractInstsAddSeq(San, Adds, Deletes, BB, BIt, UserBBs))
+        ;
+    }
+
+    // ================================================================
+    //    2. Extract SanPHIs from the UserBB PHI list (CFG stable).
+    // ================================================================
+    for (BasicBlock &BB : F)
+      if (UserBBs.contains(&BB))
+        extractPhiAddSeq(San, Adds, BB);
+
+    // =================================================================
+    //    3. Extract detached SanBBs from (break BB lists).
+    // ================================================================
     BlockAddRecord::SanBBVec PendingSanBBs;
+    /// TODO: figure out should we maintain the insert point for SanBBs? Why not
+    /// insert them into F.end directly?
     auto FlushPending = [&](BasicBlock *InsertPt) {
       if (PendingSanBBs.empty())
         return;
-      Adds.BBRecords.push_back(BlockAddRecord{&F, PendingSanBBs, InsertPt});
+      BlockAddRecord BBRecord{&F, PendingSanBBs, InsertPt};
+      BBRecord.revert();
+      Adds.BBRecords.push_back(std::move(BBRecord));
       PendingSanBBs.clear();
     };
     auto FindUserSucc = [&](const BasicBlock &BB) {
@@ -647,41 +676,21 @@ static void restoreAdd(const Sanitizer &San, AddArchive &Adds,
       });
       return It == Successors.end() ? nullptr : const_cast<BasicBlock *>(*It);
     };
-
-    // ================================================================
-    //    1. Extract SanInsts from BB and move UserInsts (CFG stable)
-    // ================================================================
+    // For UBSan, some SanBBs might not be eliminated. Those special SanBBs
+    // would be treated as User BB in the subsequent DeSan. Therefore, we remove
+    // those unreachable BBs as `BlockAddRecord`s.
+    const auto &&ReachableBBs =
+        San.isUBSan() ? SmallSetVector<const BasicBlock *, 16>{llvm::from_range,
+                                                               depth_first(&F)}
+                      : SmallSetVector<const BasicBlock *, 16>{};
     for (BasicBlock &BB : F) {
-      if (!UserBBs.contains(&BB)) {
-        // Collect SanBBs.
+      if (San.isUBSan() ? ReachableBBs.contains(&BB) : UserBBs.contains(&BB))
+        FlushPending(&BB);
+      else
         PendingSanBBs.emplace_back(&BB, FindUserSucc(BB));
-        continue;
-      }
-      FlushPending(&BB);
-
-      auto BIt = compat::getFirstNonPHIIt(&BB)->getIterator();
-      while (BIt != BB.end() &&
-             extractInstsAddSeq(San, Adds, Deletes, BB, BIt, UserBBs))
-        ;
     }
-
     FlushPending(nullptr);
-
-    // ================================================================
-    //    2. Extract SanPHIs from the UserBB PHI list.
-    // ================================================================
-    for (BasicBlock &BB : F)
-      if (UserBBs.contains(&BB))
-        extractPhiAddSeq(San, Adds, BB);
   }
-  // ===============================================================
-  //    3. Remove SanBBs from Function F (break CFG)
-  // ===============================================================
-  /// TODO: what if split add record extraction fails and the related
-  /// SanBBs are removed?
-  for (auto &BBRecord : Adds.BBRecords)
-    BBRecord.revert();
-
   if (!San.isUBSan())
     Adds.tagAs(San);
 }

@@ -505,8 +505,8 @@ std::optional<SplitAddExtraction> extractSplitAdd(const Sanitizer &San,
 }
 } // namespace
 
-void AddRecord::RedirectExtra::removeEdgesOfSanBB2Sink(
-    BasicBlock &SourceBB, BasicBlock &SanInsts) {
+void AddRecord::RedirectExtra::removeEdgesOfSanBB2Sink(BasicBlock &SourceBB,
+                                                       BasicBlock &SanInsts) {
   auto FoldPhi = [&](PHINode &PHI) {
     Value *IV = nullptr;
     __xsan::compat::removeIncomingValueIf(PHI, [&](const unsigned Idx) -> bool {
@@ -583,9 +583,9 @@ static bool extractInstsAddSeq(const Sanitizer &San, AddArchive &Adds,
   }
   auto Split = std::move(*MaybeSplit);
   if (Split.ReuseExistingSink) {
-    Adds.addRecord(AddRecord::extractFrom(
-        SrcBB, SanItBegin, Split.SinkBB, std::move(Split.SinkSanPreds),
-        std::move(Split.SanBBs)));
+    Adds.addRecord(AddRecord::extractFrom(SrcBB, SanItBegin, Split.SinkBB,
+                                          std::move(Split.SinkSanPreds),
+                                          std::move(Split.SanBBs)));
     // The br is newly created, should being deleted after add-replaying.
     Deletes.insert(SrcBB.getTerminator());
     return false;
@@ -595,9 +595,9 @@ static bool extractInstsAddSeq(const Sanitizer &San, AddArchive &Adds,
          "desan split add extraction lost its sink user anchor");
   // Old: BIt ----usr------ SanItBegin ----san---- BBEnd
   // New:     --- usr ----                         BIt  ---- usr ----
-  Adds.addRecord(AddRecord::extractFrom(
-      SrcBB, SanItBegin, Split.SinkBB, Split.SinkUserI->getIterator(),
-      std::move(Split.SanBBs)));
+  Adds.addRecord(AddRecord::extractFrom(SrcBB, SanItBegin, Split.SinkBB,
+                                        Split.SinkUserI->getIterator(),
+                                        std::move(Split.SanBBs)));
   assert(Split.SinkUserI->getParent() == &SrcBB &&
          "Sink User Inst must be moved to SrcBB");
   BIt = Split.SinkUserI->getIterator();

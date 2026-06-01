@@ -307,9 +307,11 @@ static bool hasMultiUserEntries(
   return NumUserEntry > 1;
 }
 
-static bool isTermByRetOrUnreachable(const BasicBlock *BB) {
-  return isa<UnreachableInst>(BB->getTerminator()) ||
-         isa<ReturnInst>(BB->getTerminator());
+static bool isAllUBSanTermByRetOrUnreachable(const BasicBlock *BB) {
+  bool AllUBSan =
+      BB && all_of(*BB, [](const Instruction &I) { return UBSanInst::is(I); });
+  return AllUBSan && (isa<UnreachableInst>(BB->getTerminator()) ||
+                      isa<ReturnInst>(BB->getTerminator()));
 }
 
 static UserBBsMap collectUserBBsForUBSan(Module &M) {
@@ -341,7 +343,7 @@ static UserBBsMap collectUserBBsForUBSan(Module &M) {
                               [&UserBBsSet](const BasicBlock *BB) {
                                 return UserBBsSet.contains(BB);
                               }) &&
-          !isTermByRetOrUnreachable(BB))
+          !isAllUBSanTermByRetOrUnreachable(BB))
         UserBBsSet.insert(BB);
     }
   }

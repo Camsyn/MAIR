@@ -307,11 +307,9 @@ static bool hasMultiUserEntries(
   return NumUserEntry > 1;
 }
 
-static bool isAllUBSanTermByRetOrUnreachable(const BasicBlock *BB) {
-  bool AllUBSan =
-      BB && all_of(*BB, [](const Instruction &I) { return UBSanInst::is(I); });
-  return AllUBSan && (isa<UnreachableInst>(BB->getTerminator()) ||
-                      isa<ReturnInst>(BB->getTerminator()));
+static bool allInstsAreUBSan(const BasicBlock *BB) {
+  return BB &&
+         all_of(*BB, [](const Instruction &I) { return UBSanInst::is(I); });
 }
 
 static UserBBsMap collectUserBBsForUBSan(Module &M) {
@@ -336,14 +334,12 @@ static UserBBsMap collectUserBBsForUBSan(Module &M) {
         UserBBsSet.insert(BB);
         continue;
       }
-      // 3. Rule THREE: BB with >1 user entries and without unreachable/ret
-      // terminiator is UsrBB.
-      // Note: unreacahble/ret SanBB is the only SanbB allowing >1 user entries.
+      // 3. Rule THREE: BB with >1 user entries and user Instruction.
       if (hasMultiUserEntries(BB,
                               [&UserBBsSet](const BasicBlock *BB) {
                                 return UserBBsSet.contains(BB);
                               }) &&
-          !isAllUBSanTermByRetOrUnreachable(BB))
+          !allInstsAreUBSan(BB))
         UserBBsSet.insert(BB);
     }
   }
@@ -422,10 +418,12 @@ AddRecord AddRecord::extractFrom(
 void BlockAddRecord::revert() {
   for (auto [SanBB, UserSucc] : SanBBs) {
     assert(SanBB && SanBB->getParent());
+    // Some SinkBB has no terminator as SplitAdd.
+    auto *Term = SanBB->getTerminator();
     // Hide the edge SanBB -> UserSucc to avoid predecessors(UserSucc) noticing
     // SanBB.
-    if (UserSucc)
-      SanBB->getTerminator()->replaceSuccessorWith(UserSucc, nullptr);
+    if (UserSucc && Term)
+      Term->replaceSuccessorWith(UserSucc, nullptr);
     SanBB->removeFromParent();
   }
 }

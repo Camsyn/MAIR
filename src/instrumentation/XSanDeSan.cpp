@@ -55,6 +55,7 @@
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -286,6 +287,31 @@ static void restoreReplace(const Sanitizer &San, ReplaceArchive &Archive,
   }
 }
 
+static bool hasMultiUserEntries(
+    const BasicBlock *BB,
+    llvm::function_ref<bool(const BasicBlock *)> UserPredicate) {
+  uint8_t NumUserEntry = 0;
+  auto It = idf_begin(BB);
+  ++It;
+  for (auto End = idf_end(BB); It != End;) {
+    const BasicBlock *Cur = *It;
+    if (UserPredicate(Cur)) {
+      // >1 user entries, dirtecly break the loop.
+      if (++NumUserEntry > 1)
+        break;
+      It.skipChildren();
+    } else {
+      ++It;
+    }
+  }
+  return NumUserEntry > 1;
+}
+
+static bool isTermByRetOrUnreachable(const BasicBlock *BB) {
+  return isa<UnreachableInst>(BB->getTerminator()) ||
+         isa<ReturnInst>(BB->getTerminator());
+}
+
 static UserBBsMap collectUserBBsForUBSan(Module &M) {
   UserBBsMap Result;
   for (Function &F : M) {
@@ -308,26 +334,14 @@ static UserBBsMap collectUserBBsForUBSan(Module &M) {
         UserBBsSet.insert(BB);
         continue;
       }
-      // 3. Rule THREE: BB with 1) user inst and 2) >1 user entries
-      //    The SinkBB is the only SanBB allowing user inst, but it must has
-      //    just ONE entry.
-      if (all_of(*BB, [](const Instruction &I) { return UBSanInst::is(I); }))
-        continue;
-      uint8_t NumUserEntry = 0;
-      auto It = idf_begin(BB);
-      ++It;
-      for (auto End = idf_end(BB); It != End;) {
-        BasicBlock *BB = *It;
-        if (UserBBsSet.contains(BB)) {
-          // >1 user entries, dirtecly break the loop.
-          if (++NumUserEntry > 1)
-            break;
-          It.skipChildren();
-        } else {
-          ++It;
-        }
-      }
-      if (NumUserEntry > 1)
+      // 3. Rule THREE: BB with >1 user entries and without unreachable/ret
+      // terminiator is UsrBB.
+      // Note: unreacahble/ret SanBB is the only SanbB allowing >1 user entries.
+      if (hasMultiUserEntries(BB,
+                              [&UserBBsSet](const BasicBlock *BB) {
+                                return UserBBsSet.contains(BB);
+                              }) &&
+          !isTermByRetOrUnreachable(BB))
         UserBBsSet.insert(BB);
     }
   }

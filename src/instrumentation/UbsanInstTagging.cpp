@@ -47,12 +47,14 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/iterator.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Use.h"
 #include "llvm/Support/Casting.h"
@@ -199,6 +201,25 @@ private:
   Function &F;
   std::array<InstDefUseNode *, 2> VRoots;
 
+  template <typename RootsT>
+  void addRoots(const RootsT &Roots,
+                SmallVectorImpl<InstDefUseNode *> &DstRoots,
+                InstDefUseNode::Tag RootTag,
+                SmallVectorImpl<InstDefUseNode *> *AddedNodes = nullptr) {
+    DstRoots.reserve(DstRoots.size() + Roots.size());
+    for (Instruction *I : Roots) {
+      if (isIgnorableForDefUseGraph(*I))
+        continue;
+      InstDefUseNode *const Node = getNode(*I);
+      if (AddedNodes && llvm::is_contained(DstRoots, Node))
+        continue;
+      Node->NodeTag = RootTag;
+      DstRoots.push_back(Node);
+      if (AddedNodes)
+        AddedNodes->push_back(Node);
+    }
+  }
+
 public:
   template <typename UBSanRootRangeT, typename UserRootRangeT>
   InstUseDefGraph(Function &F, const UBSanRootRangeT &UBSanRoots,
@@ -223,41 +244,42 @@ public:
   }
 
   template <typename RootsT> void addUBSanRoots(const RootsT &Roots) {
-    UBSanRoots.reserve(UBSanRoots.size() + Roots.size());
-    for (Instruction *I : Roots) {
-      if (isIgnorableForDefUseGraph(*I))
-        continue;
-      InstDefUseNode *const Node = getNode(*I);
-      Node->NodeTag = InstDefUseNode::Tag::UBSanRoot;
-      UBSanRoots.push_back(Node);
-    }
+    addRoots(Roots, UBSanRoots, InstDefUseNode::Tag::UBSanRoot);
   }
 
   template <typename RootsT>
   void addUBSanRoots(const RootsT &Roots,
                      SmallVectorImpl<InstDefUseNode *> &AddedNodes) {
-    UBSanRoots.reserve(UBSanRoots.size() + Roots.size());
-    for (Instruction *I : Roots) {
-      if (isIgnorableForDefUseGraph(*I))
-        continue;
-      InstDefUseNode *const Node = getNode(*I);
-      if (llvm::is_contained(UBSanRoots, Node))
-        continue;
-      Node->NodeTag = InstDefUseNode::Tag::UBSanRoot;
-      UBSanRoots.push_back(Node);
-      AddedNodes.push_back(Node);
-    }
+    addRoots(Roots, UBSanRoots, InstDefUseNode::Tag::UBSanRoot, &AddedNodes);
   }
 
   template <typename RootsT> void addUserRoots(const RootsT &Roots) {
-    UserRoots.reserve(UserRoots.size() + Roots.size());
-    for (Instruction *I : Roots) {
-      if (isIgnorableForDefUseGraph(*I))
+    addRoots(Roots, UserRoots, InstDefUseNode::Tag::UserRoot);
+  }
+
+  template <typename RootsT>
+  void addUserRoots(const RootsT &Roots,
+                    SmallVectorImpl<InstDefUseNode *> &AddedNodes) {
+    addRoots(Roots, UserRoots, InstDefUseNode::Tag::UserRoot, &AddedNodes);
+  }
+
+  template <typename RootsT>
+  void removeUBSanRoots(const RootsT &Roots,
+                        SmallVectorImpl<InstDefUseNode *> &RemovedNodes) {
+    unsigned WriteIdx = 0;
+    bool SawRemoval = false;
+    for (InstDefUseNode *Node : UBSanRoots) {
+      if (llvm::is_contained(Roots, Node->Inst)) {
+        RemovedNodes.push_back(Node);
+        SawRemoval = true;
         continue;
-      InstDefUseNode *const Node = getNode(*I);
-      Node->NodeTag = InstDefUseNode::Tag::UserRoot;
-      UserRoots.push_back(Node);
+      }
+      if (SawRemoval)
+        UBSanRoots[WriteIdx] = Node;
+      ++WriteIdx;
     }
+    if (SawRemoval)
+      UBSanRoots.resize(WriteIdx);
   }
 
   template <typename RootsT>
@@ -337,6 +359,7 @@ public:
   auto nodes_begin() { return Storage.begin(); }
   auto nodes_end() { return Storage.end(); }
   unsigned size() const { return Storage.size(); }
+  auto getAllInstruction() { return instructions(F); }
 };
 
 // A interator to unifiy different types of iterators.
@@ -482,13 +505,27 @@ class UBSanUseDefDomTree : public DomTreeBase<InstDefUseNode> {
     assert(this->Parent && "UBSanUseDomTree must be calculated first");
     return *this->Parent;
   }
+  mutable bool Updated = false;
+  mutable SmallVector<Instruction *, 32> UBSanInsts;
 
 public:
   using Base = DomTreeBase<InstDefUseNode>;
   using Base::recalculate;
 
-  SmallVector<Instruction *, 32> getAllUBSanInsts() const;
-  bool tagAllUBSanInsts();
+  const SmallVector<Instruction *, 32> &getAllUBSanInsts() const;
+  /// @p Refresh: drop the old UBSan Inst firstly
+  bool tagAllUBSanInsts(bool Refresh = false);
+  void recalculate(ParentType &Func) {
+    DomTreeBase<InstDefUseNode>::recalculate(Func);
+    Updated = true;
+  }
+  void recalculate(ParentType &Func, ArrayRef<UpdateType> Updates) = delete;
+  void applyUpdates(ArrayRef<UpdateType> Updates) {
+    DomTreeBase<InstDefUseNode>::applyUpdates(Updates);
+    Updated = true;
+  }
+  void applyUpdates(ArrayRef<UpdateType> Updates,
+                    ArrayRef<UpdateType> PostViewUpdates) = delete;
 };
 
 bool isUBSanBlock(const BasicBlock &BB) {
@@ -528,22 +565,23 @@ BasicBlock *getSingleSuccessor(const BasicBlock &BB) {
 ///     unreachable
 ///   SinkBB:
 ///     ...
-bool isSanityCheckCondBr(const BasicBlock &SanBB, const BranchInst &PredBr) {
+const BasicBlock *getSanityCheckSink(const BasicBlock &SanBB,
+                                     const BranchInst &PredBr,
+                                     const BasicBlock *SanSucc) {
   assert(PredBr.isConditional() &&
          "only conditional branches need UBSan split validation");
-  if (isa<UnreachableInst>(SanBB.getTerminator()))
-    return true;
-
-  BasicBlock *SanSucc = getSingleSuccessor(SanBB);
+  BasicBlock *OtherSucc = PredBr.getSuccessor(0) == &SanBB
+                              ? PredBr.getSuccessor(1)
+                              : PredBr.getSuccessor(0);
   if (!SanSucc)
-    return false;
+    return OtherSucc;
+  return OtherSucc == SanSucc ? SanSucc : nullptr;
+}
 
-  BasicBlock *OtherSucc = nullptr;
-  if (PredBr.getSuccessor(0) == &SanBB)
-    return SanSucc == PredBr.getSuccessor(1);
-  if (PredBr.getSuccessor(1) == &SanBB)
-    return SanSucc == PredBr.getSuccessor(0);
-  return false;
+bool containsUserPhi(const BasicBlock *BB) {
+  assert(BB);
+  return !all_of(BB->phis(),
+                 [](const PHINode &PHI) { return __xsan::UBSanInst::is(PHI); });
 }
 
 bool isNotUBSanSanityCall(const CallBase &CB) {
@@ -558,7 +596,8 @@ bool isNotUBSanSanityCall(const CallBase &CB) {
 /// TODO: make this recursively. I.e., NewRoots's parent can derive otehr new
 /// roots.
 void getNewRootsFromUBSanBB(ArrayRef<CallBase *> UbsanCallAnchors,
-                            SmallSetVector<Instruction *, 8> &NewRoots) {
+                            SmallSetVector<Instruction *, 8> &NewRoots,
+                            SmallSetVector<const BasicBlock *, 8> &Sinks) {
   SmallSetVector<BasicBlock *, 8> UbsanBlocks;
   for (CallBase *Anchor : UbsanCallAnchors) {
     // E.g.,
@@ -573,42 +612,52 @@ void getNewRootsFromUBSanBB(ArrayRef<CallBase *> UbsanCallAnchors,
       UbsanBlocks.insert(BB);
   }
 
-  for (BasicBlock *BB : UbsanBlocks) {
-    NewRoots.insert(BB->getTerminator());
-
-    for (BasicBlock *Pred : predecessors(BB)) {
+  for (BasicBlock *SanBB : UbsanBlocks) {
+    BasicBlock *SanSucc = getSingleSuccessor(*SanBB);
+    assert((SanSucc || isa<UnreachableInst>(SanBB->getTerminator())) &&
+           "Unexpect SanBB met!");
+    for (BasicBlock *Pred : predecessors(SanBB)) {
       Instruction *PredTerm = Pred->getTerminator();
       auto *Br = dyn_cast<BranchInst>(PredTerm);
       // Only conditional pred branch can be NewRoot
-      if (!Br || !Br->isConditional() || !isSanityCheckCondBr(*BB, *Br))
+      if (!Br || !Br->isConditional())
         continue;
+      const auto *Sink = getSanityCheckSink(*SanBB, *Br, SanSucc);
+      if (!Sink)
+        continue;
+      Sinks.insert(Sink);
       NewRoots.insert(Br);
     }
+    NewRoots.insert(SanBB->getTerminator());
   }
 }
 
-SmallVector<Instruction *, 32> UBSanUseDefDomTree::getAllUBSanInsts() const {
-  const InstUseDefGraph &Graph = getGraph();
-  SmallVector<Instruction *, 32> UbsanInsts;
-  SmallVector<InstDefUseNode *, 32> DTNodes;
-  this->getDescendants(Graph.UBSanVRoot, DTNodes);
-  for (InstDefUseNode *Node : DTNodes) {
-    if (!Node || !Node->isInstructionNode())
-      continue;
-    UbsanInsts.push_back(Node->Inst);
+const SmallVector<Instruction *, 32> &
+UBSanUseDefDomTree::getAllUBSanInsts() const {
+  if (Updated) {
+    UBSanInsts.clear();
+    const InstUseDefGraph &Graph = getGraph();
+    SmallVector<InstDefUseNode *, 32> DTNodes;
+    this->getDescendants(Graph.UBSanVRoot, DTNodes);
+    for (InstDefUseNode *Node : DTNodes) {
+      if (!Node || !Node->isInstructionNode())
+        continue;
+      UBSanInsts.push_back(Node->Inst);
+    }
+    Updated = false;
   }
-
-  return UbsanInsts;
+  return UBSanInsts;
 }
 
-bool UBSanUseDefDomTree::tagAllUBSanInsts() {
-  bool Changed = false;
-  for (Instruction *I : getAllUBSanInsts()) {
+bool UBSanUseDefDomTree::tagAllUBSanInsts(bool Refresh) {
+  if (Refresh && Parent) {
+    for (auto &I : Parent->getAllInstruction())
+      __xsan::UBSanInst::drop(I);
+  }
+  const auto &UBSanInsts = getAllUBSanInsts();
+  for (Instruction *I : UBSanInsts)
     __xsan::UBSanInst::set(*I);
-    __xsan::UserIR::drop(*I);
-    Changed = true;
-  }
-  return Changed;
+  return !UBSanInsts.empty();
 }
 
 // Those instructions without user
@@ -655,32 +704,69 @@ bool tagUbsanInstructions(Function &F) {
   // and collect new roots (i.e., conditional terminator -> UBSan BB).
   //===------------------------------------------------------------------===//
   SmallSetVector<Instruction *, 8> NewRoots;
-  getNewRootsFromUBSanBB(UBSanHandlerRoots, NewRoots);
+  SmallSetVector<const BasicBlock *, 8> Sinks;
+  getNewRootsFromUBSanBB(UBSanHandlerRoots, NewRoots, Sinks);
 
   //===------------------------------------------------------------------===//
   // Phase 4: update the tree with newly discovered control roots.
   //===------------------------------------------------------------------===//
-  SmallVector<InstDefUseNode *, 8> AddedUBSanRoots;
-  SmallVector<InstDefUseNode *, 8> RemovedUserRoots;
-  Graph.addUBSanRoots(NewRoots, AddedUBSanRoots);
-  Graph.removeUserRoots(NewRoots, RemovedUserRoots);
-
+  SmallVector<InstDefUseNode *, 8> AddedRoots;
+  SmallVector<InstDefUseNode *, 8> RemovedRoots;
   SmallVector<UBSanUseDefDomTree::UpdateType, 8> Updates;
-  for (InstDefUseNode *Node : AddedUBSanRoots)
-    Updates.push_back({UBSanUseDefDomTree::Insert, Graph.UBSanVRoot, Node});
-  for (InstDefUseNode *Node : RemovedUserRoots)
-    Updates.push_back({UBSanUseDefDomTree::Delete, Graph.UserVRoot, Node});
+  auto ApplyUpdates = [&](const SmallSetVector<Instruction *, 8> &Roots,
+                          bool Usr2UBSan) {
+    AddedRoots.clear();
+    RemovedRoots.clear();
+    Updates.clear();
+    InstDefUseNode *VRootFrom, *VRootTo;
+    if (Usr2UBSan) {
+      Graph.addUBSanRoots(Roots, AddedRoots);
+      Graph.removeUserRoots(Roots, RemovedRoots);
+      VRootFrom = Graph.UserVRoot, VRootTo = Graph.UBSanVRoot;
+    } else {
+      Graph.removeUBSanRoots(Roots, RemovedRoots);
+      Graph.addUserRoots(Roots, AddedRoots);
+      VRootFrom = Graph.UBSanVRoot, VRootTo = Graph.UserVRoot;
+    }
+    for (InstDefUseNode *Node : AddedRoots)
+      Updates.push_back({UBSanUseDefDomTree::Insert, VRootTo, Node});
+    for (InstDefUseNode *Node : RemovedRoots)
+      Updates.push_back({UBSanUseDefDomTree::Delete, VRootFrom, Node});
+    if (!AddedRoots.empty() || !RemovedRoots.empty())
+      Changed = true;
+    if (!Updates.empty())
+      DT.applyUpdates(Updates);
+  };
 
-  if (!AddedUBSanRoots.empty() || !RemovedUserRoots.empty())
-    Changed = true;
-  if (!Updates.empty())
-    DT.applyUpdates(Updates);
+  ApplyUpdates(NewRoots, true);
 
   //===------------------------------------------------------------------===//
-  // Phase 5: tag the final UBSan closure from the finalized tree.
+  // Phase 5: tag the UBSan closure with newly discovered control roots.
   //===------------------------------------------------------------------===//
   Changed |= DT.tagAllUBSanInsts();
 
+  //===------------------------------------------------------------------===//
+  // Phase 6: revert some UBSan tagging as user PHI fixing CFG
+  //===------------------------------------------------------------------===//
+  SmallSetVector<Instruction *, 8> Roots2Remove;
+  for (const auto *BB : make_filter_range(Sinks, containsUserPhi)) {
+    auto MapRng = map_range(predecessors(BB), [](const BasicBlock *Pred) {
+      return const_cast<Instruction *>(Pred->getTerminator());
+    });
+    auto FilterRng = make_filter_range(MapRng, [&](const Instruction *Term) {
+      return NewRoots.contains(Term);
+    });
+    Roots2Remove.insert_range(FilterRng);
+  }
+  if (Roots2Remove.empty())
+    return Changed;
+
+  ApplyUpdates(Roots2Remove, false);
+
+  //===------------------------------------------------------------------===//
+  // Phase 7: tag the final UBSan closure from the finalized tree.
+  //===------------------------------------------------------------------===//
+  Changed |= DT.tagAllUBSanInsts(true);
   return Changed;
 }
 

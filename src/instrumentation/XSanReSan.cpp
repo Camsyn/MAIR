@@ -55,6 +55,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Utils/MetaDataUtils.h"
 #include "Utils/Options.h"
 #include "XSanDeSanReSan.h"
 #include "XSanSanitizingContext.h"
@@ -346,8 +347,10 @@ static void obtainReplacersAndAdjustSanUseAnchor(
       auto *Replacer = dyn_cast<Instruction>(Records.front().Replacer);
       if (!Replacer)
         continue;
-      assert(Replacer->getParent() && !Replacer->getParent()->getParent() &&
-             "Replacer must belong to some detached san block");
+      assert(
+          Replacer->getParent() &&
+          (!Replacer->getParent()->getParent() || UBSanInst::is(*Replacer)) &&
+          "Non-UBSan replacer must belong to some detached san block");
       AddRecord &ReplacerRecord = *Inst2Add(*Replacer);
 
       if (!mustComesBefore(*Replacee, ReplacerRecord)) {

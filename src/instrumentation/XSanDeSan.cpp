@@ -51,6 +51,7 @@
 #include "livepatch/record/SanitizingRecorder.h"
 #include "xsan_llvm_compat.h"
 
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/PostOrderIterator.h"
@@ -65,6 +66,7 @@
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/Constant.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instruction.h"
@@ -126,24 +128,122 @@ Instruction *nextUsrInst(BasicBlock &BB, const Sanitizer &San) {
   return It == End ? nullptr : &*It;
 }
 
+bool matchSpecialBranchValue(const BasicBlock &SrcBB, const Value *&CondVal,
+                             const Constant *&ImposedBySan) {
+  using namespace llvm::PatternMatch;
+  CondVal = ImposedBySan = nullptr;
+  Instruction *Cond;
+  if (!match(SrcBB.getTerminator(),
+             m_Br(m_Instruction(Cond), m_BasicBlock(), m_BasicBlock())))
+    return false;
+
+  // Match equality branch:
+  //   br i1 (icmp eq/ne V, C), label %Then, label %Else
+  //   Sink:
+  //     %p = phi [ V, %Src ], [ C, %SanBB ]
+  // Treat C from non-SrcBB incoming edges as V.
+  CmpPredicate CmpPred;
+
+  const Value *LHS = nullptr, *RHS = nullptr;
+  Constant *C = nullptr;
+  if (match(Cond, m_ICmp(CmpPred, m_Value(LHS), m_Constant(C))) &&
+      CmpInst::isEquality(CmpPred) && !isa<Constant>(LHS)) {
+    // TODO: support a non-constant RHS once the needed equivalence boundary is
+    // explicit.
+    CondVal = LHS, ImposedBySan = C;
+    return true;
+  }
+
+  // Match signed add/sub overflow branch, e.g.:
+  //   %ov = call { iN, i1 } @llvm.sadd.with.overflow.iN(iN %V, iN 1)
+  //   %ob = extractvalue { iN, i1 } %ov, 1
+  //   br i1 %ob, label %SanBB, label %Cont
+  //   Sink:
+  //     %p = phi [ V, %Src ], [ iN::smax() - 1, %SanBB ]
+  // Also match the inverted condition:
+  //   br i1 (xor %ob, true), label %Cont, label %SanBB
+  // For ssub.with.overflow(V, 1), the matched boundary is signed_min + 1.
+  WithOverflowInst *WOI = nullptr;
+  if (!match(Cond, m_ExtractValue<1>(m_WithOverflowInst(WOI))))
+    return false;
+  bool IsSigned, IsAdd;
+  switch (WOI->getIntrinsicID()) {
+  case Intrinsic::sadd_with_overflow:
+    IsSigned = true, IsAdd = true;
+    break;
+  case Intrinsic::ssub_with_overflow:
+    IsSigned = true, IsAdd = false;
+    break;
+  case Intrinsic::uadd_with_overflow:
+    IsSigned = false, IsAdd = true;
+    break;
+  case Intrinsic::usub_with_overflow:
+    IsSigned = false, IsAdd = false;
+    break;
+  default:
+    return false;
+  }
+  LHS = WOI->getArgOperand(0), RHS = WOI->getArgOperand(1);
+  auto *Ty = dyn_cast<IntegerType>(LHS->getType());
+  if (!Ty)
+    return false;
+
+  auto isOne = [](const Value *V) {
+    const auto *C = dyn_cast<ConstantInt>(V);
+    return C && C->isOne();
+  };
+  const bool IsRHSOne = isOne(RHS);
+  if (IsAdd && (IsRHSOne || isOne(LHS)) || !IsAdd && IsRHSOne) {
+    const APInt Boundary =
+        IsAdd ? (IsSigned ? APInt::getSignedMaxValue(Ty->getBitWidth())
+                          : APInt::getMaxValue(Ty->getBitWidth()))
+              : (IsSigned ? APInt::getSignedMinValue(Ty->getBitWidth())
+                          : APInt::getMinValue(Ty->getBitWidth()));
+    CondVal = IsRHSOne ? LHS : RHS,
+    ImposedBySan = ConstantInt::get(Ty, Boundary);
+    return true;
+  }
+
+  return false;
+}
+
+struct SplitAddExtraction {
+  BasicBlock &SinkBB;
+  Instruction *SinkUserI = nullptr;
+  bool ReuseExistingSink = false;
+  AddRecord::SanBBsVec SanBBs;
+  mutable SmallSetVector<BasicBlock *, 2> SinkSanPreds;
+  mutable const Value *CondVal = nullptr;
+  mutable const Constant *ImposedBySan = nullptr;
+};
+
 // Return if all IVs of preds ∈ (preds(BB) ∩ Visisted), and pass (preds(BB) ∩
 // Visisted) as mutable argument.
-bool AllSpecifiedPredIVsEquals(
-    const BasicBlock &BB, const SmallPtrSetImpl<BasicBlock *> &Visited,
-    SmallSetVector<BasicBlock *, 2> &SpecifiedPreds) {
+bool AllSpecifiedPredIVsEquals(const BasicBlock &SrcBB,
+                               const SmallPtrSetImpl<BasicBlock *> &Visited,
+                               const SplitAddExtraction &Redirect) {
+  assert(Redirect.ReuseExistingSink);
+  const BasicBlock &BB = Redirect.SinkBB;
+  auto &SpecifiedPreds = Redirect.SinkSanPreds;
   // This sink is the only user exit and we have finished the DFS.
   SpecifiedPreds.clear();
   for (const auto *Pred : predecessors(&BB))
     if (Visited.contains(Pred))
       SpecifiedPreds.insert(const_cast<BasicBlock *>(Pred));
+
+  auto &CondVal = Redirect.CondVal;
+  auto &ImposedBySan = Redirect.ImposedBySan;
+  const bool Special = matchSpecialBranchValue(SrcBB, CondVal, ImposedBySan);
   auto AllIVsEq = [&](const PHINode &PHi) {
     const unsigned NumIV = PHi.getNumIncomingValues();
-    Value *IV = nullptr;
+    const Value *IV = nullptr;
     for (unsigned Idx = 0; Idx != NumIV; ++Idx) {
       BasicBlock *Pred = PHi.getIncomingBlock(Idx);
       if (!SpecifiedPreds.contains(Pred))
         continue;
-      Value *CurIV = PHi.getIncomingValue(Idx);
+      const Value *CurIV = PHi.getIncomingValue(Idx);
+      if (Special && Pred != &SrcBB && CurIV == ImposedBySan)
+        CurIV = CondVal;
       if (!IV)
         IV = CurIV;
       else if (IV != CurIV)
@@ -393,8 +493,11 @@ AddRecord AddRecord::extractFrom(llvm::BasicBlock &SrcBB,
 }
 
 AddRecord AddRecord::extractFrom(
-    BasicBlock &SrcBB, BasicBlock::iterator Fr, BasicBlock &SinkBB,
-    SmallSetVector<BasicBlock *, 2> &&DetachedEdges, SanBBsVec &&SanBBs) {
+    llvm::BasicBlock &SrcBB, llvm::BasicBlock::iterator Fr,
+    llvm::BasicBlock &SinkBB, const llvm::Value *CondVal,
+    const llvm::Constant *ImposedBySan,
+    llvm::SmallSetVector<llvm::BasicBlock *, 2> &&DetachedEdges,
+    SanBBsVec &&SanBBs) {
   requireOrDie(Fr != SrcBB.end(),
                "desan split redirect got empty source suffix");
 
@@ -406,7 +509,8 @@ AddRecord AddRecord::extractFrom(
   __xsan::UserIR::set(*NewBr);
   // User SrcBB is unstable for replay, remove it.
   DetachedEdges.remove(&SrcBB);
-  RedirectExtra Redirect{&SrcBB, &SinkBB, std::move(DetachedEdges)};
+  RedirectExtra Redirect{&SrcBB, &SinkBB, std::move(DetachedEdges), CondVal,
+                         ImposedBySan};
 
   // Fold Phi IVs in Sink BB.
   Redirect.removeEdgesOfSanBB2Sink(SrcBB, *SanInsts);
@@ -444,13 +548,6 @@ std::optional<PHIAddRecord> PHIAddRecord::extractFrom(const Sanitizer &San,
 }
 
 namespace {
-struct SplitAddExtraction {
-  BasicBlock &SinkBB;
-  Instruction *SinkUserI = nullptr;
-  bool ReuseExistingSink = false;
-  AddRecord::SanBBsVec SanBBs;
-  SmallSetVector<BasicBlock *, 2> SinkSanPreds;
-};
 
 std::optional<SplitAddExtraction> extractSplitAdd(const Sanitizer &San,
                                                   BasicBlock &SourceBB,
@@ -500,7 +597,7 @@ std::optional<SplitAddExtraction> extractSplitAdd(const Sanitizer &San,
   if (Sink->ReuseExistingSink) {
     // This sink is the only user exit and we have finished the DFS.
     // Any of IVs not equal, cannot merge.
-    if (!AllSpecifiedPredIVsEquals(Sink->SinkBB, Visited, Sink->SinkSanPreds))
+    if (!AllSpecifiedPredIVsEquals(SourceBB, Visited, *Sink))
       return std::nullopt;
     Visited.erase(&Sink->SinkBB);
   }
@@ -521,6 +618,8 @@ void AddRecord::RedirectExtra::removeEdgesOfSanBB2Sink(BasicBlock &SourceBB,
           DetachedEdges.contains(IncomingBB) || IncomingBB == &SourceBB;
       if (Remove && !IV)
         IV = PHI.getIncomingValue(Idx);
+      if (IV == ImposedBySan)
+        IV = const_cast<Value *>(CondVal);
       return Remove;
     });
     requireOrDie(IV, "[DeSan] Unexpected strange PHI");
@@ -598,9 +697,9 @@ static bool extractInstsAddSeq(const Sanitizer &San, AddArchive &Adds,
   }
   auto Split = std::move(*MaybeSplit);
   if (Split.ReuseExistingSink) {
-    Adds.addRecord(AddRecord::extractFrom(SrcBB, SanItBegin, Split.SinkBB,
-                                          std::move(Split.SinkSanPreds),
-                                          std::move(Split.SanBBs)));
+    Adds.addRecord(AddRecord::extractFrom(
+        SrcBB, SanItBegin, Split.SinkBB, Split.CondVal, Split.ImposedBySan,
+        std::move(Split.SinkSanPreds), std::move(Split.SanBBs)));
     // The br is newly created, should being deleted after add-replaying.
     Deletes.insert(SrcBB.getTerminator());
     return false;

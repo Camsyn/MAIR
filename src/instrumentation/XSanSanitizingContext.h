@@ -8,9 +8,11 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constant.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Value.h"
 
 #include <cstdint>
 #include <memory>
@@ -90,6 +92,9 @@ struct AddRecord {
   struct RedirectExtra : SplitExtra {
     // not contains SourceBB, as it is unstable while replaying.
     llvm::SmallSetVector<llvm::BasicBlock *, 2> DetachedEdges;
+    // Match SrcBB terminates with br [icmp eq/ne CondVal, ImposedBySan], _, _
+    const llvm::Value *CondVal = nullptr;
+    const llvm::Constant *ImposedBySan = nullptr;
     void removeEdgesOfSanBB2Sink(llvm::BasicBlock &SourceBB,
                                  llvm::BasicBlock &SanInsts);
     void replayEdgesOfSanBB2Sink(llvm::BasicBlock &SourceBB,
@@ -127,7 +132,8 @@ struct AddRecord {
   // and replace the source suffix with an unconditional branch to SinkBB.
   static AddRecord
   extractFrom(llvm::BasicBlock &SrcBB, llvm::BasicBlock::iterator Fr,
-              llvm::BasicBlock &SinkBB,
+              llvm::BasicBlock &SinkBB, const llvm::Value *CondVal,
+              const llvm::Constant *ImposedBySan,
               llvm::SmallSetVector<llvm::BasicBlock *, 2> &&DetachedEdges,
               SanBBsVec &&SanBBs);
 

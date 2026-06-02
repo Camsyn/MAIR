@@ -105,7 +105,7 @@ void BlockAddRecord::replay(Module &M) {
 
 void PHIAddRecord::replay() {
   requireOrDie(TargetUsrBB, "resan phi add replay lost target user block");
-  auto *InsertPt = compat::getFirstNonPHIIt(TargetUsrBB);
+  auto InsertPt = TargetUsrBB->begin();
 
   for (PHINode *Phi : SanPhis) {
     assert(Phi && "resan phi add replay lost phi");

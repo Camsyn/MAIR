@@ -90,6 +90,15 @@ inline void moveBefore(llvm::Instruction* I, llvm::Instruction* MovePos) {
 }
 
 inline void insertInstructionBefore(llvm::Instruction *I,
+                                    llvm::BasicBlock::iterator InsertPt) {
+#if LLVM_VERSION_MAJOR >= 22
+  I->insertBefore(InsertPt);
+#else
+  I->insertBefore(&*InsertPt);
+#endif
+}
+
+inline void insertInstructionBefore(llvm::Instruction *I,
                                     llvm::Instruction *InsertPos) {
 #if LLVM_VERSION_MAJOR >= 22
   I->insertBefore(InsertPos->getIterator());

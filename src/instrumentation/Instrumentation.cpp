@@ -807,7 +807,8 @@ static Value *getOrInsertLoopCounter(Loop *Loop, InstrumentationIRBuilder &IRB,
   // Create a new PHI node before the first non-PHI insertion point in the
   // header
   auto *OrigInsertPt = &*IRB.GetInsertPoint();
-  IRB.SetInsertPoint(&*Header->getFirstInsertionPt());
+  // Insert PHI to the begining of loop header
+  IRB.SetInsertPoint(Header->begin());
 
   LLVMContext &Ctx = Header->getContext();
 

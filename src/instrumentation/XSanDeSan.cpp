@@ -845,6 +845,9 @@ static WithOverflowInst *matchUBSanReplacement(Instruction &I,
   WithOverflowInst *WOI = nullptr;
   if (!match(&I, m_ExtractValue<0>(m_WithOverflowInst(WOI))))
     return nullptr;
+  // This I has no user uses.
+  if (UBSanInst::is(I))
+    return nullptr;
   if (!getUbsanReplaceRule(WOI->getIntrinsicID(), Rule))
     return nullptr;
   if (!hasTaggedUbsanOverflowExtract(*WOI))

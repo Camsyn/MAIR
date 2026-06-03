@@ -298,7 +298,7 @@ UserBBsMap collectUserBBs(llvm::Module &M) {
   for (Function &F : M) {
     if (F.isDeclaration())
       continue;
-    UserBBsSet &UserBBs = UserBBsMap[&F];
+    BBsSet &UserBBs = UserBBsMap[&F];
     for (BasicBlock &BB : F)
       UserBBs.insert(&BB);
   }
@@ -462,7 +462,7 @@ void validateArchive(const Sanitizer &San, const ReSanArchive &Archive,
   std::string S;
   llvm::raw_string_ostream OS(S);
 
-  static ::__xsan::desan::UserBBsSet CacheUserBBs;
+  static ::__xsan::desan::BBsSet CacheUserBBs;
   static const ::__xsan::desan::UserBBsMap *CacheUserBBsMap = nullptr;
 
   if (CacheUserBBsMap != &UserBBsMap) {

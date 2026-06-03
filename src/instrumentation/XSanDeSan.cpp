@@ -388,19 +388,20 @@ static void restoreReplace(const Sanitizer &San, ReplaceArchive &Archive,
   }
 }
 
-static bool hasMultiUserEntries(
-    const BasicBlock *BB,
-    llvm::function_ref<bool(const BasicBlock *)> UserPredicate) {
+static bool hasMultiUserEntries(const BasicBlock *BB, const BBsSet &UserBBs,
+                                const BBsSet &SanBBsWithMultiUsrEntries) {
   uint8_t NumUserEntry = 0;
   auto It = idf_begin(BB);
   ++It;
   for (auto End = idf_end(BB); It != End;) {
     const BasicBlock *Cur = *It;
-    if (UserPredicate(Cur)) {
+    if (UserBBs.contains(Cur)) {
       // >1 user entries, dirtecly break the loop.
       if (++NumUserEntry > 1)
         break;
       It.skipChildren();
+    } else if (SanBBsWithMultiUsrEntries.contains(Cur)) {
+      return true;
     } else {
       ++It;
     }
@@ -418,6 +419,7 @@ static UserBBsMap collectUserBBsForUBSan(Module &M) {
   for (Function &F : M) {
     if (F.isDeclaration())
       continue;
+    BBsSet MultiUsrEntriesSanBBs;
     auto &UserBBsSet = Result[&F];
     // 1. Rule ONE: Function entry must be user BB.
     UserBBsSet.insert(&F.getEntryBlock());
@@ -427,7 +429,7 @@ static UserBBsMap collectUserBBsForUBSan(Module &M) {
       assert(BB->getTerminator() && "Pathological BB without Terminator");
       return !UBSanInst::is(*BB->getTerminator());
     };
-    for (auto *BB : llvm::make_range(RPO.begin(), RPO.end())) {
+    for (auto *BB : RPO) {
       if (UserBBsSet.contains(BB))
         continue;
       // 2. Rule TWO: BBs with pred_term_non_ubsan be user BBs.
@@ -436,12 +438,12 @@ static UserBBsMap collectUserBBsForUBSan(Module &M) {
         continue;
       }
       // 3. Rule THREE: BB with >1 user entries and user Instruction.
-      if (hasMultiUserEntries(BB,
-                              [&UserBBsSet](const BasicBlock *BB) {
-                                return UserBBsSet.contains(BB);
-                              }) &&
-          !allInstsAreUBSan(BB))
+      if (!hasMultiUserEntries(BB, UserBBsSet, MultiUsrEntriesSanBBs))
+        continue;
+      if (!allInstsAreUBSan(BB))
         UserBBsSet.insert(BB);
+      else
+        MultiUsrEntriesSanBBs.insert(BB);
     }
   }
   return Result;
@@ -551,7 +553,7 @@ namespace {
 
 std::optional<SplitAddExtraction> extractSplitAdd(const Sanitizer &San,
                                                   BasicBlock &SourceBB,
-                                                  const UserBBsSet &Users) {
+                                                  const BBsSet &Users) {
   df_iterator_default_set<BasicBlock *, 8> Visited;
   auto It = /* Skip Root*/ df_ext_begin(&SourceBB, Visited),
        End = df_ext_end(&SourceBB, Visited);
@@ -656,8 +658,7 @@ static void extractPhiAddSeq(const Sanitizer &San, AddArchive &Archive,
 /// this BB.
 static bool extractInstsAddSeq(const Sanitizer &San, AddArchive &Adds,
                                DeleteArchive &Deletes, BasicBlock &SrcBB,
-                               BasicBlock::iterator &BIt,
-                               const UserBBsSet &Users) {
+                               BasicBlock::iterator &BIt, const BBsSet &Users) {
   assert(Users.contains(&SrcBB) &&
          "The source BB of SanAddSeq must be user BB");
   assert(BIt != SrcBB.end());
@@ -732,7 +733,7 @@ static void restoreAdd(const Sanitizer &San, AddArchive &Adds,
     const auto UserBBsIt = UserBBsMap.find(&F);
     requireOrDie(UserBBsIt != UserBBsMap.end(),
                  "Unexpected non-user function found: " + F.getName());
-    const UserBBsSet &UserBBs = UserBBsIt->second;
+    const BBsSet &UserBBs = UserBBsIt->second;
 
     // ================================================================
     //    1. Extract SanInsts from BB and move UserInsts (BBs stable)

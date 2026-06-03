@@ -255,8 +255,8 @@ struct ResidualSanitizerSummary {
   llvm::SmallVector<llvm::BasicBlock *, 8> SanitizerOnlyBlocks;
 };
 
-using UserBBsSet = llvm::SmallPtrSet<llvm::BasicBlock *, 8>;
-using UserBBsMap = llvm::DenseMap<llvm::Function *, UserBBsSet>;
+using BBsSet = llvm::SmallPtrSet<llvm::BasicBlock *, 8>;
+using UserBBsMap = llvm::DenseMap<llvm::Function *, BBsSet>;
 
 struct SanitizerArchive {
   SanitizerArchive(SanitizingContext &Context, const Sanitizer &San)

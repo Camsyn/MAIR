@@ -578,8 +578,12 @@ const BasicBlock *getSanityCheckSink(const BasicBlock &SanBB,
   return OtherSucc == SanSucc ? SanSucc : nullptr;
 }
 
-bool containsUserPhi(const BasicBlock *BB) {
+bool maybeBeSplitSinkWithUsrPhi(const BasicBlock *BB) {
   assert(BB);
+  // If BB has >= 3 predecessors, it must not be treated as SplitAddRecord at
+  // DeSan(UBSan)
+  if (BB->hasNPredecessorsOrMore(3))
+    return false;
   return !all_of(BB->phis(),
                  [](const PHINode &PHI) { return __xsan::UBSanInst::is(PHI); });
 }

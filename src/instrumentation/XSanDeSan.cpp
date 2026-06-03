@@ -768,13 +768,6 @@ static void restoreAdd(const Sanitizer &San, AddArchive &Adds,
       Adds.BBRecords.push_back(std::move(BBRecord));
       PendingSanBBs.clear();
     };
-    auto FindUserSucc = [&](const BasicBlock &BB) {
-      auto Successors = successors(&BB);
-      auto It = find_if(Successors, [&](const BasicBlock *Succ) {
-        return UserBBs.contains(Succ);
-      });
-      return It == Successors.end() ? nullptr : const_cast<BasicBlock *>(*It);
-    };
     // For UBSan, some SanBBs might not be eliminated. Those special SanBBs
     // would be treated as User BB in the subsequent DeSan. Therefore, we remove
     // those unreachable BBs as `BlockAddRecord`s.
@@ -782,8 +775,17 @@ static void restoreAdd(const Sanitizer &San, AddArchive &Adds,
         San.isUBSan() ? SmallSetVector<const BasicBlock *, 16>{llvm::from_range,
                                                                depth_first(&F)}
                       : SmallSetVector<const BasicBlock *, 16>{};
+    auto IsReachable = [isUBSan = San.isUBSan(), &ReachableBBs,
+                        &UserBBs](const BasicBlock *BB) {
+      return isUBSan ? ReachableBBs.contains(BB) : UserBBs.contains(BB);
+    };
+    auto FindUserSucc = [&](const BasicBlock &BB) {
+      auto Successors = successors(&BB);
+      auto It = find_if(Successors, IsReachable);
+      return It == Successors.end() ? nullptr : const_cast<BasicBlock *>(*It);
+    };
     for (BasicBlock &BB : F) {
-      if (San.isUBSan() ? ReachableBBs.contains(&BB) : UserBBs.contains(&BB))
+      if (IsReachable(&BB))
         FlushPending(&BB);
       else
         PendingSanBBs.emplace_back(&BB, FindUserSucc(BB));

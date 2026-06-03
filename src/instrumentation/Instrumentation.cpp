@@ -808,7 +808,7 @@ static Value *getOrInsertLoopCounter(Loop *Loop, InstrumentationIRBuilder &IRB,
   // header
   auto *OrigInsertPt = &*IRB.GetInsertPoint();
   // Insert PHI to the begining of loop header
-  IRB.SetInsertPoint(Header->begin());
+  IRB.SetInsertPoint(&*Header->begin());
 
   LLVMContext &Ctx = Header->getContext();
 

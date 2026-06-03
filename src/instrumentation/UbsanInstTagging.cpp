@@ -762,9 +762,9 @@ bool tagUbsanInstructions(Function &F) {
       return const_cast<Instruction *>(Pred->getTerminator());
     });
     auto FilterRng = make_filter_range(MapRng, [&](const Instruction *Term) {
-      return NewRoots.contains(Term);
+      return llvm::is_contained(NewRoots, Term);
     });
-    Roots2Remove.insert_range(FilterRng);
+    Roots2Remove.insert(FilterRng.begin(), FilterRng.end());
   }
   if (Roots2Remove.empty())
     return Changed;

@@ -58,7 +58,6 @@
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/STLForwardCompat.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -71,6 +70,7 @@
 #include "llvm/IR/Constant.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -81,7 +81,6 @@
 #include "llvm/Transforms/Utils/Local.h"
 
 #include <cassert>
-#include <cstdint>
 #include <optional>
 
 using namespace llvm;
@@ -144,7 +143,11 @@ bool matchSpecialBranchValue(const BasicBlock &SrcBB, const Value *&CondVal,
   //   Sink:
   //     %p = phi [ V, %Src ], [ C, %SanBB ]
   // Treat C from non-SrcBB incoming edges as V.
+#if LLVM_VERSION_MAJOR >= 22
   CmpPredicate CmpPred;
+#else
+  CmpInst::Predicate CmpPred;
+#endif
 
   const Value *LHS = nullptr, *RHS = nullptr;
   Constant *C = nullptr;
@@ -505,10 +508,12 @@ static UserBBsMap collectUserBBsForUBSan(Module &M) {
       else
         Update(BB);
       // If any of successors are processed before, put them into the worklist.
-      WorkList.insert_range(
+      auto Filtered =
           make_filter_range(successors(BB), [&](const BasicBlock *Succ) {
             return Processed.contains(Succ);
-          }));
+          });
+      // insert_range is only LLVM-23 API.
+      WorkList.insert(Filtered.begin(), Filtered.end());
     }
 
     // 2. Worklist algorithm to perform fixpoint iteration.
@@ -856,10 +861,13 @@ static void restoreAdd(const Sanitizer &San, AddArchive &Adds,
     // For UBSan, some SanBBs might not be eliminated. Those special SanBBs
     // would be treated as User BB in the subsequent DeSan. Therefore, we remove
     // those unreachable BBs as `BlockAddRecord`s.
+    auto DFS = depth_first(&F);
     const auto &&ReachableBBs =
-        San.isUBSan() ? SmallSetVector<const BasicBlock *, 16>{llvm::from_range,
-                                                               depth_first(&F)}
-                      : SmallSetVector<const BasicBlock *, 16>{};
+        San.isUBSan()
+            ?
+            // = SmallSetVector{from_range, depth_first(&F), the LLVM23-only API
+            SmallSetVector<const BasicBlock *, 16>{DFS.begin(), DFS.end()}
+            : SmallSetVector<const BasicBlock *, 16>{};
     auto IsReachable = [isUBSan = San.isUBSan(), &ReachableBBs,
                         &UserBBs](const BasicBlock *BB) {
       return isUBSan ? ReachableBBs.contains(BB) : UserBBs.contains(BB);

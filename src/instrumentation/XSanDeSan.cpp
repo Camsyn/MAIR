@@ -387,69 +387,142 @@ static void restoreReplace(const Sanitizer &San, ReplaceArchive &Archive,
     Archive[Event.UserReplacee].push_back({Event.SanReplacer, RealReplacement});
   }
 }
-
-static bool hasMultiUserEntries(const BasicBlock *BB, const BBsSet &UserBBs) {
-  uint8_t NumUserEntry = 0;
-  auto It = idf_begin(BB);
-  ++It;
-  for (auto End = idf_end(BB); It != End;) {
-    const BasicBlock *Cur = *It;
-    if (UserBBs.contains(Cur)) {
-      // >1 user entries, dirtecly break the loop.
-      if (++NumUserEntry > 1)
-        break;
-      It.skipChildren();
-    } else {
-      ++It;
-    }
-  }
-  return NumUserEntry > 1;
-}
-
+namespace {
 /// All insts are UBSan and term with ret/unreachable
-static bool hasNoUserExit(const BasicBlock *BB) {
+bool hasNoUserExit(const BasicBlock *BB) {
   const bool AllUBSan =
       BB && all_of(*BB, [](const Instruction &I) { return UBSanInst::is(I); });
   return AllUBSan && (isa<UnreachableInst>(BB->getTerminator()) ||
                       isa<ReturnInst>(BB->getTerminator()));
 }
+class UBSanBBLattice {
+public:
+  bool isAsUser() const { return K == User; }
+  bool isAsSan() const { return K == San; }
+  bool markAsUser(const BasicBlock *Cur) {
+    if (isAsUser())
+      return false;
+    UserEntry = Cur;
+    K = User;
+    Fixed = true;
+    return true;
+  }
+  template <class LatticeRange>
+  bool merge(const BasicBlock *Cur, LatticeRange &&PredStates) {
+    if (Fixed)
+      return false;
+    const BasicBlock *UsrEntry = nullptr;
+    for (const UBSanBBLattice &L : PredStates) {
+      if (!L.UserEntry) {
+        assert(L.K == Unknown && "Unexpected Pred Lattice");
+        continue;
+      }
+      if (!UsrEntry) {
+        UsrEntry = L.UserEntry;
+        continue;
+      }
+      // Has >1 user entries
+      if (UsrEntry != L.UserEntry)
+        return hasNoUserExit(Cur) ? markAsNoUsrExitSan() : markAsUser(Cur);
+    }
+    if (!UsrEntry)
+      return false;
+    return markAsSan(UsrEntry);
+  }
+
+private:
+  bool markAsNoUsrExitSan() {
+    if (isAsUser())
+      return false;
+    K = San;
+    UserEntry = nullptr;
+    Fixed = true;
+    return true;
+  }
+  bool markAsSan(const BasicBlock *Entry) {
+    if (isAsUser() || isAsSan() && UserEntry == Entry)
+      return false;
+    UserEntry = Entry;
+    K = San;
+    return true;
+  }
+
+  // Unknown ──> San -> User
+  enum Kind { Unknown, San, User } K = Unknown;
+  bool Fixed = false;
+  const BasicBlock *UserEntry = nullptr;
+};
+
+bool anyPredTermNonUBSan(const BasicBlock *BB) {
+  assert(BB->getTerminator() && "Pathological BB without Terminator");
+  return any_of(predecessors(BB), [](const BasicBlock *Pred) {
+    return !UBSanInst::is(*Pred->getTerminator());
+  });
+}
+} // namespace
 
 /// For UBSan, the defitions of UserBB and SanBB are different from otehr San.
 /// UserBB defitions:
 ///   1. Function entry
 ///   2. BB with any predecessor terminated by non-UBSan terminator
-///   3. BB with >1 user entries
+///   3. BB reaching >1 user entries, computed by a fixpoint lattice:
+///      Unknown -> San(UserEntry) -> User.
 /// SanBB defitions: non-UserBB.
 /// SanBB's nature:
 ///   1. Either has only ONE user entry
 ///   2. Or has no user exit
+///
+/// We use a fixpoint iteration to infer a user bb set.
 static UserBBsMap collectUserBBsForUBSan(Module &M) {
   UserBBsMap Result;
+  DenseMap<const BasicBlock *, UBSanBBLattice> States;
   for (Function &F : M) {
     if (F.isDeclaration())
       continue;
-    auto &UserBBsSet = Result[&F];
-    // 1. Rule ONE: Function entry must be user BB.
-    UserBBsSet.insert(&F.getEntryBlock());
-    // Traverse the function on topological order.
-    ReversePostOrderTraversal RPO(&F);
-    auto TermNonUBSan = [](const BasicBlock *BB) {
-      assert(BB->getTerminator() && "Pathological BB without Terminator");
-      return !UBSanInst::is(*BB->getTerminator());
+    States.clear();
+    SmallSetVector<const BasicBlock *, 32> WorkList;
+    SmallPtrSet<const BasicBlock *, 32> Processed;
+
+    // RULE 1: Function entry is user.
+    States[&F.getEntryBlock()].markAsUser(&F.getEntryBlock());
+    auto Update = [&](const BasicBlock *BB) {
+      return States[BB].merge(
+          BB, map_range(predecessors(BB), [&States](const BasicBlock *Pred) {
+            return States[Pred];
+          }));
     };
+
+    // 1. First round use Reverse Post Order Traversal to speed up the analysis.
+    ReversePostOrderTraversal RPO(&F);
     for (auto *BB : RPO) {
-      if (UserBBsSet.contains(BB))
-        continue;
-      // 2. Rule TWO: BBs with pred_term_non_ubsan be user BBs.
-      if (any_of(predecessors(BB), TermNonUBSan)) {
-        UserBBsSet.insert(BB);
-        continue;
-      }
-      // 3. Rule THREE: BB with >1 user entries
-      if (!hasMultiUserEntries(BB, UserBBsSet) || hasNoUserExit(BB))
-        continue;
-      UserBBsSet.insert(BB);
+      Processed.insert(BB);
+      // RULE 2: BB is user if any predecessor terminated by user termniator.
+      if (anyPredTermNonUBSan(BB))
+        States[BB].markAsUser(BB); // Fixed as User
+      // RULE 3: BB is user if it has >1 user entries and a user exit
+      else
+        Update(BB);
+      // If any of successors are processed before, put them into the worklist.
+      WorkList.insert_range(
+          make_filter_range(successors(BB), [&](const BasicBlock *Succ) {
+            return Processed.contains(Succ);
+          }));
     }
+
+    // 2. Worklist algorithm to perform fixpoint iteration.
+    while (!WorkList.empty()) {
+      const BasicBlock *BB = WorkList.pop_back_val();
+      if (!Update(BB))
+        continue;
+      for (const BasicBlock *Succ : successors(BB))
+        WorkList.insert(Succ);
+    }
+
+    // 3. Collect user BBs
+    auto &UserBBsSet = Result[&F];
+    for (auto &[BB, State] : States)
+      if (State.isAsUser())
+        UserBBsSet.insert(const_cast<BasicBlock *>(BB));
   }
   return Result;
 }

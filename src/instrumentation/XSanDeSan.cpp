@@ -387,9 +387,8 @@ static void restoreDelete(const Sanitizer &San, DeleteArchive &Archive,
 static void restoreReplace(const Sanitizer &San, ReplaceArchive &Archive,
                            const std::vector<ReplaceEvent> &Events) {
   for (const auto &Event : Events) {
-    const bool RealReplacement =
-        replaceNonSanInstUses(San, *Event.SanReplacer, *Event.UserReplacee);
-    Archive[Event.UserReplacee].push_back({Event.SanReplacer, RealReplacement});
+    replaceNonSanInstUses(San, *Event.SanReplacer, *Event.UserReplacee);
+    Archive[Event.UserReplacee].push_back({Event.SanReplacer});
   }
 }
 namespace {
@@ -1006,7 +1005,7 @@ static void restoreUbsanArithmetic(const Sanitizer &San, ReSanArchive &Archive,
 
   // Restore replacement
   for (auto &[Replacer, WOI, _, Replacee] : Worklist) {
-    const bool RealReplace = replaceNonSanInstUses(San, *Replacer, *Replacee);
+    replaceNonSanInstUses(San, *Replacer, *Replacee);
     if (allUsesAreUbsan(*Replacer)) {
       __xsan::UBSanInst::set(*Replacer);
       __xsan::UserIR::drop(*Replacer);
@@ -1015,7 +1014,7 @@ static void restoreUbsanArithmetic(const Sanitizer &San, ReSanArchive &Archive,
       __xsan::UBSanInst::set(*WOI);
       __xsan::UserIR::drop(*WOI);
     }
-    Archive.ReplaceRecords[Replacee].push_back({Replacer, RealReplace});
+    Archive.ReplaceRecords[Replacee].push_back({Replacer});
   }
 }
 

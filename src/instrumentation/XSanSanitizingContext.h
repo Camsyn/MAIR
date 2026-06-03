@@ -188,9 +188,6 @@ struct BlockAddRecord {
 
 struct ReplaceRecord {
   llvm::Value *Replacer = nullptr;
-  // If RealReplace = false, the replacement happens logically without any
-  // effects. E.g., the replacement of `void` instruction.
-  bool RealReplace = false;
 };
 
 struct SanitizingContext;

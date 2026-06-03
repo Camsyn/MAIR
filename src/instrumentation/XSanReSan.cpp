@@ -479,7 +479,7 @@ static void replayReplace(Module &M, SanitizingContext &Context) {
                    Twine("resan found multiple replace records in sanitizer ") +
                        Entry.San.name());
       // The replacement is in logic, and no real replacement happens.
-      if (!Records.front().RealReplace)
+      if (Replacee->use_empty())
         continue;
       Value *Replacer = Records.front().Replacer;
       assert(Replacer && "Unexpected null replacer");

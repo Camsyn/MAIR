@@ -388,8 +388,7 @@ static void restoreReplace(const Sanitizer &San, ReplaceArchive &Archive,
   }
 }
 
-static bool hasMultiUserEntries(const BasicBlock *BB, const BBsSet &UserBBs,
-                                const BBsSet &SanBBsWithMultiUsrEntries) {
+static bool hasMultiUserEntries(const BasicBlock *BB, const BBsSet &UserBBs) {
   uint8_t NumUserEntry = 0;
   auto It = idf_begin(BB);
   ++It;
@@ -400,8 +399,6 @@ static bool hasMultiUserEntries(const BasicBlock *BB, const BBsSet &UserBBs,
       if (++NumUserEntry > 1)
         break;
       It.skipChildren();
-    } else if (SanBBsWithMultiUsrEntries.contains(Cur)) {
-      return true;
     } else {
       ++It;
     }
@@ -409,17 +406,28 @@ static bool hasMultiUserEntries(const BasicBlock *BB, const BBsSet &UserBBs,
   return NumUserEntry > 1;
 }
 
-static bool allInstsAreUBSan(const BasicBlock *BB) {
-  return BB &&
-         all_of(*BB, [](const Instruction &I) { return UBSanInst::is(I); });
+/// All insts are UBSan and term with ret/unreachable
+static bool hasNoUserExit(const BasicBlock *BB) {
+  const bool AllUBSan =
+      BB && all_of(*BB, [](const Instruction &I) { return UBSanInst::is(I); });
+  return AllUBSan && (isa<UnreachableInst>(BB->getTerminator()) ||
+                      isa<ReturnInst>(BB->getTerminator()));
 }
 
+/// For UBSan, the defitions of UserBB and SanBB are different from otehr San.
+/// UserBB defitions:
+///   1. Function entry
+///   2. BB with any predecessor terminated by non-UBSan terminator
+///   3. BB with >1 user entries
+/// SanBB defitions: non-UserBB.
+/// SanBB's nature:
+///   1. Either has only ONE user entry
+///   2. Or has no user exit
 static UserBBsMap collectUserBBsForUBSan(Module &M) {
   UserBBsMap Result;
   for (Function &F : M) {
     if (F.isDeclaration())
       continue;
-    BBsSet MultiUsrEntriesSanBBs;
     auto &UserBBsSet = Result[&F];
     // 1. Rule ONE: Function entry must be user BB.
     UserBBsSet.insert(&F.getEntryBlock());
@@ -437,13 +445,10 @@ static UserBBsMap collectUserBBsForUBSan(Module &M) {
         UserBBsSet.insert(BB);
         continue;
       }
-      // 3. Rule THREE: BB with >1 user entries and user Instruction.
-      if (!hasMultiUserEntries(BB, UserBBsSet, MultiUsrEntriesSanBBs))
+      // 3. Rule THREE: BB with >1 user entries
+      if (!hasMultiUserEntries(BB, UserBBsSet) || hasNoUserExit(BB))
         continue;
-      if (!allInstsAreUBSan(BB))
-        UserBBsSet.insert(BB);
-      else
-        MultiUsrEntriesSanBBs.insert(BB);
+      UserBBsSet.insert(BB);
     }
   }
   return Result;

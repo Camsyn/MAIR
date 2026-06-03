@@ -466,9 +466,8 @@ void ActiveMopAnalysis::dataflowAnalyze() {
     // Propagate to successors.
     // As we erase BB in the beginning, the enrties of
     // loops will retain after the ReverserPostOrderTraversal ends.
-    for (const BasicBlock *Succ : successors(BB)) {
+    for (const BasicBlock *Succ : successors(BB))
       WorkList.insert(Succ);
-    }
   }
 
   while (!WorkList.empty()) {
@@ -519,9 +518,8 @@ bool ActiveMopAnalysis::isOneMopActiveToAnother(const Instruction *From,
   MopID FromId = getMopId(From);
 
   // If a MOP is reachable in the OUT[ToBB], then it must be reachable for To.
-  if (isMopActiveAfter(FromId, ToBB, ConsiderAcqOrRel)) {
+  if (isMopActiveAfter(FromId, ToBB, ConsiderAcqOrRel))
     return true;
-  }
 
   // If From and To belong to the same basic block, then we can use the
   // internal reachability test.

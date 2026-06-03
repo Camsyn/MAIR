@@ -34,11 +34,13 @@
 //    5.2. Break sanitizer CFG edges only after SanInsts and SanPHIs are
 //         archived.
 //
-// 6. UBSan frontend recovery: run before UBSan restoreAdd.
+// 6. UBSan frontend recovery: run before optional UBSan restoreAdd.
 //    6.1. Fold frontend overflow intrinsics back into user arithmetic.
 //    6.2. Record paired replace/delete facts for ReSan.
-//    6.3. Collect UBSan user BBs, then reuse the same AddArchive extraction.
-//    6.4. Keep UBSan split classification because optimized frontend IR can
+//    6.3. Stop here by default for UBSan.
+//    6.4. With -xsan-de-ubsan, collect UBSan user BBs, then
+//         reuse the same AddArchive extraction.
+//    6.5. Keep UBSan split classification because optimized frontend IR can
 //         obscure the original user CFG shape.
 //
 //===----------------------------------------------------------------------===//
@@ -797,6 +799,10 @@ static bool extractInstsAddSeq(const Sanitizer &San, AddArchive &Adds,
   return true;
 }
 
+/// TODO: extract UBSan's restoreAdd as follows:
+///    1. Fold BB as much as possible
+///    2. Fold Phi
+///    3. Do AddRecord::extract like DCE.
 static void restoreAdd(const Sanitizer &San, AddArchive &Adds,
                        DeleteArchive &Deletes, Module &M,
                        const UserBBsMap &UserBBsMap) {
@@ -972,6 +978,17 @@ static void restoreUbsanArithmetic(const Sanitizer &San, ReSanArchive &Archive,
     }
   }
 
+  // Without full UBSan DeSan/ReSan, keep frontend overflow checks in place.
+  // Drop nosanitize from the arithmetic value path so later sanitizers can
+  // propagate through llvm.*with.overflow intrinsics.
+  if (!options::ClDeUBSan) {
+    for (auto &[Replacer, WOI, Rule, _] : Worklist) {
+      NoSanitize::drop(*Replacer);
+      NoSanitize::drop(*WOI);
+    }
+    return;
+  }
+
   // Restore deletion
   for (auto &[Replacer, WOI, Rule, Replacee] : Worklist) {
     Replacee = foldUBSanReplacement(*Replacer, *WOI, Rule);
@@ -1002,10 +1019,9 @@ void runDeSan(Module &M, SanitizerArchive &Entry, UserBBsMap &UserBBsMap) {
     // UBSan is not enabled.
     if (!__xsan::hasUbsanFunction(M))
       return;
-    // UBSan performs sanitizing instrumentation on compiler-frontend, and thus
-    // might be affected by optimization. We need to specialize the handling of
-    // UBSan.
     restoreUbsanArithmetic(San, Archive, M);
+    if (!options::ClDeUBSan)
+      return;
     auto UBSanUserBBsMap = collectUserBBsForUBSan(M);
     restoreAdd(San, Archive.AddRecords, Archive.DeleteRecords, M,
                UBSanUserBBsMap);

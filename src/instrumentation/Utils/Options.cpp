@@ -25,7 +25,7 @@ const cl::opt<bool>
 /// TODO: The current analysis is still wrong, and we should not optimize the
 /// inspection of Data Race based on the assumption that Data Race does not
 /// exist.
-/// Maybe we could optimize the tail checking based on the assumption of 
+/// Maybe we could optimize the tail checking based on the assumption of
 /// Use-After-Return does not exist.
 const cl::opt<bool>
     ClTsanOptStackObj("xsan-tsan-opt-stack-obj",
@@ -54,11 +54,10 @@ const cl::opt<bool> ClPostOpt(
 
 } // namespace opt
 
-cl::list<std::string> ClSanitizers(
-    "xsan-sanitizers", cl::CommaSeparated, cl::ZeroOrMore,
-    cl::value_desc("asan,tsan,msan|none"),
-    cl::desc("Explicitly select XSan sub-sanitizers"),
-    cl::Hidden);
+cl::list<std::string>
+    ClSanitizers("xsan-sanitizers", cl::CommaSeparated, cl::ZeroOrMore,
+                 cl::value_desc("asan,tsan,msan|none"),
+                 cl::desc("Explicitly select XSan sub-sanitizers"), cl::Hidden);
 
 bool isSelectedSanitizer(llvm::StringRef Name) {
   if (ClSanitizers.empty())
@@ -92,9 +91,24 @@ bool isSelectedSanitizer(llvm::StringRef Name) {
 cl::opt<bool> ClDebug("xsan-debug", cl::init(false),
                       cl::desc("Enable debug output for XSan"), cl::Hidden);
 
-cl::opt<std::string> ClDumpDeSanReSan(
-    "xsan-dump", cl::init(""), cl::value_desc("dir"),
-    cl::desc("Dump the whole XSan instrumentation pipeline into the given directory"),
+cl::opt<std::string>
+    ClDumpDeSanReSan("xsan-dump", cl::init(""), cl::value_desc("dir"),
+                     cl::desc("Dump the whole XSan instrumentation pipeline "
+                              "into the given directory"),
+                     cl::Hidden);
+
+// UBSan sanitizing is emitted by the compiler frontend. Later optimizations may
+// break part of the sanitizing semantics, which makes
+// sanitizer-assumption-based DeSan/ReSan hard to handle well for UBSan.
+// Therefore, full UBSan DeSan/ReSan is disabled by default because this path
+// hides many optimization-induced bugs.
+//
+// Ideal situation   : (San -> DeSan)* -> ReSan
+// UBSan's situation : UBSan -> Opt -> DeSan -> (San -> DeSan)* -> ReSan
+cl::opt<bool> ClDeUBSan(
+    "xsan-de-ubsan", cl::init(false),
+    cl::desc(
+        "Enable full UBSan DeSan/ReSan handling beyond arithmetic recovery"),
     cl::Hidden);
 } // namespace options
 

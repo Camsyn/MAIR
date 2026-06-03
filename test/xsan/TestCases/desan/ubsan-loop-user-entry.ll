@@ -2,7 +2,7 @@
 ;   llvm-extract 00-raw.ll --func=_ZN10SAXParserP9parseNameEv
 ; The old single RPO pass visited while.cond.preheader before
 ; while.cond.sink.split became a user entry and then never revisited it.
-; RUN: %xsan_opt -passes=xsan -xsan-sanitizers=asan,tsan,msan -xsan-dump=%t.dump -S %s -o %t.out.ll
+; RUN: %xsan_opt -passes=xsan -xsan-sanitizers=asan,tsan,msan -xsan-de-ubsan -xsan-dump=%t.dump -S %s -o %t.out.ll
 ; RUN: FileCheck %s --check-prefix=DESAN --input-file=%t.dump/02-desan.ll
 
 target triple = "x86_64-unknown-linux-gnu"

@@ -68,6 +68,9 @@ extern cl::opt<std::string> ClDumpDeSanReSan;
 
 inline bool enableDeSanReSanDump() { return !ClDumpDeSanReSan.empty(); }
 
+/// Enable full UBSan DeSan/ReSan handling beyond arithmetic recovery.
+extern cl::opt<bool> ClDeUBSan;
+
 } // namespace options
 
 } // namespace __xsan

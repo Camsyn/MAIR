@@ -19,6 +19,8 @@
 //    2.3. Retarget detached sanitizer uses so SanUse(replacee) is replayed
 //         after the replacer when required.
 //    2.4. Keep replacer-before-replacee records until after normal Add replay.
+//    2.5. Default UBSan arithmetic replacements are not AddRecords; replay
+//         them later through replayReplace/replayDelete.
 //
 // 3. replayAdd / PHIs: replay all PHIAddRecords first.
 //    3.1. Insert SanPHIs back into their target user BB PHI lists.

@@ -38,6 +38,7 @@
 
 #include "UbsanInstTagging.hpp"
 #include "Utils/MetaDataUtils.h"
+#include "Utils/Options.h"
 #include "Utils/UbsanUtils.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
@@ -748,12 +749,15 @@ bool tagUbsanInstructions(Function &F) {
   // Phase 5: tag the UBSan closure with newly discovered control roots.
   //===------------------------------------------------------------------===//
   Changed |= DT.tagAllUBSanInsts();
+  // Phase 6/7 only serve full UBSan DeSan/ReSan CFG extraction.
+  if (!__xsan::options::ClDeUBSan)
+    return Changed;
 
   //===------------------------------------------------------------------===//
   // Phase 6: revert some UBSan tagging as user PHI fixing CFG
   //===------------------------------------------------------------------===//
   SmallSetVector<Instruction *, 8> Roots2Remove;
-  for (const auto *BB : make_filter_range(Sinks, containsUserPhi)) {
+  for (const auto *BB : make_filter_range(Sinks, maybeBeSplitSinkWithUsrPhi)) {
     auto MapRng = map_range(predecessors(BB), [](const BasicBlock *Pred) {
       return const_cast<Instruction *>(Pred->getTerminator());
     });

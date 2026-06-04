@@ -960,7 +960,10 @@ static Instruction *foldUBSanReplacement(ExtractValueInst &Replacer,
   if (Rule.HasNoSignedWrap)
     Replacee->setHasNoSignedWrap();
 
-  __xsan::compat::insertInstructionBefore(Replacee, &WithOverflow);
+  // Later sanitizers instrument the synthetic user value. ReSan will replace it
+  // back with the UBSan extractvalue, so keep the synthetic value after the
+  // replacer to preserve dominance after replayReplace.
+  Replacee->insertAfter(&Replacer);
   Replacee->setDebugLoc(Replacer.getDebugLoc());
   __xsan::UserIR::set(*Replacee);
   return Replacee;

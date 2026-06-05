@@ -4,12 +4,18 @@
 #include <llvm/ADT/Twine.h>
 #include <llvm/Support/ErrorHandling.h>
 
+#include <cstdlib>
+
 namespace __xsan {
 namespace options {
 
+namespace {
+bool hasEnvVar(const char *Name) { return !!std::getenv(Name); }
+} // namespace
+
 namespace opt {
 const cl::opt<bool> ClOpt("xsan-opt", cl::desc("Optimize instrumentation"),
-                          cl::Hidden, cl::init(true));
+                          cl::Hidden, cl::init(!hasEnvVar("XSAN_DISABLE_OPT")));
 const cl::opt<bool> ClReccReduce("xsan-reduce-rec",
                                  cl::desc("Reduce recurring checks"),
                                  cl::Hidden, cl::init(true));
@@ -88,7 +94,7 @@ bool isSelectedSanitizer(llvm::StringRef Name) {
   return Selected;
 }
 
-cl::opt<bool> ClDebug("xsan-debug", cl::init(false),
+cl::opt<bool> ClDebug("xsan-debug", cl::init(hasEnvVar("XSAN_DEBUG")),
                       cl::desc("Enable debug output for XSan"), cl::Hidden);
 
 cl::opt<std::string>
@@ -106,7 +112,7 @@ cl::opt<std::string>
 // Ideal situation   : (San -> DeSan)* -> ReSan
 // UBSan's situation : UBSan -> Opt -> DeSan -> (San -> DeSan)* -> ReSan
 cl::opt<bool> ClDeUBSan(
-    "xsan-de-ubsan", cl::init(false),
+    "xsan-de-ubsan", cl::init(hasEnvVar("XSAN_DE_UBSAN")),
     cl::desc(
         "Enable full UBSan DeSan/ReSan handling beyond arithmetic recovery"),
     cl::Hidden);

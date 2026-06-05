@@ -173,7 +173,6 @@ SanitizerCompositorPass::SanitizerCompositorPass(OptimizationLevel level)
 PreservedAnalyses SanitizerCompositorPass::run(Module &M,
                                                ModuleAnalysisManager &MAM) {
   verifyOriginalPassNotRun(M);
-  options::ClDebug.setValue(options::ClDebug || !!std::getenv("XSAN_DEBUG"));
 
   FunctionAnalysisManager &FAM =
       MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();

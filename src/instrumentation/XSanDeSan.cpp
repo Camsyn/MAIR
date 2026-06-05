@@ -957,37 +957,19 @@ BBsSet collectUserBBs(Function &F) {
   return UsrBBs;
 }
 
-bool DCEInstruction(Instruction &I, DenseSet<Instruction *> &DeadInsts,
-                    DenseSet<Instruction *> &Visited) {
-  // Cache
-  if (Visited.contains(&I))
-    return DeadInsts.contains(&I);
-  Visited.insert(&I);
-  assert(UBSanInst::is(I) && "Expect UBSan Instruction");
-  // This instruction is already dead.
-  if (!I.getParent() || !I.getParent()->getParent() ||
-      __xsan::isUbsanInterfaceCall(I) && I.use_empty()) {
-    DeadInsts.insert(&I);
-    return true;
-  }
-  // Remaining UBSan branches are live roots on the current CFG. Their
-  // operand chains must be preserved unless CFG extraction has already moved
-  // the roots out of the function.
-  if (I.isTerminator())
-    return false;
-  // If all users are dead, this instruction is dead.
-  const bool AllUserDCE = all_of(I.users(), [&](User *User) {
-    auto *UserI = dyn_cast<Instruction>(User);
-    if (!UserI)
-      return true;
-    return DCEInstruction(*UserI, DeadInsts, Visited);
-  });
-  if (AllUserDCE)
-    DeadInsts.insert(&I);
-  return AllUserDCE;
-}
-DenseSet<Instruction *> obtainUBSanDCE(Function &F) {
-  DenseSet<Instruction *> DeadInsts, Visited;
+// DCE ubsan instruction along use-def chain.
+DenseSet<const Instruction *> obtainUBSanDCE(Function &F) {
+  // This mirrors LLVM DCE's use-to-def propagation shape: once a use is known
+  // dead, re-check its operand instructions because they may have become dead.
+  // LLVM physically nulls operands before erasing; DeSan cannot mutate here
+  // because the dead UBSan instructions must be archived and replayed later, so
+  // `DeadInsts` is the logical removal set used when testing remaining uses.
+  //
+  // This deliberately does not solve circular dependencies, e.g. circular
+  // phi-use cycles. A complete model would collapse SCCs in the use-def graph
+  // and decide liveness per component. This DCE stays simple and fast, aligned
+  // with LLVM DCE's local worklist behavior, so it does not build SCCs.
+  DenseSet<const Instruction *> DeadInsts;
   SmallVector<Instruction *> UBSanInsts;
   UBSanInsts.reserve(F.getInstructionCount());
   auto Rng = make_pointer_range(make_filter_range(
@@ -995,15 +977,52 @@ DenseSet<Instruction *> obtainUBSanDCE(Function &F) {
   UBSanInsts.append(Rng.begin(), Rng.end());
 
   DeadInsts.reserve(UBSanInsts.size());
-  Visited.reserve(UBSanInsts.size());
+  auto isUserDead = [&](const User *User) {
+    auto *UserI = dyn_cast<Instruction>(User);
+    if (!UserI)
+      return true;
+    assert(UserI->getParent());
+    return /* Detached Inst */ !UserI->getParent()->getParent() ||
+           /* Dead I  */
+           DeadInsts.contains(UserI);
+  };
 
-  for_each(UBSanInsts,
-           [&](Instruction *I) { DCEInstruction(*I, DeadInsts, Visited); });
+  auto isDead = [&](const Instruction &I) {
+    // Remaining UBSan branches are live roots on the current CFG. Their
+    // operand chains must be preserved unless CFG extraction has already moved
+    // the roots out of the function.
+    if (I.isTerminator() || !UBSanInst::is(I))
+      return false;
+    /* UBSan's handler call can be eliminated safely */
+    if (__xsan::isUbsanInterfaceCall(I) && I.use_empty())
+      return true;
+    // If all users are dead, current I is dead too.
+    return all_of(I.users(), isUserDead);
+  };
+
+  SmallSetVector<const Instruction *, 16> WorkList;
+  auto DCEInstruction = [&](const Instruction &I) {
+    assert(isDead(I));
+    DeadInsts.insert(&I);
+    for (const auto &Op : I.operand_values())
+      if (const Instruction *OpI = dyn_cast<Instruction>(Op);
+          OpI && OpI != &I && isDead(*OpI))
+        WorkList.insert(OpI);
+  };
+
+  for (Instruction *I : UBSanInsts)
+    if (!WorkList.contains(I) && isDead(*I))
+      DCEInstruction(*I);
+
+  while (!WorkList.empty())
+    DCEInstruction(*WorkList.pop_back_val());
+
   return DeadInsts;
 }
 
-static void extractUBSanPhiAddSeq(const DenseSet<Instruction *> &DeadInsts,
-                                  AddArchive &Archive, BasicBlock &BB) {
+static void
+extractUBSanPhiAddSeq(const DenseSet<const Instruction *> &DeadInsts,
+                      AddArchive &Archive, BasicBlock &BB) {
   auto PhiRecord = PHIAddRecord::extractFrom(
       BB, [&](const auto &Phi) { return DeadInsts.contains(&Phi); });
   if (PhiRecord.has_value())
@@ -1014,21 +1033,21 @@ using AnchorAddMap = DenseMap<const Instruction *, ARGetterTy>;
 
 BasicBlock::iterator nextDeadInst(BasicBlock::iterator SI,
                                   BasicBlock::iterator EI,
-                                  const DenseSet<Instruction *> &Dead) {
+                                  const DenseSet<const Instruction *> &Dead) {
   return llvm::find_if(llvm::make_range(SI, EI),
                        [&Dead](Instruction &I) { return Dead.contains(&I); });
 }
 
 BasicBlock::iterator nextLiveInst(BasicBlock::iterator SI,
                                   BasicBlock::iterator EI,
-                                  const DenseSet<Instruction *> &Dead) {
+                                  const DenseSet<const Instruction *> &Dead) {
   return llvm::find_if(llvm::make_range(SI, EI),
                        [&Dead](Instruction &I) { return !Dead.contains(&I); });
 }
 
 bool extractUBSanDeadInstSeq(AddArchive &Adds, BasicBlock &SrcBB,
                              BasicBlock::iterator &BIt,
-                             const DenseSet<Instruction *> &DeadInsts,
+                             const DenseSet<const Instruction *> &DeadInsts,
                              AnchorAddMap &AnchorToAdd) {
   auto DeadBegin = nextDeadInst(BIt, SrcBB.end(), DeadInsts);
   if (DeadBegin == SrcBB.end())
@@ -1107,7 +1126,7 @@ void restoreAdd(AddArchive &Adds, DeleteArchive &Deletes, Module &M) {
     // =================================================================
     //    3. Compute dead UBSan instructions on the current CFG.
     // =================================================================
-    DenseSet<Instruction *> DeadInsts = ubsan::obtainUBSanDCE(F);
+    auto DeadInsts = ubsan::obtainUBSanDCE(F);
 
     // ================================================================
     //    4. Extract Pure Adds (CFG stable)
@@ -1205,9 +1224,9 @@ Instruction *foldUBSanReplacement(ExtractValueInst &Replacer,
   if (Rule.HasNoSignedWrap)
     Replacee->setHasNoSignedWrap();
 
-  // Later sanitizers instrument the synthetic user value. ReSan will replace it
-  // back with the UBSan extractvalue, so keep the synthetic value after the
-  // replacer to preserve dominance after replayReplace.
+  // Later sanitizers instrument the synthetic user value. ReSan will replace
+  // it back with the UBSan extractvalue, so keep the synthetic value after
+  // the replacer to preserve dominance after replayReplace.
   Replacee->insertAfter(&Replacer);
   Replacee->setDebugLoc(Replacer.getDebugLoc());
   __xsan::UserIR::set(*Replacee);

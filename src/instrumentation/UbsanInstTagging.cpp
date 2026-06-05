@@ -70,6 +70,7 @@ UbsanInstTaggingPass::UbsanInstTaggingPass() {}
 namespace {
 
 bool isUserRootInstruction(const Instruction &I);
+bool isUntaggedSideEffectUserRoot(const Instruction &I);
 bool isIgnorableForUbsanBlock(const Instruction &I);
 bool isIgnorableForDefUseGraph(const Instruction &I);
 
@@ -670,6 +671,14 @@ bool isUserRootInstruction(const Instruction &I) {
   return I.user_empty() || I.isTerminator();
 }
 
+bool isUntaggedSideEffectUserRoot(const Instruction &I) {
+  // Frontend UBSan marks its own side-effecting instructions with nosanitize.
+  // If optimization produces or preserves an unmarked side-effecting
+  // instruction in a UBSan-dominated value chain, keep it as user IR.
+  return !I.getMetadata(LLVMContext::MD_nosanitize) &&
+         (isa<CallBase>(I) || I.mayHaveSideEffects());
+}
+
 bool isIgnorableForUbsanBlock(const Instruction &I) {
   return isa<DbgInfoIntrinsic>(I);
 }
@@ -692,6 +701,8 @@ bool tagUbsanInstructions(Function &F) {
       continue;
     if (__xsan::isUbsanInterfaceCall(I))
       UBSanHandlerRoots.push_back(cast<CallBase>(&I));
+    else if (isUntaggedSideEffectUserRoot(I))
+      UserRoots.push_back(&I);
     else if (isUserRootInstruction(I))
       UserRoots.push_back(&I);
   }

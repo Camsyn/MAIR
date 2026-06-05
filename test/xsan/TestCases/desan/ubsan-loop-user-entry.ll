@@ -7,8 +7,8 @@
 
 target triple = "x86_64-unknown-linux-gnu"
 
-@1 = external hidden unnamed_addr global { { ptr, i32, i32 }, ptr, i8, i8 }, no_sanitize_address
-@2 = external hidden unnamed_addr global { { ptr, i32, i32 }, ptr, i8, i8 }, no_sanitize_address
+@ubsan_data_if_then = external hidden unnamed_addr global { { ptr, i32, i32 }, ptr, i8, i8 }, no_sanitize_address
+@ubsan_data_loop = external hidden unnamed_addr global { { ptr, i32, i32 }, ptr, i8, i8 }, no_sanitize_address
 
 define dso_local noundef ptr @_ZN10SAXParserP9parseNameEv(ptr noundef nonnull align 8 dereferenceable(52) %this, ptr %call, i1 %is_name_start, i1 %align_ok, i1 %loop_ok) sanitize_address sanitize_memory sanitize_thread {
 entry:
@@ -19,7 +19,7 @@ if.then:                                          ; preds = %entry
   br i1 %align_ok, label %while.cond.preheader, label %while.cond.sink.split, !prof !1, !nosanitize !0
 
 while.cond.sink.split:                            ; preds = %handler.type_mismatch50, %if.then
-  %.sink = phi ptr [ @2, %handler.type_mismatch50 ], [ @1, %if.then ]
+  %.sink = phi ptr [ @ubsan_data_loop, %handler.type_mismatch50 ], [ @ubsan_data_if_then, %if.then ]
   tail call void @__ubsan_handle_type_mismatch_v1(ptr nonnull %.sink, i64 %0), !nosanitize !0
   br label %while.cond.preheader
 
@@ -27,9 +27,9 @@ while.cond.preheader:                             ; preds = %while.cond.sink.spl
   br label %while.cond
 
 while.cond:                                       ; preds = %while.body, %while.cond.preheader
-  %curch = getelementptr inbounds nuw i8, ptr %this, i64 40
-  %9 = load i32, ptr %curch, align 8
-  %conv57 = trunc i32 %9 to i8
+  %curch = getelementptr inbounds i8, ptr %this, i64 40
+  %curch.value = load i32, ptr %curch, align 8
+  %conv57 = trunc i32 %curch.value to i8
   %call58 = tail call noundef ptr @_ZN13StringBuilder6appendEc(ptr noundef nonnull align 8 dereferenceable(24) %call, i8 noundef signext %conv57)
   tail call void @_ZN10SAXParserP6nextchEv(ptr noundef nonnull align 8 dereferenceable(52) %this)
   br i1 %loop_ok, label %while.body, label %if.end
@@ -57,7 +57,7 @@ declare noundef ptr @_ZN13StringBuilder6appendEc(ptr noundef nonnull align 8 der
 ; DESAN: if.then:
 ; DESAN-NEXT: br i1 {{.*}}, label %while.cond.preheader, label %while.cond.sink.split
 ; DESAN: while.cond.sink.split:{{.*}}; preds = {{.*}}%handler.type_mismatch50{{.*}}%if.then
-; DESAN-NEXT: br label %while.cond.preheader, !xsan.user
+; DESAN: br label %while.cond.preheader
 ; DESAN: while.cond.preheader:{{.*}}; preds = {{.*}}%while.cond.sink.split{{.*}}%if.then
 ; DESAN-NEXT: br label %while.cond
 ; DESAN-NOT: while.cond.preheader:{{[ ]+}}; preds = %if.then, %__xsan_desan_add_record_bb

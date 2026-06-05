@@ -3,6 +3,7 @@
 #include "livepatch/record/SanitizingRecorder.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
@@ -137,6 +138,9 @@ struct AddRecord {
               llvm::SmallSetVector<llvm::BasicBlock *, 2> &&DetachedEdges,
               SanBBsVec &&SanBBs);
 
+  // Move SrcBB[Fr:Anchor] to the front of SanInsts
+  void prepend(llvm::BasicBlock &SrcBB, llvm::BasicBlock::iterator Fr);
+
   /// Obtain the related SanBBs. Return {} if this is PureRecord.
   llvm::ArrayRef<llvm::BasicBlock *> getSanBBs() { return SanBBs; }
   bool enable() { return !std::exchange(EnableReplay, true); }
@@ -157,8 +161,9 @@ struct PHIAddRecord {
   llvm::SmallVector<llvm::PHINode *, 2> SanPhis;
   llvm::BasicBlock *const TargetUsrBB;
 
-  static std::optional<PHIAddRecord> extractFrom(const Sanitizer &San,
-                                                 llvm::BasicBlock &TargetUsrBB);
+  static std::optional<PHIAddRecord>
+  extractFrom(llvm::BasicBlock &TargetUsrBB,
+              llvm::function_ref<bool(const llvm::PHINode &)> Predicate);
   void replay();
 };
 
@@ -206,7 +211,7 @@ struct AddArchive {
   std::vector<PHIAddRecord> PhiRecords;
   SanitizingContext &Ctx;
 
-  void addRecord(AddRecord &&Add);
+  unsigned addRecord(AddRecord &&Add);
   void tagAs(const Sanitizer &San);
 };
 

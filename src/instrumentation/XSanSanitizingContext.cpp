@@ -236,8 +236,10 @@ void AddArchive::tagAs(const Sanitizer &San) {
       TagBB(*SanBB);
 }
 
-void AddArchive::addRecord(AddRecord &&Add) {
+unsigned AddArchive::addRecord(AddRecord &&Add) {
+  unsigned Idx = Records.size();
   Records.emplace_back(std::move(Add));
+  return Idx;
 }
 
 static void dumpIRToFile(Module &M, const Twine &FileName) {

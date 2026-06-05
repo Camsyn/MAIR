@@ -201,7 +201,7 @@ void AddRecord::RedirectExtra::replayEdgesOfSanBB2Sink(BasicBlock &SrcBB,
   // ```
   for (PHINode &PHI : SinkBB->phis()) {
     const int Idx = PHI.getBasicBlockIndex(&SrcBB);
-    requireOrDie(Idx >= 0, "resan redirect replay lost folded source PHI");
+    requireOrDie(Idx >= 0, "ReSan redirect replay lost folded source PHI");
     Value *IV = PHI.getIncomingValue(Idx);
     if (!IsSrcAsPred)
       PHI.removeIncomingValue(Idx);
@@ -213,7 +213,7 @@ void AddRecord::RedirectExtra::replayEdgesOfSanBB2Sink(BasicBlock &SrcBB,
 void AddRecord::replayRedirect() {
   Instruction &Anchor = *this->Anchor;
   BasicBlock *SrcUserBB = Anchor.getParent();
-  requireOrDie(SrcUserBB, "resan add replay get anchor without a parent block");
+  requireOrDie(SrcUserBB, "ReSan add replay get anchor without a parent block");
   auto *Redirect = std::get_if<AddRecord::RedirectExtra>(&ExtraRecord);
   assert(Redirect && "unreachable code in resan add replay record");
   // Insert detached IVs for PHIs in SinkBB. Reverse operation of

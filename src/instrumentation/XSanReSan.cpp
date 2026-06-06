@@ -373,8 +373,7 @@ static void obtainReplacersAndAdjustSanUseAnchor(
             SanUseRecord.Anchor == ReplacerRecord.Anchor)
           continue;
         if (mustComesBefore(SanUseRecord, ReplacerRecord))
-          const_cast<Instruction *&>(SanUseRecord.Anchor) =
-              ReplacerRecord.Anchor;
+          SanUseRecord.retargetAnchor(*ReplacerRecord.Anchor);
       }
     }
   }

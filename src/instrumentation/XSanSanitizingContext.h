@@ -138,8 +138,14 @@ struct AddRecord {
               llvm::SmallSetVector<llvm::BasicBlock *, 2> &&DetachedEdges,
               SanBBsVec &&SanBBs);
 
-  // Move SrcBB[Fr:Anchor] to the front of SanInsts
+  // Move SrcBB[Fr:Anchor) to the front of SanInsts.
   void prepend(llvm::BasicBlock &SrcBB, llvm::BasicBlock::iterator Fr);
+  // Move SrcBB[Fr:To) to the archived sink prefix of Split/Redirect records.
+  void appendToSink(llvm::BasicBlock &SrcBB, llvm::BasicBlock::iterator Fr,
+                    llvm::BasicBlock::iterator To);
+  void retargetAnchor(llvm::Instruction &NewAnchor) {
+    const_cast<llvm::Instruction *&>(Anchor) = &NewAnchor;
+  }
 
   /// Obtain the related SanBBs. Return {} if this is PureRecord.
   llvm::ArrayRef<llvm::BasicBlock *> getSanBBs() { return SanBBs; }

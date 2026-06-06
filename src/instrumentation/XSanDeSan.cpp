@@ -516,12 +516,25 @@ bool anyPredTermNonUBSan(const BasicBlock *BB) {
 }
 } // namespace
 
-// Move SrcBB[Fr:Anchor] to the front of SanInsts
+// Move SrcBB[Fr:Anchor) to the front of SanInsts.
 void AddRecord::prepend(BasicBlock &SrcBB, llvm::BasicBlock::iterator Fr) {
   requireOrDie(&SrcBB == Anchor->getParent(),
                "Prepend must happens in the same source BB");
+  if (Fr == Anchor->getIterator())
+    return;
   __xsan::compat::spliceInstructions(SanInsts.get(), SanInsts->begin(), &SrcBB,
                                      Fr, Anchor->getIterator());
+}
+
+// Move SrcBB[Fr:To) to the archived sink prefix of Split/Redirect records.
+void AddRecord::appendToSink(BasicBlock &SrcBB, llvm::BasicBlock::iterator Fr,
+                             llvm::BasicBlock::iterator To) {
+  if (Fr == To)
+    return;
+  SplitExtra *Split = std::get_if<SplitExtra>(&ExtraRecord);
+  requireOrDie(Split, "Only split add record has a sink prefix");
+  __xsan::compat::spliceInstructions(Split->SinkBB, Split->SinkBB->end(),
+                                     &SrcBB, Fr, To);
 }
 
 AddRecord AddRecord::extractFrom(BasicBlock &SrcBB, BasicBlock::iterator Fr,
@@ -1064,8 +1077,6 @@ extractUBSanPhiAddSeq(const DenseSet<const Instruction *> &DeadInsts,
     Archive.PhiRecords.push_back(std::move(*PhiRecord));
 }
 
-using AnchorAddMap = DenseMap<const Instruction *, ARGetterTy>;
-
 BasicBlock::iterator nextDeadInst(BasicBlock::iterator SI,
                                   BasicBlock::iterator EI,
                                   const DenseSet<const Instruction *> &Dead) {
@@ -1080,10 +1091,12 @@ BasicBlock::iterator nextLiveInst(BasicBlock::iterator SI,
                        [&Dead](Instruction &I) { return !Dead.contains(&I); });
 }
 
-bool extractUBSanDeadInstSeq(AddArchive &Adds, BasicBlock &SrcBB,
-                             BasicBlock::iterator &BIt,
-                             const DenseSet<const Instruction *> &DeadInsts,
-                             AnchorAddMap &AnchorToAdd) {
+using Anchor2AddGetter = DenseMap<const Instruction *, ARGetterTy>;
+using BB2Add = DenseMap<const BasicBlock *, AddRecord>;
+
+bool extractUBSanDeadInstSeq(BasicBlock &SrcBB, BasicBlock::iterator &BIt,
+                             BB2Add &PureAdds, Anchor2AddGetter &AnchorToAdd,
+                             const DenseSet<const Instruction *> &DeadInsts) {
   auto DeadBegin = nextDeadInst(BIt, SrcBB.end(), DeadInsts);
   if (DeadBegin == SrcBB.end())
     return false;
@@ -1095,17 +1108,94 @@ bool extractUBSanDeadInstSeq(AddArchive &Adds, BasicBlock &SrcBB,
                    SrcBB.getParent()->getName() + "\n\tBB: " + SrcBB.getName() +
                    "\n\tDeadBegin: " + DeadBegin->getName());
 
-  Instruction &Anchor = *DeadEnd;
-  auto It = AnchorToAdd.find(&Anchor);
+  BIt = DeadEnd;
+  auto It = AnchorToAdd.find(&*DeadEnd);
   // If we have some other AddRecord belong to the same Anchor, prepend the
   // current add seq to it.
-  if (It != AnchorToAdd.end())
+  if (It != AnchorToAdd.end()) {
     (It->second)().prepend(SrcBB, DeadBegin);
-  else
-    Adds.addRecord(AddRecord::extractFrom(SrcBB, DeadBegin, DeadEnd));
-  BIt = Anchor.getIterator();
+    AnchorToAdd.erase(It);
+  } else {
+    auto Add = AddRecord::extractFrom(SrcBB, DeadBegin, DeadEnd);
+    const BasicBlock *SanInsts = &*Add.SanInsts;
+    [[maybe_unused]] bool Inserted =
+        PureAdds.try_emplace(SanInsts, std::move(Add)).second;
+    assert(Inserted);
+  }
   return true;
 }
+
+void tryMergeUBSanAddRecords(AddArchive &Adds, BB2Add &&PureAdds,
+                             Anchor2AddGetter &&AnchorToAdd) {
+  // Merge pure add into split add
+  for (auto &[ConstAnchor, AddGetter] : AnchorToAdd) {
+    auto *Anchor = const_cast<Instruction *>(ConstAnchor);
+    BasicBlock *BB = Anchor->getParent();
+    assert(BB);
+    // If anchor not detached, we do not need to merge pure add to it.
+    if (!isBlockDettached(BB))
+      continue;
+    auto It = PureAdds.find(BB);
+    assert(It != PureAdds.end());
+    // PureAdd = begin ... Anchor ... end
+    //   [begin, Anchor) should be moved to MergeTo's SanInsts
+    //   [Anchor, end)   should be moved to MergeTo's SinkBB
+    // MergeTo's anchor should be assigned as PureAdd's Anchor
+    auto &PureAdd = It->second;
+    auto &MergeTo = AddGetter();
+    MergeTo.prepend(*BB, BB->begin());
+    MergeTo.appendToSink(*BB, Anchor->getIterator(), BB->end());
+    MergeTo.retargetAnchor(*PureAdd.Anchor);
+    // One pure add relates to at most ONE split add.
+    PureAdds.erase(It);
+  }
+
+  // Add teh rest pure adds into AddArchive
+  for (auto &[_, Add] : PureAdds)
+    Adds.addRecord(std::move(Add));
+}
+
+bool extractUBSanDeadInstSeq(AddArchive &Adds, BasicBlock &SrcBB,
+                             BasicBlock::iterator &BIt,
+                             const DenseSet<const Instruction *> &DeadInsts,
+                             Anchor2AddGetter &AnchorToAdd) {
+  auto DeadBegin = nextDeadInst(BIt, SrcBB.end(), DeadInsts);
+  if (DeadBegin == SrcBB.end())
+    return false;
+  auto DeadEnd = nextLiveInst(DeadBegin, SrcBB.end(), DeadInsts);
+  // Terminator cannot be 'dead'.
+  requireOrDie(DeadEnd != SrcBB.end(),
+               "desan ubsan dead instruction sequence cannot end a block\n\t"
+               "Function: " +
+                   SrcBB.getParent()->getName() + "\n\tBB: " + SrcBB.getName() +
+                   "\n\tDeadBegin: " + DeadBegin->getName());
+
+  BIt = DeadEnd;
+  auto Seq2MapIt =
+      map_range(make_range(DeadBegin, DeadEnd->getNextNode()->getIterator()),
+                [&](const Instruction &I) { return AnchorToAdd.find(&I); });
+  auto AnchorIt = find_if(
+      Seq2MapIt, [&](const auto It) { return It != AnchorToAdd.end(); });
+
+  if (AnchorIt == Seq2MapIt.end()) {
+    Adds.addRecord(AddRecord::extractFrom(SrcBB, DeadBegin, DeadEnd));
+    return true;
+  }
+  auto AnchorRecord = *AnchorIt;
+  // If we have some other AddRecord belong to the same Anchor, prepend the
+  // current add seq to it.
+  const Instruction *OldAnchor = (*AnchorIt)->first;
+  auto &Record = (AnchorRecord->second)();
+  Record.prepend(SrcBB, DeadBegin);
+  if (AnchorRecord->first != &*DeadEnd) {
+    Instruction *OldAnchor = const_cast<Instruction *>(AnchorRecord->first);
+    Record.appendToSink(SrcBB, OldAnchor->getIterator(), DeadEnd);
+    Record.retargetAnchor(*DeadEnd);
+  }
+  AnchorToAdd.erase(AnchorRecord);
+  return true;
+}
+
 SplitExtractStatus extractSplitRedirectAddSeq(AddArchive &Adds,
                                               DeleteArchive &Deletes,
                                               BasicBlock &SrcBB,
@@ -1124,7 +1214,7 @@ void restoreAdd(AddArchive &Adds, DeleteArchive &Deletes, Module &M) {
       continue;
 
     const BBsSet &UserBBs = collectUserBBs(F);
-    AnchorAddMap AnchorToAdd;
+    Anchor2AddGetter AnchorToAdd;
 
     // ================================================================
     //    1. Extract Split/Redirect Adds (break CFG)
@@ -1170,15 +1260,17 @@ void restoreAdd(AddArchive &Adds, DeleteArchive &Deletes, Module &M) {
     // optimization, we isolate the pure Add Record extraction from
     // Split/Redirect Add Record extraction.
     // ================================================================
+    BB2Add PureAdds;
     for (BasicBlock &BB : F) {
       assert(isReachable(&BB));
       auto *FirstNonPHI = compat::getFirstNonPHIIt(&BB);
       assert(FirstNonPHI);
       auto BIt = FirstNonPHI->getIterator();
       while (BIt != BB.end() &&
-             extractUBSanDeadInstSeq(Adds, BB, BIt, DeadInsts, AnchorToAdd))
+             extractUBSanDeadInstSeq(BB, BIt, PureAdds, AnchorToAdd, DeadInsts))
         ;
     }
+    tryMergeUBSanAddRecords(Adds, std::move(PureAdds), std::move(AnchorToAdd));
 
     // ================================================================
     //    5. Extract SanPHIs from the UserBB PHI list (CFG stable).

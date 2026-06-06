@@ -1032,9 +1032,9 @@ DenseSet<const Instruction *> obtainUBSanDCE(Function &F) {
   };
 
   auto isDead = [&](const Instruction &I) {
-    // Detached I is not dead Instrcution in live BBs.
-    if (!I.getParent())
-      return false;
+    // Detached I is dead.
+    if (isInstDettached(&I))
+      return true;
     // Remaining UBSan branches are live roots on the current CFG. Their
     // operand chains must be preserved unless CFG extraction has already moved
     // the roots out of the function.
@@ -1050,8 +1050,8 @@ DenseSet<const Instruction *> obtainUBSanDCE(Function &F) {
   SmallSetVector<const Instruction *, 16> WorkList;
   auto DCEInstruction = [&](const Instruction &I) {
     assert(isDead(I));
-    auto Inserted = DeadInsts.insert(&I).second;
-    assert(Inserted && "DeadInsts should be inserted only once");
+    if (!DeadInsts.insert(&I).second)
+      return;
     for (const auto &Op : I.operand_values())
       if (const Instruction *OpI = dyn_cast<Instruction>(Op);
           OpI && OpI != &I && isDead(*OpI))

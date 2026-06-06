@@ -98,14 +98,6 @@ using namespace llvm;
 
 namespace __xsan::desan {
 namespace {
-/// If a block is detached, it does not belong to any function.
-bool isBlockDettached(const BasicBlock *BB) { return !BB->getParent(); }
-
-/// If an instruction is detached, it does not belong to any function.
-bool isInstDettached(const Instruction *I) {
-  assert(I->getParent());
-  return isBlockDettached(I->getParent());
-}
 bool isSanInst(const Instruction &I) { return !__xsan::UserIR::is(I); }
 bool isUsrInst(const Instruction &I) { return !isSanInst(I); }
 

@@ -315,7 +315,7 @@ static void obtainReplacersAndAdjustSanUseAnchor(
   auto Inst2Add = [&BB2Add](const Instruction &I) -> AddRecord * {
     auto It = BB2Add.find(I.getParent());
     requireOrDie(It != BB2Add.end(),
-                 "resan add cannot find replacement add record");
+                 "ReSan add cannot find replacement add record");
     return It->second;
   };
 
@@ -349,10 +349,11 @@ static void obtainReplacersAndAdjustSanUseAnchor(
       auto *Replacer = dyn_cast<Instruction>(Records.front().Replacer);
       if (!Replacer)
         continue;
-      assert(
-          Replacer->getParent() &&
-          (!Replacer->getParent()->getParent() || UBSanInst::is(*Replacer)) &&
-          "Non-UBSan replacer must belong to some detached san block");
+      // DeSan(UBSan) might leave some replacers as user instruction.
+      if (UBSanInst::is(*Replacer) && !isInstDettached(Replacer))
+        continue;
+      assert(isInstDettached(Replacer) &&
+             "Non-UBSan replacer must belong to some detached san block");
       AddRecord &ReplacerRecord = *Inst2Add(*Replacer);
 
       if (!mustComesBefore(*Replacee, ReplacerRecord)) {

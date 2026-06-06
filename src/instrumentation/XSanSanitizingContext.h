@@ -25,6 +25,15 @@
 
 namespace __xsan::desan {
 
+/// If a block is detached, it does not belong to any function.
+inline bool isBlockDettached(const llvm::BasicBlock *BB) { return !BB->getParent(); }
+
+/// If an instruction is detached, it does not belong to any function.
+inline bool isInstDettached(const llvm::Instruction *I) {
+  assert(I->getParent());
+  return isBlockDettached(I->getParent());
+}
+
 // A sanitizer is identified by the user-facing plan name ("asan", "msan",
 // ...). Creation order is the replay order used by ReSan. Metadata is derived
 // from the name as `xsan.<name>`, so adding a sanitizer no longer requires a

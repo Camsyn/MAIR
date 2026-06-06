@@ -98,6 +98,14 @@ using namespace llvm;
 
 namespace __xsan::desan {
 namespace {
+/// If a block is detached, it does not belong to any function.
+bool isBlockDettached(const BasicBlock *BB) { return !BB->getParent(); }
+
+/// If an instruction is detached, it does not belong to any function.
+bool isInstDettached(const Instruction *I) {
+  assert(I->getParent());
+  return isBlockDettached(I->getParent());
+}
 bool isSanInst(const Instruction &I) { return !__xsan::UserIR::is(I); }
 bool isUsrInst(const Instruction &I) { return !isSanInst(I); }
 
@@ -745,6 +753,20 @@ static void extractSanBB(AddArchive &Adds, Function &F,
   FlushPending(nullptr);
 }
 
+/// Given a UBSan PHI, judge whether it is dead trivially.
+static bool isUBSanPhiTrivialDead(const PHINode &PHI) {
+  assert(UBSanInst::is(PHI));
+  return all_of(PHI.users(), [](const User *User) {
+    auto *UserI = dyn_cast<Instruction>(User);
+    if (!UserI)
+      return true;
+    assert(UserI->getParent());
+    return /* Detached Inst */ isInstDettached(UserI) ||
+           /* Handler Call  */
+           __xsan::isUbsanInterfaceCall(*UserI) && UserI->user_empty();
+  });
+}
+
 /// Extract Split/Redirect Add Sequence from current user BB. Used only for
 /// DeSan(UBSan). Use mutable @p BIt to record the progress.
 /// @return @ref SplitExtractStatus
@@ -783,11 +805,20 @@ static SplitExtractStatus extractSplitRedirectAddSeq(
 
   assert(Split.SinkUserI != nullptr &&
          "desan split add extraction lost its sink user anchor");
+  BasicBlock::iterator SinkTo;
+  if (isUBSan) {
+    // We cannot move SanPhi from Sink To Source.
+    // For UBSan, if there is any SanPhi, we must keep the CFG structure.
+    if (!all_of(Split.SinkBB.phis(), isUBSanPhiTrivialDead))
+      return SplitExtractStatus::fail();
+    SinkTo = compat::getFirstNonPHIIt(&Split.SinkBB)->getIterator();
+  } else {
+    SinkTo = Split.SinkUserI->getIterator();
+  }
   // Old: BIt ----usr------ SanItBegin ----san---- BBEnd
   // New:     --- usr ----                         BIt  ---- usr ----
   const unsigned CurIdx = Adds.addRecord(AddRecord::extractFrom(
-      SrcBB, Beg, Split.SinkBB, Split.SinkUserI->getIterator(),
-      std::move(Split.SanBBs)));
+      SrcBB, Beg, Split.SinkBB, SinkTo, std::move(Split.SanBBs)));
   assert(Split.SinkUserI->getParent() == &SrcBB &&
          "Sink User Inst must be moved to SrcBB");
   return SplitExtractStatus::split(

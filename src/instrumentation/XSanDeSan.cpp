@@ -774,7 +774,7 @@ static bool isUBSanPhiTrivialDead(const PHINode &PHI) {
     if (!UserI)
       return true;
     assert(UserI->getParent());
-    return /* Detached Inst */ isInstDettached(UserI) ||
+    return /* Detached Inst */ isInstDetached(UserI) ||
            /* Handler Call  */
            __xsan::isUbsanInterfaceCall(*UserI) && UserI->user_empty();
   });
@@ -1026,14 +1026,14 @@ DenseSet<const Instruction *> obtainUBSanDCE(Function &F) {
     if (!UserI)
       return true;
     assert(UserI->getParent());
-    return /* Detached Inst */ isInstDettached(UserI) ||
+    return /* Detached Inst */ isInstDetached(UserI) ||
            /* Dead I  */
            DeadInsts.contains(UserI);
   };
 
   auto isDead = [&](const Instruction &I) {
     // Detached I is dead.
-    if (isInstDettached(&I))
+    if (isInstDetached(&I))
       return true;
     // Remaining UBSan branches are live roots on the current CFG. Their
     // operand chains must be preserved unless CFG extraction has already moved
@@ -1133,7 +1133,7 @@ void tryMergeUBSanAddRecords(AddArchive &Adds, BB2Add &&PureAdds,
     BasicBlock *BB = Anchor->getParent();
     assert(BB);
     // If anchor not detached, we do not need to merge pure add to it.
-    if (!isBlockDettached(BB))
+    if (!isBlockDetached(BB))
       continue;
     auto It = PureAdds.find(BB);
     assert(It != PureAdds.end());

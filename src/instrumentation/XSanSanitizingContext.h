@@ -26,14 +26,17 @@
 namespace __xsan::desan {
 
 /// If a block is detached, it does not belong to any function.
-inline bool isBlockDettached(const llvm::BasicBlock *BB) {
+inline bool isBlockDetached(const llvm::BasicBlock *BB) {
+  assert(BB);
   return !BB->getParent();
 }
 
 /// If an instruction is detached, it does not belong to any function.
-inline bool isInstDettached(const llvm::Instruction *I) {
-  assert(I->getParent());
-  return isBlockDettached(I->getParent());
+inline bool isInstDetached(const llvm::Instruction *I) {
+  assert(I);
+  if (!I->getParent())
+    return true;
+  return isBlockDetached(I->getParent());
 }
 
 // A sanitizer is identified by the user-facing plan name ("asan", "msan",
@@ -120,7 +123,7 @@ struct AddRecord {
 
   AddRecordKind Kind;
   // The first user instruction after the added parts.
-  llvm::Instruction *const Anchor;
+  llvm::Instruction *Anchor;
   // The related SanInsts
   std::unique_ptr<llvm::BasicBlock> SanInsts;
   // The related SanBBs.
@@ -154,9 +157,7 @@ struct AddRecord {
   // Move SrcBB[Fr:To) to the archived sink prefix of Split/Redirect records.
   void appendToSink(llvm::BasicBlock &SrcBB, llvm::BasicBlock::iterator Fr,
                     llvm::BasicBlock::iterator To);
-  void retargetAnchor(llvm::Instruction &NewAnchor) {
-    const_cast<llvm::Instruction *&>(Anchor) = &NewAnchor;
-  }
+  void retargetAnchor(llvm::Instruction &NewAnchor) { Anchor = &NewAnchor; }
 
   /// Obtain the related SanBBs. Return {} if this is PureRecord.
   llvm::ArrayRef<llvm::BasicBlock *> getSanBBs() { return SanBBs; }

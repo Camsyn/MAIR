@@ -22,7 +22,7 @@ struct DeleteEvent {
 
   llvm::Instruction *const Inst2Remove = nullptr;
   llvm::BasicBlock *const Block = nullptr;
-  llvm::Instruction *const Anchor = nullptr;
+  llvm::Instruction *Anchor = nullptr;
   const llvm::SmallVector<llvm::Value *, 4> Operands;
 
 private:
@@ -35,8 +35,7 @@ private:
              "Current anchor should have been deleted");
       return;
     }
-    const_cast<llvm::Instruction *&>(Anchor) =
-        const_cast<llvm::Instruction *>(NewAnchor);
+    Anchor = const_cast<llvm::Instruction *>(NewAnchor);
   }
 };
 

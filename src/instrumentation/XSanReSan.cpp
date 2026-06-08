@@ -80,6 +80,17 @@ using namespace llvm;
 
 namespace __xsan::desan {
 
+static bool replaceSuccessorSlot(Instruction &Term, BasicBlock *OldSucc,
+                                 BasicBlock *NewSucc) {
+  for (unsigned I = 0, E = Term.getNumSuccessors(); I != E; ++I) {
+    if (Term.getSuccessor(I) != OldSucc)
+      continue;
+    Term.setSuccessor(I, NewSucc);
+    return true;
+  }
+  return false;
+}
+
 void BlockAddRecord::replay(Module &M) {
   if (Replayed)
     return;
@@ -100,7 +111,8 @@ void BlockAddRecord::replay(Module &M) {
     SanBB->insertInto(F, InsertBefore);
     auto *Term = SanBB->getTerminator();
     if (UserSucc && Term)
-      Term->replaceSuccessorWith(nullptr, UserSucc);
+      requireOrDie(replaceSuccessorSlot(*Term, nullptr, UserSucc),
+                   "resan block add replay lost hidden user successor");
   }
   Replayed = true;
 }
@@ -189,9 +201,11 @@ void AddRecord::RedirectExtra::replayEdgesOfSanBB2Sink(BasicBlock &SrcBB,
   const bool IsSrcAsPred = llvm::is_contained(successors(&SanInsts), nullptr);
   // Recover hidden edge SanBB -> SinkBB
   if (IsSrcAsPred)
-    SanInsts.getTerminator()->replaceSuccessorWith(nullptr, SinkBB);
+    requireOrDie(replaceSuccessorSlot(*SanInsts.getTerminator(), nullptr,
+                                      SinkBB),
+                 "resan redirect replay lost hidden sink successor");
   // AddRecord does not own SanBBs (which are owned by BlockAddRecord).
-  // Therefore, we should not modify DetachedEdges's implict edge at this place;
+  // Therefore, we should not modify DetachedEdges's implicit edge at this place;
   // they should be modified at BlockAddRecord::replay.
   // All in all, we cannot add the following code here due to ownership
   // violation:
@@ -222,7 +236,7 @@ void AddRecord::replayRedirect() {
   replayPHiUses();
   // Replay as pure add at first.
   auto &SanBeg = replayPure();
-  // This 'user' br was creared by previous DeSan.
+  // This 'user' br was created by previous DeSan.
   // However, addition replay should not remove any inst.
   // Move this before the SanInsts to avoid any other SanInsts being inserted
   // after a san-br.
@@ -350,9 +364,9 @@ static void obtainReplacersAndAdjustSanUseAnchor(
       if (!Replacer)
         continue;
       // DeSan(UBSan) might leave some replacers as user instruction.
-      if (UBSanInst::is(*Replacer) && !isInstDettached(Replacer))
+      if (UBSanInst::is(*Replacer) && !isInstDetached(Replacer))
         continue;
-      assert(isInstDettached(Replacer) &&
+      assert(isInstDetached(Replacer) &&
              "Non-UBSan replacer must belong to some detached san block");
       AddRecord &ReplacerRecord = *Inst2Add(*Replacer);
 

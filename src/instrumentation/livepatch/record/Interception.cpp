@@ -175,7 +175,7 @@ void recordDeleteEvent(llvm::Instruction *I) {
     // the new event as the last Inst2Remove.
     if (auto *LastEvent =
             Recorder.DeleteEvents.getLastEventAnchoredBy(Event.Anchor))
-      const_cast<llvm::Instruction *&>(Event.Anchor) = LastEvent->Inst2Remove;
+      Event.Anchor = LastEvent->Inst2Remove;
     Recorder.DeleteEvents.track(RawAnchor, std::move(Event));
   }
 }

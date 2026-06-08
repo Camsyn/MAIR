@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <limits.h>
 #include <link.h>
+#include <llvm/Support/ErrorHandling.h>
 #include <llvm/Support/Memory.h>
 #include <llvm/Support/Process.h>
 #include <optional>
@@ -635,6 +636,7 @@ public:
     case MemoryType::RoData:
       return PROT_READ;
     }
+    llvm_unreachable("unexpected patch memory type");
   }
 
   ScopedApplyPatch(void *FuncAddr, size_t n, MemoryType Type = MemoryType::Exec)

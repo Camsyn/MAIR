@@ -2,9 +2,9 @@
 // warning block that MSan inserts for an uninitialized conditional path.
 // RUN: %clang -O0 -g -S -emit-llvm %s -o %t.raw.ll
 // RUN: %xsan_opt -passes=xsan -xsan-sanitizers=msan -xsan-dump=%t.dump -S %t.raw.ll -o %t.out.ll
-// RUN: FileCheck %s --check-prefix=DESAN --input-file=%t.dump/04-desan.ll
-// RUN: FileCheck %s --check-prefix=RESAN-BB --input-file=%t.dump/05-1-1-resan-add-bb.ll
-// RUN: FileCheck %s --check-prefix=RESAN --input-file=%t.dump/05-resan.ll
+// RUN: FileCheck %s --check-prefix=DESAN --input-file=%t.dump/02-desan.ll
+// RUN: FileCheck %s --check-prefix=RESAN-BB --input-file=%t.dump/03-1-1-resan-add-bb.ll
+// RUN: FileCheck %s --check-prefix=RESAN --input-file=%t.dump/03-resan.ll
 
 __attribute__((noinline)) int msan_dead_bb(int c) {
   int x;

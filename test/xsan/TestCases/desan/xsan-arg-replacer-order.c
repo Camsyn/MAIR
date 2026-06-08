@@ -2,7 +2,7 @@
 // another sanitizer observes that argument in an added sequence.
 // RUN: %clang -O0 -g -S -emit-llvm %s -o %t.raw.ll
 // RUN: %xsan_opt -passes=xsan -xsan-sanitizers=asan,tsan,msan -xsan-dump=%t.dump -S %t.raw.ll -o %t.out.ll
-// RUN: FileCheck %s --check-prefix=RESAN --input-file=%t.dump/09-resan.ll
+// RUN: FileCheck %s --check-prefix=RESAN --input-file=%t.dump/07-resan.ll
 
 struct Big {
   long a[8];

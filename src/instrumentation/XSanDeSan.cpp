@@ -34,21 +34,29 @@
 //    5.2. Break sanitizer CFG edges only after SanInsts and SanPHIs are
 //         archived.
 //
-// 6. UBSan frontend recovery: run before optional UBSan add extraction.
+// 6. UBSan arithmetic recovery: always run before optional full UBSan DeSan.
 //    6.1. Fold frontend overflow intrinsics back into user arithmetic.
 //    6.2. Record paired replace/delete facts for ReSan.
-//    6.3. Stop here by default for UBSan.
+//    6.3. Without -xsan-de-ubsan or XSAN_DE_UBSAN=1, keep the remaining
+//         frontend UBSan checks in place and only drop nosanitize from the
+//         overflow value path so later sanitizers can see it.
 //
-// 7. UBSan add extraction: with -xsan-de-ubsan, use a stricter staged flow.
+// 7. Full UBSan add extraction: when -xsan-de-ubsan or XSAN_DE_UBSAN=1 is
+//    enabled, use a stricter staged flow because optimized frontend UBSan IR
+//    often no longer matches livepatch sanitizer assumptions.
 //    7.1. CFG change: first fold only Split/Redirect shapes. For SourceBB,
 //         extract only the sanitizer terminator; for SinkBB, extract no
-//         instructions.
-//    7.2. BB extract: detach sanitizer-only blocks after CFG is simplified.
+//         instructions. Record these AddRecords by anchor for later merging.
+//    7.2. BB extract: recompute reachability after CFG simplification and
+//         detach blocks no longer reachable from the function entry.
 //    7.3. DeadObtain: compute UBSan dead instructions on the current CFG.
-//    7.4. InstExtract: extract only UBSan-dead instruction sequences. If an
-//         anchor already has a CFG AddRecord, prepend the sequence to that
-//         record's SanInsts so replay still places it before the terminator.
-//    7.5. PhiExtract: extract UBSan-dead PHIs after instruction extraction.
+//    7.4. InstExtract: extract only UBSan-dead instruction sequences as pure
+//         AddRecords while keeping a SanInsts-block -> AddRecord map. If a
+//         dead sequence reaches an anchor already owned by a Split/Redirect
+//         AddRecord, merge the prefix into that record and, when needed, move
+//         the suffix to the sink side and retarget the replay anchor.
+//    7.5. PhiExtract: extract UBSan-dead PHIs after instruction extraction and
+//         AddRecord merging.
 //
 //===----------------------------------------------------------------------===//
 

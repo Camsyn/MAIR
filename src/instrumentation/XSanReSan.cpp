@@ -13,7 +13,7 @@
 //         and split user BBs.
 //
 // 2. replayAdd / prepare replacer AddRecords: classify AddRecords that contain
-//    replacement values.
+//    sanitizer replacement values.
 //    2.1. Build detached SanBB -> AddRecord ownership.
 //    2.2. Put replacer-after-replacee records before normal Add replay.
 //    2.3. Retarget detached sanitizer uses so SanUse(replacee) is replayed
@@ -31,7 +31,7 @@
 //    4.1. Reattach sanitizer-only BBs to their parent functions.
 //    4.2. Do not move user instructions in this phase.
 //
-// 5. replayAdd / SanInsts: replay normal AddRecords last.
+// 5. replayAdd / SanInsts: replay instruction AddRecords last.
 //    5.1. Replay replacer-after-replacee AddRecords first.
 //    5.2. Replay each sanitizer's remaining AddRecords in sanitizer order.
 //    5.3. Replay replacer-before-replacee AddRecords at the end.
@@ -387,7 +387,8 @@ static void obtainReplacersAndAdjustSanUseAnchor(
 ///    instructions)
 ///    3-1: If the additions are related to replacer after replacee, replay them
 ///         at first.
-///    3-2: Replay other additions in order.
+///    3-2: Replay other additions in sanitizer order.
+///    3-3: Replay additions related to replacer before replacee at the end.
 static void replayAdd(Module &M, SanitizingContext &Context,
                       unsigned DumpIndex) {
   // =========================================================
@@ -422,7 +423,7 @@ static void replayAdd(Module &M, SanitizingContext &Context,
   Context.dumpNestedIR(M, DumpIndex, "1-1-resan-add-bb");
 
   // =========================================================
-  // 2. Replay all SanInsts
+  // 3. Replay all SanInsts
   // =========================================================
 
   // We need to firstly replay those add record which is treated as

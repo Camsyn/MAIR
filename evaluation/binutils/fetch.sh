@@ -1,6 +1,6 @@
 #!/bin/bash
 export PROJ=binutils
-URL="git://sourceware.org/git/binutils-gdb.git"
+URL="https://sourceware.org/git/binutils-gdb.git"
 
 
 # Use depth 1 to avoid cloning the history

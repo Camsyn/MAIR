@@ -1,6 +1,6 @@
 #!/bin/bash
 export PROJ=binutils
-URL="https://github.com/bminor/binutils-gdb.git"
+URL="git://sourceware.org/git/binutils-gdb.git"
 
 
 # Use depth 1 to avoid cloning the history
@@ -106,4 +106,3 @@ EOF
   fi
 }
 ensure_strings_min
-

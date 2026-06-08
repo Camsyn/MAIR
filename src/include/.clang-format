@@ -1,3 +1,4 @@
-BasedOnStyle: Google
+# BasedOnStyle: Google # which prefer A* than A *
+BasedOnStyle: LLVM
 AllowShortIfStatementsOnASingleLine: false
 IndentPPDirectives: AfterHash

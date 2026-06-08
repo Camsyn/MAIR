@@ -44,14 +44,14 @@ inline llvm::Instruction *getNextNonDebugInstruction(llvm::Instruction *I) {
 }
 
 // Get next non-debug instruction (const version)
-inline const llvm::Instruction *getNextNonDebugInstruction(
-    const llvm::Instruction *I) {
+inline const llvm::Instruction *
+getNextNonDebugInstruction(const llvm::Instruction *I) {
   return getNextNonDebugInstruction(const_cast<llvm::Instruction *>(I));
 }
 
 // Get first non-PHI or debug or lifetime instruction
-inline const llvm::Instruction *getFirstNonPHIOrDbgOrLifetime(
-    const llvm::BasicBlock &BB) {
+inline const llvm::Instruction *
+getFirstNonPHIOrDbgOrLifetime(const llvm::BasicBlock &BB) {
 #if LLVM_VERSION_MAJOR >= 22
   auto It = BB.getFirstNonPHIOrDbgOrLifetime();
   return It != BB.end() ? &*It : nullptr;
@@ -78,9 +78,9 @@ inline llvm::Instruction *getFirstNonPHIIt(llvm::BasicBlock *BB) {
 }
 
 using InstructionEraseIterator =
-    decltype(std::declval<llvm::Instruction&>().eraseFromParent());
+    decltype(std::declval<llvm::Instruction &>().eraseFromParent());
 
-inline void moveBefore(llvm::Instruction* I, llvm::Instruction* MovePos) {
+inline void moveBefore(llvm::Instruction *I, llvm::Instruction *MovePos) {
 #if LLVM_VERSION_MAJOR >= 22
   I->moveBefore(MovePos->getIterator());
 #else
@@ -137,9 +137,9 @@ inline void spliceInstructions(llvm::BasicBlock *ToBB,
 #endif
 }
 
-inline llvm::Function *getOrInsertDeclaration(
-    llvm::Module *M, llvm::Intrinsic::ID id,
-    llvm::ArrayRef<llvm::Type *> Tys = {}) {
+inline llvm::Function *
+getOrInsertDeclaration(llvm::Module *M, llvm::Intrinsic::ID id,
+                       llvm::ArrayRef<llvm::Type *> Tys = {}) {
 #if LLVM_VERSION_MAJOR >= 23
   return llvm::Intrinsic::getOrInsertDeclaration(M, id, Tys);
 #else
@@ -171,5 +171,5 @@ inline void removeIncomingValueIf(llvm::PHINode &PN,
 #endif
 }
 
-}  // namespace compat
-}  // namespace __xsan
+} // namespace compat
+} // namespace __xsan

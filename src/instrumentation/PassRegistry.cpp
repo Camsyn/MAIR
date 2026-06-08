@@ -457,8 +457,8 @@ SubSanitizers SubSanitizers::loadSubSanitizers(llvm::OptimizationLevel Level) {
   // sanitizing edits; do these cleanups before any DeSan/Sanitizing step.
   Sanitizers.addPass(desan::PreprocessPass(Sanitizers.Ctx));
 
-  // Post-tag UBSan's instructions, as it is instrumented by the compiler frontend, which
-  // cannot be controlled by XSan.
+  // Post-tag UBSan's instructions, as it is instrumented by the compiler
+  // frontend, which cannot be controlled by XSan.
   Sanitizers.addPass(UbsanInstTaggingPass());
 
   // Deal with UBSan first, since UBSan is done by clang frontend.

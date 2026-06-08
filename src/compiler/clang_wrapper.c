@@ -417,9 +417,9 @@ static void regist_pass_plugin(enum SanitizerType sanTy) {
 #define ADD_XSAN_SANITIZER(NAME)                                               \
   do {                                                                         \
     snprintf(xsan_sanitizers + strlen(xsan_sanitizers),                        \
-             sizeof(xsan_sanitizers) - strlen(xsan_sanitizers), "%s" NAME,    \
+             sizeof(xsan_sanitizers) - strlen(xsan_sanitizers), "%s" NAME,     \
              sep);                                                             \
-    sep = ",";                                                                \
+    sep = ",";                                                                 \
   } while (0)
 
   if (has(&act_sanitizers, ASan))

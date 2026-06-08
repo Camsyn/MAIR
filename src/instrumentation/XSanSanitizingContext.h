@@ -26,7 +26,9 @@
 namespace __xsan::desan {
 
 /// If a block is detached, it does not belong to any function.
-inline bool isBlockDettached(const llvm::BasicBlock *BB) { return !BB->getParent(); }
+inline bool isBlockDettached(const llvm::BasicBlock *BB) {
+  return !BB->getParent();
+}
 
 /// If an instruction is detached, it does not belong to any function.
 inline bool isInstDettached(const llvm::Instruction *I) {

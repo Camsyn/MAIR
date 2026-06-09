@@ -119,6 +119,55 @@ if [ $track_time -eq 1 ]; then
     export CXXFLAGS="-ftime-trace ${CXXFLAGS}"
 fi
 
+prepare_trace_dir() {
+    local data_dir="$1"
+    if [ -e "$data_dir" ]; then
+        local ts
+        ts=$(date +%Y%m%d_%H%M%S)
+        local recycle_dir=".temp/recyclebin/$ts/$(dirname "$data_dir")"
+        mkdir -p "$recycle_dir"
+        mv "$data_dir" "$recycle_dir/$(basename "$data_dir")"
+    fi
+    mkdir -p "$data_dir"
+}
+
+collect_trace_files() {
+    local data_dir="$1"
+    local found=0
+    while IFS= read -r -d '' f; do
+        found=1
+        cp --parents "$f" "$data_dir" 2>/dev/null || {
+            mkdir -p "$(dirname "$data_dir/$f")"
+            cp "$f" "$data_dir/$f"
+        }
+    done < <(find ./temp -type f -name "*.json" -print0 2>/dev/null)
+    return $((1 - found))
+}
+
+sum_executecompiler_time_us() {
+    local data_dir="$1"
+    python3 - "$data_dir" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+total = 0.0
+events = 0
+jsons = 0
+
+for json_file in sorted(Path(sys.argv[1]).rglob("*.json")):
+    jsons += 1
+    with json_file.open() as f:
+        obj = json.load(f)
+    for event in obj.get("traceEvents", []):
+        if isinstance(event, dict) and event.get("name") == "ExecuteCompiler":
+            total += float(event["dur"])
+            events += 1
+
+print(f"{total:.0f} {events} {jsons}")
+PY
+}
+
 for mode in "${enabled_modes[@]}"; do
     echo "=============================="
     echo "Compile mode: $mode"
@@ -141,14 +190,11 @@ for mode in "${enabled_modes[@]}"; do
     fi
 
     export mode="$mode"
-    start_time=$(date +%s)
     ./compile.sh
     if [ $? -ne 0 ]; then
         echo "Compilation failed, skipping $mode"
         continue
     fi
-    end_time=$(date +%s)
-    compile_time=$((end_time - start_time))
 
     # Check whether temp/.bin exists
     if [ ! -d temp/.bin ]; then
@@ -164,28 +210,38 @@ for mode in "${enabled_modes[@]}"; do
         echo "Moved $bin to artefacts/$prog/$prog.$mode"
     done
     mkdir -p ".compiled/"
-    echo "Compile Time: $compile_time s" > ".compiled/$mode"
 
     # In trace mode, collect *.json compile-time trace files
     if [ $track_time -eq 1 ]; then
         data_dir=".compiled/data-time-trace/$mode"
-        rm -rf "$data_dir" && mkdir -p "$data_dir"
-        # Find all *.json files
-        found=0
-        for f in $(find ./temp -type f -name "*.json" 2>/dev/null); do
-            found=1
-            # Use cp --parents to preserve path structure
-            cp --parents "$f" "$data_dir" 2>/dev/null || \
-                (mkdir -p "$(dirname "$data_dir/$f")" && cp "$f" "$data_dir/$f")
-        done
-        if [ $found -eq 1 ]; then
-            # Move $data_dir/temp/* to $data_dir/
-            mv "$data_dir/temp/*" "$data_dir/"
-            rm -rf "$data_dir/temp"
+        prepare_trace_dir "$data_dir"
+        if collect_trace_files "$data_dir"; then
+            read -r trace_us trace_events trace_jsons < <(sum_executecompiler_time_us "$data_dir")
+            if [ "$trace_events" -eq 0 ]; then
+                echo "No $mode ExecuteCompiler events found"
+                echo "Compiled: yes" > ".compiled/$mode"
+                echo "Compile Time Source: unavailable" >> ".compiled/$mode"
+                echo "Trace JSON Count: $trace_jsons" >> ".compiled/$mode"
+                continue
+            fi
+            trace_seconds=$(python3 - "$trace_us" <<'PY'
+import sys
+print(f"{float(sys.argv[1]) / 1_000_000:.6f}")
+PY
+)
+            echo "Compile Time: $trace_seconds s" > ".compiled/$mode"
+            echo "Compile Time Source: ExecuteCompiler.dur" >> ".compiled/$mode"
+            echo "ExecuteCompiler Time: $trace_us us" >> ".compiled/$mode"
+            echo "ExecuteCompiler Events: $trace_events" >> ".compiled/$mode"
+            echo "Trace JSON Count: $trace_jsons" >> ".compiled/$mode"
             echo "Collected $mode compile trace files into $data_dir/"
         else
             echo "No $mode compile trace (.json) files found"
+            echo "Compiled: yes" > ".compiled/$mode"
+            echo "Compile Time Source: unavailable" >> ".compiled/$mode"
         fi
+    else
+        echo "Compiled: yes" > ".compiled/$mode"
     fi
 done
 

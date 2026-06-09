@@ -7,7 +7,7 @@ export stdin="false"
 MODE="${1:-raw}"
 shift 1 || true
 
-# 将子命令参数放入 PRE_OPT，避免被外层 run.sh 当作“输入文件”
+# Put subcommand arguments in PRE_OPT so the outer run.sh does not treat them as input files
 if [ $# -eq 0 ]; then
 	PRE_OPT="-help"
 else
@@ -17,6 +17,6 @@ fi
 export MSAN_OPTIONS="poison_in_free=0:poison_in_malloc=0"
 
 
-echo "运行: $PROG_DIR/../../../run.sh $MODE (PRE_OPT=\"$PRE_OPT\")"
+echo "Running: $PROG_DIR/../../../run.sh $MODE (PRE_OPT=\"$PRE_OPT\")"
 exec "$PROG_DIR/../../../run.sh" "$MODE"
 

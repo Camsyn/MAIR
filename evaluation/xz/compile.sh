@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e  # 只要有一步失败，脚本立即退出
+set -e  # Exit immediately if any command fails
 
 export PROJ=xz
 
@@ -12,15 +12,15 @@ export ADDITIONAL="-DFORTIFY_SOURCE=2 -fstack-protector-all -fno-omit-frame-poin
 export CXXFLAGS="$CXXFLAGS $ADDITIONAL"
 export CFLAGS="$CFLAGS $ADDITIONAL"
 
-# 模式：优先位置参数，其次环境变量，默认 raw
+# Mode: prefer positional argument, then environment variable, default to raw
 mode="${1:-${mode:-raw}}"
 
 source ../activate_compile_flags.sh "$mode" false
 
-# 首先生成configure脚本
+# First generate the configure script if needed
 pushd repo
 if [ ! -f "configure" ]; then
-    echo "生成configure脚本..."
+    echo "Generating configure script..."
     ./autogen.sh
 fi
 popd
@@ -31,7 +31,7 @@ rm -rf *
 make clean
 make -j
 
-# 将 xz 下的指定可执行文件移动到 ../artefacts 目录
+# Move selected xz binaries into ../artefacts directory
 mkdir -p .bin
 XZ_BINARIES=(xz)
 for bin in "${XZ_BINARIES[@]}"; do

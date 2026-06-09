@@ -6,7 +6,7 @@ URL="https://github.com/nlohmann/json.git"
 git clone "$URL" repo --depth 1
 
 
-# 拉取测试数据
+# Fetch test data
 TEST_DATA_VERSION=3.1.0
 wget https://github.com/nlohmann/json_test_data/archive/refs/tags/v$TEST_DATA_VERSION.zip
 unzip v$TEST_DATA_VERSION.zip
@@ -20,11 +20,11 @@ do
 done
 rm -fr json_test_data-$TEST_DATA_VERSION
 
-# 实际上，以标准JSON为输入的fuzzer 是 parse_afl_fuzzer
+# The primary fuzzer that takes standard JSON as input is parse_afl_fuzzer.
 rm -rf corpus/json@parse_afl_fuzzer
 mv corpus/json@parse_json_fuzzer corpus/json@parse_afl_fuzzer
 
-# 对于C++程序，由于我们不插桩 libc++, 因此MSan可能有误报；因此，我们手动过滤掉引起误报的测试输入
+# For C++ programs, libc++ is not instrumented, so MSan may report false positives; filter inputs that trigger them.
 FP_JSON_SEEDS=(
   # n_*
   "n_structure_*" "n_string_*" "n_object_*" "n_incomplete_*" "n_number_*" "n_array_*"
@@ -38,7 +38,7 @@ for seed in ${FP_JSON_SEEDS[@]}; do
     rm -f corpus/json@parse_afl_fuzzer/$seed
 done
 
-# 对于C++程序，由于我们不插桩 libc++, 因此MSan可能有误报；因此，我们手动过滤掉引起误报的测试输入
+# For C++ programs, libc++ is not instrumented, so MSan may report false positives; filter inputs that trigger them.
 FP_BSON_SEEDS=(
   "1.json.bson" "2.json.bson" "4.json.bson" "5.json.bson"
 )

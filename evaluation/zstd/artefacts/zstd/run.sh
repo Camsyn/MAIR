@@ -1,25 +1,25 @@
 #!/bin/bash
 export PROG_DIR=$(cd "$(dirname "$0")"; pwd)
 
-# 冒烟测试：默认只执行基本操作，避免复杂压缩/解压
+# Smoke test: run only basic operations by default to avoid expensive compression/decompression
 : "${SMOKE:=1}"
 export stdin="false"
 
 if [ "$SMOKE" = "1" ] || [ "$SMOKE" = "true" ]; then
-  # 只测试基本的帮助信息，不处理文件I/O
+  # Only test basic help output, without doing any file I/O
   export PRE_OPT=""
   export POST_OPT="--help"
 else
-  # 正常模式：如果提供了输入参数，则根据扩展名决定压缩/解压，并将输出/解压目录置于 /tmp 下
+  # Normal mode: if input is provided, choose compression/decompression by extension and keep output under /tmp
   if [ $# -ge 2 ]; then
     input="$2"
     TMP_DIR=$(mktemp -d /tmp/zstd_bench_XXXXXX)
-    # 解压：将输出目录设置到 /tmp 临时目录
+    # Decompression: write output into the temporary directory under /tmp
     if [[ "$input" == *.zst || "$input" == *.zstd ]]; then
       export PRE_OPT="-d -o $TMP_DIR/output"
       export POST_OPT=""
     else
-      # 压缩：将生成的压缩包写到 /tmp 临时目录
+      # Compression: write the resulting archive into the temporary directory
       export PRE_OPT="-o $TMP_DIR/output.zst"
       export POST_OPT=""
     fi
@@ -29,7 +29,7 @@ else
   fi
 fi
 
-# # 组合模式 asan+msan：不静音，仅设为非致命；并关闭 LSan 以免与 MSan 冲突
+# Combined asan+msan mode: keep reports visible, make them non-fatal, and disable LSan to avoid MSan conflicts
 # mode="$1"
 # if [[ "$mode" == *asan* && "$mode" == *msan* ]]; then
 #   : "${ASAN_OPTIONS:=halt_on_error=0,detect_leaks=0}"

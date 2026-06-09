@@ -1,17 +1,17 @@
 #!/bin/bash
 set -e
 
-# 参考 sqlite3 模版
+# Based on the sqlite3 template
 mkdir -p repo corpus/re2@ossfuzz
 
-# 拉取 re2 源码
+# Fetch re2 source code
 if [ ! -d repo/.git ]; then
   git clone https://github.com/google/re2.git repo --depth 1
 else
   (cd repo && git pull --ff-only)
 fi
 
-# 从 oss-fuzz 拉取 fuzzer 源（re2_fuzzer.cc）
+# Fetch fuzzer source (re2_fuzzer.cc) from oss-fuzz
 if [ ! -d oss-fuzz-temp ]; then
   git clone https://github.com/google/oss-fuzz.git oss-fuzz-temp --depth 1
 else
@@ -22,23 +22,23 @@ if [ -f oss-fuzz-temp/projects/re2/re2_fuzzer.cc ]; then
   cp -f oss-fuzz-temp/projects/re2/re2_fuzzer.cc repo/
 fi
 
-# 可选：复制 seeds（若存在）
+# Optionally copy seeds (if they exist)
 if [ -d oss-fuzz-temp/projects/re2/seeds ]; then
   cp -rf oss-fuzz-temp/projects/re2/seeds/* corpus/re2@re2_fuzzer/ || true
 fi
 
-# 应用 MSan 抑制补丁
+# Apply MSan suppression patch if present
 if [ -f repo.patch ]; then
-  echo "应用 MSan 抑制补丁..."
+  echo "Applying MSan suppression patch..."
   (cd repo && git apply ../repo.patch)
 fi
 
-# 从仓库中搜寻语料文件
+# Search the repository for corpus files
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 if [ -f "$SCRIPT_DIR/create_re2_corpus.sh" ]; then
     "$SCRIPT_DIR/create_re2_corpus.sh" || true
 else
-    echo "警告: 未找到可执行的 create_re2_corpus.sh，已跳过语料生成" >&2
+    echo "Warning: Executable create_re2_corpus.sh not found, skipping corpus generation" >&2
 fi  
 
 rm -rf oss-fuzz-temp fuzzbench-temp

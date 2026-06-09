@@ -1,10 +1,10 @@
 #!/bin/bash
 set -e
 
-# 创建必要的目录
+# Create required directories
 mkdir -p repo corpus/libxml2@ossfuzz
 
-# 从 libxml2 官方仓库克隆源码
+# Clone source code from the official libxml2 repository
 if [ ! -d "repo/.git" ]; then
     git clone https://gitlab.gnome.org/GNOME/libxml2.git repo
 else
@@ -13,8 +13,8 @@ else
     popd
 fi
 
-# 从 oss-fuzz 拉取 fuzzer 文件
-echo "从 oss-fuzz 拉取 fuzzer 文件..."
+# Fetch fuzzer files from oss-fuzz
+echo "Fetching fuzzer files from oss-fuzz..."
 if [ ! -d "oss-fuzz-temp" ]; then
     git clone https://github.com/google/oss-fuzz.git oss-fuzz-temp --depth 1
 else
@@ -23,8 +23,8 @@ else
     popd
 fi
 
-# 从 fuzzbench 拉取 fuzzer 文件
-echo "从 fuzzbench 拉取 fuzzer 文件..."
+# Fetch fuzzer files from fuzzbench
+echo "Fetching fuzzer files from fuzzbench..."
 if [ ! -d "fuzzbench-temp" ]; then
     git clone https://github.com/google/fuzzbench.git fuzzbench-temp --depth 1
 else
@@ -33,39 +33,39 @@ else
     popd
 fi
 
-# 检查 oss-fuzz 中是否有 libxml2 项目
-echo "检查 oss-fuzz 中的 libxml2 项目..."
+# Check whether libxml2 exists as a project in oss-fuzz
+echo "Checking libxml2 project in oss-fuzz..."
 if [ -d "oss-fuzz-temp/projects" ]; then
-    ls oss-fuzz-temp/projects/ | grep -i xml || echo "未找到 XML 相关项目"
+    ls oss-fuzz-temp/projects/ | grep -i xml || echo "No XML-related projects found"
 fi
 
-# 复制 fuzzer 源文件
+# Copy fuzzer source files
 if [ -f "oss-fuzz-temp/projects/libxml2/xml_read_memory_fuzzer.c" ]; then
     cp oss-fuzz-temp/projects/libxml2/xml_read_memory_fuzzer.c repo/
-    echo "已复制 xml_read_memory_fuzzer.c"
+    echo "Copied xml_read_memory_fuzzer.c"
 else
-    echo "警告: 未找到 xml_read_memory_fuzzer.c"
+    echo "Warning: xml_read_memory_fuzzer.c not found"
 fi
 
 if [ -f "oss-fuzz-temp/projects/libxml2/xml_read_memory_fuzzer.h" ]; then
     cp oss-fuzz-temp/projects/libxml2/xml_read_memory_fuzzer.h repo/
-    echo "已复制 xml_read_memory_fuzzer.h"
+    echo "Copied xml_read_memory_fuzzer.h"
 else
-    echo "警告: 未找到 xml_read_memory_fuzzer.h"
+    echo "Warning: xml_read_memory_fuzzer.h not found"
 fi
 
-# 跳过 autogen.sh，直接使用预生成的 configure 脚本
-echo "跳过 autogen.sh，使用预生成的 configure 脚本..."
+# Skip autogen.sh and use the pre-generated configure script directly
+echo "Skipping autogen.sh, using pre-generated configure script..."
 
-echo "fetch 完成。"
+echo "fetch finished."
 
 
-# 从仓库中搜寻语料文件
+# Search the repository to build an initial corpus
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 if [ -f "$SCRIPT_DIR/create_libxml2_corpus.sh" ]; then
     "$SCRIPT_DIR/create_libxml2_corpus.sh" || true
 else
-    echo "警告: 未找到可执行的 create_libxml2_corpus.sh，已跳过语料生成" >&2
+    echo "Warning: Executable create_libxml2_corpus.sh not found, skipping corpus generation" >&2
 fi
 
 rm -rf oss-fuzz-temp fuzzbench-temp

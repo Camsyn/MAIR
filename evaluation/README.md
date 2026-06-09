@@ -1,24 +1,24 @@
-本目录为XSan在50+个项目上运行的根目录
+This directory is the root for running XSan on 50+ real-world projects.
 
-- `<package>` : 被测试的软件包
-    - [手写] `fetch.sh`: 拉取软件包的代码，尽可能减少包体积，比如git clone 时，应该指定 --depth=1 参数
-    - [手写] `compile.sh`: 编译脚本，受外部环境变量，并极可能减少无关产物的编译, 并将产物移动到 artefacts目录
+- `<package>`: package under test
+    - [manual] `fetch.sh`: fetch the package source while keeping it small; for git clone, prefer `--depth=1`.
+    - [manual] `compile.sh`: build script controlled by environment variables; avoid unrelated build outputs and move binaries into `artefacts`.
         ```requirements
-        默认添加 -g 支持, 且需要支持并行编译, 尽量避免依赖package自身的动态库
-        - 支持 P({TSan, UBSan, MSan}) + ASan 的各种组合 （共 8 种）
-        - 支持原生的 ASan , MSan, TSan, UBSan 共 4 种编译选项
-        - 支持不加sanitizer的版本作为 baseline
-        - 支持 -O0 用于编译
+        Add `-g` by default, support parallel builds, and avoid depending on package-local shared libraries when possible.
+        - Support combinations in P({TSan, UBSan, MSan}) + ASan (8 modes total).
+        - Support native ASan, MSan, TSan, and UBSan build modes.
+        - Support a no-sanitizer baseline.
+        - Support `-O0` builds.
         ```
-    - repo: 软件包的代码, 尽可能减少包体积，比如git clone 时，应该指定 --depth=1 参数
-    - temp: 临时目录，用于 compile.sh的编译
+    - repo: package source; keep it small, for example by using `git clone --depth=1`.
+    - temp: temporary directory used by `compile.sh`.
     - artefact
-        - `<program1>`: 编译后的可执行文件名
-        - `<program2>`: 编译后的可执行文件名
-          - [手写] `run.sh` : 运行脚本，用于运行目标program，需要设置环境变量 PRE_OPT, POST_OPT, stdin 和 PROG_DIR
-            - 注意：run.sh 需要适合大规模运行，即不会在工作目录产生‘垃圾’文件，不会就地修改输入文件。例如，解压缩软件，就需要将解压地址设置为 /tmp/ 下的一个临时目录。
-          - `<prog>.dbg`: 用于debug的程序
-          - `<prog>.raw`: 不开sanitizer的baseline
+        - `<program1>`: built executable name
+        - `<program2>`: built executable name
+          - [manual] `run.sh`: run script for the target program; it must set `PRE_OPT`, `POST_OPT`, `stdin`, and `PROG_DIR`.
+            - Note: `run.sh` must be suitable for large-scale runs. It should not leave junk files in the working directory or modify inputs in place. For decompression tools, write extracted output to a temporary directory under `/tmp`.
+          - `<prog>.dbg`: debug build
+          - `<prog>.raw`: no-sanitizer baseline
           - `<prog>.asan`: ASan
           - `<prog>.tsan`: TSan
           - `<prog>.ubsan`: UBSan
@@ -31,20 +31,20 @@
           - `<prog>.xsan-asan-msan-ubsan`: (ASan+MSan+UBSan)@XSan
           - `<prog>.xsan-asan-tsan-ubsan`: (ASan+TSan+UBSan)@XSan
           - `<prog>.xsan-asan-msan-tsan-ubsan`: (ASan+MSan+TSan+UBSan)@XSan
-    - inputs: 测试输入（可以来自fuzzing的seeds corpus，也可以是程序自带的测试用例）
-        - `<program1>` : 一个目录，表示 program1 的测试输入，拥有 1 个及以上的测试输入文件
-        - `<program2>` : 如果program2 与program1共享一种输入用例，那么 用 `ln -s program1 program2` 即可
+    - inputs: test inputs, either from fuzzing seed corpora or package-provided tests
+        - `<program1>`: a directory containing one or more test inputs for program1
+        - `<program2>`: if program2 shares inputs with program1, use `ln -s program1 program2`.
 - `<pakcage>`: ...
   - ...
-- `activate_compile_flags.sh`: 供 `compile.sh` 导入
-- `compile-all.sh`: 调用 `compile.sh` 编译程序的所有Sanitizer模式
-- `run.sh`: 运行脚本，仅供 artefacts/<prog>/run.sh 调用
-- `common-run.sh`: 通用运行脚本，供 run.sh 调用
-- `eval-sample.sh`: 单次运行脚本，用于测量程序的性能和内存占用
-- `benchmarking.py`: 用于对不同 Sanitizer 配置下的基准程序进行自动化的性能测试与内存占用评测，并保存结果数据，便于后续分析。
-- `benchmarks.py`: 用于定义基准程序和不同 Sanitizer 配置的集合。
-- `gen_bench_config.py`: 用于自动生成 benchmarks.py 配置文件。
-- `README.md`: 本文件
+- `activate_compile_flags.sh`: sourced by `compile.sh`.
+- `compile-all.sh`: calls `compile.sh` to build all Sanitizer modes.
+- `run.sh`: shared run script, called only by `artefacts/<prog>/run.sh`.
+- `common-run.sh`: common runtime helper called by `run.sh`.
+- `eval-sample.sh`: single-run measurement script for performance and memory usage.
+- `benchmarking.py`: automates performance and memory evaluation across Sanitizer configurations and stores results for later analysis.
+- `benchmarks.py`: defines benchmark programs and Sanitizer configuration sets.
+- `gen_bench_config.py`: generates the `benchmarks.py` configuration file.
+- `README.md`: this file
 
 Example:
 ```

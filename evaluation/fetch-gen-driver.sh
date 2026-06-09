@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 推荐用 BASH_SOURCE 获取脚本真实路径，兼容 source 和直接执行
+# Use BASH_SOURCE to get the real script path, compatible with both source and direct execution
 SCRIPTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")"; pwd)
 
 pushd ${SCRIPTS_DIR}

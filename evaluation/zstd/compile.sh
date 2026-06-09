@@ -7,29 +7,29 @@ rm -rf temp && mkdir temp
 
 export SUBJECT=$PWD
 
-# 模式：优先位置参数，其次环境变量，默认 raw
+# Mode: prefer positional argument, then environment variable, default to raw
 mode="${1:-${mode:-raw}}"
 
-# 与 binutils 一致的最小环境设置（不强行切换编译器/链接器）
+# Minimal environment settings consistent with binutils (do not forcibly switch compiler/linker)
 export LDFLAGS=-lpthread
 export ADDITIONAL="-DFORTIFY_SOURCE=2 -fstack-protector-all -fno-omit-frame-pointer -Wno-error"
 export CXXFLAGS="$CXXFLAGS $ADDITIONAL"
 export CFLAGS="$CFLAGS $ADDITIONAL"
 
-# 导入外部消毒器旗标：zstd 为 C 项目，这里传 false
+# Import sanitizer flags: zstd is a C project, so pass false here
 source ../activate_compile_flags.sh "$mode" false
 
-# 备份并隔离旗标，避免 make 自身变量覆盖
+# Backup and isolate flags to avoid being overwritten by make variables
 export XSAN_CFLAGS="$CFLAGS"
 export XSAN_CXXFLAGS="$CXXFLAGS"
 export XSAN_LDFLAGS="$LDFLAGS"
 unset CFLAGS CXXFLAGS LDFLAGS
 
-# 生成编译器包装器，注入 CFLAGS/CXXFLAGS/LDFLAGS（不修改上游 makefile）
+# Generate compiler wrappers to inject CFLAGS/CXXFLAGS/LDFLAGS (without modifying upstream Makefiles)
 TOOLCHAIN_DIR="$SUBJECT/temp/.toolchain"
 mkdir -p "$TOOLCHAIN_DIR"
 
-# 选择真实编译器：默认使用 xclang（若存在）；如需强制 GCC，设置 FORCE_GCC=1
+# Choose the real compiler: use xclang by default if available; set FORCE_GCC=1 to force GCC
 if [ "${FORCE_GCC:-0}" = "1" ]; then
   REAL_CC="$(command -v xgcc)"
   REAL_CXX="$(command -v xg++)"
@@ -44,7 +44,7 @@ fi
 cat >"$TOOLCHAIN_DIR/cc-wrap" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-# 纯 C 编译与可能的链接区分
+# Distinguish pure C compilation from potential linking
 is_compile=0
 for a in "$@"; do
   case "$a" in
@@ -60,7 +60,7 @@ EOF
 cat >"$TOOLCHAIN_DIR/cxx-wrap" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-# 判断是否为编译阶段（存在 -c/-S/-E）
+# Determine whether this is a compilation phase (presence of -c/-S/-E)
 is_compile=0
 for a in "$@"; do
   case "$a" in
@@ -70,14 +70,14 @@ done
 if [ "$is_compile" -eq 1 ]; then
   exec "${REAL_CXX}" ${XSAN_CXXFLAGS:-} "$@"
 else
-  # 认为是链接阶段：不要带 CXXFLAGS，使用 LDFLAGS
+  # Treat as link phase: do not pass CXXFLAGS, use LDFLAGS instead
   exec "${REAL_CXX}" "$@" ${XSAN_LDFLAGS:-}
 fi
 EOF
 cat >"$TOOLCHAIN_DIR/link-wrap" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-# 过滤编译专用开关，避免把链接当成编译
+# Filter compile-only options to avoid treating linking as compilation
 filtered=()
 for a in "$@"; do
   case "$a" in
@@ -104,14 +104,14 @@ cp -r repo/* temp/
 
 pushd temp
 
-# 与 binutils 风格一致：先 clean 再并行构建
+# Follow binutils style: clean first, then parallel build
 make clean || true
 make -j CC="$CC" CXX="$CXX" PREFIX="$SUBJECT/temp/_o"
 
-# 收集可执行文件到 temp/.bin
+# Collect executables into temp/.bin
 mkdir -p .bin
 
-# zstd 主要可执行文件
+# Main zstd executables
 CANDIDATES=(zstd)
 SEARCH_PATHS=(
   "./_o/bin"
@@ -132,10 +132,10 @@ for name in "${CANDIDATES[@]}"; do
 done
 
 if [ "$found_any" -eq 0 ]; then
-  echo "警告: 未在预期路径发现 zstd 可执行文件。" >&2
+  echo "Warning: zstd executable not found in expected paths." >&2
 fi
 
-# 兜底搜索
+# Fallback search
 if [ "$found_any" -eq 0 ]; then
   mapfile -t EXTRA_FOUND < <(find ../repo -maxdepth 6 -type f -perm -111 -name zstd 2>/dev/null || true)
   for f in "${EXTRA_FOUND[@]:-}"; do
@@ -147,7 +147,7 @@ fi
 
 chmod +x .bin/* 2>/dev/null || true
 
-# 同步到 artefacts 并生成带模式后缀
+# Sync into artefacts and generate files with mode suffix
 mkdir -p ../artefacts/zstd
 cp -f .bin/* ../artefacts/zstd/ 2>/dev/null || true
 

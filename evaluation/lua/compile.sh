@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# 用法: ./compile.sh <mode>
+# Usage: ./compile.sh <mode>
 mode="${1:-${mode:-raw}}"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
@@ -13,10 +13,10 @@ OUT_BIN="$OUT_BIN_DIR/lua"
 mkdir -p "$OUT_BIN_DIR"
 cp -r "$SRC_DIR"/* "$OUT_DIR"
 
-# 注入编译/链接标志（C 项目，第二参 false）
+# Inject compile/link flags (C project, second parameter false)
 source "$SCRIPT_DIR/../activate_compile_flags.sh" "$mode" false
 
-# Lua 顶层 makefile：直接使用默认目标
+# Lua top-level Makefile: use the default target directly
 make -C "$OUT_DIR" clean || true
 make -C "$OUT_DIR" -j"$(nproc)" \
   CC="${CC:-xclang}" \
@@ -27,7 +27,7 @@ if [ -x "$OUT_DIR/lua" ]; then
   cp -f "$OUT_DIR/lua" "$OUT_BIN"
   echo "built: $OUT_BIN"
 else
-  echo "未找到 lua 可执行文件" >&2
+  echo "lua executable not found" >&2
   exit 1
 fi
 

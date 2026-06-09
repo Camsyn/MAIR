@@ -8,24 +8,24 @@ REPO_DIR="$ROOT_DIR/repo"
 
 mkdir -p "$CORPUS_DIR"
 
-# 按 artefacts/<name> 生成对应 corpus/<name>
+# For each artefacts/<name> generate a corresponding corpus/<name>
 copy_from_tree() {
     local src_root="$1"; shift || true
     local out_dir="$1"; shift || true
     [ -d "$src_root" ] || return 0
 
-    # 选择性收集：证书/密钥/CRL/配置/测试向量等
-    # 限制单文件大小，避免超大样本（例如 512KB）
+    # Selectively collect certificates/keys/CRLs/configs/test vectors, etc.
+    # Limit per-file size to avoid huge samples (e.g., larger than 512KB)
     local -a patterns=(
         "*.pem" "*.der" "*.crt" "*.cer" "*.key" "*.p12" "*.pfx" "*.crl"
         "*.conf" "*.ini" "*.cnf" "*.cfg" "*.txt" "*.json"
     )
 
     for pat in "${patterns[@]}"; do
-        # 复制并保持相对结构的文件名（去目录，仅保留文件名即可）
+        # Copy files while keeping only the basename (strip directory path)
         while IFS= read -r -d '' f; do
             base="$(basename "$f")"
-            # 去重：已存在则跳过
+            # De-duplicate: skip if a file with the same name already exists
             [ -e "$out_dir/$base" ] && continue
             cp -f "$f" "$out_dir/$base" 2>/dev/null || true
         done < <(find "$src_root" -type f -name "$pat" -size -512k -print0 2>/dev/null)
@@ -38,7 +38,7 @@ for ARTEFACT_SUBDIR in "$ARTEFACTS_DIR"/*/; do
     OUT_DIR="$CORPUS_DIR/$NAME"
     mkdir -p "$OUT_DIR"
 
-    # 基础占位样本
+    # Basic placeholder samples
     cat >"$OUT_DIR/min.json" <<'JSON'
 {}
 JSON
@@ -49,13 +49,13 @@ JSON
 
     printf '\x00\x01\x02\x03' >"$OUT_DIR/min.bin"
 
-    # 从源码树收集更丰富的样本
+    # Collect richer samples from the source tree
     copy_from_tree "$REPO_DIR/testing" "$OUT_DIR"
     copy_from_tree "$REPO_DIR/src/libstrongswan/tests" "$OUT_DIR"
     copy_from_tree "$REPO_DIR/src/pki/tests" "$OUT_DIR" || true
     copy_from_tree "$REPO_DIR/src/swanctl/tests" "$OUT_DIR" || true
 
-    echo "语料已生成: $OUT_DIR"
+    echo "Corpus generated: $OUT_DIR"
 done
 
 

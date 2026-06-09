@@ -1,19 +1,19 @@
 #!/bin/bash
-set -e  # 只要有一步失败，脚本立即退出
+set -e  # Exit immediately if any command fails
 
 export PROJ=iproute2
 
-# 使用与 tpm2-tss 相同的整体流程与变量约定
+# Use the same overall workflow and variable conventions as tpm2-tss
 export SUBJECT=$PWD
 export LDFLAGS="${LDFLAGS:+$LDFLAGS }-lpthread"
 export ADDITIONAL="-DFORTIFY_SOURCE=2 -fstack-protector-all -fno-omit-frame-pointer -Wno-error"
 export CXXFLAGS="$CXXFLAGS $ADDITIONAL"
 export CFLAGS="$CFLAGS $ADDITIONAL"
 
-# 模式：优先位置参数，其次环境变量，默认 raw
+# Mode: prefer positional argument, then environment variable, default to raw
 mode="${1:-${mode:-raw}}"
 
-# 激活编译标志（C 项目，第二参为 false）
+# Activate compile flags (C project, second parameter false)
 source ../activate_compile_flags.sh "$mode" false
 
 ROOT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -22,27 +22,27 @@ BUILD_DIR="$ROOT_DIR/temp"
 
 rm -rf "$BUILD_DIR" && mkdir "$BUILD_DIR"
 
-# 复制源码到构建目录
+# Copy source code into the build directory
 cp -r "$REPO_DIR"/* "$BUILD_DIR/"
 
 pushd "$BUILD_DIR"
 
-# 生成 config.mk
+# Generate config.mk
 if [ ! -f "config.mk" ]; then
-    echo "生成 config.mk..."
+    echo "Generating config.mk..."
     ./configure
 fi
 
-# 清理之前的构建
+# Clean previous builds
 make clean || true
 
-# 编译
+# Build
 make -j
 
-# 在构建目录收集到 .bin
+# Collect binaries into .bin within the build directory
 mkdir -p .bin
 
-# iproute2 主要工具
+# Main iproute2 tools
 CANDIDATES=(
   ip
   tc
@@ -89,10 +89,10 @@ for name in "${CANDIDATES[@]}"; do
 done
 
 if [ "$found_any" -eq 0 ]; then
-  echo "警告: 未在预期路径发现 iproute2 可执行文件。" >&2
+  echo "Warning: iproute2 executables not found in expected paths." >&2
 fi
 
-# 兜底搜索：抓取当前目录下所有可执行文件
+# Fallback search: grab all executables under the current directory
 if [ "$found_any" -eq 0 ]; then
   mapfile -t EXTRA_FOUND < <(find . -maxdepth 2 -type f -perm -111 2>/dev/null || true)
   for f in "${EXTRA_FOUND[@]:-}"; do
@@ -104,7 +104,7 @@ fi
 
 chmod +x .bin/* 2>/dev/null || true
 
-# 同步到 artefacts：为每个可执行生成 <name>.<mode>
+# Sync into artefacts: generate <name>.<mode> for each executable
 for f in .bin/*; do
   [ -f "$f" ] || continue
   name="$(basename "$f")"
@@ -116,4 +116,4 @@ done
 
 popd
 
-echo "完成: iproute2($mode) 构建与产物收集。"
+echo "Done: iproute2($mode) build and artefact collection."

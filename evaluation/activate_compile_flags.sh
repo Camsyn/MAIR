@@ -1,41 +1,41 @@
 # -----------------------------------------------------------------------------
-# 本脚本：activate_compile_flags.sh
+# Script: activate_compile_flags.sh
 #
-# 说明：
-#   本脚本用于根据传入的编译模式（mode）和是否为 C++（is_cxx）自动设置编译器相关环境变量，
-#   以便在不同 Sanitizer、优化等级、调试等场景下统一管理 C/C++ 工程的编译参数。
+# Description:
+#   Configure compiler-related environment variables from the selected build mode (mode) and C++ flag (is_cxx),
+#   so C/C++ flags are managed consistently across Sanitizers, optimization levels, and debug configurations.
 #
-#   支持的 mode 包括：
-#     - dbg                       ：调试模式，关闭优化（-O0）; 否则默认优化（-O2）
-#     - asan                      ：开启 AddressSanitizer
-#     - ubsan                     ：开启 UndefinedBehaviorSanitizer
-#     - tsan                      ：开启 ThreadSanitizer
-#     - msan                      ：开启 MemorySanitizer
-#     - xsan-asan                 ：XSan 开启 ASan
-#     - xsan-asan-tsan            ：XSan 开启 ASan + TSan
-#     - xsan-asan-msan            ：XSan 开启 ASan + MSan
-#     - xsan-asan-ubsan           ：XSan 开启 ASan + UBSan
-#     - xsan-asan-tsan-ubsan      ：XSan 开启 ASan + TSan + UBSan
-#     - xsan-asan-msan-tsan       ：XSan 开启 ASan + MSan + TSan
-#     - xsan-asan-msan-ubsan      ：XSan 开启 ASan + MSan + UBSan
-#     - xsan-asan-msan-tsan-ubsan ：XSan 开启 ASan + TSan + MSan + UBSan
+#   Supported modes include:
+#     - dbg                       : debug mode, disable optimizations (-O0); otherwise default to -O2
+#     - asan                      : enable AddressSanitizer
+#     - ubsan                     : enable UndefinedBehaviorSanitizer
+#     - tsan                      : enable ThreadSanitizer
+#     - msan                      : enable MemorySanitizer
+#     - xsan-asan                 : XSan with ASan
+#     - xsan-asan-tsan            : XSan with ASan + TSan
+#     - xsan-asan-msan            : XSan with ASan + MSan
+#     - xsan-asan-ubsan           : XSan with ASan + UBSan
+#     - xsan-asan-tsan-ubsan      : XSan with ASan + TSan + UBSan
+#     - xsan-asan-msan-tsan       : XSan with ASan + MSan + TSan
+#     - xsan-asan-msan-ubsan      : XSan with ASan + MSan + UBSan
+#     - xsan-asan-msan-tsan-ubsan : XSan with ASan + TSan + MSan + UBSan
 #
-#   is_cxx 取值：
-#     - "true"   ：C++ 项目，CXXFLAGS/LDFLAGS 增加 -stdlib=libc++
-#     - "false"  ：C 项目
+#   is_cxx values:
+#     - "true"   : C++ project; append -stdlib=libc++ to CXXFLAGS/LDFLAGS
+#     - "false"  : C project
 #
-# 使用方法（Usage）：供 compile.sh 调用
+# Usage: meant to be sourced by compile.sh
 #   source ./activate_compile_flags.sh <mode> <is_cxx>
 #
-#   例如：
+#   Examples:
 #     source ./activate_compile_flags.sh asan true
 #     source ./activate_compile_flags.sh dbg false
 #
-#   执行后，会自动设置 CC/CXX/CFLAGS/CXXFLAGS/LDFLAGS 等环境变量。
+#   After sourcing, CC/CXX/CFLAGS/CXXFLAGS/LDFLAGS and related variables are configured.
 # -----------------------------------------------------------------------------
 
-# 由于 bash 没有原生的枚举类型，通常用字符串或数组来模拟枚举。这里我们用字符串，并在函数内部用 case 语句处理。
-# 参数: $1 = mode, $2 = is_cxx (true/false)
+# Bash has no native enum type; we emulate it with strings and case branches.
+# Args: $1 = mode, $2 = is_cxx (true/false)
 if [ $# -eq 1 ] && { [ "$1" = "true" ] || [ "$1" = "false" ]; }; then
     mode="raw"
     is_cxx="$1"
@@ -48,19 +48,19 @@ if command -v clang >/dev/null 2>&1 && command -v clang++ >/dev/null 2>&1; then
     export CC=xclang
     export CXX=xclang++
 else
-    echo "错误: 未找到 clang/clang++，请确保已在 PATH 中。" >&2
+    echo "Error: clang/clang++ not found, please ensure they are in PATH." >&2
     exit 1
 fi
 
 # export CC=clang
 # export CXX=clang++
 
-# 默认追加 -g
+# Always append -g by default
 export CFLAGS="${CFLAGS:+$CFLAGS }-g"
 export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-g"
 export LDFLAGS="${LDFLAGS:+$LDFLAGS }"
 
-# 推荐用 BASH_SOURCE 获取脚本真实路径，兼容 source 和直接执行
+# Use BASH_SOURCE to locate the real script path; works for both source and exec
 SCRIPTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")"; pwd)
 
 export FUZZER_LIB="${SCRIPTS_DIR}/libAFL.a"
@@ -72,13 +72,13 @@ if [ ! -f "${SCRIPTS_DIR}/libAFL.a" ]; then
     ${SCRIPTS_DIR}/fetch-gen-driver.sh
 fi
 
-# is_cxx = true 时，CXXFLAGS, LDFLAGS 追加 -stdlib=libc++
+# When is_cxx = true, append -stdlib=libc++ to CXXFLAGS and LDFLAGS
 if [ "$is_cxx" = "true" ]; then
     export CXXFLAGS="${CXXFLAGS} -stdlib=libc++"
     export LDFLAGS="${LDFLAGS} -stdlib=libc++"
 fi
 
-# mode 处理
+# Handle optimization level based on mode (dbg vs non-dbg)
 case "$mode" in
     *dbg)
         export CFLAGS="${CFLAGS} -O0"
@@ -90,11 +90,11 @@ case "$mode" in
         ;;
 esac
 
-# 从 mode 中去除 -dbg 后缀（如有），便于后续 case 判断
+# Strip any -dbg suffix from mode so the sanitizer case below is simpler
 mode="${mode%.dbg}"
 mode="${mode%-dbg}"
 
-# sanitizer 相关
+# Sanitizer-specific flags
 case "$mode" in
     asan)
         export CFLAGS="${CFLAGS} -fsanitize=address"
@@ -192,11 +192,11 @@ case "$mode" in
         export LDFLAGS="${LDFLAGS} -xsan-only -fsanitize=address,memory,thread,undefined"
         ;;
     raw|'')
-        # 不做处理
+        # Do not modify flags for raw mode
         ;;
     *)
-        echo "警告：未识别的编译选项：$1"
-        echo "可选参数包括：raw, asan, tsan, ubsan, msan, xsan-asan, xsan-asan-tsan, xsan-asan-msan, xsan-asan-ubsan, xsan-asan-tsan-ubsan, xsan-asan-msan-tsan, xsan-asan-msan-ubsan, xsan-asan-msan-tsan-ubsan"
+        echo "Warning: unrecognized compile mode: $1" >&2
+        echo "Supported modes include: raw, asan, tsan, ubsan, msan, xsan-asan, xsan-asan-tsan, xsan-asan-msan, xsan-asan-ubsan, xsan-asan-tsan-ubsan, xsan-asan-msan-tsan, xsan-asan-msan-ubsan, xsan-asan-msan-tsan-ubsan" >&2
         ;;
 esac
 

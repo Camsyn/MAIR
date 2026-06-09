@@ -1,12 +1,12 @@
 #!/bin/bash
-set -e  # 只要有一步失败，脚本立即退出
+set -e  # Exit immediately if any command fails
 
-# 获取编译模式参数
+# Get compilation mode parameter
 mode="${1:-${mode:-raw}}"
 
 rm -rf temp && mkdir temp
 
-# 驱动是 C
+# The driver is C
 source ../activate_compile_flags.sh "$mode" false
 
 pushd temp
@@ -14,8 +14,8 @@ pushd temp
 SRC_DIR=../repo
 mkdir -p .bin
 
-# 使用 CMake 构建 libxml2
-echo "使用 CMake 构建 libxml2..."
+# Build libxml2 with CMake
+echo "Building libxml2 with CMake..."
 
 cmake -B . -S "$SRC_DIR" -G Ninja \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -28,25 +28,25 @@ cmake -B . -S "$SRC_DIR" -G Ninja \
 
 cmake --build . -j$(nproc)
 
-# 编译 fuzzer
+# Build the fuzzer
 
-# 检查 fuzzer 源文件是否存在
+# Check whether the fuzzer source file exists
 FUZZER_SRC="$SRC_DIR/fuzz/xml.c"
 if [ ! -f "$FUZZER_SRC" ]; then
-    echo "错误: 未找到 fuzzer 源文件: $FUZZER_SRC" >&2
+    echo "Error: fuzzer source file not found: $FUZZER_SRC" >&2
     exit 1
 fi
 
-# 编译 fuzzer 辅助函数
+# Compile fuzzer helper functions
 $CC $CFLAGS -I"$SRC_DIR" -I"$SRC_DIR/include" -I"$SRC_DIR/fuzz" -I"." -c "$SRC_DIR/fuzz/fuzz.c" -o ./fuzz.o
 
-# 编译 fuzzer
+# Compile the fuzzer
 $CC $CFLAGS -I"$SRC_DIR" -I"$SRC_DIR/include" -I"$SRC_DIR/fuzz" -I"." -c "$FUZZER_SRC" -o ./fuzzer.o
 
-# 链接 fuzzer
+# Link the fuzzer
 $CXX $CXXFLAGS ./fuzzer.o ./fuzz.o -o .bin/libxml2@xml_fuzzer \
     $LIB_FUZZING_ENGINE "./libxml2.a" -lm -lc++ -lpthread
 
 popd
 
-echo "完成: libxml2($mode) 构建与产物收集。"
+echo "Done: libxml2($mode) build and artefact collection."

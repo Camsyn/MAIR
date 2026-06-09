@@ -1,10 +1,10 @@
 #!/bin/bash
-set -e  # 只要有一步失败，脚本立即退出
+set -e  # Exit immediately if any command fails
 
 export PROJ=strongswan
 
-# 使用与 tpm2-tss 相同的整体流程与变量约定
-# 启用共享库与基础插件，便于运行时按需加载
+# Use the same overall workflow and variable conventions as tpm2-tss
+# Enable shared libraries and core plugins to allow on-demand loading at runtime
 CONFIG_OPTIONS="--enable-load-tester"
 export SUBJECT=$PWD
 export LDFLAGS="${LDFLAGS:+$LDFLAGS }-lpthread"
@@ -12,10 +12,10 @@ export ADDITIONAL="-DFORTIFY_SOURCE=2 -fstack-protector-all -fno-omit-frame-poin
 export CXXFLAGS="$CXXFLAGS $ADDITIONAL"
 export CFLAGS="$CFLAGS $ADDITIONAL"
 
-# 模式：优先位置参数，其次环境变量，默认 raw
+# Mode: prefer positional argument, then environment variable, default to raw
 mode="${1:-${mode:-raw}}"
 
-# 激活编译标志（C 项目，第二参为 false）
+# Activate compile flags (C project, second parameter false)
 source ../activate_compile_flags.sh "$mode" false
 
 ROOT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -24,14 +24,14 @@ BUILD_DIR="$ROOT_DIR/temp"
 
 rm -rf "$BUILD_DIR" && mkdir "$BUILD_DIR"
 
-# 生成 configure
+# Generate configure script
 pushd "$REPO_DIR"
 if [ ! -f "configure" ]; then
     if [ -x ./autogen.sh ]; then
-        echo "生成configure脚本..."
+        echo "Generating configure script..."
         ./autogen.sh
     else
-        echo "错误: 缺少 configure，且不存在 autogen.sh" >&2
+        echo "Error: configure is missing and autogen.sh does not exist" >&2
         exit 1
     fi
 fi
@@ -40,7 +40,7 @@ popd
 pushd "$BUILD_DIR"
 rm -rf *
 rm -f config.cache
-# 预先确定按模式隔离的输出目录，并将其作为编译期内置插件目录（PLUGINDIR）
+# Pre-determine per-mode output directories and use them as the build-time plugin directory (PLUGINDIR)
 ARTEFACTS_DIR="$ROOT_DIR/artefacts/charon"
 PLUGINS_DIR_MODE="$ARTEFACTS_DIR/plugins/$mode"
 LIB_DIR_MODE="$ARTEFACTS_DIR/lib/$mode"
@@ -52,10 +52,10 @@ ac_cv_func_mallinfo2=no "$REPO_DIR"/configure $CONFIG_OPTIONS \
 make clean || true
 make -j
 
-# 在构建目录收集到 .bin
+# Collect binaries into .bin inside the build directory
 mkdir -p .bin
 
-# strongSwan 常见工具，charon 除外（它需要占用各种诸如路由表、特定目录文件夹等。一个电脑只有一份的资源，很难并行测试）
+# Common strongSwan tools, excluding charon (it uses system-wide resources such as routing tables and special directories, which are hard to parallelize)
 CANDIDATES=(
   swanctl
   pki
@@ -76,7 +76,7 @@ for name in "${CANDIDATES[@]}"; do
   for dir in "${SEARCH_PATHS[@]}"; do
     if [ -f "$dir/$name" ]; then
       src="$dir/$name"
-      # 若为 charon，处理 libtool 包装器，优先选择真实 ELF
+      # If this is charon, handle libtool wrappers and prefer the real ELF binary
       if [ "$name" = "charon" ]; then
         if [ -f "$dir/.libs/charon" ]; then
           src="$dir/.libs/charon"
@@ -85,7 +85,7 @@ for name in "${CANDIDATES[@]}"; do
         fi
       fi
       cp "$src" ".bin/$name"
-      # 若仍非 ELF（可能仍是包装脚本），再尝试兜底从 .libs 取可执行
+      # If it is still not ELF (may still be a wrapper script), fallback to executables under .libs
       if ! is_elf ".bin/$name" && [ -d "$dir/.libs" ]; then
         if [ -f "$dir/.libs/charon" ]; then
           cp "$dir/.libs/charon" ".bin/$name"
@@ -99,14 +99,14 @@ for name in "${CANDIDATES[@]}"; do
   done
 done
 
-# 确保不保留任何 charon 相关的产物目录
+# Ensure we do not keep any charon-related artefact directories
 rm -rf ../artefacts/charon 2>/dev/null || true
 
 if [ "$found_any" -eq 0 ]; then
-  echo "警告: 未在预期路径发现 strongSwan 可执行文件。" >&2
+  echo "Warning: strongSwan executables not found in expected paths." >&2
 fi
 
-# 兜底搜索：抓取 src 下所有可执行文件
+# Fallback search: collect all executables under src
 if [ "$found_any" -eq 0 ]; then
   mapfile -t EXTRA_FOUND < <(find ./src ../repo/src -maxdepth 3 -type f -perm -111 2>/dev/null || true)
   for f in "${EXTRA_FOUND[@]:-}"; do
@@ -118,14 +118,14 @@ fi
 
 chmod +x .bin/* 2>/dev/null || true
 
-# 显式排除 charon（即使兜底搜索复制到了 .bin）
+# Explicitly exclude charon (even if fallback search copied it into .bin)
 rm -f .bin/charon 2>/dev/null || true
 
-# 同步到 artefacts：为每个可执行生成 artefacts/<name>/<name>.<mode>
+# Sync to artefacts: create artefacts/<name>/<name>.<mode> for each executable
 for f in .bin/*; do
   [ -f "$f" ] || continue
   name="$(basename "$f")"
-  # 跳过 charon 的打包
+  # Skip packaging of charon
   if [ "$name" = "charon" ]; then
     continue
   fi
@@ -133,20 +133,20 @@ for f in .bin/*; do
   mkdir -p "$out_dir"
   cp -f "$f" "$out_dir/${name}.${mode}"
   chmod +x "$out_dir/${name}.${mode}" || true
-  # 为 charon 额外打包插件与共享库
+  # For charon, additionally package plugins and shared libraries
   if [ "$name" = "charon" ]; then
     plug_out="$out_dir/plugins/$mode"
     lib_out="$out_dir/lib/$mode"
     mkdir -p "$plug_out" "$lib_out"
-    # 收集插件 *.so（包含符号链接），并保持属性
+    # Collect plugin *.so files (including symlinks) and preserve attributes
     while IFS= read -r -d '' p; do
       cp -a "$p" "$plug_out/"
     done < <(find "$BUILD_DIR" -path "*/plugins/*" \( -type f -o -type l \) -name "*.so*" -print0 2>/dev/null || true)
-    # 收集核心共享库（如 libstrongswan / libcharon，包含符号链接）
+    # Collect core shared libraries (such as libstrongswan / libcharon, including symlinks)
     while IFS= read -r -d '' s; do
       cp -a "$s" "$lib_out/"
     done < <(find "$BUILD_DIR" \( -type f -o -type l \) \( -name "libstrongswan.so*" -o -name "libcharon.so*" \) -print0 2>/dev/null || true)
-    echo "[$mode] 已打包 $(ls -1 "$plug_out" 2>/dev/null | wc -l) 个插件到 $plug_out；共享库放在 $lib_out" >&2
+    echo "[$mode] Packed $(ls -1 "$plug_out" 2>/dev/null | wc -l) plugins into $plug_out; shared libraries are placed in $lib_out" >&2
   fi
 done
 

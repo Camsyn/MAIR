@@ -10,12 +10,12 @@ else
 fi
 
 
-# 仓库没有提供测试文件，手动生成测试文件
+# The upstream repository does not provide test files; generate corpus manually
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 if [ -f "$SCRIPT_DIR/create_lua_corpus.sh" ]; then
     "$SCRIPT_DIR/create_lua_corpus.sh" || true
 else
-    echo "警告: 未找到可执行的 create_lua_corpus.sh，已跳过语料生成" >&2
+    echo "Warning: executable create_lua_corpus.sh not found, skipping corpus generation." >&2
 fi
 
 

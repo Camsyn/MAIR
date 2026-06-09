@@ -1,39 +1,39 @@
 #!/bin/bash
 
 # -----------------------------------------------------------------------------
-# 脚本说明：
-#   本脚本 run.sh 为各基准程序提供统一的运行入口，自动调用 common-run.sh，
-#   根据环境变量和参数配置，支持不同 Sanitizer 模式、输入文件、预/后置参数等。
+# Script description:
+#   This script provides a shared entry point for benchmark programs and calls common-run.sh.
+#   Environment variables and arguments select Sanitizer mode, input file, and pre/post options.
 #
-# 用法（Usage）: 在 <package>/artefacts/<program>/run.sh 中调用
+# Usage: called from <package>/artefacts/<program>/run.sh
 #   /path/to/this/run.sh <mode> [<input>]
 #
-#   <mode>   ：运行模式（如 raw, asan, msan, xsan-asan 等，需与编译时一致）
-#   <input>  ：（可选）输入文件路径，若省略则由 common-run.sh 处理
+#   <mode>   : run mode (e.g., raw, asan, msan, xsan-asan; must match build)
+#   <input>  : (optional) input file path; if omitted, common-run.sh decides
 #
-# 环境变量要求：
-#   PRE_OPT   ：（可为空）程序参数，放在输入文件前
-#   POST_OPT  ：（可为空）程序参数，放在输入文件后
-#   stdin     ：（必填）是否通过标准输入传递输入（true/false）
-#   PROG_DIR  ：（必填）程序 artefacts 目录
+# Required environment variables:
+#   PRE_OPT   : (optional) program arguments placed before the input file
+#   POST_OPT  : (optional) program arguments placed after the input file
+#   stdin     : (required) whether to pipe input via stdin (true/false)
+#   PROG_DIR  : (required) artefacts directory of the program
 #
-# 示例：
+# Examples:
 #   PRE_OPT="-v" POST_OPT="--debug" stdin=false PROG_DIR=./artefacts/foo ./run.sh asan ./inputs/foo/input1
 #   stdin=true PROG_DIR=./artefacts/bar ./run.sh xsan-asan ./inputs/bar/input2
 # -----------------------------------------------------------------------------
 
 
-# 通用 run 脚本
+# Generic run wrapper
 
-# 确保必要变量已定义(可以为空定义)
-: "${PRE_OPT?需要定义 PRE_OPT}"
-: "${POST_OPT?需要定义 POST_OPT}"
-# 不能为空
-: "${stdin:?需要定义 stdin}"
-: "${PROG_DIR:?需要定义 PROG_DIR}"
+# Ensure required variables are defined (may be empty for PRE_OPT/POST_OPT)
+: "${PRE_OPT?PRE_OPT must be defined}"
+: "${POST_OPT?POST_OPT must be defined}"
+# These must not be empty
+: "${stdin:?stdin must be defined}"
+: "${PROG_DIR:?PROG_DIR must be defined}"
 
 usage() {
-    echo "用法: $PROG_DIR/run.sh <mode> [<input>]"
+    echo "Usage: $PROG_DIR/run.sh <mode> [<input>]"
     exit 1
 }
 
@@ -46,17 +46,17 @@ FILE_DIR=$(cd "$(dirname "$0")"; pwd)
 mode="$1"
 shift
 input="${1:-}"
-# 如果 stdin=true 且 input 为空，则从 corpus 目录获取默认输入文件
+# If stdin=true and no input is provided, pick a default input file from corpus
 if [ "$stdin" = "true" ] && [ -z "$input" ]; then
-    # 提取 PROG_DIR 的 name
+    # Derive program name from PROG_DIR
     prog_name=$(basename "$PROG_DIR")
 
-    # 构建 corpus 目录路径
+    # Build corpus directory path
     corpus_dir="$PROG_DIR/../../corpus/$prog_name"
 
-    # 检查 corpus 目录是否存在，并获取第一个文件
+    # If corpus directory exists, take the first file as default input
     if [ -d "$corpus_dir" ]; then
-        # 获取目录下第一个文件
+        # Get the first file in the corpus directory
         first_file=$(find "$corpus_dir" -type f | head -n 1)
         if [ -n "$first_file" ]; then
             input="$first_file"

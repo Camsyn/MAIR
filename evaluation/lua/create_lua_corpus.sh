@@ -32,7 +32,7 @@ local s = string.gsub('a,b,c', ',', '|')
 print(s)
 EOF
 
-echo "生成 corpus 到: $CORPUS_DIR"
+echo "Generated corpus at: $CORPUS_DIR"
 
 
 

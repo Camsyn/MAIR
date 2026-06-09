@@ -1,35 +1,35 @@
 #!/usr/bin/env /usr/bin/python3
 
 '''
-本脚本 evaluation/benchmarking.py 用于对不同 Sanitizer 配置下的基准程序进行自动化的
-性能测试与内存占用评测，并保存结果数据，便于后续分析。
+This script automates performance and memory evaluation for benchmark programs under different Sanitizer configurations.
+It stores result data for later analysis.
 
-主要功能包括：
-- 遍历 benchmarks.py 中定义的所有基准程序
-- 针对每个基准程序和不同 Sanitizer 组合，重复多次运行，收集执行时间和内存占用（RSS）
-- 支持多进程并发执行，自动分配 CPU 亲和性
-- 自动过滤异常数据，保存和加载测试结果
-- 支持指定只评测部分基准程序
+Main functions:
+- Iterate over benchmark programs defined in benchmarks.py.
+- Repeat runs for each benchmark and Sanitizer combination, collecting execution time and RSS.
+- Support multiprocessing and assign CPU affinity automatically.
+- Filter abnormal data and save/load test results.
+- Allow evaluating only selected benchmarks.
 
-使用方法（Usage）：
-1. 确保已生成 benchmarks.py（可通过运行 evaluation/gen_bench_config.py 自动生成）
-2. 在 evaluation 目录下，运行本脚本：
+Usage:
+1. Ensure benchmarks.py has been generated (for example by running evaluation/gen_bench_config.py).
+2. Run this script from the evaluation directory:
 
    python3 benchmarking.py
 
-3. 评测结果将保存在各个 package/data/ 目录下，格式为 .npy 和 .txt 文件
+3. Results are saved under each package/data/ directory as .npy and .txt files.
 
-可选配置：
-- 修改 BENCH_TO_RUN 集合，仅评测指定程序（如 {'cxxfilt',}）
-- 修改 REPEAT_TIMES 控制每个输入的重复次数
-- 修改 MAX_WORKERS 控制并发进程数
+Optional configuration:
+- Modify BENCH_TO_RUN to evaluate only selected programs (for example {'cxxfilt',}).
+- Modify REPEAT_TIMES to control repeats per input.
+- Modify MAX_WORKERS to control worker concurrency.
 
-依赖项：
+Dependencies:
 - Python 3
 - numpy
-- benchmarks.py 配置文件
-- 各基准程序 artefacts 及其 corpus
-- eval-sample.sh 脚本用于实际测量
+- benchmarks.py configuration file
+- benchmark artefacts and corpora
+- eval-sample.sh for actual measurement
 
 '''
 
@@ -57,8 +57,8 @@ MAX_WORKERS = 5
 '''
 Platform-Specific Initialization Time
 
-通过重复测量初始化例程100次的执行时间得到
-XSan 的初始化时间基本等于所选sanitizers的初始化时间之和要小，因为XSan没有重复进行一些通用的初始化.
+Measured by repeating the initialization routine 100 times.
+XSan initialization time is generally smaller than the sum of selected sanitizers because common initialization is not repeated.
 '''
 INIT_TIMES = {
     'asan': 1.798,
@@ -191,7 +191,7 @@ class MyProcessPoolExecutor(concurrent.futures.ProcessPoolExecutor):
 
     def __init__(self, max_workers=MAX_WORKERS, mp_context=None):
         '''
-        该进程池将每个工作线程绑定到一个核心上, 避免进程调度带来的性能损失, 更为公平地比较性能。
+        This process pool binds each worker to one core to reduce scheduling noise and compare performance more fairly.
         '''
         super().__init__(
             max_workers,
@@ -203,9 +203,9 @@ class MyProcessPoolExecutor(concurrent.futures.ProcessPoolExecutor):
     @staticmethod
     def initializer():
         """
-        在每个子进程启动后执行一次：
-        1. 从共享列表里弹出一个 CPU ID
-        2. 调用 os.sched_setaffinity 绑定到该 CPU
+        Run once in each child process:
+        1. Pop a CPU ID from the shared list.
+        2. Bind the process to that CPU via os.sched_setaffinity.
         """
         with MyProcessPoolExecutor.lock:
             if not MyProcessPoolExecutor.cpu_list:

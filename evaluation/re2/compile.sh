@@ -1,7 +1,7 @@
 #!/bin/bash
-set -e  # 只要有一步失败，脚本立即退出
+set -e  # Exit immediately if any command fails
 
-# 获取编译模式参数（支持参数或环境变量）
+# Get build mode (support positional argument or environment variable)
 mode="${1:-${mode:-raw}}"
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
@@ -11,19 +11,19 @@ BUILD_DIR="${TEMP_DIR}"
 BIN_DIR="${TEMP_DIR}/.bin"
 rm -rf "${BUILD_DIR}" && mkdir -p "${BUILD_DIR}" "${BIN_DIR}"
 
-# 驱动是 C++
+# Driver is C++
 source "${SCRIPT_DIR}/../activate_compile_flags.sh" "$mode" true
 
 pushd "${BUILD_DIR}"
 
-# 这里的 SRC_DIR 已经是绝对路径
+# At this point SRC_DIR is already an absolute path
 
-# 统一启用 C++17（Abseil 和使用 Abseil 的库都需要）
+# Enable C++17 everywhere (required by Abseil and libraries using it)
 export CXXFLAGS="${CXXFLAGS} -std=c++17"
 export LDFLAGS="${LDFLAGS} -stdlib=libc++"
 
-# 1) 构建并安装 Abseil（按 oss-fuzz 流程）
-# 使用本地构建的 Abseil（避免污染系统），并确保加入当前模式标志
+# 1) Build and install Abseil following the oss-fuzz flow
+# Use locally built Abseil to avoid polluting the system and include current mode flags
 if [ ! -d ../repo/abseil-cpp ]; then
   git clone https://github.com/abseil/abseil-cpp.git --depth 1 ../repo/abseil-cpp
 fi
@@ -39,28 +39,28 @@ make install
 popd
 export PKG_CONFIG_PATH="$(pwd)/absl-install/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
-# 2) 构建 RE2 静态库（注入当前模式标志，不安装到系统）
+# 2) Build RE2 static library (injecting current mode flags, without installing)
 make -C "$SRC_DIR" clean || true
 make -C "$SRC_DIR" CXXFLAGS="${CXXFLAGS}" LDFLAGS="${LDFLAGS}" -j$(nproc) obj/libre2.a
 
 if [ ! -f "$SRC_DIR/obj/libre2.a" ]; then
-  echo "错误: 构建 libre2.a 失败" >&2
+  echo "Error: failed to build libre2.a" >&2
   exit 1
 fi
 
-# 3) 编译并链接 fuzzer（使用 RE2 自带的 re2/fuzzing/re2_fuzzer.cc）
+# 3) Build and link the fuzzer (use RE2's own re2/fuzzing/re2_fuzzer.cc)
 if [ ! -f "$SRC_DIR/re2/fuzzing/re2_fuzzer.cc" ]; then
-  echo "错误: 未找到 $SRC_DIR/re2/fuzzing/re2_fuzzer.cc" >&2
+  echo "Error: $SRC_DIR/re2/fuzzing/re2_fuzzer.cc not found" >&2
   exit 1
 fi
 
-# 确保 fuzzer 使用与 RE2 相同的 sanitizer 标志，并嵌入模式签名以便区分产物
+# Ensure the fuzzer uses the same sanitizer flags as RE2 and embeds a mode signature to distinguish artefacts
 FUZZER_CXXFLAGS="${CXXFLAGS} -DXSAN_MODE_STR=\"${mode}\""
 FUZZER_LDFLAGS="${LDFLAGS}"
 
 ${CXX:-xclang++} ${FUZZER_CXXFLAGS} -I"$SRC_DIR" -c "$SRC_DIR/re2/fuzzing/re2_fuzzer.cc" -o ./fuzzer.o
 
-# 额外编译一个包含模式字符串的目标，确保不同模式二进制有可见差异
+# Compile an extra object containing the mode string so binaries for different modes visibly differ
 cat > ./mode_tag.cc <<EOF
 extern "C" const char kXsanModeTag[] = "xsan-mode=${mode}";
 EOF

@@ -6,9 +6,9 @@ URL="https://sourceware.org/git/binutils-gdb.git"
 # Use depth 1 to avoid cloning the history
 git clone "$URL" repo --depth 1
 
-# 原仓库未提供输入语料。为便于冒烟与快速基准，这里生成基础语料：
+# The original repository does not provide input corpora. Generate basic corpora for smoke tests and quick benchmarks.
 
-# 目录就绪
+# Ensure directories exist
 mkdir -p ./corpus/cxxfilt \
          ./corpus/nm-new \
          ./corpus/objcopy \
@@ -18,10 +18,10 @@ mkdir -p ./corpus/cxxfilt \
          ./corpus/strings \
          ./corpus/strip-new
 
-# 1) cxxfilt：用 nm 全量导出 7zip 二进制的符号列表，作为反修饰输入
+# 1) cxxfilt: export the full symbol list from the 7zip binary with nm as demangling input
 if [ ! -s ./corpus/cxxfilt/7zz-nm-out.txt ]; then
   mkdir -p ./corpus/cxxfilt
-  # 优先寻找 7zip artefact，可匹配不同模式产物；否则尝试系统 7z/7zz 可执行
+  # Prefer 7zip artefacts to match different build modes; otherwise try system 7z/7zz binaries
   CANDIDATE_BIN=""
   if [ -d ../7zip/artefacts/7zz ]; then
     CANDIDATE_BIN=$(find ../7zip/artefacts/7zz -maxdepth 1 -type f -name '7zz.*' | head -n1)
@@ -34,7 +34,7 @@ if [ ! -s ./corpus/cxxfilt/7zz-nm-out.txt ]; then
   fi
 
   if [ -n "$CANDIDATE_BIN" ] && command -v nm >/dev/null 2>&1; then
-    # 导出完整符号（不解码 C++ 名），取最后一列为符号名，过滤空行
+    # Export all symbols without demangling C++ names, take the last field as the symbol name, and filter empty lines
     nm -a --no-demangle "$CANDIDATE_BIN" 2>/dev/null \
       | awk '{if (NF>0) print $NF}' \
       | sed 's/\r$//' \
@@ -42,7 +42,7 @@ if [ ! -s ./corpus/cxxfilt/7zz-nm-out.txt ]; then
       > ./corpus/cxxfilt/7zz-nm-out.txt || true
   fi
 
-  # 兜底：若仍未生成，则写入一个最小样例，避免目录为空
+  # Fallback: if still empty, write a minimal sample so the directory is not empty
   if [ ! -s ./corpus/cxxfilt/7zz-nm-out.txt ]; then
     cat > ./corpus/cxxfilt/7zz-nm-out.txt << 'EOF'
 __ZSt4cout
@@ -54,7 +54,7 @@ EOF
   fi
 fi
 
-# 2) 各工具的最小 ELF 原始输入：objdump.raw（如不存在则创建）
+# 2) Minimal ELF raw input for each tool: objdump.raw (create if missing)
 gen_min_elf() {
   local dst="$1"
   if [ -s "$dst" ]; then return; fi
@@ -69,7 +69,7 @@ EOF
   rm -f "${dst}.hex" 2>/dev/null || true
 }
 
-# 优先使用已存在的 artefacts/objdump/objdump.raw；否则回退到最小 ELF 生成
+# Prefer existing artefacts/objdump/objdump.raw; otherwise generate a minimal ELF file
 ART_OBJDUMP_RAW=./artefacts/objdump/objdump.raw
 if [ -f "$ART_OBJDUMP_RAW" ]; then
   for d in nm-new objcopy objdump readelf size strip-new; do
@@ -82,17 +82,17 @@ else
   done
 fi
 
-# 3) strings：若已有 XML/文本则保留；否则尝试从 libxml2 语料复制，仍无则造小样例
+# 3) strings: keep existing XML/text inputs; otherwise copy from the libxml2 corpus, then create small samples if still empty
 ensure_strings_min() {
-  # 若目录已有文件，则不动作
+  # If the directory already has files, do nothing.
   if [ -n "$(ls -A ./corpus/strings 2>/dev/null)" ]; then return; fi
-  # 尝试从 libxml2 复制
+  # Try to copy from the libxml2 corpus
   if [ -d ../libxml2/corpus/libxml2@ossfuzz ]; then
     find ../libxml2/corpus/libxml2@ossfuzz -maxdepth 1 -type f | head -n 20 | while read -r f; do
       cp -f "$f" ./corpus/strings/
     done
   fi
-  # 仍为空则造 3 个小样
+  # If it is still empty, create three small sample files
   if [ -z "$(ls -A ./corpus/strings 2>/dev/null)" ]; then
     cat > ./corpus/strings/sample1.txt << 'EOF'
 Hello, binutils strings sample.
@@ -101,8 +101,9 @@ EOF
 <root><a>1</a><b>text</b></root>
 EOF
     cat > ./corpus/strings/unicode.txt << 'EOF'
-中文字符 / unicode ✓
+Chinese characters / unicode ✓
 EOF
   fi
 }
 ensure_strings_min
+

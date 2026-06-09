@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e  # 只要有一步失败，脚本立即退出
+set -e  # Exit immediately if any command fails
 
 export PROJ=binutils-gdb
 
@@ -24,7 +24,7 @@ rm -rf *
 make clean
 make -j
 
-# 将 binutils/ 下的指定可执行文件移动到 ../artefacts 目录
+# Move selected binutils binaries into ../artefacts directory
 mkdir -p .bin
 BINUTILS_BINARIES=(nm-new readelf objdump objcopy strings size cxxfilt strip-new)
 for bin in "${BINUTILS_BINARIES[@]}"; do

@@ -9,29 +9,29 @@ rm -rf temp && mkdir temp
 
 export SUBJECT=$PWD
 
-# 模式：优先位置参数，其次环境变量，默认 raw
+# Mode: prefer positional argument, then environment variable, default to raw
 mode="${1:-${mode:-raw}}"
 
-# 与 binutils 一致的最小环境设置（不强行切换编译器/链接器）
+# Minimal environment settings consistent with binutils (do not forcibly switch compiler/linker)
 export LDFLAGS=-lpthread
 export ADDITIONAL="-DFORTIFY_SOURCE=2 -fstack-protector-all -fno-omit-frame-pointer -Wno-error"
 export CXXFLAGS="$CXXFLAGS $ADDITIONAL"
 export CFLAGS="$CFLAGS $ADDITIONAL"
 
-# 导入外部消毒器旗标：7zip 为 C++ 项目，这里应当传 true 以启用 -stdlib=libc++ 等
+# Import sanitizer flags: 7zip is a C++ project, pass true here to enable -stdlib=libc++ etc.
 source ../activate_compile_flags.sh "$mode" true
 
-# 备份并隔离旗标，避免 make 自身变量覆盖
+# Backup and isolate flags to avoid being overwritten by make variables
 export XSAN_CFLAGS="$CFLAGS"
 export XSAN_CXXFLAGS="$CXXFLAGS"
 export XSAN_LDFLAGS="$LDFLAGS"
 unset CFLAGS CXXFLAGS LDFLAGS
 
-# 生成编译器包装器，注入 CFLAGS/CXXFLAGS/LDFLAGS（不修改上游 makefile）
+# Generate compiler wrappers to inject CFLAGS/CXXFLAGS/LDFLAGS (without modifying upstream Makefiles)
 TOOLCHAIN_DIR="$SUBJECT/temp/.toolchain"
 mkdir -p "$TOOLCHAIN_DIR"
 
-# 选择真实编译器：默认使用 xclang（若存在）；如需强制 GCC，设置 FORCE_GCC=1
+# Choose the real compiler: use xclang by default if available; set FORCE_GCC=1 to force GCC
 if [ "${FORCE_GCC:-0}" = "1" ]; then
   REAL_CC="$(command -v xgcc)"
   REAL_CXX="$(command -v xg++)"
@@ -46,7 +46,7 @@ fi
 cat >"$TOOLCHAIN_DIR/cc-wrap" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-# 纯 C 编译与可能的链接区分
+# Distinguish pure C compilation from potential linking
 is_compile=0
 for a in "$@"; do
   case "$a" in
@@ -62,7 +62,7 @@ EOF
 cat >"$TOOLCHAIN_DIR/cxx-wrap" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-# 判断是否为编译阶段（存在 -c/-S/-E）
+# Determine whether this is a compilation phase (presence of -c/-S/-E)
 is_compile=0
 for a in "$@"; do
   case "$a" in
@@ -72,14 +72,14 @@ done
 if [ "$is_compile" -eq 1 ]; then
   exec "${REAL_CXX}" ${XSAN_CXXFLAGS:-} "$@"
 else
-  # 认为是链接阶段：不要带 CXXFLAGS，使用 LDFLAGS
+  # Treat as link phase: do not pass CXXFLAGS, use LDFLAGS instead
   exec "${REAL_CXX}" "$@" ${XSAN_LDFLAGS:-}
 fi
 EOF
 cat >"$TOOLCHAIN_DIR/link-wrap" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-# 过滤编译专用开关，避免把链接当成编译
+# Filter compile-only options to avoid treating linking as compilation
 filtered=()
 for a in "$@"; do
   case "$a" in
@@ -103,16 +103,16 @@ export OBJCOPY="$(command -v objcopy)"
 
 pushd repo/CPP/7zip/Bundles/Alone2
 
-# 与 binutils 风格一致：先 clean 再并行构建
+# Follow binutils style: clean first, then parallel build
 make -rR -f makefile.gcc O="$SUBJECT/temp/_o" CC="$CC" CXX="$CXX" LINK="$LINK" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" OBJCOPY="$OBJCOPY" clean || true
 make -rR -f makefile.gcc O="$SUBJECT/temp/_o" CC="$CC" CXX="$CXX" LINK="$LINK" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" OBJCOPY="$OBJCOPY" -j
 
-# 上游 make 已通过 O= 重定向到顶层 temp/_o/
+# Upstream make redirects its output to the top-level temp/_o/ via O=
 OUTDIR="$SUBJECT/temp/_o"
 
 popd
 
-# 收集可执行文件到 temp/.bin
+# Collect executables into temp/.bin
 pushd temp
 mkdir -p .bin
 
@@ -136,10 +136,10 @@ for name in "${CANDIDATES[@]}"; do
 done
 
 if [ "$found_any" -eq 0 ]; then
-  echo "警告: 未在预期路径发现 7-Zip 可执行文件(7zz/7za/7zr/7z)。" >&2
+  echo "Warning: 7-Zip executables (7zz/7za/7zr/7z) not found in expected paths." >&2
 fi
 
-# 兜底搜索
+# Fallback search
 if [ "$found_any" -eq 0 ]; then
   mapfile -t EXTRA_FOUND < <(find ../repo -maxdepth 6 -type f -perm -111 \( -name 7zz -o -name 7za -o -name 7zr -o -name 7z \) 2>/dev/null || true)
   for f in "${EXTRA_FOUND[@]:-}"; do
@@ -151,7 +151,7 @@ fi
 
 chmod +x .bin/* 2>/dev/null || true
 
-# 同步到 artefacts 并生成带模式后缀
+# Sync into artefacts and generate files with mode suffix
 mkdir -p ../artefacts/7zz
 cp -f .bin/* ../artefacts/7zz/ 2>/dev/null || true
 

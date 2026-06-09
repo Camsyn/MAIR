@@ -4,16 +4,16 @@ URL="https://github.com/tpm2-software/tpm2-tss.git"
 
 git clone "$URL" repo --depth 1
 
-# 将 json_object *jso_content; 更改为 json_object *jso_content = NULL;
-# 注释说明：该变量在第三方库 libjson-c.so 中初始化，由于我们不插桩第三方库，因此，为了避免 MSan的误报，这里手动对其进行初始化
+# Change json_object *jso_content; to json_object *jso_content = NULL;
+# Rationale: this variable is initialized in third-party libjson-c.so. Since we do not instrument that library, initialize it manually to avoid MSan false positives.
 # sed -i 's/json_object \*jso_content;/json_object *jso_content = NULL;/g' repo/src/tss2-fapi/ifapi_ima_eventlog.c
 sed -i 's/\*jso_sub;/*jso_sub = NULL;/g' repo/src/tss2-fapi/ifapi_json_eventlog_serialize.c
 sed -i 's/\*jso_digests/*jso_digests = NULL/g' repo/src/tss2-fapi/ifapi_json_eventlog_serialize.c
 
-# 从仓库中搜寻语料文件
+# Search the repository for potential corpus files
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 if [ -f "$SCRIPT_DIR/create_tpm2tss_corpus.sh" ]; then
     "$SCRIPT_DIR/create_tpm2tss_corpus.sh" || true
 else
-    echo "警告: 未找到可执行的 create_tpm2tss_corpus.sh，已跳过语料生成" >&2
+    echo "Warning: Executable create_tpm2tss_corpus.sh not found, skipping corpus generation" >&2
 fi  

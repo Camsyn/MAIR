@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e  # 只要有一步失败，脚本立即退出
+set -e  # Exit immediately if any command fails
 
 export PROJ=tpm2-tss
 
@@ -12,15 +12,15 @@ export ADDITIONAL="-DFORTIFY_SOURCE=2 -fstack-protector-all -fno-omit-frame-poin
 export CXXFLAGS="$CXXFLAGS $ADDITIONAL"
 export CFLAGS="$CFLAGS $ADDITIONAL"
 
-# 模式：优先位置参数，其次环境变量，默认 raw
+# Mode: prefer positional argument, then environment variable, default to raw
 mode="${1:-${mode:-raw}}"
 
 source ../activate_compile_flags.sh "$mode" false
 
-# 首先生成configure脚本
+# Generate the configure script first
 pushd repo
 if [ ! -f "configure" ]; then
-    echo "生成configure脚本..."
+    echo "Generating configure script..."
     ./bootstrap
 fi
 popd
@@ -31,19 +31,19 @@ rm -rf *
 make clean
 make -j
 
-# 将 tpm2-tss 下的指定可执行文件移动到 ../artefacts 目录
+# Collect selected tpm2-tss executables into ../artefacts
 mkdir -p .bin
 
-# tpm2-tss 主要生成库文件，但也有一些工具
-# 查找可执行文件
+# tpm2-tss mainly builds libraries, but also provides some tools
+# Find executable files
 find . -type f -executable -name "tss2*" -o -name "test*" | head -10
 
-# 收集所有可执行文件
+# Collect all matching executables
 find . -type f -executable \( -name "tss2*" -o -name "test*" -o -name "*test*" \) -exec cp {} .bin/ \;
 
 popd
 
-# 收集可执行文件到 temp/.bin
+# Collect executable files into temp/.bin
 pushd temp
 mkdir -p .bin
 
@@ -70,10 +70,10 @@ for name in "${CANDIDATES[@]}"; do
 done
 
 if [ "$found_any" -eq 0 ]; then
-  echo "警告: 未在预期路径发现 tpm2-tss 可执行文件。" >&2
+  echo "Warning: tpm2-tss executables not found in expected paths." >&2
 fi
 
-# 兜底搜索
+# Fallback search
 if [ "$found_any" -eq 0 ]; then
   mapfile -t EXTRA_FOUND < <(find ./test ./test/unit -maxdepth 2 -type f -perm -111 2>/dev/null || true)
   for f in "${EXTRA_FOUND[@]:-}"; do
@@ -85,7 +85,7 @@ fi
 
 chmod +x .bin/* 2>/dev/null || true
 
-# 同步到 artefacts 并生成带模式后缀
+# Sync into artefacts and generate files with mode suffix
 mkdir -p ../artefacts/tpm2-tss
 cp -f .bin/* ../artefacts/tpm2-tss/ 2>/dev/null || true
 

@@ -1,23 +1,23 @@
 #!/bin/bash
 set -euo pipefail
 
-# iproute2 语料生成脚本
-# 从源码仓库收集测试样例和配置文件
+# iproute2 corpus generation script
+# Collects test samples and configuration files from the source repository.
 
 ROOT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_DIR="$ROOT_DIR/repo"
 CORPUS_BASE="$ROOT_DIR/corpus"
 
-echo "开始生成 iproute2 语料..."
+echo "Starting iproute2 corpus generation..."
 
-# 获取所有产物目录
+# Locate all artefact directories
 ARTEFACTS_DIR="$ROOT_DIR/artefacts"
 if [ ! -d "$ARTEFACTS_DIR" ]; then
-    echo "错误: 未找到 artefacts 目录" >&2
+    echo "Error: artefacts directory not found" >&2
     exit 1
 fi
 
-# 为每个产物生成语料
+# Generate corpus for each artefact
 for tool_dir in "$ARTEFACTS_DIR"/*; do
     if [ ! -d "$tool_dir" ]; then
         continue
@@ -26,15 +26,15 @@ for tool_dir in "$ARTEFACTS_DIR"/*; do
     tool_name=$(basename "$tool_dir")
     corpus_dir="$CORPUS_BASE/$tool_name"
     
-    echo "为 $tool_name 生成语料..."
+    echo "Generating corpus for $tool_name..."
     mkdir -p "$corpus_dir"
     
-    # 收集测试文件
+    # Collect test files
     found_files=0
     
-    # 1. 从 testsuite 收集测试文件
+    # 1. Collect test files from testsuite
     if [ -d "$REPO_DIR/testsuite/tests" ]; then
-        # 查找与工具相关的测试文件
+        # Find test files related to this tool
         find "$REPO_DIR/testsuite/tests" -type f \( -name "*.t" -o -name "*.dump" -o -name "*.conf" \) | while read -r test_file; do
             if [[ "$test_file" == *"/$tool_name/"* ]] || [[ "$test_file" == *"/$tool_name"* ]]; then
                 cp "$test_file" "$corpus_dir/"
@@ -43,7 +43,7 @@ for tool_dir in "$ARTEFACTS_DIR"/*; do
         done
     fi
     
-    # 2. 从 examples 收集示例文件
+    # 2. Collect example files from examples
     if [ -d "$REPO_DIR/examples" ]; then
         find "$REPO_DIR/examples" -type f \( -name "*.c" -o -name "*.h" -o -name "*.sh" -o -name "*.conf" \) | while read -r example_file; do
             cp "$example_file" "$corpus_dir/"
@@ -51,17 +51,17 @@ for tool_dir in "$ARTEFACTS_DIR"/*; do
         done
     fi
     
-    # 3. 从 man 页面收集示例命令
+    # 3. Extract example commands from man pages
     if [ -d "$REPO_DIR/man" ]; then
         find "$REPO_DIR/man" -name "*.8" -o -name "*.7" | while read -r man_file; do
             if [[ "$man_file" == *"$tool_name"* ]]; then
-                # 提取 man 页面中的示例命令
+                # Extract example commands from the man page
                 grep -E "^[[:space:]]*[a-zA-Z0-9_-]+[[:space:]]+[a-zA-Z0-9_-]+" "$man_file" > "$corpus_dir/$(basename "$man_file").examples" 2>/dev/null || true
             fi
         done
     fi
     
-    # 4. 生成基本测试命令
+    # 4. Generate basic test command sets
     case "$tool_name" in
         "ip")
             cat > "$corpus_dir/basic_commands.txt" << 'EOF'
@@ -150,62 +150,62 @@ EOF
             ;;
     esac
     
-    # 5. 生成网络配置文件示例
+    # 5. Generate example network configuration snippets
     cat > "$corpus_dir/network_configs.txt" << 'EOF'
-# 基本网络配置示例
-# 接口配置
+# Basic network configuration examples
+# Interface configuration
 ip addr add 192.168.1.1/24 dev eth0
 ip link set eth0 up
 
-# 路由配置
+# Routing configuration
 ip route add default via 192.168.1.1
 ip route add 10.0.0.0/8 via 192.168.1.1
 
-# 规则配置
+# Policy rule configuration
 ip rule add from 192.168.1.0/24 table 100
 ip rule add fwmark 1 table 200
 
-# 隧道配置
+# Tunnel configuration
 ip tunnel add gre0 mode gre remote 203.0.113.1 local 198.51.100.1
 ip link set gre0 up
 
-# 网络命名空间
+# Network namespaces
 ip netns add testns
 ip link set veth0 netns testns
 EOF
     
-    # 6. 生成 TC 配置示例
+    # 6. Generate TC (traffic control) configuration examples
     if [ "$tool_name" = "tc" ]; then
         cat > "$corpus_dir/tc_configs.txt" << 'EOF'
-# TC 配置示例
-# 添加 qdisc
+# TC configuration examples
+# Add qdisc
 tc qdisc add dev eth0 root handle 1: htb default 30
 tc class add dev eth0 parent 1: classid 1:1 htb rate 100mbit
 tc class add dev eth0 parent 1:1 classid 1:10 htb rate 50mbit ceil 100mbit
 tc class add dev eth0 parent 1:1 classid 1:20 htb rate 30mbit ceil 100mbit
 
-# 添加 filter
+# Add filters
 tc filter add dev eth0 parent 1: protocol ip prio 1 u32 match ip dport 80 0xffff flowid 1:10
 tc filter add dev eth0 parent 1: protocol ip prio 2 u32 match ip dport 443 0xffff flowid 1:20
 
-# 添加 action
+# Add actions
 tc filter add dev eth0 parent 1: protocol ip prio 3 u32 match ip src 192.168.1.0/24 action drop
 EOF
     fi
     
-    # 7. 生成最小占位文件（如果没找到其他文件）
+    # 7. Generate minimal placeholder files (if nothing else was found)
     if [ ! -f "$corpus_dir"/*.txt ] && [ ! -f "$corpus_dir"/*.conf ] && [ ! -f "$corpus_dir"/*.t ] && [ ! -f "$corpus_dir"/*.dump ]; then
-        echo "生成最小占位文件..."
+        echo "Generating minimal placeholder files..."
         echo "help" > "$corpus_dir/placeholder.txt"
         echo "--version" >> "$corpus_dir/placeholder.txt"
         echo "-h" >> "$corpus_dir/placeholder.txt"
     fi
     
-    # 限制文件大小（避免过大样本）
+    # Limit file sizes to avoid extremely large samples
     find "$corpus_dir" -type f -size +512k -delete 2>/dev/null || true
     
-    echo "  - 为 $tool_name 生成了语料目录: $corpus_dir"
+    echo "  - Generated corpus directory for $tool_name: $corpus_dir"
 done
 
-echo "完成: iproute2 语料生成完成。"
-echo "语料目录: $CORPUS_BASE"
+echo "Done: iproute2 corpus generation completed."
+echo "Corpus base directory: $CORPUS_BASE"

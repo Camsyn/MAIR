@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e  # 只要有一步失败，脚本立即退出
+set -e  # Exit immediately if any command fails
 
 rm -rf temp && mkdir temp
 

@@ -1,20 +1,20 @@
 #!/usr/bin/env /usr/bin/python3
 
 '''
-该脚本用于自动生成基准测试配置文件（benchmarks.py）。
+This script automatically generates the benchmark configuration file
 
-该脚本遍历 evaluation 目录下的各个 package，
-查找 artefacts 目录下的程序，并收集相关路径信息，最终生成一个包含所有基准程序信息的配置文件。
+packages and their artefacts, and collects path information for each
+benchmark program into a unified configuration.
 
 Usage:
-- 直接运行本脚本，将在 evaluation 目录下生成 benchmarks.py 配置文件:
+- Run this script directly to generate benchmarks.py under the evaluation directory:
    python3 gen_bench_config.py
 '''
 
 from pathlib import Path
 
 
-CONFIG_SPEC = '''# 基准测试配置文件
+CONFIG_SPEC = '''# Benchmark configuration file
 from pathlib import PosixPath
 
 BENCHMARKS = {bench}
@@ -32,7 +32,7 @@ EVAL_ROOT = Path(__file__).parent.absolute()
 
 def generate_bench_configs(lazy: bool = False):
     '''
-    生成基准测试配置文件
+    Generate the benchmark configuration file.
     '''
     benchmarks = []
     package_programs = {}

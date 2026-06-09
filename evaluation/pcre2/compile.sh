@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e  # 只要有一步失败，脚本立即退出
+set -e  # Exit immediately if any command fails
 
 export PROJ=pcre2
 
@@ -17,7 +17,7 @@ rm -rf *
 cmake ../repo -DBUILD_SHARED_LIBS=OFF
 cmake --build . -j$(nproc)
 
-# 将 binutils/ 下的指定可执行文件移动到 ../artefacts 目录
+# Move specified executables into the ../artefacts directory
 mkdir -p .bin
 BINARIES=(pcre2grep pcre2test)
 for bin in "${BINARIES[@]}"; do

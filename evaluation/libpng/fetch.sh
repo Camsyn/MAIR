@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# 与 sqlite3/libjpeg-turbo 一致：使用 git 拉取源码，并从 fuzzbench 拉取 fuzzer 相关文件
+# Match sqlite3/libjpeg-turbo: fetch sources with git and fuzzer files from FuzzBench
 
 export PROJ=libpng
 URL="https://github.com/glennrp/libpng.git"
@@ -9,7 +9,7 @@ URL="https://github.com/glennrp/libpng.git"
 rm -rf repo
 git clone "$URL" repo --depth 1
 
-echo "从 fuzzbench 拉取 fuzzer 文件..."
+echo "Fetching fuzzer files from fuzzbench..."
 if [ ! -d "fuzzbench-temp" ]; then
   git clone https://github.com/google/fuzzbench.git fuzzbench-temp --depth 1
 else
@@ -18,7 +18,7 @@ else
   popd
 fi
 
-# 从 fuzzbench 拷贝元数据（基准名称：libpng_libpng_read_fuzzer），其本身不包含 .cc 源
+# Copy metadata from FuzzBench (benchmark: libpng_libpng_read_fuzzer); it does not include the .cc source
 if [ -f "fuzzbench-temp/benchmarks/libpng_read_fuzzer/build.sh" ]; then
   cp "fuzzbench-temp/benchmarks/libpng_read_fuzzer/build.sh" repo/
 fi
@@ -26,11 +26,11 @@ if [ -f "fuzzbench-temp/benchmarks/libpng_read_fuzzer/benchmark.yaml" ]; then
   cp "fuzzbench-temp/benchmarks/libpng_read_fuzzer/benchmark.yaml" repo/
 fi
 
-# 清理临时目录
+# Clean up the temporary fuzzbench clone
 rm -rf fuzzbench-temp
 
-# 补充：从 oss-fuzz 拉取真正的 fuzzer 源文件 libpng_read_fuzzer.cc
-echo "从 oss-fuzz 拉取 libpng_read_fuzzer.cc..."
+# Also fetch the actual fuzzer source libpng_read_fuzzer.cc from oss-fuzz
+echo "Fetching libpng_read_fuzzer.cc from oss-fuzz..."
 if [ ! -d "oss-fuzz-temp" ]; then
   git clone https://github.com/google/oss-fuzz.git oss-fuzz-temp --depth 1
 else
@@ -42,29 +42,29 @@ fi
 if [ -f "oss-fuzz-temp/projects/libpng/libpng_read_fuzzer.cc" ]; then
   cp "oss-fuzz-temp/projects/libpng/libpng_read_fuzzer.cc" repo/
 else
-  echo "警告: 未在 oss-fuzz 中找到 libpng_read_fuzzer.cc" >&2
+  echo "Warning: libpng_read_fuzzer.cc not found in oss-fuzz" >&2
 fi
 
 rm -rf oss-fuzz-temp
 
-echo "fetch 完成。"
+echo "fetch finished."
 
 #!/bin/bash
 set -e
 
-# 从 fuzzbench 复制源码（可选，提升可移植性）
-echo "从 fuzzbench 复制 libpng 源码..."
+# Optionally copy additional sources from fuzzbench to improve portability.
+echo "Copying libpng sources from fuzzbench..."
 if [ -d "fuzzbench-temp/benchmarks/libpng_libpng_read_fuzzer" ]; then
   cp -r fuzzbench-temp/benchmarks/libpng_libpng_read_fuzzer/* repo/
-  echo "完成: libpng 源码获取"
+  echo "Done: libpng sources copied"
 else
-  echo "警告: 未找到 fuzzbench-temp/benchmarks/libpng_libpng_read_fuzzer，已跳过源码复制" >&2
+  echo "Warning: fuzzbench-temp/benchmarks/libpng_libpng_read_fuzzer not found; skipping source copy" >&2
 fi
 
-# 从仓库中搜寻语料文件
+# Search the repository to build a corpus
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 if [ -f "$SCRIPT_DIR/create_libpng_corpus.sh" ]; then
     "$SCRIPT_DIR/create_libpng_corpus.sh" || true
 else
-    echo "警告: 未找到可执行的 create_libpng_corpus.sh，已跳过语料生成" >&2
+    echo "Warning: Executable create_libpng_corpus.sh not found, skipping corpus generation" >&2
 fi

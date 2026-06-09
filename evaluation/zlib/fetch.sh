@@ -13,7 +13,7 @@ fi
 
 mkdir -p corpus/minigzip
 
-# 通过压缩大于40KB的文件来测试minigzip
+# Use files larger than 40KB to exercise minigzip
 find repo/ -type f -size +40k -exec cp {} corpus/minigzip/ \;
 
 # zlib, i.e., /zlib_uncompress_fuzzer, shares the same corpus with minigzip

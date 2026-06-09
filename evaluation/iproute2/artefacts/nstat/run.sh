@@ -7,26 +7,26 @@ export stdin="false"
 MODE="${1:-raw}"
 shift 1 || true
 
-# 若提供参数，则按单次运行；否则执行多组常见命令组合
+# If arguments are provided, run once; otherwise run common command combinations
 if [ $# -gt 0 ]; then
 	PRE_OPT="$*"
 	export PRE_OPT
 	export MSAN_OPTIONS="poison_in_free=0:poison_in_malloc=0"
-	echo "运行: $PROG_DIR/../../../run.sh $MODE (PRE_OPT=\"$PRE_OPT\")"
+	echo "Running: $PROG_DIR/../../../run.sh $MODE (PRE_OPT=\"$PRE_OPT\")"
 	exec "$PROG_DIR/../../../run.sh" "$MODE"
 else
 	CASES=(
-		# ""            # 默认
-		"-az"         # 全部/压缩
-		"-j"          # JSON 输出  
-		"-j"          # JSON 输出 (重复1)
-		"-j"          # JSON 输出 (重复2)
-		"-j"          # JSON 输出 (重复3)
-		"-j"          # JSON 输出 (重复4)
-		"-j"          # JSON 输出 (重复5)
-		"-s"          # 摘要
-		# "-r"          # 重置计数（可能需要权限）
-		"-t 1 -c 2"   # 周期采样两次
+		# ""            # default invocation
+		"-az"         # all / compressed
+		"-j"          # JSON output
+		"-j"          # JSON output (repeat 1)
+		"-j"          # JSON output (repeat 2)
+		"-j"          # JSON output (repeat 3)
+		"-j"          # JSON output (repeat 4)
+		"-j"          # JSON output (repeat 5)
+		"-s"          # summary
+		# "-r"          # reset counters (may require privileges)
+		"-t 1 -c 2"   # periodic sampling twice
 	)
 	export MSAN_OPTIONS="poison_in_free=0:poison_in_malloc=0"
 	for OPT in "${CASES[@]}"; do

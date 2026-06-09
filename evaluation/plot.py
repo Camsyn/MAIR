@@ -1,27 +1,27 @@
 #!/usr/bin/env /usr/bin/python3
 '''
-本脚本 evaluation/plot.py 用于对基准测试结果进行可视化分析。它会读取基准测试数据，
-计算不同 Sanitizer 组合的性能开销，并生成相应的图表，帮助用户直观比较各类 Sanitizer 对程序性能的影响。
+This script visualizes benchmark results. It reads benchmark data,
+computes overheads for different Sanitizer combinations, and generates plots for comparing performance impact.
 
-绘制图表包括：
-    1. 各个独立的sanitizer模式的性能开销图 ( {bar fig, violin fig} × {CPU, RSS} )
-    2. Sanitizer组合与对应的XSan组合的性能开销对比图 ( {bar fig, violin fig} × {CPU, RSS} )
-    3. 每个program各自的性能开销图 ( {bar fig} × {regular, compare} × {CPU, RSS} )
+Generated plots include:
+    1. Overhead plots for individual sanitizer modes ({bar, violin} x {CPU, RSS}).
+    2. Comparison plots for Sanitizer combinations and corresponding XSan combinations ({bar, violin} x {CPU, RSS}).
+    3. Per-program overhead plots ({bar} x {regular, compare} x {CPU, RSS}).
 
 Usage:
     python3 ./plot.py [-f]
 
-常用选项说明：
-    -f              强制重新生成数据或覆盖已有结果
+Options:
+    -f              Force regeneration of data and overwrite existing results
 
-脚本主要流程：
-    1. 读取基准测试配置和结果数据
-    2. 计算各 Sanitizer 及其组合的性能开销
-    3. 绘制对比图表并保存
-        1. 将各个 program 的相关图表保存于 <package>/data/<program> 目录下
-        2. 将整体性能图表保存于工作目录，即 evaluation/ 目录下
+Workflow:
+    1. Load benchmark configuration and result data
+    2. Compute overheads for each Sanitizer and combination
+    3. Draw and save comparison figures:
+         - Per-program plots saved under <package>/data/<program>
+         - Overall plots saved in the evaluation/ directory
 
-请根据实际需求修改 BENCH_TO_PLOT 变量以选择需要可视化的基准程序。
+Adjust BENCH_TO_PLOT to select which benchmarks to visualize.
 '''
 
 import sys
@@ -125,7 +125,7 @@ def plot_figure(is_time: bool):
         config = find_bench_config(bench)
         bench = Bench(config)
         '''
-        ignore_init=True: 忽略初始化时间这一固定耗费，如此可以测量一些执行时间极短的程序
+        ignore_init=True: subtract fixed initialization cost so very short programs can be measured
         '''
         data = bench.load_overhead_batchly(sanitizers, group, ignore_init=False, depth=2)
         draw_per_bench_figures(data, sanitizers, bench, is_time)
@@ -155,12 +155,12 @@ def draw_per_bench_figures(overheads: np.ndarray, sanitizers: list, bench: Bench
         x_indices = np.arange(M)
         bar_width = 0.8
 
-        # 创建 figure，分三行：标题 / 图例 / 主图
+        # Create a figure with three rows: title / legend / main plot
         fig = plt.figure(figsize=(12, 6))
         gs = fig.add_gridspec(3, 1, height_ratios=[
                               0.08, 0.14, 1.0], hspace=0.05)
 
-        # 标题行
+        # Title row
         ax_title = fig.add_subplot(gs[0])
         ax_title.axis("off")
         title_text = '{} Overheads of Sanitizers on ${}$'.format(
@@ -169,20 +169,20 @@ def draw_per_bench_figures(overheads: np.ndarray, sanitizers: list, bench: Bench
                       ha="center", va="center",
                       fontsize=14, fontweight="bold")
 
-        # 图例行
+        # Legend row
         ax_legend = fig.add_subplot(gs[1])
         ax_legend.axis("off")
 
-        # 主图
+        # Main plot
         ax = fig.add_subplot(gs[2])
 
         linewidth = 0.4
 
-        # 生成每个柱子的不同颜色
+        # Generate different colors for each bar
         cmap = plt.get_cmap("tab20")
         colors = [cmap(i % 20) for i in range(M)]
 
-        # 绘制每个柱子，分别指定颜色
+        # Draw each bar with its own color
         bars = ax.bar(
             x_indices,
             overheads,
@@ -194,19 +194,19 @@ def draw_per_bench_figures(overheads: np.ndarray, sanitizers: list, bench: Bench
             linewidth=linewidth
         )
 
-        # 在每个柱子上方标注具体数值
+        # Label each bar with its numeric value
         for rect, value in zip(bars, overheads):
             height = rect.get_height()
             ax.text(
                 rect.get_x() + rect.get_width() / 2,
-                height + 1,  # 数值稍微高于柱子顶部
+                height + 1,
                 f'{value:.2f}',
                 ha='center',
                 va='bottom',
                 fontsize=9
             )
 
-        # 设置 x 轴
+        # Configure x-axis
         ax.set_xticks(x_indices)
         ax.set_xticklabels([])
 
@@ -216,8 +216,8 @@ def draw_per_bench_figures(overheads: np.ndarray, sanitizers: list, bench: Bench
         # baseline
         ax.axhline(y=100, color="red", linestyle="--", linewidth=1)
 
-        # 在单独的 legend 行绘制图例
-        ncol = min(6, M)  # 一行放几个图例
+        # Draw legend in the dedicated legend row
+        ncol = min(6, M)  # max 6 columns in the legend
         ax_legend.legend(
             handles=bars,
             labels=sanitizers,
@@ -227,7 +227,7 @@ def draw_per_bench_figures(overheads: np.ndarray, sanitizers: list, bench: Bench
             fontsize=9
         )
 
-        # 保存
+        # Save figure
         plt.savefig(bar_fig_path, dpi=DPI, bbox_inches='tight')
         plt.close(fig)
 
@@ -280,7 +280,7 @@ def draw_per_bench_figures(overheads: np.ndarray, sanitizers: list, bench: Bench
         legend_handles = []
         linewidth = 0.4
 
-        # 用于存储bar容器，方便后续标注
+        # Store bar containers for later annotation
         sum_bars = []
         xsan_bars = []
 
@@ -296,7 +296,7 @@ def draw_per_bench_figures(overheads: np.ndarray, sanitizers: list, bench: Bench
                 edgecolor='black',
                 linewidth=linewidth,
                 zorder=3,
-                alpha=0.8  # 设置透明度为0.8
+                alpha=0.8  # transparency
             )
             sum_bars.append(bar1)
 
@@ -310,7 +310,7 @@ def draw_per_bench_figures(overheads: np.ndarray, sanitizers: list, bench: Bench
                 linewidth=linewidth,
                 hatch='///',
                 zorder=3,
-                alpha=0.8  # 设置透明度为0.8
+                alpha=0.8  # transparency
             )
             xsan_bars.append(bar2)
 
@@ -324,16 +324,16 @@ def draw_per_bench_figures(overheads: np.ndarray, sanitizers: list, bench: Bench
                                         linewidth=linewidth,
                                         label=f'{sum_name} (XSan)'))
 
-        # 在每个柱子上方标注具体数值
+        # Annotate bars with their numeric values
         for i in range(M):
-            # 合并 sum_bars 和 xsan_bars 的循环
+            # Merge the sum and xsan bars
             for rect in zip(sum_bars[i], xsan_bars[i]):
                 # (Sum-Bar, XSan-Bar)
                 for r in rect:
                     height = r.get_height()
                     ax.text(
                         r.get_x() + r.get_width() / 2,
-                        height + 1,  # 数值稍微高于柱子顶部
+                        height + 1,  # make text above the top of the bar slightly
                         f'{height:.2f}',
                         ha='center',
                         va='bottom',
@@ -410,15 +410,15 @@ def draw_overall_compare_figure(overheads: np.ndarray, sanitizers: list, is_time
         pair_width = group_width / max(M, 1)
         bar_width = pair_width * 0.45
 
-        # 子图排布：每行最多 5 个
+        # Layout subplots: at most 5 columns per row
         ncols = 5
         nrows = int(np.ceil(N / ncols))
 
-        # 整个 figure 大小根据行列数缩放
+        # Scale overall figure size with row/column count
         fig_width = 3 * ncols
-        fig_height = 2.5 * nrows + 2  # +2 留给标题和legend
+        fig_height = 2.5 * nrows + 2  # +2 for the title and legend
         fig = plt.figure(figsize=(fig_width, fig_height))
-        gs = fig.add_gridspec(nrows + 2, ncols,  # +2 行用于 title + legend
+        gs = fig.add_gridspec(nrows + 2, ncols,
                               height_ratios=[0.1, 0.3] + [1.0] * nrows,
                               hspace=0.35, wspace=0.25)
 
@@ -437,9 +437,9 @@ def draw_overall_compare_figure(overheads: np.ndarray, sanitizers: list, is_time
         colors = [cmap(i % 20) for i in range(M)]
         linewidth = 0.4
 
-        # --- 逐 benchmark 绘制 ---
+        # --- Draw each benchmark in its own subplot ---
         for bi, bench in enumerate(BENCH_TO_PLOT):
-            row = bi // ncols + 2   # 前两行是 title+legend
+            row = bi // ncols + 2  # +2 for the title and legend
             col = bi % ncols
             ax = fig.add_subplot(gs[row, col])
 
@@ -477,9 +477,9 @@ def draw_overall_compare_figure(overheads: np.ndarray, sanitizers: list, is_time
             ax.axhline(y=100, color="red", linestyle="--",
                        linewidth=1, zorder=1)
 
-            # 坐标轴 & 标题
+            # Axis & title
             ax.set_title(bench, fontsize=10)
-            ax.set_xticks([])   # 去掉x轴刻度
+            ax.set_xticks([])  # no x-axis ticks
             ax.set_xlabel("")
             if col == 0:
                 ax.set_ylabel("Overhead (%)")
@@ -515,13 +515,13 @@ def draw_overall_compare_figure(overheads: np.ndarray, sanitizers: list, is_time
         plt.close(fig)
 
     def draw_violin():
-        # --- 1. 准备数据 ---
+        # --- 1. Prepare data ---
         rows = []
-        groups = []   # 用来记录分组名 -> 颜色
+        groups = []   # Track mapping from group name to color
         for idx, ((sum_data, xsan_data), (sum_name, xsan_name)) in enumerate(
             zip(data_pair_to_compare, san_pair_to_compare)
         ):
-            group_id = f"{sum_name}"   # 组名（不带 Sum/XSan）
+            group_id = f"{sum_name}"
             groups.append(group_id)
             for v in sum_data:
                 rows.append({"Group": group_id, "Type": "Sum",
@@ -531,7 +531,7 @@ def draw_overall_compare_figure(overheads: np.ndarray, sanitizers: list, is_time
                             "Overhead": v, "X": idx})
         df = pd.DataFrame(rows)
 
-        # --- 2. 配色 ---
+        # --- 2. Color mapping ---
         cmap = plt.get_cmap("tab10")
         group_colors = {g: cmap(i % 10) for i, g in enumerate(groups)}
 
@@ -553,7 +553,7 @@ def draw_overall_compare_figure(overheads: np.ndarray, sanitizers: list, is_time
         # main axis
         ax = fig.add_subplot(gs[2])
 
-        # --- 3. 逐组绘制 violin ---
+        # --- 3. Draw violins per group ---
         for idx, g in enumerate(groups):
             gdf = df[df["Group"] == g]
 
@@ -562,7 +562,7 @@ def draw_overall_compare_figure(overheads: np.ndarray, sanitizers: list, is_time
                 sdf = gdf[gdf["Type"] == t]
                 color = group_colors[g]
 
-                # 绘制 violin
+                # Draw violin for this group/type
                 parts = ax.violinplot(
                     dataset=[sdf["Overhead"]],
                     positions=[idx + shift],
@@ -581,7 +581,7 @@ def draw_overall_compare_figure(overheads: np.ndarray, sanitizers: list, is_time
                     vp.set_edgecolor("black")
                     vp.set_linewidth(1)
 
-                # 中位数数值
+                # Median label
                 median_val = sdf["Overhead"].median()
                 ax.text(idx + shift,
                         median_val,
@@ -589,16 +589,16 @@ def draw_overall_compare_figure(overheads: np.ndarray, sanitizers: list, is_time
                         ha="center", va="bottom",
                         fontsize=8, fontweight="bold")
 
-        # --- 4. 美化 ---
+        # --- 4. Styling ---
         # baseline
         ax.axhline(y=100, color="red", linestyle="--", linewidth=1.2, zorder=1)
 
         ax.set_xticks(range(len(groups)))
-        ax.set_xticklabels([])  # 不显示组名
+        ax.set_xticklabels([])
         ax.set_xlim(-0.5, len(groups) - 0.5)
         ax.set_ylabel("Overhead (%)")
 
-        # Legend 替代横坐标
+        # Legend replaces x-axis labels
         legend_handles = []
         for gi, (sum_name, _) in enumerate(san_pair_to_compare):
             base_color = group_colors[sum_name]
@@ -619,7 +619,7 @@ def draw_overall_compare_figure(overheads: np.ndarray, sanitizers: list, is_time
                              handlelength=1.2,
                              fontsize=9)
 
-        # 压缩上下左右空白
+        # Trim surrounding whitespace
         # plt.tight_layout(rect=[0.05, 0.05, 0.98, 0.95])
         typ = 'time' if is_time else 'rss'
         plt.savefig(f'compare_violin_{typ}.{OUTPUT_FORMAT}',
@@ -650,31 +650,31 @@ def draw_overall_figures(
     draw the bar chart of the overhead of the sanitizers over the benchmarks
     overheads_over_benchmarks : N * M, N = len(BENCHMARKS), M = len(sanitizers)
     '''
-    # 获取 N 和 M
-    N = overheads.shape[0]  # 基准数量
-    M = overheads.shape[1]  # sanitizer 数量
+    # Get N and M
+    N = overheads.shape[0]  # Number of benchmarks
+    M = overheads.shape[1]  # Number of sanitizers
 
     def draw_bar():
         benchmarks = BENCH_TO_PLOT
         n_bench = len(benchmarks)
-        x_indices = np.arange(M)  # 每个子图里画 M 个 sanitizer
+        x_indices = np.arange(M)  # M sanitizers for each subplot
         bar_width = 0.8
 
-        # 子图排布：每行最多 5 个
+        # Layout subplots: at most 5 benchmarks per row
         ncols = 5
         nrows = int(np.ceil(n_bench / ncols))
 
-        # Figure 大小随行列数调整
+        # Adjust figure size based on row/column count
         fig_width = 3 * ncols
         fig_height = 2.5 * nrows + 2
         fig = plt.figure(figsize=(fig_width, fig_height))
         gs = fig.add_gridspec(
-            nrows + 2, ncols,   # +2 行用于 title+legend
+            nrows + 2, ncols,
             height_ratios=[0.1, 0.2] + [1.0] * nrows,
             hspace=0.35, wspace=0.25
         )
 
-        # --- 标题行 ---
+        # --- Title row ---
         ax_title = fig.add_subplot(gs[0, :])
         ax_title.axis("off")
         title_text = f'{"CPU" if not is_rss else "Memory"} Overheads of Sanitizers on Benchmarks{" (ignore small)" if ignore_small else ""}'
@@ -682,14 +682,14 @@ def draw_overall_figures(
                       ha="center", va="center",
                       fontsize=14, fontweight="bold")
 
-        # --- 图例行 ---
+        # Legend row
         ax_legend = fig.add_subplot(gs[1, :])
         ax_legend.axis("off")
 
         linewidth = 0.4
         colors = plt.get_cmap("tab20").colors
 
-        # --- 每个 benchmark 一个子图 ---
+        # One subplot per benchmark
         for bi, bench in enumerate(benchmarks):
             row = bi // ncols + 2
             col = bi % ncols
@@ -711,13 +711,13 @@ def draw_overall_figures(
             # baseline
             ax.axhline(y=100, color="red", linestyle="--", linewidth=1)
 
-            # 标题 & 坐标
+            # Title & axes
             ax.set_title(bench, fontsize=10)
             ax.set_xticks([])
             if col == 0:
                 ax.set_ylabel("Overhead (%)")
 
-        # --- 图例 ---
+        # Legend
         legend_handles = [
             plt.Rectangle((0, 0), 1, 1,
                           facecolor=colors[j % len(colors)],
@@ -736,7 +736,7 @@ def draw_overall_figures(
             fontsize=9
         )
 
-        # --- 保存 ---
+        # Save figure
         typ = 'rss' if is_rss else 'time'
         typ = f'{typ}_big' if ignore_small else typ
         plt.savefig(f'overheads_{typ}.{OUTPUT_FORMAT}',
@@ -744,12 +744,12 @@ def draw_overall_figures(
         plt.close(fig)
 
     def draw_violin():
-        # --- 1. 准备数据 ---
-        # overheads: shape (N_benchmarks, M_sanitizers, repeat_times) 或者 (repeat_times, M)
-        # 这里 flatten 成 repeat_times * M
+        # --- 1. Prepare data ---
+        # overheads: shape (N_benchmarks, M_sanitizers) or similar;
+        # we treat each column as a sanitizer distribution.
         df = pd.DataFrame(overheads, columns=sanitizers)
 
-        # --- 2. 配色 ---
+        # --- 2. Color mapping ---
         cmap = plt.get_cmap("tab20")
         colors = [cmap(i % 20) for i in range(len(sanitizers))]
 
@@ -782,10 +782,10 @@ def draw_overall_figures(
         # main axis
         ax = fig.add_subplot(gs[2])
 
-        # --- 3. 逐 sanitizer 绘制 violin ---
+        # --- 3. Draw violin per sanitizer ---
         legend_handles = []
         for idx, san in enumerate(sanitizers):
-            sdf = df[san].dropna()  # 单个 sanitizer 的数据
+            sdf = df[san].dropna()
             parts = ax.violinplot(
                 dataset=[sdf],
                 positions=[idx],
@@ -793,7 +793,7 @@ def draw_overall_figures(
                 showmedians=True,
                 showmeans=False,
             )
-            # 上色
+            # Color each violin
             for pc in parts["bodies"]:
                 pc.set_facecolor(colors[idx])
                 pc.set_edgecolor("black")
@@ -803,7 +803,7 @@ def draw_overall_figures(
                 vp.set_edgecolor("black")
                 vp.set_linewidth(1)
 
-            # 中位数数值
+            # Median label
             median_val = sdf.median()
             ax.text(
                 idx,
@@ -825,10 +825,10 @@ def draw_overall_figures(
                 )
             )
 
-        # --- 4. 美化 ---
+        # --- 4. Styling ---
         ax.axhline(y=100, color="red", linestyle="--", linewidth=1.2, zorder=1)
         ax.set_xticks(range(len(sanitizers)))
-        ax.set_xticklabels([])  # 不在主图上写名字，交给 legend
+        ax.set_xticklabels([])
         ax.set_xlim(-0.5, len(sanitizers) - 0.5)
         ax.set_ylabel("Overhead (%)")
 
@@ -843,7 +843,7 @@ def draw_overall_figures(
             fontsize=9,
         )
 
-        # 保存
+        # Save figure
         typ = "rss" if is_rss else "time"
         typ = f"{typ}_big" if ignore_small else typ
         plt.savefig(f"overheads_violin_{typ}.{OUTPUT_FORMAT}",

@@ -18,11 +18,11 @@ JSON
 {"a":1,"b":[true,false],"s":"x"}
 JSON
 
-  # 简单的二进制占位
+  # Simple binary placeholder
   printf '\x00\x01\x02\x03' >"$target_dir/min.bin"
 }
 
-# 为 fapi-ima-fuzzing 生成有效 IMA 事件日志语料（从 .b64 解码）
+# Generate valid IMA event log corpus for fapi-ima-fuzzing (decoded from .b64)
 generate_fapi_ima_corpus() {
   local target_dir="$1"
   mkdir -p "$target_dir"
@@ -38,18 +38,18 @@ generate_fapi_ima_corpus() {
   for f in "${files[@]}"; do
     if [ -f "$src_dir/$f" ]; then
       local out="$target_dir/${f%.b64}"
-      base64 -d "$src_dir/$f" >"$out" || { echo "警告: 解码失败 $f" >&2; rm -f "$out" || true; continue; }
+      base64 -d "$src_dir/$f" >"$out" || { echo "Warning: failed to decode $f" >&2; rm -f "$out" || true; continue; }
       any=1
     fi
   done
 
   if [ "$any" -eq 0 ]; then
-    echo "警告: 未在 $src_dir 找到 IMA 事件日志样例，回退到基础语料。" >&2
+    echo "Warning: no IMA event log samples found in $src_dir, falling back to basic corpus." >&2
     generate_basic_corpus "$target_dir"
   fi
 }
 
-# 为 fapi-system-fuzzing 生成固件事件日志语料（从 .b64 解码）
+# Generate firmware event log corpus for fapi-system-fuzzing (decoded from .b64)
 generate_fapi_system_corpus() {
   local target_dir="$1"
   mkdir -p "$target_dir"
@@ -70,18 +70,18 @@ generate_fapi_system_corpus() {
   for f in "${files[@]}"; do
     if [ -f "$src_dir/$f" ]; then
       local out="$target_dir/${f%.b64}"
-      base64 -d "$src_dir/$f" >"$out" || { echo "警告: 解码失败 $f" >&2; rm -f "$out" || true; continue; }
+      base64 -d "$src_dir/$f" >"$out" || { echo "Warning: failed to decode $f" >&2; rm -f "$out" || true; continue; }
       any=1
     fi
   done
 
   if [ "$any" -eq 0 ]; then
-    echo "警告: 未在 $src_dir 找到固件事件日志样例，回退到基础语料。" >&2
+    echo "Warning: no firmware event log samples found in $src_dir, falling back to basic corpus." >&2
     generate_basic_corpus "$target_dir"
   fi
 }
 
-# 针对 artefacts 下的每个子目录，在 corpus 下创建同名子目录并放置样例
+# For each artefacts subdirectory, create a matching corpus subdirectory and place a sample there
 shopt -s nullglob
 created=()
 for dir in "$ARTEFACTS_DIR"/*; do
@@ -103,9 +103,9 @@ for dir in "$ARTEFACTS_DIR"/*; do
 done
 
 if [ ${#created[@]} -eq 0 ]; then
-  echo "警告: 未在 $ARTEFACTS_DIR 下发现任何子目录，未生成语料。" >&2
+  echo "Warning: no subdirectories found under $ARTEFACTS_DIR, corpus not generated." >&2
 else
-  printf "已生成语料目录:\n"
+  printf "Corpus directories generated:\n"
   for p in "${created[@]}"; do echo "  - $p"; done
 fi
 

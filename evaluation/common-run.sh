@@ -1,49 +1,49 @@
 #!/bin/bash
 
 # -----------------------------------------------------------------------------
-# 脚本说明：
-#   本脚本 common-run.sh 用于统一在不同 Sanitizer 配置下运行指定的基准程序。
-#   支持通过参数灵活指定运行模式、程序目录、输入方式（标准输入或文件）、以及额外参数。
+# Script description:
+#   This script runs a selected benchmark program under a given Sanitizer mode.
+#   Arguments select the mode, program directory, input style (stdin or file), and extra options.
 #
 # Usage:
 #   ./common-run.sh <mode> <program-dir> <stdin:bool> [<input>] [preoptions] [postoptions]
 #
-# 参数说明：
-#   <mode>           : 运行模式（如 asan, msan, xsan-asan 等，需与编译时一致）
-#   <program-dir>    : 程序 artefacts 所在目录（如 ./artefacts/foo）
-#   <stdin:bool>     : 是否通过标准输入传递输入（true/false）
-#   <input>          : （可选）输入文件路径
-#   preoptions       : （可选）程序参数，放在输入文件前
-#   postoptions      : （可选）程序参数，放在输入文件后
+# Arguments:
+#   <mode>           : runtime mode (asan, msan, xsan-asan, etc.; must match build mode)
+#   <program-dir>    : directory containing program artefacts (for example ./artefacts/foo)
+#   <stdin:bool>     : whether to pass input through stdin (true/false)
+#   <input>          : optional input file path
+#   preoptions       : optional program arguments placed before the input file
+#   postoptions      : optional program arguments placed after the input file
 #
-# 示例：
+# Example:
 #   ./common-run.sh asan ./artefacts/foo false ./inputs/foo/input1 -v
 #   ./common-run.sh xsan-asan ./artefacts/bar true ./inputs/bar/input2
 #
-# 典型用途：
-#   供 /run.sh 调用，用于统一在不同 Sanitizer 配置下运行指定的基准程序。
+# Typical use:
+#   Called by /run.sh to run benchmark programs consistently across Sanitizer modes.
 # -----------------------------------------------------------------------------
 
 
-# 用法说明
+# Usage help
 usage() {
-    echo "用法: $0 <mode> <program-dir> <stdin:bool> [<input>] [preoptions] [postoptions]"
-    echo "  <mode>           : 运行模式（如 asan, msan, xsan-asan 等）"
-    echo "  <program-dir>    : 程序所在目录"
-    echo "  <use-perf:bool>  : 是否进行CPU + Memory 性能测量（true/false）"
-    echo "  <stdin:bool>     : 是否通过标准输入传递输入（true/false）"
-    echo "  <input>          : （可选）输入文件路径"
-    echo "  preoptions       : （可选）程序参数，放在输入文件前"
-    echo "  postoptions      : （可选）程序参数，放在输入文件后"
-    echo "示例:"
+    echo "Usage: $0 <mode> <program-dir> <use-perf:bool> <stdin:bool> [<input>] [preoptions] [postoptions]"
+    echo "  <mode>           : run mode (e.g., asan, msan, xsan-asan, ...)"
+    echo "  <program-dir>    : directory where the program artefacts reside"
+    echo "  <use-perf:bool>  : whether to measure CPU + memory performance (true/false)"
+    echo "  <stdin:bool>     : whether to feed input via stdin (true/false)"
+    echo "  <input>          : (optional) input file path"
+    echo "  preoptions       : (optional) arguments before the input"
+    echo "  postoptions      : (optional) arguments after the input"
+    echo "Examples:"
     echo "  $0 asan ./artefacts/foo false ./inputs/foo/input1 -v"
     echo "  $0 xsan-asan ./artefacts/bar true ./inputs/bar/input2"
     exit 1
 }
 
-# 检查参数数量
+# Check argument count
 if [ $# -lt 3 ]; then
-    echo "参数数量不足。"
+    echo "Error: insufficient arguments."
     usage
 fi
 
@@ -59,20 +59,20 @@ use_perf="$3"
 stdin="$4"
 shift 4
 
-# 判断 stdin 是否为 true/false
+# Validate stdin flag
 if [[ "$stdin" != "true" && "$stdin" != "false" ]]; then
-    echo "<stdin:bool> 参数必须为 true 或 false。"
+    echo "Error: <stdin:bool> must be true or false."
     usage
 fi
 
-# 判断程序文件是否存在
+# Check program binary existence
 prog_bin="${program_path}.${mode}"
 if [ ! -f "$prog_bin" ]; then
-    echo "错误: 程序文件 $prog_bin 不存在。"
+    echo "Error: program file $prog_bin does not exist."
     exit 2
 fi
 
-# 处理 input 参数
+# Handle input / preoptions / postoptions
 input=""
 preoptions=""
 postoptions=""
@@ -90,15 +90,15 @@ elif [ $# -ge 1 ]; then
     shift 1
 fi
 
-# 如果需要输入文件但未提供
+# If an input file is specified, ensure it exists
 if [ -n "$input" ] && [ ! -f "$input" ]; then
-    echo "错误: 输入文件 $input 不存在。"
+    echo "Error: input file $input does not exist."
     exit 3
 fi
 
 
 if [ "$stdin" = "false" ]; then
-    # 如果 input 存在，插入到 preoptions 和 postoptions 之间
+    # If input exists, place it between preoptions and postoptions
     if [ -n "$input" ]; then
         cmd=( "$prog_bin" $preoptions "$input" $postoptions )
     else
@@ -108,10 +108,10 @@ if [ "$stdin" = "false" ]; then
         cmd=( "$PERF_SCRIPT" "${cmd[@]}" )
     fi
     
-    # echo "执行命令: ${cmd[@]}"
+    # echo "Running command: ${cmd[@]}"
     exec ${cmd[@]}
 else
-    # stdin 模式
+    # stdin mode
     cmd=( "$prog_bin" $preoptions $postoptions )
     if [ "$use_perf" = "true" ]; then
         cmd=( "$PERF_SCRIPT" "${cmd[@]}" )

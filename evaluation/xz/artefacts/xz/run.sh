@@ -1,26 +1,26 @@
 #!/bin/bash
 export PROG_DIR=$(cd "$(dirname "$0")"; pwd)
 
-# 冒烟测试：默认只执行基本操作，避免复杂压缩/解压
+# Smoke test: run only basic operations by default to avoid expensive compression/decompression
 : "${SMOKE:=1}"
 export stdin="false"
 
 if [ "$SMOKE" = "1" ] || [ "$SMOKE" = "true" ]; then
-  # 只测试基本的help信息，不处理文件I/O
+  # Only test basic help output, without doing any file I/O
   export PRE_OPT="--help"
   export POST_OPT=""
 else
-  # 正常模式：通过文件传递输入
-  # 如果提供了输入参数，则根据扩展名决定压缩/解压，并将输出/解压目录置于 /tmp 下
+  # Normal mode: pass input through a file
+  # If input is provided, choose compression/decompression by extension and keep output under /tmp
   if [ $# -ge 2 ]; then
     input="$2"
     TMP_DIR=$(mktemp -d /tmp/xz_bench_XXXXXX)
-    # 解压：将输出目录设置到 /tmp 临时目录
+    # Decompression: write output into the temporary directory under /tmp
     if [[ "$input" == *.xz ]]; then
       export PRE_OPT="-d -c"
       export POST_OPT="> $TMP_DIR/output"
     else
-      # 压缩：将生成的压缩包写到 /tmp 临时目录
+      # Compression: write the resulting archive into the temporary directory
       export PRE_OPT="-c"
       export POST_OPT="> $TMP_DIR/output.xz"
     fi

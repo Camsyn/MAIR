@@ -4,7 +4,7 @@ export PRE_OPT=""
 export POST_OPT=""
 export stdin="false"
 
-# 让 MSan 非致命并降低噪音（注意: 仍可能报告，但不退出）
+# Make MSan non-fatal and reduce noise; it may still report but should not exit
 export MSAN_OPTIONS="poison_in_dtor=0:poison_in_malloc=0:poison_in_free=0"
 
 

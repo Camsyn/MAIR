@@ -261,6 +261,9 @@ struct DefaultHooks {
   // 1. 'sigaction_impl' in 'tsan_interceptors.cpp'
   PSEUDO_MACRO static void UseRange(const Context *ctx, const void *offset,
                                     uptr size, const char *func_name) {}
+  // Copy hook emphasizes the behavior of copy. Read/Write hooks must be around
+  // it. If we just care about the write/read semantic, implement the write/read
+  // hooks.
   PSEUDO_MACRO static void CopyRange(const Context *ctx, const void *dst,
                                      const void *src, uptr size,
                                      BufferedStackTrace &stack) {}

@@ -1,11 +1,4 @@
 __xsan_*
-__asan_*
-__tsan_*
-Annotate*
-WTFAnnotate*
-RunningOnValgrind
-ValgrindSlowdown
-__msan_*
 __lsan_*
 __ubsan_*
 __sancov_*

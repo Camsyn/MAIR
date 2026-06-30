@@ -108,6 +108,7 @@ endif()
 # - ${output_prefix}_COMMON_DEFINITIONS
 # - ${output_prefix}_DYNAMIC_DEFINITIONS
 # - ${output_prefix}_WRAPPED_SYMBOLS
+# - ${output_prefix}_SYMS_EXTRA
 # - ${output_prefix}_LINK_LIBS
 macro(import_subsan_wrapper dir output_prefix)
   unset(import_subsan)
@@ -121,6 +122,7 @@ macro(import_subsan_wrapper dir output_prefix)
   transform_list_in_place(${output_prefix}_COND_SOURCES PREPEND "${dir}/")
   transform_list_in_place(${output_prefix}_STATIC_SOURCES PREPEND "${dir}/")
   transform_list_in_place(${output_prefix}_WRAPPED_SYMBOLS PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/${dir}/")
+  transform_list_in_place(${output_prefix}_SYMS_EXTRA PREPEND "${dir}/")
 endmacro()
 
 ######################## Headers #########################
@@ -219,6 +221,7 @@ set(XSAN_DYNAMIC_DEFINITIONS XSAN_DYNAMIC=1)
 ######################## Link Libraries #########################
 
 set(XSAN_WRAPPED_SYMBOLS ${CMAKE_CURRENT_SOURCE_DIR}/xsan_wrapped_symbols.txt.in)
+set(XSAN_SYMS_EXTRA xsan.syms.extra)
 set(XSAN_LINK_LIBS)
 
 #################### Import Sub-san ####################
@@ -364,6 +367,7 @@ if(NOT APPLE)
     set(XSAN_STATIC_OBJ_LIST)
     set(XSAN_CFLAGS_LIST)
     set(XSAN_WRAPPED_SYMBOLS_LIST)
+    set(XSAN_SYMS_EXTRA_LIST)
     string(REPLACE "XSAN_SUBSET_" "" comb_suffix ${comb})
     string(TOLOWER "${comb_suffix}" comb_suffix)
 
@@ -389,6 +393,7 @@ if(NOT APPLE)
       endif()
       list(APPEND XSAN_CFLAGS_LIST ${${SAN}_CFLAGS})
       list(APPEND XSAN_WRAPPED_SYMBOLS_LIST ${${SAN}_WRAPPED_SYMBOLS})
+      list(APPEND XSAN_SYMS_EXTRA_LIST ${${SAN}_SYMS_EXTRA})
 
       if(NOT "${${SAN}_COND_SOURCES}" STREQUAL "")
         # Compile parts using the XSAN_CONTAINS_* condition
@@ -474,10 +479,10 @@ if(NOT APPLE)
       if(SANITIZER_USE_SYMBOLS AND NOT ${arch} STREQUAL "i386")
         add_sanitizer_rt_symbols(${libname}
           ARCHS ${arch}
-          EXTRA xsan.syms.extra)
+          EXTRA ${XSAN_SYMS_EXTRA_LIST})
         add_sanitizer_rt_symbols(${libname}_cxx
           ARCHS ${arch}
-          EXTRA xsan.syms.extra)
+          EXTRA ${XSAN_SYMS_EXTRA_LIST})
         add_dependencies(${target_comb}
           ${libname}-${arch}-symbols
           ${libname}_cxx-${arch}-symbols)
@@ -540,6 +545,7 @@ if(NOT APPLE)
     set(XSAN_DYNAMIC_OBJ_LIST)
     set(XSAN_DYNAMIC_CFLAGS_LIST)
     set(XSAN_LINK_LIBS_LIST)
+    set(XSAN_SYMS_EXTRA_LIST)
 
     set(obj_san_list ${${comb}} Xsan)
     string(REPLACE "XSAN_SUBSET_" "" comb_suffix ${comb})
@@ -559,6 +565,7 @@ if(NOT APPLE)
       list(APPEND XSAN_DYNAMIC_OBJ_LIST RTXsan_dynamic_${san})
       list(APPEND XSAN_DYNAMIC_CFLAGS_LIST ${${SAN}_DYNAMIC_CFLAGS})
       list(APPEND XSAN_LINK_LIBS_LIST ${${SAN}_LINK_LIBS})
+      list(APPEND XSAN_SYMS_EXTRA_LIST ${${SAN}_SYMS_EXTRA})
 
       if(NOT "${${SAN}_COND_SOURCES}" STREQUAL "")
         # Compile parts using the XSAN_CONTAINS_* condition
@@ -612,7 +619,7 @@ if(NOT APPLE)
         endif()
         add_sanitizer_rt_version_list(${libname}-dynamic-${arch}
                                       LIBS ${SANITIZER_RT_VERSION_LIST_LIBS}
-                                      EXTRA xsan.syms.extra)
+                                      EXTRA ${XSAN_SYMS_EXTRA_LIST})
         set(VERSION_SCRIPT_FLAG
           -Wl,--version-script,${CMAKE_CURRENT_BINARY_DIR}/${libname}-dynamic-${arch}.vers)
         # The Solaris 11.4 linker supports a subset of GNU ld version scripts,

@@ -9,6 +9,7 @@
 # - ${output_prefix}_COMMON_DEFINITIONS
 # - ${output_prefix}_DYNAMIC_DEFINITIONS
 # - ${output_prefix}_WRAPPED_SYMBOLS
+# - ${output_prefix}_SYMS_EXTRA
 # - ${output_prefix}_LINK_LIBS
 function(import_subsan output_prefix)
   ######################## Headers #########################
@@ -268,6 +269,11 @@ function(import_subsan output_prefix)
 
   set(${output_prefix}_WRAPPED_SYMBOLS
     tsan_wrapped_symbols.txt.in
+    PARENT_SCOPE
+  )
+
+  set(${output_prefix}_SYMS_EXTRA
+    tsan.syms.extra
     PARENT_SCOPE
   )
 

@@ -9,14 +9,12 @@ include_directories(${LLVM_INCLUDE_DIRS})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 link_directories(${LLVM_LIBRARY_DIRS})
 
-# -Wl,-Bsymbolic : force local symbols to be used in shared library
-add_link_options(-Wl,-Bsymbolic)
-
 if(NOT DEFINED XSAN_INSTRUMENTATION_VARIANT)
   message(FATAL_ERROR "XSAN_INSTRUMENTATION_VARIANT is not set")
 endif()
 
 add_subdirectory(livepatch)
+add_subdirectory(MAIR)
 
 set(XSAN_PASS_COMMON
   AttributeTaggingPass.cpp
@@ -31,6 +29,7 @@ set(XSAN_PASS_COMMON
   Utils/MetaDataUtils.cpp
   Utils/Options.cpp
   Utils/UbsanUtils.cpp
+  $<TARGET_OBJECTS:MAIRCore>
 )
 
 set(XSAN_PASS_VERSIONED_DIR ${XSAN_INSTRUMENTATION_VARIANT})
@@ -106,6 +105,9 @@ foreach(_xsan_pass_target
   target_compile_definitions(${_xsan_pass_target} PRIVATE
     XSAN_LLVM_MAJOR=${LLVM_VERSION_MAJOR}
   )
+  # Keep symbol binding local for pass plugins without affecting standalone LLVM
+  # tools such as mair-dump, which rely on LLVM shared-library type identity.
+  target_link_options(${_xsan_pass_target} PRIVATE -Wl,-Bsymbolic)
 endforeach()
 
 target_compile_definitions(XSanInstPass PRIVATE XSAN_PASS)

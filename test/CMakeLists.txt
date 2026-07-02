@@ -110,7 +110,7 @@ add_subdirectory(tsan)
 add_subdirectory(ubsan)
 add_subdirectory(msan)
 add_subdirectory(xsan)
-add_subdirectory(xsan/MAIR)
+add_subdirectory(MAIR)
 
 
 

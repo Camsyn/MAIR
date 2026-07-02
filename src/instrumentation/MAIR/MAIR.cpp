@@ -1,20 +1,126 @@
 #include "MAIR/MAIR.h"
 
+#include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Analysis/MemoryLocation.h"
-#include "llvm/IR/InstIterator.h"
+#include "llvm/Analysis/PostDominators.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/FormatVariadic.h"
-#include "llvm/Support/FormattedStream.h"
 
 #include <cstring>
 
 using namespace llvm;
 
-namespace __xsan::mair {
+namespace mair {
 
+namespace {
+SmallVector<BasicBlock *, 16> collectReachableBlocks(Function &F) {
+  SmallVector<BasicBlock *, 16> Blocks;
+  SmallVector<BasicBlock *, 16> Worklist;
+  SmallPtrSet<BasicBlock *, 16> Seen;
+
+  Worklist.push_back(&F.getEntryBlock());
+  while (!Worklist.empty()) {
+    BasicBlock *BB = Worklist.pop_back_val();
+    if (!Seen.insert(BB).second)
+      continue;
+    Blocks.push_back(BB);
+    const Instruction *Term = BB->getTerminator();
+    for (unsigned I = 0, E = Term->getNumSuccessors(); I != E; ++I)
+      Worklist.push_back(Term->getSuccessor(I));
+  }
+  return Blocks;
+}
+
+bool isInterestingMop(const Instruction &I) {
+  if (I.hasMetadata(LLVMContext::MD_nosanitize))
+    return false;
+  if (I.isAtomic())
+    return false;
+  return isa<LoadInst>(I) || isa<StoreInst>(I);
+}
+} // namespace
+
+// Build the initial, unoptimized MAIR graph for one LLVM function.
+//
+// Observation layout follows each LLVM basic block:
+//   BBEntry -> memory observations in source order -> BBExit.
+// Edges are then added for adjacent observations inside each block and for
+// immediate dominator/post-dominator relationships across blocks. Barrier
+// queries decide whether the corresponding forward/backward sanitizer
+// reachability edge is legal.
+MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
+                           const PostDominatorTree &PDT,
+                           MAIRBarrierAnalysisCore &BA) {
+  MAIRGraph Graph(F);
+  DenseMap<const BasicBlock *, Observation *> BBEntryObs;
+  DenseMap<const BasicBlock *, Observation *> BBExitObs;
+  DenseMap<const BasicBlock *, SmallVector<Observation *, 4>> OrderedObs;
+
+  for (BasicBlock &BB : F) {
+    auto &ObsInOneBB = OrderedObs[&BB];
+    auto &Start = Graph.createBBObservation(BB, true);
+    BBEntryObs[&BB] = &Start;
+    ObsInOneBB.push_back(&Start);
+    for (Instruction &I : BB) {
+      if (isInterestingMop(I)) {
+        auto &Obs = Graph.createInstObservation(BB, I);
+        ObsInOneBB.push_back(&Obs);
+      }
+    }
+    auto &End = Graph.createBBObservation(BB, false);
+    BBExitObs[&BB] = &End;
+    ObsInOneBB.push_back(&End);
+  }
+
+  for (auto &Entry : OrderedObs) {
+    ArrayRef<Observation *> Points = Entry.second;
+    assert(Points.size() > 1);
+    for (unsigned I = 1; I < Points.size(); ++I) {
+      Observation &Prev = *Points[I - 1];
+      Observation &Next = *Points[I];
+      const Instruction *PrevI = Prev.getAnchorInstruction();
+      const Instruction *NextI = Next.getAnchorInstruction();
+      if (!BA.hasFwdBarrierBetween(PrevI, NextI))
+        Graph.addEdge(Prev, Next);
+      if (!BA.hasBwdBarrierBetween(PrevI, NextI))
+        Graph.addEdge(Next, Prev);
+    }
+  }
+
+  for (const DomTreeNode *Node : depth_first(DT.getRootNode())) {
+    const DomTreeNode *IDom = Node->getIDom();
+    if (!IDom || !Node->getBlock() || !IDom->getBlock())
+      continue;
+    const BasicBlock &BB = *Node->getBlock();
+    const BasicBlock &IDomBB = *IDom->getBlock();
+    Observation *EntryObs = BBEntryObs.lookup(&BB);
+    Observation *Pred = BBEntryObs.lookup(&IDomBB);
+    assert(EntryObs && Pred);
+    if (!BA.hasFwdBarrierPath(IDomBB, BB))
+      Graph.addEdge(*Pred, *EntryObs);
+  }
+
+  for (const DomTreeNode *Node : depth_first(PDT.getRootNode())) {
+    const DomTreeNode *IPDom = Node->getIDom();
+    if (!IPDom || !Node->getBlock() || !IPDom->getBlock())
+      continue;
+    const BasicBlock &BB = *Node->getBlock();
+    const BasicBlock &IPDomBB = *IPDom->getBlock();
+    Observation *ExitObs = BBExitObs.lookup(&BB);
+    Observation *Succ = BBEntryObs.lookup(&IPDomBB);
+    assert(ExitObs && Succ);
+    if (!BA.hasBwdBarrierPath(BB, IPDomBB))
+      Graph.addEdge(*ExitObs, *Succ);
+  }
+
+  return Graph;
+}
+
+namespace {
 static AccessKind mergeKind(AccessKind LHS, AccessKind RHS) {
   if (LHS == RHS)
     return LHS;
@@ -49,16 +155,16 @@ static StringRef getPrintedMemoryOpcode(const Instruction &I,
                  I.getOpcodeName() + strlen(I.getOpcodeName()));
   return StringRef(Storage.data(), Storage.size());
 }
+} // namespace
 
 void MemoryAccess::mergeKind(AccessKind Other) {
-  Kind = ::__xsan::mair::mergeKind(Kind, Other);
+  Kind = ::mair::mergeKind(Kind, Other);
 }
 
-std::string MemoryAccess::toString(bool annotate) const {
-  (void)annotate;
+std::string MemoryAccess::toString(bool Annotate) const {
   std::string S;
   raw_string_ostream OS(S);
-  print(OS);
+  print(OS, Annotate);
   OS.flush();
   return S;
 }
@@ -89,7 +195,8 @@ MemoryAccess MemoryAccess::fromInstruction(const Instruction &I,
   return MemoryAccess(&I, Loc, Kind);
 }
 
-void MemoryAccess::print(raw_ostream &OS) const {
+void MemoryAccess::print(raw_ostream &OS, bool annotate) const {
+  (void)annotate;
   OS << "ma[";
   if (Inst) {
     SmallVector<char, 16> Opcode;
@@ -123,14 +230,26 @@ Observation::Observation(StringRef N, const BasicBlock *Block,
                          const Instruction *Anchor, SiteKind K)
     : Name(N.str()), BB(Block), AnchorInst(Anchor), Kind(K) {}
 
-void Observation::addAccess(const MemoryAccess &A) {
-  Accesses.push_back(A);
-  Accesses.back().setParent(this);
+Observation::~Observation() { AccessAllocator.DestroyAll(); }
+
+MemoryAccess &Observation::createAccess(const Instruction *I,
+                                        MemoryLocation Loc, AccessKind Kind) {
+  return *new (AccessAllocator.Allocate()) MemoryAccess(I, Loc, Kind);
 }
 
-void Observation::addAccess(MemoryAccess &&A) {
-  Accesses.push_back(std::move(A));
-  Accesses.back().setParent(this);
+MemoryAccess &Observation::addAccess(const MemoryAccess &A) {
+  auto &Node = createAccess(A.getInstruction(), A.getLocation(), A.getKind());
+  Accesses.push_back(Node);
+  Node.setParent(this);
+  ++NumAccesses;
+  return Node;
+}
+
+Observation::iterator Observation::erase(iterator It) {
+  assert(It != Accesses.end() && "Cannot erase end iterator");
+  auto Next = Accesses.erase(It);
+  --NumAccesses;
+  return Next;
 }
 
 void Observation::mergeAccessesFrom(const Observation &Other) {
@@ -141,14 +260,26 @@ void Observation::mergeAccessesFrom(const Observation &Other) {
 std::string Observation::toString(bool annotate) const {
   std::string S;
   raw_string_ostream OS(S);
-  print(OS);
+  print(OS, annotate);
   OS.flush();
   return S;
 }
 
-void Observation::print(raw_ostream &OS) const {
+void Observation::print(raw_ostream &OS, bool annotate) const {
+  (void)annotate;
   OS << "obs " << Name << " {";
-  OS << "site=" << (Kind == SiteKind::MemoryInst ? "memory-inst" : "bb-entry");
+  OS << "site=";
+  switch (Kind) {
+  case SiteKind::MemoryInst:
+    OS << "memory-inst";
+    break;
+  case SiteKind::BasicBlockEntry:
+    OS << "bb-entry";
+    break;
+  case SiteKind::BasicBlockExit:
+    OS << "bb-exit";
+    break;
+  }
   if (BB) {
     OS << ",bb=";
     OS << getPrintedValueName(*BB);
@@ -164,7 +295,7 @@ void Observation::print(raw_ostream &OS) const {
   for (const MemoryAccess &A : Accesses) {
     if (!First)
       OS << ", ";
-    A.print(OS);
+    A.print(OS, annotate);
     First = false;
   }
   OS << "]}";
@@ -172,45 +303,98 @@ void Observation::print(raw_ostream &OS) const {
 
 MAIRGraph::MAIRGraph(const Function &Func) : F(&Func) {}
 
-Observation &MAIRGraph::addObservation(Observation Obs) {
-  OwnedObservations.push_back(std::make_unique<Observation>(std::move(Obs)));
-  Observation *Node = OwnedObservations.back().get();
-  Node->setParent(this);
-  for (MemoryAccess &Access : Node->accesses())
-    Access.setParent(Node);
-  Observations.push_back(*Node);
-  return *Node;
+MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
+    : F(Other.F), GraphAllocator(std::move(Other.GraphAllocator)),
+      Observations(std::move(Other.Observations)),
+      Edges(std::move(Other.Edges)), SuccMap(std::move(Other.SuccMap)),
+      PredMap(std::move(Other.PredMap)), NumObservations(Other.NumObservations),
+      NumEdges(Other.NumEdges), NextObservationID(Other.NextObservationID) {
+  for (Observation &Obs : Observations)
+    Obs.setParent(this);
 }
 
-Observation &MAIRGraph::createObservation(StringRef Name, const BasicBlock *BB,
-                                          const Instruction *Anchor,
-                                          Observation::SiteKind Kind) {
-  return addObservation(Observation(Name, BB, Anchor, Kind));
+MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
+  if (this == &Other)
+    return *this;
+  clear();
+  F = Other.F;
+  GraphAllocator = std::move(Other.GraphAllocator);
+  Observations = std::move(Other.Observations);
+  Edges = std::move(Other.Edges);
+  SuccMap = std::move(Other.SuccMap);
+  PredMap = std::move(Other.PredMap);
+  NumObservations = Other.NumObservations;
+  NumEdges = Other.NumEdges;
+  NextObservationID = Other.NextObservationID;
+  for (Observation &Obs : Observations)
+    Obs.setParent(this);
+  return *this;
+}
+
+MAIRGraph::~MAIRGraph() { clear(); }
+
+template <class T, class... Args>
+T &MAIRGraph::allocateNode(Args &&...ArgsPack) {
+  return *new (GraphAllocator.Allocate()) T(std::forward<Args>(ArgsPack)...);
+}
+
+std::string MAIRGraph::createObservationName(StringRef Prefix) {
+  return (Twine(Prefix) + Twine(NextObservationID++)).str();
+}
+
+Observation &MAIRGraph::addObservation(Observation &Obs) {
+  Observations.push_back(Obs);
+  Obs.setParent(this);
+  ++NumObservations;
+  return Obs;
+}
+
+Observation &MAIRGraph::createBBObservation(const BasicBlock &BB,
+                                            bool IsEntry) {
+  return addObservation(allocateNode<Observation>(
+      createObservationName(IsEntry ? "bs" : "be"), &BB, nullptr,
+      IsEntry ? Observation::SiteKind::BasicBlockEntry
+              : Observation::SiteKind::BasicBlockExit));
+}
+
+Observation &MAIRGraph::createInstObservation(const BasicBlock &BB,
+                                              const Instruction &Anchor) {
+  auto &Obs = addObservation(allocateNode<Observation>(
+      createObservationName("ma"), &BB, &Anchor,
+      Observation::SiteKind::MemoryInst));
+  Obs.addAccess(
+      MemoryAccess::fromInstruction(Anchor, Anchor.getModule()->getDataLayout()));
+  return Obs;
 }
 
 MAIRGraph::iterator MAIRGraph::erase(Observation &Obs) {
-  auto It = Obs.getIterator();
+  auto It = llvm::find_if(Observations, [&Obs](Observation &Candidate) {
+    return &Candidate == &Obs;
+  });
+  assert(It != Observations.end() &&
+         "Observation does not belong to this MAIRGraph");
+  SmallVector<Observation *, 4> Succs = successors(Obs);
+  SmallVector<Observation *, 4> Preds = predecessors(Obs);
+  for (Observation *Succ : Succs)
+    removeEdge(Obs, *Succ);
+  for (Observation *Pred : Preds)
+    removeEdge(*Pred, Obs);
   auto Next = Observations.erase(It);
-  Edges.erase(llvm::remove_if(Edges,
-                              [&Obs](const auto &Edge) {
-                                return Edge.first == &Obs ||
-                                       Edge.second == &Obs;
-                              }),
-              Edges.end());
-  for (auto OwnedIt = OwnedObservations.begin();
-       OwnedIt != OwnedObservations.end(); ++OwnedIt) {
-    if (OwnedIt->get() != &Obs)
-      continue;
-    OwnedObservations.erase(OwnedIt);
-    break;
-  }
+  SuccMap.erase(&Obs);
+  PredMap.erase(&Obs);
+  --NumObservations;
   return Next;
 }
 
 void MAIRGraph::clear() {
-  Edges.clear();
+  GraphAllocator.DestroyAll();
   Observations.clear();
-  OwnedObservations.clear();
+  Edges.clear();
+  SuccMap.clear();
+  PredMap.clear();
+  NumObservations = 0;
+  NumEdges = 0;
+  NextObservationID = 0;
 }
 
 Observation *MAIRGraph::find(StringRef Name) {
@@ -229,48 +413,58 @@ void MAIRGraph::addEdge(Observation &From, Observation &To) {
     if (Edge.first == &From && Edge.second == &To)
       return;
   Edges.push_back({&From, &To});
+  SuccMap[&From].push_back(&To);
+  PredMap[&To].push_back(&From);
+  ++NumEdges;
 }
 
 void MAIRGraph::removeEdge(Observation &From, Observation &To) {
-  Edges.erase(llvm::remove_if(Edges,
-                              [&From, &To](const auto &Edge) {
-                                return Edge.first == &From &&
-                                       Edge.second == &To;
-                              }),
-              Edges.end());
+  auto It = llvm::find_if(Edges, [&From, &To](const auto &Edge) {
+    return Edge.first == &From && Edge.second == &To;
+  });
+  if (It == Edges.end())
+    return;
+  Edges.erase(It);
+  if (auto Succs = SuccMap.find(&From); Succs != SuccMap.end())
+    Succs->second.erase(
+        std::remove(Succs->second.begin(), Succs->second.end(), &To),
+        Succs->second.end());
+  if (auto Preds = PredMap.find(&To); Preds != PredMap.end())
+    Preds->second.erase(
+        std::remove(Preds->second.begin(), Preds->second.end(), &From),
+        Preds->second.end());
+  --NumEdges;
 }
 
 MAIRGraph::EdgeListType MAIRGraph::successors(Observation &Obs) {
   EdgeListType Result;
-  for (const auto &Edge : Edges)
-    if (Edge.first == &Obs)
-      Result.push_back(Edge.second);
+  if (auto Succs = SuccMap.find(&Obs); Succs != SuccMap.end())
+    Result.append(Succs->second.begin(), Succs->second.end());
   return Result;
 }
 
 MAIRGraph::ConstEdgeListType
 MAIRGraph::successors(const Observation &Obs) const {
   ConstEdgeListType Result;
-  for (const auto &Edge : Edges)
-    if (Edge.first == &Obs)
-      Result.push_back(Edge.second);
+  if (auto Succs = SuccMap.find(const_cast<Observation *>(&Obs));
+      Succs != SuccMap.end())
+    Result.append(Succs->second.begin(), Succs->second.end());
   return Result;
 }
 
 MAIRGraph::EdgeListType MAIRGraph::predecessors(Observation &Obs) {
   EdgeListType Result;
-  for (const auto &Edge : Edges)
-    if (Edge.second == &Obs)
-      Result.push_back(Edge.first);
+  if (auto Preds = PredMap.find(&Obs); Preds != PredMap.end())
+    Result.append(Preds->second.begin(), Preds->second.end());
   return Result;
 }
 
 MAIRGraph::ConstEdgeListType
 MAIRGraph::predecessors(const Observation &Obs) const {
   ConstEdgeListType Result;
-  for (const auto &Edge : Edges)
-    if (Edge.second == &Obs)
-      Result.push_back(Edge.first);
+  if (auto Preds = PredMap.find(const_cast<Observation *>(&Obs));
+      Preds != PredMap.end())
+    Result.append(Preds->second.begin(), Preds->second.end());
   return Result;
 }
 
@@ -279,6 +473,8 @@ bool MAIRGraph::verify() const {
     if (Obs.getParent() != this)
       return false;
     if (Obs.isBasicBlockEntrySite() && Obs.getAnchorInstruction())
+      return false;
+    if (Obs.isBasicBlockExitSite() && Obs.getAnchorInstruction())
       return false;
     if (Obs.isMemoryInstSite() && !Obs.getAnchorInstruction())
       return false;
@@ -302,12 +498,13 @@ bool MAIRGraph::verify() const {
 std::string MAIRGraph::toString(bool annotate) const {
   std::string S;
   raw_string_ostream OS(S);
-  print(OS);
+  print(OS, annotate);
   OS.flush();
   return S;
 }
 
-void MAIRGraph::print(raw_ostream &OS) const {
+void MAIRGraph::print(raw_ostream &OS, bool annotate) const {
+  (void)annotate;
   OS << "mair graph";
   if (F) {
     OS << " function ";
@@ -316,8 +513,8 @@ void MAIRGraph::print(raw_ostream &OS) const {
   OS << " {\n";
   for (const Observation &Obs : Observations) {
     OS << "  ";
-    Obs.print(OS);
-    ConstEdgeListType Succs = successors(Obs);
+    Obs.print(OS, annotate);
+    const ConstEdgeListType Succs = successors(Obs);
     if (!Succs.empty()) {
       OS << " ; succs=[";
       bool First = true;
@@ -334,44 +531,4 @@ void MAIRGraph::print(raw_ostream &OS) const {
   OS << "}\n";
 }
 
-void MAIRAnnotatedWriter::emitFunctionAnnot(const Function *F,
-                                            formatted_raw_ostream &OS) {
-  if (!Graph.getFunction() || Graph.getFunction() != F)
-    return;
-  OS << " ; MAIR fn";
-}
-
-void MAIRAnnotatedWriter::emitBasicBlockStartAnnot(const BasicBlock *BB,
-                                                   formatted_raw_ostream &OS) {
-  for (const Observation &Obs : Graph) {
-    if (Obs.getBasicBlock() == BB && Obs.isBasicBlockEntrySite()) {
-      OS << " ; ";
-      Obs.print(OS);
-    }
-  }
-}
-
-void MAIRAnnotatedWriter::emitInstructionAnnot(const Instruction *I,
-                                               formatted_raw_ostream &OS) {
-  for (const Observation &Obs : Graph) {
-    if (Obs.getAnchorInstruction() != I)
-      continue;
-    OS << " ; ";
-    Obs.print(OS);
-  }
-}
-
-void MAIRAnnotatedWriter::printInfoComment(const Value &V,
-                                           formatted_raw_ostream &OS) {
-  if (const auto *I = dyn_cast<Instruction>(&V))
-    emitInstructionAnnot(I, OS);
-}
-
-void dumpPure(const MAIRGraph &Graph, raw_ostream &OS) { Graph.print(OS); }
-
-void dumpAnnotated(const MAIRGraph &Graph, const Module &M, raw_ostream &OS) {
-  MAIRAnnotatedWriter Writer(Graph);
-  M.print(OS, &Writer);
-}
-
-} // namespace __xsan::mair
+} // namespace mair

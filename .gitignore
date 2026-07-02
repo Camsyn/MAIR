@@ -25,3 +25,6 @@ xsan_hooks_gen.h
 
 build*/
 /.*/
+
+# lit outputs
+test/**/Output/

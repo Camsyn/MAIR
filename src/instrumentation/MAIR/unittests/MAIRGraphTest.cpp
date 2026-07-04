@@ -224,7 +224,7 @@ entry:
 
   std::string Dump;
   raw_string_ostream OS(Dump);
-  dumpPure(Graph, OS);
+  dumpMAIR(Graph, OS);
   OS.flush();
   EXPECT_NE(Dump.find("mair graph"), std::string::npos);
   EXPECT_NE(Dump.find("obs bs0 {site=bb-entry"), std::string::npos);

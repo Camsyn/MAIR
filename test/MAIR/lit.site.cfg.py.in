@@ -2,5 +2,5 @@
 
 config.test_source_root = "@MAIR_LIT_SOURCE_DIR@"
 config.test_exec_root = "@CMAKE_CURRENT_BINARY_DIR@/MAIR"
-config.mair_dump = "@MAIR_DUMP_PATH@"
+config.mair_opt = "@MAIR_OPT_PATH@"
 lit_config.load_config(config, "@MAIR_LIT_SOURCE_DIR@/lit.cfg.py")

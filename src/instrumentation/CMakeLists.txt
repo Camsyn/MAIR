@@ -106,7 +106,7 @@ foreach(_xsan_pass_target
     XSAN_LLVM_MAJOR=${LLVM_VERSION_MAJOR}
   )
   # Keep symbol binding local for pass plugins without affecting standalone LLVM
-  # tools such as mair-dump, which rely on LLVM shared-library type identity.
+  # tools such as mair-opt, which rely on LLVM shared-library type identity.
   target_link_options(${_xsan_pass_target} PRIVATE -Wl,-Bsymbolic)
 endforeach()
 

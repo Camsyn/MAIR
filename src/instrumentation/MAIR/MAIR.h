@@ -63,8 +63,8 @@ public:
   static MemoryAccess fromInstruction(const Instruction &I,
                                       const DataLayout &DL);
 
-  std::string toString(bool annotate = false) const;
-  void print(raw_ostream &OS, bool annotate = false) const;
+  std::string toString(bool LLVM = false) const;
+  void print(raw_ostream &OS, bool LLVM = false) const;
 };
 
 class Observation final
@@ -120,8 +120,8 @@ public:
   iterator erase(iterator It);
   void mergeAccessesFrom(const Observation &Other);
 
-  std::string toString(bool annotate = false) const;
-  void print(raw_ostream &OS, bool annotate = false) const;
+  std::string toString(bool LLVM = false) const;
+  void print(raw_ostream &OS, bool LLVM = false) const;
 
 private:
   static AccessListType Observation::*getSublistAccess(MemoryAccess *) {
@@ -213,8 +213,8 @@ public:
   ConstEdgeListType predecessors(const Observation &Obs) const;
 
   bool verify(raw_ostream *OS = nullptr) const;
-  std::string toString(bool Annotate = false) const;
-  void print(raw_ostream &OS, bool Annotate = false) const;
+  std::string toString(bool LLVM = false) const;
+  void print(raw_ostream &OS, bool LLVM = false) const;
   void dump(raw_ostream &OS) const { print(OS); }
 
 private:
@@ -222,10 +222,12 @@ private:
   std::string createObservationName(StringRef Prefix);
   Observation &addObservation(Observation &Obs);
 
-  /// Construct the raw MAIR graph once dominance and barrier analyses are fixed.
+  /// Construct the raw MAIR graph once dominance and barrier analyses are
+  /// fixed.
   ///
   /// Creates BB-entry, memory-instruction, and BB-exit observations, then adds
-  /// intra-block and dominance/post-dominance edges gated by \p BarrierAnalysis.
+  /// intra-block and dominance/post-dominance edges gated by \p
+  /// BarrierAnalysis.
   static MAIRGraph build(Function &F, const DominatorTree &DT,
                          const PostDominatorTree &PDT,
                          MAIRBarrierAnalysisCore &BarrierAnalysis);

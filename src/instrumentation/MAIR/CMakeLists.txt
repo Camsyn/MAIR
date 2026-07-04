@@ -16,4 +16,4 @@ target_include_directories(MAIRCore BEFORE PRIVATE
 )
 
 add_subdirectory(unittests)
-add_subdirectory(tools/mair-dump)
+add_subdirectory(tools/mair-opt)

@@ -4,7 +4,7 @@
 
 namespace mair {
 
-void dumpPure(const MAIRGraph &Graph, raw_ostream &OS);
-void dumpAnnotated(const MAIRGraph &Graph, const Module &M, raw_ostream &OS);
+void dumpMAIR(const MAIRGraph &Graph, raw_ostream &OS);
+void dumpLLVM(const MAIRGraph &Graph, const Module &M, raw_ostream &OS);
 
 } // namespace mair

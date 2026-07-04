@@ -177,10 +177,10 @@ void MemoryAccess::mergeKind(AccessKind Other) {
   Kind = ::mair::mergeKind(Kind, Other);
 }
 
-std::string MemoryAccess::toString(bool Annotate) const {
+std::string MemoryAccess::toString(bool LLVM) const {
   std::string S;
   raw_string_ostream OS(S);
-  print(OS, Annotate);
+  print(OS, LLVM);
   OS.flush();
   return S;
 }
@@ -211,8 +211,8 @@ MemoryAccess MemoryAccess::fromInstruction(const Instruction &I,
   return MemoryAccess(&I, Loc, Kind);
 }
 
-void MemoryAccess::print(raw_ostream &OS, bool annotate) const {
-  (void)annotate;
+void MemoryAccess::print(raw_ostream &OS, bool LLVM) const {
+  (void)LLVM;
   OS << "ma[";
   if (Inst) {
     SmallVector<char, 16> Opcode;
@@ -273,16 +273,16 @@ void Observation::mergeAccessesFrom(const Observation &Other) {
     addAccess(A);
 }
 
-std::string Observation::toString(bool annotate) const {
+std::string Observation::toString(bool LLVM) const {
   std::string S;
   raw_string_ostream OS(S);
-  print(OS, annotate);
+  print(OS, LLVM);
   OS.flush();
   return S;
 }
 
-void Observation::print(raw_ostream &OS, bool annotate) const {
-  (void)annotate;
+void Observation::print(raw_ostream &OS, bool LLVM) const {
+  (void)LLVM;
   OS << "obs " << Name << " {";
   OS << "site=";
   switch (Kind) {
@@ -311,7 +311,7 @@ void Observation::print(raw_ostream &OS, bool annotate) const {
   for (const MemoryAccess &A : Accesses) {
     if (!First)
       OS << ", ";
-    A.print(OS, annotate);
+    A.print(OS, LLVM);
     First = false;
   }
   OS << "]}";
@@ -486,16 +486,16 @@ MAIRGraph::predecessors(const Observation &Obs) const {
   return Result;
 }
 
-std::string MAIRGraph::toString(bool annotate) const {
+std::string MAIRGraph::toString(bool LLVM) const {
   std::string S;
   raw_string_ostream OS(S);
-  print(OS, annotate);
+  print(OS, LLVM);
   OS.flush();
   return S;
 }
 
-void MAIRGraph::print(raw_ostream &OS, bool annotate) const {
-  (void)annotate;
+void MAIRGraph::print(raw_ostream &OS, bool LLVM) const {
+  (void)LLVM;
   OS << "mair graph";
   if (F) {
     OS << " function ";
@@ -504,7 +504,7 @@ void MAIRGraph::print(raw_ostream &OS, bool annotate) const {
   OS << " {\n";
   for (const Observation &Obs : Observations) {
     OS << "  ";
-    Obs.print(OS, annotate);
+    Obs.print(OS, LLVM);
     const ConstEdgeListType Succs = successors(Obs);
     if (!Succs.empty()) {
       OS << " ; succs=[";

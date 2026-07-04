@@ -1,5 +1,5 @@
 set(MAIR_LIT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-set(MAIR_DUMP_PATH ${XSAN_OUTPUT_BINDIR}/mair-dump)
+set(MAIR_OPT_PATH ${XSAN_OUTPUT_BINDIR}/mair-opt)
 
 configure_lit_site_cfg(
   ${CMAKE_CURRENT_SOURCE_DIR}/lit.site.cfg.py.in
@@ -8,7 +8,7 @@ configure_lit_site_cfg(
 add_lit_testsuite(check-mair
   "Running MAIR tests"
   ${CMAKE_CURRENT_BINARY_DIR}
-  DEPENDS mair-dump
+  DEPENDS mair-opt
 )
 
 if(NOT TARGET check-all)

@@ -16,20 +16,13 @@ using namespace mair;
 
 static cl::opt<std::string>
     InputFilename(cl::Positional, cl::desc("<input LLVM IR>"), cl::Required);
-static cl::opt<bool> Pure("pure", cl::desc("Print MAIR as standalone IR"),
-                          cl::init(false));
-static cl::opt<bool> Annotated("annotated",
-                               cl::desc("Print LLVM IR annotated with MAIR"),
-                               cl::init(false));
+static cl::opt<bool>
+    EmitLLVM("emit-llvm", cl::desc("Print LLVM IR annotated with MAIR"),
+             cl::init(false));
 
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
-  cl::ParseCommandLineOptions(argc, argv, "MAIR dump utility\n");
-
-  if (!Pure && !Annotated) {
-    Pure = true;
-    Annotated = true;
-  }
+  cl::ParseCommandLineOptions(argc, argv, "MAIR optimizer utility\n");
 
   LLVMContext Ctx;
   SMDiagnostic Err;
@@ -56,10 +49,10 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    if (Pure)
-      dumpPure(Graph, outs());
-    if (Annotated)
-      dumpAnnotated(Graph, *M, outs());
+    if (EmitLLVM)
+      dumpLLVM(Graph, *M, outs());
+    else
+      dumpMAIR(Graph, outs());
   }
 
   return 0;

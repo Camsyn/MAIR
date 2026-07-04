@@ -1,7 +1,9 @@
 set(MAIR_SOURCES
+  Analysis/MAIRStatAnalysis.cpp
   MAIR.cpp
   MAIRBarrierAnalysis.cpp
   MAIRDump.cpp
+  MAIRPasses.cpp
   Verifier.cpp
 )
 

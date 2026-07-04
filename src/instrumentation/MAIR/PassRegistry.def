@@ -1,0 +1,19 @@
+//===- PassRegistry.def - MAIR pass registry -------------------*- C++ -*-===//
+//
+// This file is intentionally included multiple times with different macro
+// definitions, following LLVM's PassRegistry.def pattern.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef MAIR_GRAPH_PASS
+#define MAIR_GRAPH_PASS(NAME, CREATE_PASS)
+#endif
+#ifndef MAIR_GRAPH_ANALYSIS
+#define MAIR_GRAPH_ANALYSIS(NAME, CREATE_PASS)
+#endif
+
+MAIR_GRAPH_ANALYSIS("stat", MAIRStatAnalysis())
+MAIR_GRAPH_PASS("print<stat>", MAIRStatPrinterPass(errs()))
+
+#undef MAIR_GRAPH_ANALYSIS
+#undef MAIR_GRAPH_PASS

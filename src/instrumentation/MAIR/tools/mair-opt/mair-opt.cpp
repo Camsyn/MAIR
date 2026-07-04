@@ -1,12 +1,15 @@
 #include "MAIR/MAIR.h"
 #include "MAIR/MAIRDump.h"
+#include "MAIR/MAIRPasses.h"
 
 #include "llvm/ADT/iterator.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassInstrumentation.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/SourceMgr.h"
@@ -21,6 +24,12 @@ static cl::opt<std::string>
 static cl::opt<bool>
     EmitLLVM("emit-llvm", cl::desc("Print LLVM IR annotated with MAIR"),
              cl::init(false));
+static cl::opt<bool> DisableOutput("disable-output",
+                                   cl::desc("Do not emit MAIR or LLVM output"),
+                                   cl::init(false));
+static cl::opt<std::string>
+    PassPipeline("passes", cl::desc("MAIRGraph pass pipeline"),
+                 cl::value_desc("pipeline"));
 
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
@@ -40,6 +49,16 @@ int main(int argc, char **argv) {
   FAM.registerPass([] { return DominatorTreeAnalysis(); });
   FAM.registerPass([] { return PostDominatorTreeAnalysis(); });
 
+  MAIRGraphAnalysisManager GAM;
+  registerMAIRGraphAnalyses(GAM, &PIC);
+  MAIRGraphPassManager GPM;
+  if (!PassPipeline.empty()) {
+    if (Error Err = parseMAIRGraphPassPipeline(GPM, PassPipeline)) {
+      errs() << toString(std::move(Err)) << "\n";
+      return 1;
+    }
+  }
+
   SmallVector<MAIRGraph, 8> Graphs;
   for (Function &F : *M) {
     if (F.isDeclaration())
@@ -53,11 +72,18 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    if (!EmitLLVM)
+    if (!PassPipeline.empty()) {
+      GPM.run(Graph, GAM);
+      GAM.clear(Graph, Graph.getFunction() ? Graph.getFunction()->getName()
+                                           : StringRef("<unknown>"));
+    }
+
+    if (!DisableOutput && !EmitLLVM) {
       dumpMAIR(Graph, outs());
+    }
   }
 
-  if (EmitLLVM && !Graphs.empty()) {
+  if (!DisableOutput && EmitLLVM && !Graphs.empty()) {
     SmallVector<const MAIRGraph *, 8> GraphPtrs(make_pointer_range(Graphs));
     dumpLLVM(GraphPtrs, outs());
   }

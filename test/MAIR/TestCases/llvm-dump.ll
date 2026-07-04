@@ -41,7 +41,7 @@ define void @branch_loop(i32* %p, i32* %q, i1 %c, i32 %n) {
 ; LLVM-NEXT:  ; be5: preds=[ma4], succs=[ma4, bs6]
 ; LLVM-NEXT:    br label %[[LOOP]]
 ; LLVM:       [[LOOP]]:
-; LLVM-NEXT:    [[I:%.*]] = phi i32 [ 0, %[[ENTRY]] ], [ [[NEXT:%.*]], %[[LOOP]] ]
+; LLVM-NEXT:    [[I:%.*]] = phi i32 [ 0, %[[ENTRY]] ], [ 0, %[[THEN]] ], [ [[NEXT:%.*]], %[[LOOP]] ]
 ; LLVM-NEXT:  ; bs6: preds=[ma7, be1, be5, bs0], succs=[ma7, bs10]
 ; LLVM-NEXT:  ; ma7: preds=[bs6, ma8], succs=[bs6, ma8]
 ; LLVM-NEXT:  ; read ptr [[P]], 4
@@ -67,7 +67,7 @@ then:
   br label %loop
 
 loop:
-  %i = phi i32 [ 0, %entry ], [ %next, %loop ]
+  %i = phi i32 [ 0, %entry ], [ 0, %then ], [ %next, %loop ]
   %lv = load i32, i32* %p, align 4
   %next = add i32 %i, 1
   store i32 %next, i32* %q, align 4

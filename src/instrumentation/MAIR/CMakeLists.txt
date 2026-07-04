@@ -1,5 +1,6 @@
 set(MAIR_SOURCES
   Analysis/MAIRStatAnalysis.cpp
+  Transforms/SimplifyGraphPass.cpp
   MAIR.cpp
   MAIRBarrierAnalysis.cpp
   MAIRDump.cpp

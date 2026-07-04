@@ -1,6 +1,7 @@
 #include "MAIR/MAIRPasses.h"
 
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
+#include "MAIR/Transforms/SimplifyGraphPass.h"
 
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Function.h"

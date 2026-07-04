@@ -174,9 +174,12 @@ void MAIRVerifier::verifyMemoryAccess(const Observation &Obs,
         Obs);
 
   if (Obs.isMemoryInstSite()) {
-    Check(Access.getInstruction() == Obs.getAnchor(),
-          "memory access instruction does not match observation anchor", Access,
-          Obs, Access.getInstruction(), Obs.getAnchor());
+    const Instruction *AccessI = Access.getInstruction();
+    CheckFatal(AccessI, "memory observation has access without instruction",
+               Access, Obs);
+    Check(AccessI->getFunction() == Obs.getAnchor()->getFunction(),
+          "memory access instruction is outside observation function", Access,
+          Obs, AccessI, Obs.getAnchor());
   }
 }
 

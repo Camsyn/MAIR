@@ -74,6 +74,12 @@ int main(int argc, char **argv) {
 
     if (!PassPipeline.empty()) {
       GPM.run(Graph, GAM);
+      if (!Graph.verify(&errs())) {
+        errs() << "invalid MAIRGraph after pass pipeline for function "
+               << F.getName() << "\n";
+        Graph.print(errs());
+        return 1;
+      }
       GAM.clear(Graph, Graph.getFunction() ? Graph.getFunction()->getName()
                                            : StringRef("<unknown>"));
     }

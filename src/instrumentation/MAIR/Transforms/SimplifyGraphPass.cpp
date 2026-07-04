@@ -1,0 +1,72 @@
+#include "MAIR/Transforms/SimplifyGraphPass.h"
+
+#include "llvm/ADT/SmallVector.h"
+
+using namespace llvm;
+
+namespace mair {
+
+namespace {
+
+struct MergeCandidate {
+  Observation *Into = nullptr;
+  Observation *From = nullptr;
+};
+
+MergeCandidate findMergeCandidate(MAIRGraph &G) {
+  for (Observation &O1 : G) {
+    for (const ObservationEdge &Edge : O1.children()) {
+      if (!Edge.isDom())
+        continue;
+
+      Observation &O2 = Edge.getNode();
+      if (&O1 == &O2)
+        continue;
+      if (G.hasEdge(O2, O1, ObservationEdgeKind::PostDom))
+        return {&O1, &O2};
+    }
+  }
+  return {};
+}
+
+void mergeObservationInto(MAIRGraph &G, Observation &Into,
+                          Observation &From) {
+  Into.mergeAccessesFrom(From);
+
+  SmallVector<ObservationEdge, 8> Incoming = G.parentEdges(From);
+  SmallVector<ObservationEdge, 8> Outgoing = G.childEdges(From);
+
+  for (const ObservationEdge &Edge : Incoming) {
+    Observation &Pred = Edge.getNode();
+    if (&Pred != &Into)
+      G.addEdge(Pred, Into, Edge.getKind());
+  }
+
+  for (const ObservationEdge &Edge : Outgoing) {
+    Observation &Succ = Edge.getNode();
+    if (&Succ != &Into)
+      G.addEdge(Into, Succ, Edge.getKind());
+  }
+
+  G.erase(From);
+}
+
+} // namespace
+
+PreservedAnalyses SimplifyGraphPass::run(MAIRGraph &G,
+                                         MAIRGraphAnalysisManager &AM) {
+  (void)AM;
+  bool Changed = false;
+
+  while (true) {
+    MergeCandidate Candidate = findMergeCandidate(G);
+    if (!Candidate.Into)
+      break;
+    mergeObservationInto(G, *Candidate.Into, *Candidate.From);
+    Changed = true;
+  }
+
+  return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+}
+
+} // namespace mair

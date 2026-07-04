@@ -1,6 +1,7 @@
 #include "MAIR/MAIR.h"
 #include "MAIR/MAIRBarrierAnalysis.h"
 #include "MAIR/MAIRDump.h"
+#include "MAIR/Transforms/SimplifyGraphPass.h"
 
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/Analysis/PostDominators.h"
@@ -549,4 +550,84 @@ merge:
   ASSERT_TRUE(Explicit.verify());
   ASSERT_TRUE(FromFAM.verify());
   EXPECT_EQ(FromFAM.toString(), Explicit.toString());
+}
+
+TEST(MAIRGraphPass, SimplifyGraphMergesMutualDomPairAndRewiresEdges) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(i32* %p, i32* %q) {
+entry:
+  %v = load i32, i32* %p, align 4
+  store i32 %v, i32* %q, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  const llvm::Function &F = *M->begin();
+  const llvm::BasicBlock &BB = *F.begin();
+  auto InstIt = BB.begin();
+  const llvm::Instruction &LoadInst = *InstIt++;
+  const llvm::Instruction &StoreInst = *InstIt++;
+
+  MAIRGraph Graph(F);
+  auto &Entry = Graph.createBBObservation(BB, true);
+  auto &Load = Graph.createInstObservation(BB, LoadInst);
+  auto &Store = Graph.createInstObservation(BB, StoreInst);
+  auto &Exit = Graph.createBBObservation(BB, false);
+  Graph.addEdge(Entry, Load, ObservationEdgeKind::Dom);
+  Graph.addEdge(Load, Store, ObservationEdgeKind::Dom);
+  Graph.addEdge(Store, Load, ObservationEdgeKind::PostDom);
+  Graph.addEdge(Store, Exit, ObservationEdgeKind::Dom);
+
+  MAIRGraphAnalysisManager AM;
+  SimplifyGraphPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_FALSE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  EXPECT_EQ(Graph.size(), 3u);
+  EXPECT_EQ(Graph.find("ma2"), nullptr);
+  const Observation *Merged = Graph.find("ma1");
+  ASSERT_NE(Merged, nullptr);
+  EXPECT_EQ(Merged->accesses().size(), 2u);
+  EXPECT_TRUE(hasSuccessor(Graph, Entry, *Merged, ObservationEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *Merged, Exit, ObservationEdgeKind::Dom));
+}
+
+TEST(MAIRGraphPass, SimplifyGraphRequiresReversePostDomEdge) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(i32* %p) {
+entry:
+  %v = load i32, i32* %p, align 4
+  store i32 %v, i32* %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  const llvm::Function &F = *M->begin();
+  const llvm::BasicBlock &BB = *F.begin();
+  auto InstIt = BB.begin();
+  const llvm::Instruction &LoadInst = *InstIt++;
+  const llvm::Instruction &StoreInst = *InstIt++;
+
+  MAIRGraph Graph(F);
+  auto &Load = Graph.createInstObservation(BB, LoadInst);
+  auto &Store = Graph.createInstObservation(BB, StoreInst);
+  Graph.addEdge(Load, Store, ObservationEdgeKind::Dom);
+  Graph.addEdge(Store, Load, ObservationEdgeKind::Dom);
+
+  MAIRGraphAnalysisManager AM;
+  SimplifyGraphPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_TRUE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  EXPECT_EQ(Graph.size(), 2u);
+  EXPECT_NE(Graph.find("ma0"), nullptr);
+  EXPECT_NE(Graph.find("ma1"), nullptr);
 }

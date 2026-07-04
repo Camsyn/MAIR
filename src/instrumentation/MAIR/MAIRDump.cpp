@@ -75,7 +75,8 @@ void MAIRLLVMWriter::emitObservationLine(const Observation &Obs,
   SmallVector<StringRef, 4> Lines;
   StringRef(Text).split(Lines, '\n');
   for (StringRef Line : Lines)
-    OS << "  ; " << Line << "\n";
+    if (!Line.trim().empty())
+      OS << "  ; " << Line << "\n";
 }
 
 void MAIRLLVMWriter::emitFunctionAnnot(const Function *F,

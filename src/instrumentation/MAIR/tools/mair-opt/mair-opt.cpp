@@ -1,6 +1,7 @@
 #include "MAIR/MAIR.h"
 #include "MAIR/MAIRDump.h"
 
+#include "llvm/ADT/iterator.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassInstrumentation.h"
 #include "llvm/IR/PassManager.h"
@@ -15,7 +16,8 @@ using namespace llvm;
 using namespace mair;
 
 static cl::opt<std::string>
-    InputFilename(cl::Positional, cl::desc("<input LLVM IR>"), cl::Required);
+    InputFilename(cl::Positional, cl::desc("<input LLVM IR>"), cl::init("-"),
+                  cl::value_desc("filename"));
 static cl::opt<bool>
     EmitLLVM("emit-llvm", cl::desc("Print LLVM IR annotated with MAIR"),
              cl::init(false));

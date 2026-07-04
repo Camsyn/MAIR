@@ -293,6 +293,7 @@ void Observation::print(raw_ostream &OS, bool LLVM) const {
     OS << "\n  ";
     A.print(OS, LLVM);
   }
+  OS << "\n";
 }
 
 MAIRGraph::MAIRGraph(const Function &Func) : F(&Func) {}
@@ -484,7 +485,7 @@ void MAIRGraph::print(raw_ostream &OS, bool LLVM) const {
     Obs.print(OS, LLVM);
     OS << "\n";
   }
-  OS << "}\n";
+  OS << "}\n\n";
 }
 
 } // namespace mair

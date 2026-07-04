@@ -1,6 +1,6 @@
 @LIT_SITE_CFG_IN_HEADER@
 
 config.test_source_root = "@MAIR_LIT_SOURCE_DIR@"
-config.test_exec_root = "@CMAKE_CURRENT_BINARY_DIR@/MAIR"
+config.test_exec_root = "@CMAKE_CURRENT_BINARY_DIR@/TestCases"
 config.mair_opt = "@MAIR_OPT_PATH@"
-lit_config.load_config(config, "@MAIR_LIT_SOURCE_DIR@/lit.cfg.py")
+lit_config.load_config(config, "@MAIR_LIT_CONFIG_DIR@/lit.cfg.py")

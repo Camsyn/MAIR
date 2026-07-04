@@ -50,7 +50,7 @@ int main(int argc, char **argv) {
       continue;
 
     MAIRGraph Graph = MAIRGraph::build<DefaultBarrierTrait>(F, FAM);
-    if (!Graph.verify()) {
+    if (!Graph.verify(&errs())) {
       errs() << "invalid MAIRGraph for function " << F.getName() << "\n";
       Graph.print(errs());
       return 1;

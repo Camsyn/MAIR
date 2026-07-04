@@ -18,6 +18,14 @@ using namespace llvm;
 namespace mair {
 
 namespace {
+const Instruction *getBarrierRangeStart(const Observation &Obs) {
+  return Obs.isBasicBlockEntrySite() ? nullptr : Obs.getAnchor();
+}
+
+const Instruction *getBarrierRangeEnd(const Observation &Obs) {
+  return Obs.isBasicBlockExitSite() ? nullptr : Obs.getAnchor();
+}
+
 SmallVector<BasicBlock *, 16> collectReachableBlocks(Function &F) {
   SmallVector<BasicBlock *, 16> Blocks;
   SmallVector<BasicBlock *, 16> Worklist;
@@ -89,8 +97,8 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
     assert(Points.size() > 1);
     for (unsigned I = 1; I < Points.size(); ++I) {
       Observation &Prev = *Points[I - 1], &Next = *Points[I];
-      const Instruction *PrevI = Prev.getAnchor();
-      const Instruction *NextI = Next.getAnchor();
+      const Instruction *PrevI = getBarrierRangeStart(Prev);
+      const Instruction *NextI = getBarrierRangeEnd(Next);
       if (!BA.hasFwdBarrierBetween(BB, PrevI, NextI))
         Graph.addEdge(Prev, Next);
       if (!BA.hasBwdBarrierBetween(BB, PrevI, NextI))
@@ -359,8 +367,10 @@ Observation &MAIRGraph::addObservation(Observation &Obs) {
 
 Observation &MAIRGraph::createBBObservation(const BasicBlock &BB,
                                             bool IsEntry) {
+  const Instruction *Anchor =
+      IsEntry ? &*BB.getFirstNonPHIIt() : BB.getTerminator();
   return addObservation(allocateNode<Observation>(
-      createObservationName(IsEntry ? "bs" : "be"), &BB, nullptr,
+      createObservationName(IsEntry ? "bs" : "be"), &BB, Anchor,
       IsEntry ? Observation::SiteKind::BasicBlockEntry
               : Observation::SiteKind::BasicBlockExit));
 }
@@ -476,21 +486,96 @@ MAIRGraph::predecessors(const Observation &Obs) const {
   return Result;
 }
 
-bool MAIRGraph::verify() const {
+bool MAIRGraph::verify(raw_ostream *OS) const {
+  auto Fail = [OS](StringRef Reason) {
+    if (OS)
+      *OS << "MAIRGraph verify failed: " << Reason << "\n";
+    return false;
+  };
+  auto PrintObservation = [](raw_ostream &Out, const Observation &Obs) {
+    Out << "observation '" << Obs.getName() << "'";
+    if (const BasicBlock *BB = Obs.getBasicBlock()) {
+      Out << " in ";
+      BB->printAsOperand(Out, false);
+    }
+  };
+
   for (const Observation &Obs : Observations) {
-    if (!Obs.getAnchor()) return false;
-    if (Obs.getParent() != this)
+    if (Obs.getParent() != this) {
+      if (OS) {
+        *OS << "MAIRGraph verify failed: ";
+        PrintObservation(*OS, Obs);
+        *OS << " has parent " << Obs.getParent() << ", expected " << this
+            << "\n";
+      }
       return false;
+    }
+    if (!Obs.getAnchor()) {
+      if (OS) {
+        *OS << "MAIRGraph verify failed: ";
+        PrintObservation(*OS, Obs);
+        *OS << " has no anchor\n";
+      }
+      return false;
+    }
+    if (Obs.getAnchor()->getParent() != Obs.getBasicBlock()) {
+      if (OS) {
+        *OS << "MAIRGraph verify failed: ";
+        PrintObservation(*OS, Obs);
+        *OS << " has anchor outside its basic block\n";
+      }
+      return false;
+    }
     for (const MemoryAccess &Access : Obs) {
-      if (Access.getParent() != &Obs)
+      if (Access.getParent() != &Obs) {
+        if (OS) {
+          *OS << "MAIRGraph verify failed: memory access in ";
+          PrintObservation(*OS, Obs);
+          *OS << " has parent " << Access.getParent() << ", expected " << &Obs
+              << "\n";
+        }
         return false;
+      }
+      if (Obs.isMemoryInstSite() && Access.getInstruction() != Obs.getAnchor()) {
+        if (OS) {
+          *OS << "MAIRGraph verify failed: memory access in ";
+          PrintObservation(*OS, Obs);
+          *OS << " is attached to instruction ";
+          if (const Instruction *I = Access.getInstruction())
+            I->printAsOperand(*OS, false);
+          else
+            *OS << "<null>";
+          *OS << ", expected anchor ";
+          Obs.getAnchor()->printAsOperand(*OS, false);
+          *OS << "\n";
+        }
+        return false;
+      }
     }
   }
   for (const auto &Edge : Edges) {
-    if (!Edge.first || !Edge.second)
+    if (!Edge.first)
+      return Fail("edge has null source");
+    if (!Edge.second)
+      return Fail("edge has null destination");
+    if (Edge.first->getParent() != this) {
+      if (OS) {
+        *OS << "MAIRGraph verify failed: edge source ";
+        PrintObservation(*OS, *Edge.first);
+        *OS << " has parent " << Edge.first->getParent() << ", expected "
+            << this << "\n";
+      }
       return false;
-    if (Edge.first->getParent() != this || Edge.second->getParent() != this)
+    }
+    if (Edge.second->getParent() != this) {
+      if (OS) {
+        *OS << "MAIRGraph verify failed: edge destination ";
+        PrintObservation(*OS, *Edge.second);
+        *OS << " has parent " << Edge.second->getParent() << ", expected "
+            << this << "\n";
+      }
       return false;
+    }
   }
   return true;
 }

@@ -11,9 +11,8 @@ namespace mair {
 namespace {
 class MAIRAnnotatedWriter final : public AssemblyAnnotationWriter {
   const MAIRGraph &Graph;
-  const Observation *findBlockObservation(const BasicBlock *BB,
-                                          Observation::SiteKind Kind) const;
-  const Observation *findInstructionObservation(const Instruction *I) const;
+  void emitAnchoredObservations(const Instruction *I,
+                                formatted_raw_ostream &OS) const;
   void emitObservationLine(const Observation &Obs,
                            formatted_raw_ostream &OS) const;
 
@@ -21,31 +20,17 @@ public:
   explicit MAIRAnnotatedWriter(const MAIRGraph &G) : Graph(G) {}
 
   void emitFunctionAnnot(const Function *F, formatted_raw_ostream &OS) override;
-  void emitBasicBlockStartAnnot(const BasicBlock *BB,
-                                formatted_raw_ostream &OS) override;
-  void emitBasicBlockEndAnnot(const BasicBlock *BB,
-                              formatted_raw_ostream &OS) override;
   void emitInstructionAnnot(const Instruction *I,
                             formatted_raw_ostream &OS) override;
   void printInfoComment(const Value &V, formatted_raw_ostream &OS) override;
 };
 } // namespace
 
-const Observation *
-MAIRAnnotatedWriter::findBlockObservation(const BasicBlock *BB,
-                                          Observation::SiteKind Kind) const {
-  for (const Observation &Obs : Graph)
-    if (Obs.getBasicBlock() == BB && Obs.getSiteKind() == Kind)
-      return &Obs;
-  return nullptr;
-}
-
-const Observation *
-MAIRAnnotatedWriter::findInstructionObservation(const Instruction *I) const {
+void MAIRAnnotatedWriter::emitAnchoredObservations(
+    const Instruction *I, formatted_raw_ostream &OS) const {
   for (const Observation &Obs : Graph)
     if (Obs.getAnchor() == I)
-      return &Obs;
-  return nullptr;
+      emitObservationLine(Obs, OS);
 }
 
 void MAIRAnnotatedWriter::emitObservationLine(const Observation &Obs,
@@ -60,24 +45,9 @@ void MAIRAnnotatedWriter::emitFunctionAnnot(const Function *F,
   OS << "; MAIR fn\n";
 }
 
-void MAIRAnnotatedWriter::emitBasicBlockStartAnnot(const BasicBlock *BB,
-                                                   formatted_raw_ostream &OS) {
-  if (const Observation *Obs =
-          findBlockObservation(BB, Observation::SiteKind::BasicBlockEntry))
-    emitObservationLine(*Obs, OS);
-}
-
-void MAIRAnnotatedWriter::emitBasicBlockEndAnnot(const BasicBlock *BB,
-                                                 formatted_raw_ostream &OS) {
-  if (const Observation *Obs =
-          findBlockObservation(BB, Observation::SiteKind::BasicBlockExit))
-    emitObservationLine(*Obs, OS);
-}
-
 void MAIRAnnotatedWriter::emitInstructionAnnot(const Instruction *I,
                                                formatted_raw_ostream &OS) {
-  if (const Observation *Obs = findInstructionObservation(I))
-    emitObservationLine(*Obs, OS);
+  emitAnchoredObservations(I, OS);
 }
 
 void MAIRAnnotatedWriter::printInfoComment(const Value &V,

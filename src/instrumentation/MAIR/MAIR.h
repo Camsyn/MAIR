@@ -209,7 +209,7 @@ public:
   EdgeListType predecessors(Observation &Obs);
   ConstEdgeListType predecessors(const Observation &Obs) const;
 
-  bool verify() const;
+  bool verify(raw_ostream *OS = nullptr) const;
   std::string toString(bool Annotate = false) const;
   void print(raw_ostream &OS, bool Annotate = false) const;
   void dump(raw_ostream &OS) const { print(OS); }

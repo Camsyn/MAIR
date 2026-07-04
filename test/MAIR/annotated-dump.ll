@@ -12,8 +12,8 @@
 ; CHECK:   %v = load i32, ptr %p, align 4
 ; CHECK: ; obs ma2 {site=memory-inst,bb=%entry,anchor=store
 ; CHECK:   store i32 %v, ptr %p, align 4
-; CHECK:   ret void
 ; CHECK: ; obs be3 {site=bb-exit,bb=%entry
+; CHECK:   ret void
 
 define void @f(i32* %p) {
 entry:

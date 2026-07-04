@@ -1,6 +1,5 @@
 set(MAIR_LIT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-set(MAIR_DUMP_PATH
-  ${CMAKE_BINARY_DIR}/src/instrumentation/MAIR/tools/mair-dump/mair-dump)
+set(MAIR_DUMP_PATH ${XSAN_OUTPUT_BINDIR}/mair-dump)
 
 configure_lit_site_cfg(
   ${CMAKE_CURRENT_SOURCE_DIR}/lit.site.cfg.py.in

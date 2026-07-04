@@ -478,18 +478,11 @@ MAIRGraph::predecessors(const Observation &Obs) const {
 
 bool MAIRGraph::verify() const {
   for (const Observation &Obs : Observations) {
+    if (!Obs.getAnchor()) return false;
     if (Obs.getParent() != this)
-      return false;
-    if (Obs.isBasicBlockEntrySite() && Obs.getAnchor())
-      return false;
-    if (Obs.isBasicBlockExitSite() && Obs.getAnchor())
-      return false;
-    if (Obs.isMemoryInstSite() && !Obs.getAnchor())
       return false;
     for (const MemoryAccess &Access : Obs) {
       if (Access.getParent() != &Obs)
-        return false;
-      if (Obs.isMemoryInstSite() && Access.getInstruction() != Obs.getAnchor())
         return false;
     }
   }

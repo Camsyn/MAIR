@@ -27,6 +27,7 @@ namespace mair {
 using namespace llvm;
 
 class MAIRGraph;
+class MAIRVerifier;
 class Observation;
 
 enum class AccessKind : uint8_t { Read = 1, Write = 2, ReadWrite = 3 };
@@ -131,6 +132,8 @@ private:
 };
 
 class MAIRGraph final {
+  friend class MAIRVerifier;
+
 public:
   using ObservationListType =
       simple_ilist<Observation, ilist_parent<MAIRGraph>>;

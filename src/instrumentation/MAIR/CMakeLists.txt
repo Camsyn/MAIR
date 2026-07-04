@@ -2,6 +2,7 @@ set(MAIR_SOURCES
   MAIR.cpp
   MAIRBarrierAnalysis.cpp
   MAIRDump.cpp
+  Verifier.cpp
 )
 
 add_library(MAIRCore OBJECT ${MAIR_SOURCES})

@@ -13,7 +13,6 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instruction.h"
-#include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/raw_ostream.h"
@@ -98,7 +97,7 @@ public:
 
   StringRef getName() const { return Name; }
   const BasicBlock *getBasicBlock() const { return BB; }
-  const Instruction *getAnchorInstruction() const { return AnchorInst; }
+  const Instruction *getAnchor() const { return AnchorInst; }
   SiteKind getSiteKind() const { return Kind; }
 
   bool isMemoryInstSite() const { return Kind == SiteKind::MemoryInst; }
@@ -193,7 +192,7 @@ public:
   const_iterator begin() const { return Observations.begin(); }
   const_iterator end() const { return Observations.end(); }
 
-  Observation &createBBObservation(const BasicBlock &BB, bool isEntry);
+  Observation &createBBObservation(const BasicBlock &BB, bool IsEntry);
   Observation &createInstObservation(const BasicBlock &BB,
                                      const Instruction &Anchor);
 
@@ -211,8 +210,8 @@ public:
   ConstEdgeListType predecessors(const Observation &Obs) const;
 
   bool verify() const;
-  std::string toString(bool annotate = false) const;
-  void print(raw_ostream &OS, bool annotate = false) const;
+  std::string toString(bool Annotate = false) const;
+  void print(raw_ostream &OS, bool Annotate = false) const;
   void dump(raw_ostream &OS) const { print(OS); }
 
 private:

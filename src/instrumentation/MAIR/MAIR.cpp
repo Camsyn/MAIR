@@ -1,12 +1,13 @@
 #include "MAIR/MAIR.h"
 
-#include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -60,6 +61,9 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
   DenseMap<const BasicBlock *, Observation *> BBExitObs;
   DenseMap<const BasicBlock *, SmallVector<Observation *, 4>> OrderedObs;
 
+  // ===========================================================
+  // 1. Create observations for each MA and BB
+  // ===========================================================
   for (BasicBlock &BB : F) {
     auto &ObsInOneBB = OrderedObs[&BB];
     auto &Start = Graph.createBBObservation(BB, true);
@@ -76,14 +80,16 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
     ObsInOneBB.push_back(&End);
   }
 
+  // ===========================================================
+  // 2. Connect observations' edges intra-block
+  // ===========================================================
   for (auto &Entry : OrderedObs) {
     ArrayRef<Observation *> Points = Entry.second;
     assert(Points.size() > 1);
     for (unsigned I = 1; I < Points.size(); ++I) {
-      Observation &Prev = *Points[I - 1];
-      Observation &Next = *Points[I];
-      const Instruction *PrevI = Prev.getAnchorInstruction();
-      const Instruction *NextI = Next.getAnchorInstruction();
+      Observation &Prev = *Points[I - 1], &Next = *Points[I];
+      const Instruction *PrevI = Prev.getAnchor();
+      const Instruction *NextI = Next.getAnchor();
       if (!BA.hasFwdBarrierBetween(PrevI, NextI))
         Graph.addEdge(Prev, Next);
       if (!BA.hasBwdBarrierBetween(PrevI, NextI))
@@ -91,30 +97,31 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
     }
   }
 
-  for (const DomTreeNode *Node : depth_first(DT.getRootNode())) {
-    const DomTreeNode *IDom = Node->getIDom();
-    if (!IDom || !Node->getBlock() || !IDom->getBlock())
-      continue;
-    const BasicBlock &BB = *Node->getBlock();
-    const BasicBlock &IDomBB = *IDom->getBlock();
+  // ===========================================================
+  // 3. Connect observations' edges inter-block via DT/PDT
+  // ===========================================================
+  auto GetIDom = [](auto &DT, const BasicBlock &BB) -> const BasicBlock * {
+    if (const DomTreeNode *Node = DT.getNode(&BB))
+      if (const DomTreeNode *IDom = Node->getIDom())
+        return IDom->getBlock();
+    return nullptr;
+  };
+  for (BasicBlock &BB : F) {
     Observation *EntryObs = BBEntryObs.lookup(&BB);
-    Observation *Pred = BBEntryObs.lookup(&IDomBB);
-    assert(EntryObs && Pred);
-    if (!BA.hasFwdBarrierPath(IDomBB, BB))
-      Graph.addEdge(*Pred, *EntryObs);
-  }
-
-  for (const DomTreeNode *Node : depth_first(PDT.getRootNode())) {
-    const DomTreeNode *IPDom = Node->getIDom();
-    if (!IPDom || !Node->getBlock() || !IPDom->getBlock())
-      continue;
-    const BasicBlock &BB = *Node->getBlock();
-    const BasicBlock &IPDomBB = *IPDom->getBlock();
     Observation *ExitObs = BBExitObs.lookup(&BB);
-    Observation *Succ = BBEntryObs.lookup(&IPDomBB);
-    assert(ExitObs && Succ);
-    if (!BA.hasBwdBarrierPath(BB, IPDomBB))
-      Graph.addEdge(*ExitObs, *Succ);
+    assert(EntryObs && ExitObs);
+    if (const BasicBlock *IDom = GetIDom(DT, BB)) {
+      Observation *Pred = BBEntryObs.lookup(IDom);
+      assert(Pred);
+      if (!BA.hasFwdBarrierPath(*IDom, BB))
+        Graph.addEdge(*Pred, *EntryObs);
+    }
+    if (const BasicBlock *IPDom = GetIDom(PDT, BB)) {
+      Observation *Succ = BBEntryObs.lookup(IPDom);
+      assert(Succ);
+      if (!BA.hasBwdBarrierPath(BB, *IPDom))
+        Graph.addEdge(*ExitObs, *Succ);
+    }
   }
 
   return Graph;
@@ -351,19 +358,24 @@ Observation &MAIRGraph::addObservation(Observation &Obs) {
 
 Observation &MAIRGraph::createBBObservation(const BasicBlock &BB,
                                             bool IsEntry) {
+  const mair::Observation::SiteKind Kind =
+      IsEntry ? Observation::SiteKind::BasicBlockEntry
+              : Observation::SiteKind::BasicBlockExit;
+  const Instruction *Anchor =
+      IsEntry ? &*BB.getFirstNonPHIIt() : BB.getTerminator();
   return addObservation(allocateNode<Observation>(
-      createObservationName(IsEntry ? "bs" : "be"), &BB, nullptr,
+      createObservationName(IsEntry ? "bs" : "be"), &BB, Anchor,
       IsEntry ? Observation::SiteKind::BasicBlockEntry
               : Observation::SiteKind::BasicBlockExit));
 }
 
 Observation &MAIRGraph::createInstObservation(const BasicBlock &BB,
                                               const Instruction &Anchor) {
-  auto &Obs = addObservation(allocateNode<Observation>(
-      createObservationName("ma"), &BB, &Anchor,
-      Observation::SiteKind::MemoryInst));
-  Obs.addAccess(
-      MemoryAccess::fromInstruction(Anchor, Anchor.getModule()->getDataLayout()));
+  auto &Obs = addObservation(
+      allocateNode<Observation>(createObservationName("ma"), &BB, &Anchor,
+                                Observation::SiteKind::MemoryInst));
+  Obs.addAccess(MemoryAccess::fromInstruction(
+      Anchor, Anchor.getModule()->getDataLayout()));
   return Obs;
 }
 
@@ -472,17 +484,16 @@ bool MAIRGraph::verify() const {
   for (const Observation &Obs : Observations) {
     if (Obs.getParent() != this)
       return false;
-    if (Obs.isBasicBlockEntrySite() && Obs.getAnchorInstruction())
+    if (Obs.isBasicBlockEntrySite() && Obs.getAnchor())
       return false;
-    if (Obs.isBasicBlockExitSite() && Obs.getAnchorInstruction())
+    if (Obs.isBasicBlockExitSite() && Obs.getAnchor())
       return false;
-    if (Obs.isMemoryInstSite() && !Obs.getAnchorInstruction())
+    if (Obs.isMemoryInstSite() && !Obs.getAnchor())
       return false;
     for (const MemoryAccess &Access : Obs) {
       if (Access.getParent() != &Obs)
         return false;
-      if (Obs.isMemoryInstSite() &&
-          Access.getInstruction() != Obs.getAnchorInstruction())
+      if (Obs.isMemoryInstSite() && Access.getInstruction() != Obs.getAnchor())
         return false;
     }
   }

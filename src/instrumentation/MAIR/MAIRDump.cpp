@@ -1,6 +1,7 @@
 #include "MAIR/MAIRDump.h"
 
 #include "llvm/IR/AssemblyAnnotationWriter.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Support/FormattedStream.h"
 
 using namespace llvm;
@@ -42,7 +43,7 @@ MAIRAnnotatedWriter::findBlockObservation(const BasicBlock *BB,
 const Observation *
 MAIRAnnotatedWriter::findInstructionObservation(const Instruction *I) const {
   for (const Observation &Obs : Graph)
-    if (Obs.getAnchorInstruction() == I)
+    if (Obs.getAnchor() == I)
       return &Obs;
   return nullptr;
 }

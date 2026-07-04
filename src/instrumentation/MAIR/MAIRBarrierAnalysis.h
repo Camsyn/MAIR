@@ -2,7 +2,6 @@
 
 #include "llvm/ADT/SetVector.h"
 #include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/Function.h"
 #include "llvm/IR/Instruction.h"
 
 #include <cassert>
@@ -19,16 +18,14 @@ struct DefaultBarrierTrait {
 class MAIRBarrierAnalysisCore {
 public:
   explicit MAIRBarrierAnalysisCore() {}
-  bool hasFwdBarrierBetween(const Instruction *From,
-                            const Instruction *To) const;
-  bool hasBwdBarrierBetween(const Instruction *From,
-                            const Instruction *To) const;
-  bool hasFwdBarrierPath(const BasicBlock &From, const BasicBlock &To) const;
-  bool hasBwdBarrierPath(const BasicBlock &From, const BasicBlock &To) const;
+  bool hasFwdBarrierBetween(const Instruction *From, const Instruction *To);
+  bool hasBwdBarrierBetween(const Instruction *From, const Instruction *To);
+  bool hasFwdBarrierPath(const BasicBlock &From, const BasicBlock &To);
+  bool hasBwdBarrierPath(const BasicBlock &From, const BasicBlock &To);
 
 private:
-  mutable SmallSetVector<const BasicBlock *, 16> FwdBarrierBBMemo;
-  mutable SmallSetVector<const BasicBlock *, 16> BwdBarrierBBMemo;
+  SmallSetVector<const BasicBlock *, 16> FwdBarrierBBMemo;
+  SmallSetVector<const BasicBlock *, 16> BwdBarrierBBMemo;
 
 protected:
   virtual bool hasAnyBarrier(const BasicBlock &BB, bool Forward) const = 0;
@@ -36,17 +33,17 @@ protected:
                              bool Forward) const = 0;
 
 private:
-  void cacheBarrierBB(const BasicBlock &BB, bool Forward) const {
+  void cacheBarrierBB(const BasicBlock &BB, bool Forward) {
     (Forward ? FwdBarrierBBMemo : BwdBarrierBBMemo).insert(&BB);
   }
   bool isInBarrierMemo(const BasicBlock &BB, bool Forward) const {
     return (Forward ? FwdBarrierBBMemo : BwdBarrierBBMemo).contains(&BB);
   }
-  bool isBarrierBlock(const BasicBlock &BB, bool Foward) const;
+  bool isBarrierBlock(const BasicBlock &BB, bool Foward);
   bool hasBarrierBetween(const Instruction *From, const Instruction *To,
-                         bool Forward) const;
+                         bool Forward);
   bool hasBarrierPath(const BasicBlock &From, const BasicBlock &To,
-                      bool Forward) const;
+                      bool Forward);
 };
 
 template <class BarrierTrait = DefaultBarrierTrait>

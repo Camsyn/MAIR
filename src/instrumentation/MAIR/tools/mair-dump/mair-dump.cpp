@@ -1,6 +1,7 @@
 #include "MAIR/MAIR.h"
 #include "MAIR/MAIRDump.h"
 
+#include "llvm/IR/Module.h"
 #include "llvm/IR/PassInstrumentation.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IRReader/IRReader.h"

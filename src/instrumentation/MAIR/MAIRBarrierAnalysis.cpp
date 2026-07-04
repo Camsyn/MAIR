@@ -10,7 +10,7 @@ using namespace llvm;
 namespace mair {
 
 bool MAIRBarrierAnalysisCore::isBarrierBlock(const BasicBlock &BB,
-                                             bool Forward) const {
+                                             bool Forward) {
   if (isInBarrierMemo(BB, Forward))
     return true;
   const bool Result = hasAnyBarrier(BB, Forward);
@@ -20,18 +20,20 @@ bool MAIRBarrierAnalysisCore::isBarrierBlock(const BasicBlock &BB,
 }
 
 bool MAIRBarrierAnalysisCore::hasFwdBarrierBetween(
-    const Instruction *ComesBefore, const Instruction *ComesAfter) const {
+    const Instruction *ComesBefore, const Instruction *ComesAfter) {
   return hasBarrierBetween(ComesBefore, ComesAfter, true);
 }
 
 bool MAIRBarrierAnalysisCore::hasBwdBarrierBetween(
-    const Instruction *ComesBefore, const Instruction *ComesAfter) const {
+    const Instruction *ComesBefore, const Instruction *ComesAfter) {
   return hasBarrierBetween(ComesBefore, ComesAfter, false);
 }
 
 bool MAIRBarrierAnalysisCore::hasBarrierBetween(const Instruction *ComesBefore,
                                                 const Instruction *ComesAfter,
-                                                bool Forward) const {
+                                                bool Forward) {
+  if (ComesBefore == ComesAfter)
+    return false;
   bool Result = hasAnyBarrier(ComesBefore, ComesAfter, Forward);
   if (Result)
     cacheBarrierBB(*ComesBefore->getParent(), Forward);
@@ -40,7 +42,7 @@ bool MAIRBarrierAnalysisCore::hasBarrierBetween(const Instruction *ComesBefore,
 
 bool MAIRBarrierAnalysisCore::hasBarrierPath(const BasicBlock &From,
                                              const BasicBlock &To,
-                                             bool Forward) const {
+                                             bool Forward) {
   // Assertion:
   //   From dom To || To pdom From
   df_iterator_default_set<const BasicBlock *> End;
@@ -55,12 +57,12 @@ bool MAIRBarrierAnalysisCore::hasBarrierPath(const BasicBlock &From,
 }
 
 bool MAIRBarrierAnalysisCore::hasFwdBarrierPath(const BasicBlock &From,
-                                                const BasicBlock &To) const {
+                                                const BasicBlock &To) {
   return hasBarrierPath(From, To, true);
 }
 
 bool MAIRBarrierAnalysisCore::hasBwdBarrierPath(const BasicBlock &From,
-                                                const BasicBlock &To) const {
+                                                const BasicBlock &To) {
   return hasBarrierPath(From, To, false);
 }
 

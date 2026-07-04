@@ -7,14 +7,14 @@ define void @f(i32* %p) {
 ; LLVM-LABEL: define void @f(
 ; LLVM-SAME: ptr [[P:%.*]]) {
 ; LLVM-NEXT:  [[ENTRY:.*:]]
-; LLVM-NEXT:  ; bs0: preds=[ma1], succs=[ma1]
-; LLVM-NEXT:  ; ma1: preds=[bs0, ma2], succs=[bs0, ma2]
+; LLVM-NEXT:  ; bs0: preds=[ma1(pdom)], succs=[ma1(dom)]
+; LLVM-NEXT:  ; ma1: preds=[bs0(dom), ma2(pdom)], succs=[bs0(pdom), ma2(dom)]
 ; LLVM-NEXT:  ; read ptr [[P]], 4
 ; LLVM-NEXT:    [[V:%.*]] = load i32, ptr [[P]], align 4
-; LLVM-NEXT:  ; ma2: preds=[ma1, be3], succs=[ma1, be3]
+; LLVM-NEXT:  ; ma2: preds=[ma1(dom), be3(pdom)], succs=[ma1(pdom), be3(dom)]
 ; LLVM-NEXT:  ; write ptr [[P]], 4
 ; LLVM-NEXT:    store i32 [[V]], ptr [[P]], align 4
-; LLVM-NEXT:  ; be3: preds=[ma2], succs=[ma2]
+; LLVM-NEXT:  ; be3: preds=[ma2(dom)], succs=[ma2(pdom)]
 ; LLVM-NEXT:    ret void
 ;
 entry:
@@ -27,35 +27,35 @@ define void @branch_loop(i32* %p, i32* %q, i1 %c, i32 %n) {
 ; LLVM-LABEL: define void @branch_loop(
 ; LLVM-SAME: ptr [[P:%.*]], ptr [[Q:%.*]], i1 [[C:%.*]], i32 [[N:%.*]]) {
 ; LLVM-NEXT:  [[ENTRY:.*]]:
-; LLVM-NEXT:  ; bs0: preds=[be1], succs=[be1, bs2, bs6]
-; LLVM-NEXT:  ; be1: preds=[bs0], succs=[bs0, bs6]
+; LLVM-NEXT:  ; bs0: preds=[be1(pdom)], succs=[be1(dom), bs2(dom), bs6(dom)]
+; LLVM-NEXT:  ; be1: preds=[bs0(dom)], succs=[bs0(pdom), bs6(pdom)]
 ; LLVM-NEXT:    br i1 [[C]], label %[[THEN:.*]], label %[[LOOP:.*]]
 ; LLVM:       [[THEN]]:
-; LLVM-NEXT:  ; bs2: preds=[ma3, bs0], succs=[ma3]
-; LLVM-NEXT:  ; ma3: preds=[bs2, ma4], succs=[bs2, ma4]
+; LLVM-NEXT:  ; bs2: preds=[ma3(pdom), bs0(dom)], succs=[ma3(dom)]
+; LLVM-NEXT:  ; ma3: preds=[bs2(dom), ma4(pdom)], succs=[bs2(pdom), ma4(dom)]
 ; LLVM-NEXT:  ; read ptr [[P]], 4
 ; LLVM-NEXT:    [[TV:%.*]] = load i32, ptr [[P]], align 4
-; LLVM-NEXT:  ; ma4: preds=[ma3, be5], succs=[ma3, be5]
+; LLVM-NEXT:  ; ma4: preds=[ma3(dom), be5(pdom)], succs=[ma3(pdom), be5(dom)]
 ; LLVM-NEXT:  ; write ptr [[Q]], 4
 ; LLVM-NEXT:    store i32 [[TV]], ptr [[Q]], align 4
-; LLVM-NEXT:  ; be5: preds=[ma4], succs=[ma4, bs6]
+; LLVM-NEXT:  ; be5: preds=[ma4(dom)], succs=[ma4(pdom), bs6(pdom)]
 ; LLVM-NEXT:    br label %[[LOOP]]
 ; LLVM:       [[LOOP]]:
 ; LLVM-NEXT:    [[I:%.*]] = phi i32 [ 0, %[[ENTRY]] ], [ 0, %[[THEN]] ], [ [[NEXT:%.*]], %[[LOOP]] ]
-; LLVM-NEXT:  ; bs6: preds=[ma7, be1, be5, bs0], succs=[ma7, bs10]
-; LLVM-NEXT:  ; ma7: preds=[bs6, ma8], succs=[bs6, ma8]
+; LLVM-NEXT:  ; bs6: preds=[ma7(pdom), be1(pdom), be5(pdom), bs0(dom)], succs=[ma7(dom), bs10(dom)]
+; LLVM-NEXT:  ; ma7: preds=[bs6(dom), ma8(pdom)], succs=[bs6(pdom), ma8(dom)]
 ; LLVM-NEXT:  ; read ptr [[P]], 4
 ; LLVM-NEXT:    [[LV:%.*]] = load i32, ptr [[P]], align 4
 ; LLVM-NEXT:    [[NEXT]] = add i32 [[I]], 1
-; LLVM-NEXT:  ; ma8: preds=[ma7, be9], succs=[ma7, be9]
+; LLVM-NEXT:  ; ma8: preds=[ma7(dom), be9(pdom)], succs=[ma7(pdom), be9(dom)]
 ; LLVM-NEXT:  ; write ptr [[Q]], 4
 ; LLVM-NEXT:    store i32 [[NEXT]], ptr [[Q]], align 4
 ; LLVM-NEXT:    [[COND:%.*]] = icmp slt i32 [[NEXT]], [[N]]
-; LLVM-NEXT:  ; be9: preds=[ma8], succs=[ma8, bs10]
+; LLVM-NEXT:  ; be9: preds=[ma8(dom)], succs=[ma8(pdom), bs10(pdom)]
 ; LLVM-NEXT:    br i1 [[COND]], label %[[LOOP]], label %[[EXIT:.*]]
 ; LLVM:       [[EXIT]]:
-; LLVM-NEXT:  ; bs10: preds=[be11, be9, bs6], succs=[be11]
-; LLVM-NEXT:  ; be11: preds=[bs10], succs=[bs10]
+; LLVM-NEXT:  ; bs10: preds=[be11(pdom), be9(pdom), bs6(dom)], succs=[be11(dom)]
+; LLVM-NEXT:  ; be11: preds=[bs10(dom)], succs=[bs10(pdom)]
 ; LLVM-NEXT:    ret void
 ;
 entry:

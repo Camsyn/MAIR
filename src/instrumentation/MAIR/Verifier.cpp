@@ -55,20 +55,12 @@ struct MAIRVerifierSupport {
     *OS << "\n";
   }
 
-  void Write(const std::pair<Observation *, Observation *> &Edge) {
+  void Write(const Observation &From, const ObservationEdge &Edge) {
     if (!OS)
       return;
     *OS << "  edge: ";
-    if (Edge.first)
-      *OS << Edge.first->getName();
-    else
-      *OS << "<null>";
-    *OS << " -> ";
-    if (Edge.second)
-      *OS << Edge.second->getName();
-    else
-      *OS << "<null>";
-    *OS << "\n";
+    *OS << From.getName() << " -> " << Edge.getNode().getName() << " (";
+    *OS << (Edge.isDom() ? "dom" : "pdom") << ")\n";
   }
 
   template <typename T> void WriteTs(const T &V) { Write(V); }
@@ -121,14 +113,14 @@ public:
 private:
   void verifyObservation(const Observation &Obs);
   void verifyMemoryAccess(const Observation &Obs, const MemoryAccess &Access);
-  void verifyEdge(const std::pair<Observation *, Observation *> &Edge);
-  void verifyEdgeIndexes();
+  void verifyChildEdge(const Observation &From, const ObservationEdge &Edge);
+  void verifyParentEdge(const Observation &To, const ObservationEdge &Edge);
   void verifyCounters();
 
-  bool hasSuccIndex(const Observation *From, const Observation *To) const;
-  bool hasPredIndex(const Observation *To, const Observation *From) const;
-  unsigned countSuccIndex(const Observation *From, const Observation *To) const;
-  unsigned countPredIndex(const Observation *To, const Observation *From) const;
+  unsigned countChildEdge(const Observation &From, const Observation &To,
+                          ObservationEdgeKind Kind) const;
+  unsigned countParentEdge(const Observation &To, const Observation &From,
+                           ObservationEdgeKind Kind) const;
 };
 
 bool MAIRVerifier::verify(const MAIRGraph &G) {
@@ -137,9 +129,6 @@ bool MAIRVerifier::verify(const MAIRGraph &G) {
 
   for (const Observation &Obs : G.Observations)
     verifyObservation(Obs);
-  for (const auto &Edge : G.Edges)
-    verifyEdge(Edge);
-  verifyEdgeIndexes();
   verifyCounters();
 
   return !Broken;
@@ -171,6 +160,11 @@ void MAIRVerifier::verifyObservation(const Observation &Obs) {
 
   for (const MemoryAccess &Access : Obs)
     verifyMemoryAccess(Obs, Access);
+
+  for (const ObservationEdge &Edge : Obs.children())
+    verifyChildEdge(Obs, Edge);
+  for (const ObservationEdge &Edge : Obs.parents())
+    verifyParentEdge(Obs, Edge);
 }
 
 void MAIRVerifier::verifyMemoryAccess(const Observation &Obs,
@@ -186,71 +180,37 @@ void MAIRVerifier::verifyMemoryAccess(const Observation &Obs,
   }
 }
 
-void MAIRVerifier::verifyEdge(
-    const std::pair<Observation *, Observation *> &Edge) {
-  CheckFatal(Edge.first, "edge has null source", Edge);
-  CheckFatal(Edge.second, "edge has null destination", Edge);
-  CheckFatal(Edge.first->getParent() == Graph,
-             "edge source observation does not belong to graph", Edge,
-             Edge.first);
-  CheckFatal(Edge.second->getParent() == Graph,
-             "edge destination observation does not belong to graph", Edge,
-             Edge.second);
-  Check(hasSuccIndex(Edge.first, Edge.second),
-        "edge is missing from successor index", Edge, Edge.first, Edge.second);
-  Check(hasPredIndex(Edge.second, Edge.first),
-        "edge is missing from predecessor index", Edge, Edge.first,
-        Edge.second);
-  Check(llvm::count(Graph->Edges, Edge) == 1,
-        "edge appears more than once in edge list", Edge, Edge.first,
-        Edge.second);
-  Check(countSuccIndex(Edge.first, Edge.second) == 1,
-        "edge appears more than once in successor index", Edge, Edge.first,
-        Edge.second);
-  Check(countPredIndex(Edge.second, Edge.first) == 1,
-        "edge appears more than once in predecessor index", Edge, Edge.first,
-        Edge.second);
+void MAIRVerifier::verifyChildEdge(const Observation &From,
+                                   const ObservationEdge &Edge) {
+  const Observation &To = Edge.getNode();
+  CheckFatal(To.getParent() == Graph,
+             "child edge destination observation does not belong to graph",
+             From);
+  Check(countChildEdge(From, To, Edge.getKind()) == 1,
+        "child edge appears more than once", From);
+  Check(countParentEdge(To, From, Edge.getKind()) == 1,
+        "child edge is missing from destination parent list", From);
 }
 
-void MAIRVerifier::verifyEdgeIndexes() {
-  for (const auto &Entry : Graph->SuccMap) {
-    const Observation *From = Entry.first;
-    CheckFatal(From, "successor index has null source observation");
-    CheckFatal(From->getParent() == Graph,
-               "successor index source observation does not belong to graph",
-               From);
-    Check(!Entry.second.empty(), "successor index has empty edge list", From);
-    for (const Observation *To : Entry.second) {
-      CheckFatal(To, "successor index has null destination observation", From);
-      Check(llvm::is_contained(Graph->Edges,
-                               std::make_pair(const_cast<Observation *>(From),
-                                              const_cast<Observation *>(To))),
-            "successor index contains edge missing from edge list", From, To);
-    }
-  }
-
-  for (const auto &Entry : Graph->PredMap) {
-    const Observation *To = Entry.first;
-    CheckFatal(To, "predecessor index has null destination observation");
-    CheckFatal(To->getParent() == Graph,
-               "predecessor index destination observation does not belong to "
-               "graph",
-               To);
-    Check(!Entry.second.empty(), "predecessor index has empty edge list", To);
-    for (const Observation *From : Entry.second) {
-      CheckFatal(From, "predecessor index has null source observation", To);
-      Check(llvm::is_contained(Graph->Edges,
-                               std::make_pair(const_cast<Observation *>(From),
-                                              const_cast<Observation *>(To))),
-            "predecessor index contains edge missing from edge list", From, To);
-    }
-  }
+void MAIRVerifier::verifyParentEdge(const Observation &To,
+                                    const ObservationEdge &Edge) {
+  const Observation &From = Edge.getNode();
+  CheckFatal(From.getParent() == Graph,
+             "parent edge source observation does not belong to graph", To);
+  Check(countParentEdge(To, From, Edge.getKind()) == 1,
+        "parent edge appears more than once", To);
+  Check(countChildEdge(From, To, Edge.getKind()) == 1,
+        "parent edge is missing from source child list", To);
 }
 
 void MAIRVerifier::verifyCounters() {
   unsigned ObservedNodes = 0;
+  unsigned ObservedChildEdges = 0;
+  unsigned ObservedParentEdges = 0;
   for (const Observation &Obs : Graph->Observations) {
     ++ObservedNodes;
+    ObservedChildEdges += Obs.Children.size();
+    ObservedParentEdges += Obs.Parents.size();
 
     unsigned ObservedAccesses = 0;
     for (const MemoryAccess &Access : Obs) {
@@ -263,38 +223,26 @@ void MAIRVerifier::verifyCounters() {
 
   Check(ObservedNodes == Graph->NumObservations,
         "graph observation count does not match observation list");
-  Check(Graph->Edges.size() == Graph->NumEdges,
-        "graph edge count does not match edge list");
+  Check(ObservedChildEdges == Graph->NumEdges,
+        "graph edge count does not match child edge lists");
+  Check(ObservedParentEdges == Graph->NumEdges,
+        "graph edge count does not match parent edge lists");
 }
 
-bool MAIRVerifier::hasSuccIndex(const Observation *From,
-                                const Observation *To) const {
-  auto It = Graph->SuccMap.find(const_cast<Observation *>(From));
-  return It != Graph->SuccMap.end() &&
-         llvm::is_contained(It->second, const_cast<Observation *>(To));
+unsigned MAIRVerifier::countChildEdge(const Observation &From,
+                                      const Observation &To,
+                                      ObservationEdgeKind Kind) const {
+  return llvm::count_if(From.children(), [&To, Kind](const auto &Edge) {
+    return &Edge.getNode() == &To && Edge.getKind() == Kind;
+  });
 }
 
-bool MAIRVerifier::hasPredIndex(const Observation *To,
-                                const Observation *From) const {
-  auto It = Graph->PredMap.find(const_cast<Observation *>(To));
-  return It != Graph->PredMap.end() &&
-         llvm::is_contained(It->second, const_cast<Observation *>(From));
-}
-
-unsigned MAIRVerifier::countSuccIndex(const Observation *From,
-                                      const Observation *To) const {
-  auto It = Graph->SuccMap.find(const_cast<Observation *>(From));
-  if (It == Graph->SuccMap.end())
-    return 0;
-  return llvm::count(It->second, const_cast<Observation *>(To));
-}
-
-unsigned MAIRVerifier::countPredIndex(const Observation *To,
-                                      const Observation *From) const {
-  auto It = Graph->PredMap.find(const_cast<Observation *>(To));
-  if (It == Graph->PredMap.end())
-    return 0;
-  return llvm::count(It->second, const_cast<Observation *>(From));
+unsigned MAIRVerifier::countParentEdge(const Observation &To,
+                                       const Observation &From,
+                                       ObservationEdgeKind Kind) const {
+  return llvm::count_if(To.parents(), [&From, Kind](const auto &Edge) {
+    return &Edge.getNode() == &From && Edge.getKind() == Kind;
+  });
 }
 
 bool MAIRGraph::verify(raw_ostream *OS) const {

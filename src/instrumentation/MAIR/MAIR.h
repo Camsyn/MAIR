@@ -19,6 +19,7 @@
 
 #include "MAIR/MAIRBarrierAnalysis.h"
 
+#include <cassert>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -31,6 +32,24 @@ class MAIRVerifier;
 class Observation;
 
 enum class AccessKind : uint8_t { Read = 1, Write = 2, ReadWrite = 3 };
+enum class ObservationEdgeKind : uint8_t { Dom, PostDom };
+
+class ObservationEdge {
+  Observation *Node = nullptr;
+  ObservationEdgeKind Kind = ObservationEdgeKind::Dom;
+
+public:
+  ObservationEdge() = default;
+  ObservationEdge(Observation &N, ObservationEdgeKind K) : Node(&N), Kind(K) {}
+
+  Observation &getNode() const {
+    assert(Node && "MAIR observation edge has no endpoint");
+    return *Node;
+  }
+  ObservationEdgeKind getKind() const { return Kind; }
+  bool isDom() const { return Kind == ObservationEdgeKind::Dom; }
+  bool isPostDom() const { return Kind == ObservationEdgeKind::PostDom; }
+};
 
 class MemoryAccess final
     : public ilist_node_with_parent<MemoryAccess, Observation,
@@ -75,6 +94,7 @@ public:
   using AccessListType = simple_ilist<MemoryAccess, ilist_parent<Observation>>;
   using iterator = AccessListType::iterator;
   using const_iterator = AccessListType::const_iterator;
+  using EdgeListType = SmallVector<ObservationEdge, 4>;
 
 private:
   std::string Name;
@@ -83,6 +103,8 @@ private:
   SiteKind Kind = SiteKind::MemoryInst;
   SpecificBumpPtrAllocator<MemoryAccess> AccessAllocator;
   AccessListType Accesses;
+  EdgeListType Children;
+  EdgeListType Parents;
   unsigned NumAccesses = 0;
 
 public:
@@ -109,6 +131,8 @@ public:
 
   const AccessListType &accesses() const { return Accesses; }
   AccessListType &accesses() { return Accesses; }
+  ArrayRef<ObservationEdge> children() const { return Children; }
+  ArrayRef<ObservationEdge> parents() const { return Parents; }
   iterator begin() { return Accesses.begin(); }
   iterator end() { return Accesses.end(); }
   const_iterator begin() const { return Accesses.begin(); }
@@ -124,6 +148,9 @@ public:
   void print(raw_ostream &OS, bool LLVM = false) const;
 
 private:
+  friend class MAIRGraph;
+  friend class MAIRVerifier;
+
   static AccessListType Observation::*getSublistAccess(MemoryAccess *) {
     return &Observation::Accesses;
   }
@@ -141,14 +168,12 @@ public:
   using const_iterator = ObservationListType::const_iterator;
   using EdgeListType = SmallVector<Observation *, 2>;
   using ConstEdgeListType = SmallVector<const Observation *, 2>;
+  using ObservationEdgeListType = SmallVector<ObservationEdge, 2>;
 
 private:
   const Function *F = nullptr;
   SpecificBumpPtrAllocator<Observation> GraphAllocator;
   ObservationListType Observations;
-  SmallVector<std::pair<Observation *, Observation *>, 8> Edges;
-  DenseMap<Observation *, SmallVector<Observation *, 4>> SuccMap;
-  DenseMap<Observation *, SmallVector<Observation *, 4>> PredMap;
   unsigned NumObservations = 0;
   unsigned NumEdges = 0;
   unsigned NextObservationID = 0;
@@ -205,12 +230,17 @@ public:
   Observation *find(StringRef Name);
   const Observation *find(StringRef Name) const;
 
-  void addEdge(Observation &From, Observation &To);
+  void addEdge(Observation &From, Observation &To, ObservationEdgeKind Kind);
   void removeEdge(Observation &From, Observation &To);
+  bool hasEdge(const Observation &From, const Observation &To) const;
+  bool hasEdge(const Observation &From, const Observation &To,
+               ObservationEdgeKind Kind) const;
   EdgeListType successors(Observation &Obs);
   ConstEdgeListType successors(const Observation &Obs) const;
+  ObservationEdgeListType childEdges(const Observation &Obs) const;
   EdgeListType predecessors(Observation &Obs);
   ConstEdgeListType predecessors(const Observation &Obs) const;
+  ObservationEdgeListType parentEdges(const Observation &Obs) const;
 
   bool verify(raw_ostream *OS = nullptr) const;
   std::string toString(bool LLVM = false) const;

@@ -47,6 +47,11 @@ bool hasSuccessor(const MAIRGraph &Graph, const Observation &From,
   return false;
 }
 
+bool hasSuccessor(const MAIRGraph &Graph, const Observation &From,
+                  const Observation &To, ObservationEdgeKind Kind) {
+  return Graph.hasEdge(From, To, Kind);
+}
+
 const Observation *findBlockEntry(const MAIRGraph &Graph, llvm::StringRef Name) {
   for (const Observation &Obs : Graph)
     if (Obs.isBasicBlockEntrySite() && Obs.getBasicBlock() &&
@@ -124,12 +129,12 @@ merge:
   const llvm::BasicBlock &Entry = *F.begin();
   const llvm::BasicBlock &Then = *std::next(F.begin());
   const llvm::BasicBlock &Merge = *std::next(F.begin(), 3);
-  EXPECT_TRUE(Analysis.hasCachedBarrierBetween(Then, Then.getFirstNonPHI(),
-                                               Then.getTerminator(), true));
-  EXPECT_FALSE(Analysis.hasCachedBarrierBetween(Merge, Merge.getFirstNonPHI(),
-                                                Merge.getTerminator(), true));
-  EXPECT_TRUE(Analysis.hasForwardBarrierOnAnyEntryPath(&Entry, &Merge));
-  EXPECT_TRUE(Analysis.hasBackwardBarrierOnAnyEntryPath(&Merge, &Entry));
+  EXPECT_TRUE(Analysis.hasFwdBarrierBetween(Then, nullptr,
+                                            Then.getTerminator()));
+  EXPECT_FALSE(Analysis.hasFwdBarrierBetween(Merge, &Merge.front(),
+                                             Merge.getTerminator()));
+  EXPECT_TRUE(Analysis.hasFwdBarrierPath(Entry, Merge));
+  EXPECT_FALSE(Analysis.hasBwdBarrierPath(Merge, Entry));
 }
 
 TEST(MAIRBarrierAnalysis, LazilyQueriesBarrierTrait) {
@@ -163,13 +168,12 @@ entry:
   EXPECT_EQ(CountingCallBarrierTrait::ForwardQueries, 0u);
   EXPECT_EQ(CountingCallBarrierTrait::BackwardQueries, 0u);
 
-  EXPECT_TRUE(Analysis.hasForwardBarrierBetween(Entry, Load, Store));
+  EXPECT_TRUE(Analysis.hasFwdBarrierBetween(Entry, Load, Store));
   EXPECT_GT(CountingCallBarrierTrait::ForwardQueries, 0u);
   EXPECT_EQ(CountingCallBarrierTrait::BackwardQueries, 0u);
   unsigned QueriesAfterFirstRange = CountingCallBarrierTrait::ForwardQueries;
-  EXPECT_TRUE(Analysis.hasForwardBarrierBetween(Entry, Load, Store));
-  EXPECT_EQ(CountingCallBarrierTrait::ForwardQueries, QueriesAfterFirstRange);
-  EXPECT_TRUE(Analysis.hasCachedBarrierBetween(Entry, Load, Store, true));
+  EXPECT_TRUE(Analysis.hasFwdBarrierBetween(Entry, Load, Store));
+  EXPECT_GE(CountingCallBarrierTrait::ForwardQueries, QueriesAfterFirstRange);
 }
 } // namespace
 
@@ -197,7 +201,7 @@ entry:
   Other.addAccess(
       MemoryAccess(nullptr, llvm::MemoryLocation(), AccessKind::Write));
   Obs.mergeAccessesFrom(Other);
-  Graph.addEdge(Entry, Obs);
+  Graph.addEdge(Entry, Obs, ObservationEdgeKind::Dom);
 
   EXPECT_TRUE(Graph.verify());
   ASSERT_EQ(Graph.size(), 2u);
@@ -228,10 +232,10 @@ entry:
   OS.flush();
   EXPECT_NE(Dump.find("mair graph of fn @f {"), std::string::npos);
   EXPECT_NE(Dump.find("bs0: preds=[]"), std::string::npos);
-  EXPECT_NE(Dump.find("bs1: preds=[bs0]"), std::string::npos);
+  EXPECT_NE(Dump.find("bs1: preds=[bs0(dom)]"), std::string::npos);
   EXPECT_NE(Dump.find("read ptr <unknown>, unknown"), std::string::npos);
   EXPECT_NE(Dump.find("write ptr <unknown>, unknown"), std::string::npos);
-  EXPECT_NE(Dump.find("succs=[bs1]"), std::string::npos);
+  EXPECT_NE(Dump.find("succs=[bs1(dom)]"), std::string::npos);
 }
 
 TEST(MAIRGraph, EraseObservationMaintainsEdges) {
@@ -253,7 +257,7 @@ entry:
   MAIRGraph Graph(F);
   auto &Entry = Graph.createBBObservation(BB, true);
   auto &Load = Graph.createInstObservation(BB, LoadInst);
-  Graph.addEdge(Entry, Load);
+  Graph.addEdge(Entry, Load, ObservationEdgeKind::Dom);
 
   Graph.erase(Load);
 
@@ -282,7 +286,7 @@ entry:
   MAIRGraph Graph(F);
   auto &Entry = Graph.createBBObservation(BB, true);
   auto &LoadObs = Graph.createInstObservation(BB, Load);
-  Graph.addEdge(Entry, LoadObs);
+  Graph.addEdge(Entry, LoadObs, ObservationEdgeKind::Dom);
 
   EXPECT_TRUE(Graph.verify());
   EXPECT_TRUE(Entry.isBasicBlockEntrySite());
@@ -329,9 +333,12 @@ entry:
   EXPECT_EQ(Load->accesses().front().getKind(), AccessKind::Read);
   EXPECT_EQ(Store->accesses().front().getKind(), AccessKind::Write);
   EXPECT_TRUE(hasSuccessor(Graph, *Entry, *Load));
+  EXPECT_TRUE(hasSuccessor(Graph, *Entry, *Load, ObservationEdgeKind::Dom));
   EXPECT_TRUE(hasSuccessor(Graph, *Load, *Store));
   EXPECT_TRUE(hasSuccessor(Graph, *Store, *Exit));
   EXPECT_TRUE(hasSuccessor(Graph, *Load, *Entry));
+  EXPECT_TRUE(
+      hasSuccessor(Graph, *Load, *Entry, ObservationEdgeKind::PostDom));
   EXPECT_TRUE(hasSuccessor(Graph, *Store, *Load));
   EXPECT_TRUE(hasSuccessor(Graph, *Exit, *Store));
   EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Exit));

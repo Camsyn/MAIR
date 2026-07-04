@@ -98,9 +98,9 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
       const Instruction *PrevI = getBarrierRangeStart(Prev);
       const Instruction *NextI = getBarrierRangeEnd(Next);
       if (!BA.hasFwdBarrierBetween(BB, PrevI, NextI))
-        Graph.addEdge(Prev, Next);
+        Graph.addEdge(Prev, Next, ObservationEdgeKind::Dom);
       if (!BA.hasBwdBarrierBetween(BB, PrevI, NextI))
-        Graph.addEdge(Next, Prev);
+        Graph.addEdge(Next, Prev, ObservationEdgeKind::PostDom);
     }
   }
 
@@ -121,13 +121,13 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
       Observation *Pred = BBEntryObs.lookup(IDom);
       assert(Pred);
       if (!BA.hasFwdBarrierPath(*IDom, BB))
-        Graph.addEdge(*Pred, *EntryObs);
+        Graph.addEdge(*Pred, *EntryObs, ObservationEdgeKind::Dom);
     }
     if (const BasicBlock *IPDom = GetIDom(PDT, BB)) {
       Observation *Succ = BBEntryObs.lookup(IPDom);
       assert(Succ);
       if (!BA.hasBwdBarrierPath(BB, *IPDom))
-        Graph.addEdge(*ExitObs, *Succ);
+        Graph.addEdge(*ExitObs, *Succ, ObservationEdgeKind::PostDom);
     }
   }
 
@@ -171,6 +171,29 @@ static void printAccessSize(raw_ostream &OS, LocationSize Size) {
   if (!Size.isPrecise())
     OS << "<=";
   OS << Size.getValue();
+}
+
+static void printEdgeKind(raw_ostream &OS, ObservationEdgeKind Kind) {
+  switch (Kind) {
+  case ObservationEdgeKind::Dom:
+    OS << "dom";
+    break;
+  case ObservationEdgeKind::PostDom:
+    OS << "pdom";
+    break;
+  }
+}
+
+static void printEdgeList(raw_ostream &OS, ArrayRef<ObservationEdge> Edges) {
+  bool First = true;
+  for (const ObservationEdge &Edge : Edges) {
+    if (!First)
+      OS << ", ";
+    OS << Edge.getNode().getName() << "(";
+    printEdgeKind(OS, Edge.getKind());
+    OS << ")";
+    First = false;
+  }
 }
 
 } // namespace
@@ -267,27 +290,9 @@ std::string Observation::toString(bool LLVM) const {
 void Observation::print(raw_ostream &OS, bool LLVM) const {
   (void)LLVM;
   OS << Name << ": preds=[";
-  if (const MAIRGraph *Graph = getParent()) {
-    MAIRGraph::ConstEdgeListType Preds = Graph->predecessors(*this);
-    bool First = true;
-    for (const Observation *Pred : Preds) {
-      if (!First)
-        OS << ", ";
-      OS << Pred->getName();
-      First = false;
-    }
-  }
+  printEdgeList(OS, Parents);
   OS << "], succs=[";
-  if (const MAIRGraph *Graph = getParent()) {
-    MAIRGraph::ConstEdgeListType Succs = Graph->successors(*this);
-    bool First = true;
-    for (const Observation *Succ : Succs) {
-      if (!First)
-        OS << ", ";
-      OS << Succ->getName();
-      First = false;
-    }
-  }
+  printEdgeList(OS, Children);
   OS << "]";
   for (const MemoryAccess &A : Accesses) {
     OS << "\n  ";
@@ -301,9 +306,8 @@ MAIRGraph::MAIRGraph(const Function &Func) : F(&Func) {}
 MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
     : F(Other.F), GraphAllocator(std::move(Other.GraphAllocator)),
       Observations(std::move(Other.Observations)),
-      Edges(std::move(Other.Edges)), SuccMap(std::move(Other.SuccMap)),
-      PredMap(std::move(Other.PredMap)), NumObservations(Other.NumObservations),
-      NumEdges(Other.NumEdges), NextObservationID(Other.NextObservationID) {
+      NumObservations(Other.NumObservations), NumEdges(Other.NumEdges),
+      NextObservationID(Other.NextObservationID) {
   for (Observation &Obs : Observations)
     Obs.setParent(this);
 }
@@ -315,9 +319,6 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   F = Other.F;
   GraphAllocator = std::move(Other.GraphAllocator);
   Observations = std::move(Other.Observations);
-  Edges = std::move(Other.Edges);
-  SuccMap = std::move(Other.SuccMap);
-  PredMap = std::move(Other.PredMap);
   NumObservations = Other.NumObservations;
   NumEdges = Other.NumEdges;
   NextObservationID = Other.NextObservationID;
@@ -377,8 +378,6 @@ MAIRGraph::iterator MAIRGraph::erase(Observation &Obs) {
   for (Observation *Pred : Preds)
     removeEdge(*Pred, Obs);
   auto Next = Observations.erase(It);
-  SuccMap.erase(&Obs);
-  PredMap.erase(&Obs);
   --NumObservations;
   return Next;
 }
@@ -386,9 +385,6 @@ MAIRGraph::iterator MAIRGraph::erase(Observation &Obs) {
 void MAIRGraph::clear() {
   GraphAllocator.DestroyAll();
   Observations.clear();
-  Edges.clear();
-  SuccMap.clear();
-  PredMap.clear();
   NumObservations = 0;
   NumEdges = 0;
   NextObservationID = 0;
@@ -405,63 +401,96 @@ const Observation *MAIRGraph::find(StringRef Name) const {
   return nullptr;
 }
 
-void MAIRGraph::addEdge(Observation &From, Observation &To) {
-  for (const auto &Edge : Edges)
-    if (Edge.first == &From && Edge.second == &To)
+void MAIRGraph::addEdge(Observation &From, Observation &To,
+                        ObservationEdgeKind Kind) {
+  assert(From.getParent() == this && To.getParent() == this &&
+         "MAIRGraph edge endpoints must belong to this graph");
+  for (const ObservationEdge &Edge : From.Children)
+    if (&Edge.getNode() == &To && Edge.getKind() == Kind)
       return;
-  Edges.push_back({&From, &To});
-  SuccMap[&From].push_back(&To);
-  PredMap[&To].push_back(&From);
+  From.Children.push_back(ObservationEdge(To, Kind));
+  To.Parents.push_back(ObservationEdge(From, Kind));
   ++NumEdges;
 }
 
 void MAIRGraph::removeEdge(Observation &From, Observation &To) {
-  auto It = llvm::find_if(Edges, [&From, &To](const auto &Edge) {
-    return Edge.first == &From && Edge.second == &To;
-  });
-  if (It == Edges.end())
+  assert(From.getParent() == this && To.getParent() == this &&
+         "MAIRGraph edge endpoints must belong to this graph");
+  auto OldChildSize = From.Children.size();
+  From.Children.erase(
+      std::remove_if(From.Children.begin(), From.Children.end(),
+                     [&To](const ObservationEdge &Edge) {
+                       return &Edge.getNode() == &To;
+                     }),
+      From.Children.end());
+  auto Removed = OldChildSize - From.Children.size();
+  if (Removed == 0)
     return;
-  Edges.erase(It);
-  if (auto Succs = SuccMap.find(&From); Succs != SuccMap.end())
-    Succs->second.erase(
-        std::remove(Succs->second.begin(), Succs->second.end(), &To),
-        Succs->second.end());
-  if (auto Preds = PredMap.find(&To); Preds != PredMap.end())
-    Preds->second.erase(
-        std::remove(Preds->second.begin(), Preds->second.end(), &From),
-        Preds->second.end());
-  --NumEdges;
+  To.Parents.erase(
+      std::remove_if(To.Parents.begin(), To.Parents.end(),
+                     [&From](const ObservationEdge &Edge) {
+                       return &Edge.getNode() == &From;
+                     }),
+      To.Parents.end());
+  NumEdges -= Removed;
+}
+
+bool MAIRGraph::hasEdge(const Observation &From, const Observation &To) const {
+  for (const ObservationEdge &Edge : From.children())
+    if (&Edge.getNode() == &To)
+      return true;
+  return false;
+}
+
+bool MAIRGraph::hasEdge(const Observation &From, const Observation &To,
+                        ObservationEdgeKind Kind) const {
+  for (const ObservationEdge &Edge : From.children())
+    if (&Edge.getNode() == &To && Edge.getKind() == Kind)
+      return true;
+  return false;
 }
 
 MAIRGraph::EdgeListType MAIRGraph::successors(Observation &Obs) {
   EdgeListType Result;
-  if (auto Succs = SuccMap.find(&Obs); Succs != SuccMap.end())
-    Result.append(Succs->second.begin(), Succs->second.end());
+  for (const ObservationEdge &Edge : Obs.children())
+    Result.push_back(&Edge.getNode());
   return Result;
 }
 
 MAIRGraph::ConstEdgeListType
 MAIRGraph::successors(const Observation &Obs) const {
   ConstEdgeListType Result;
-  if (auto Succs = SuccMap.find(const_cast<Observation *>(&Obs));
-      Succs != SuccMap.end())
-    Result.append(Succs->second.begin(), Succs->second.end());
+  for (const ObservationEdge &Edge : Obs.children())
+    Result.push_back(&Edge.getNode());
+  return Result;
+}
+
+MAIRGraph::ObservationEdgeListType
+MAIRGraph::childEdges(const Observation &Obs) const {
+  ObservationEdgeListType Result;
+  Result.append(Obs.children().begin(), Obs.children().end());
   return Result;
 }
 
 MAIRGraph::EdgeListType MAIRGraph::predecessors(Observation &Obs) {
   EdgeListType Result;
-  if (auto Preds = PredMap.find(&Obs); Preds != PredMap.end())
-    Result.append(Preds->second.begin(), Preds->second.end());
+  for (const ObservationEdge &Edge : Obs.parents())
+    Result.push_back(&Edge.getNode());
   return Result;
 }
 
 MAIRGraph::ConstEdgeListType
 MAIRGraph::predecessors(const Observation &Obs) const {
   ConstEdgeListType Result;
-  if (auto Preds = PredMap.find(const_cast<Observation *>(&Obs));
-      Preds != PredMap.end())
-    Result.append(Preds->second.begin(), Preds->second.end());
+  for (const ObservationEdge &Edge : Obs.parents())
+    Result.push_back(&Edge.getNode());
+  return Result;
+}
+
+MAIRGraph::ObservationEdgeListType
+MAIRGraph::parentEdges(const Observation &Obs) const {
+  ObservationEdgeListType Result;
+  Result.append(Obs.parents().begin(), Obs.parents().end());
   return Result;
 }
 

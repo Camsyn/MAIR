@@ -1,44 +1,44 @@
 mair graph of fn @f {
-bs0: preds=[ma1], succs=[ma1]
+bs0: preds=[ma1(pdom)], succs=[ma1(dom)]
 
-ma1: preds=[bs0, ma2], succs=[bs0, ma2]
+ma1: preds=[bs0(dom), ma2(pdom)], succs=[bs0(pdom), ma2(dom)]
   read ptr %p, 4
 
-ma2: preds=[ma1, be3], succs=[ma1, be3]
+ma2: preds=[ma1(dom), be3(pdom)], succs=[ma1(pdom), be3(dom)]
   write ptr %p, 4
 
-be3: preds=[ma2], succs=[ma2]
+be3: preds=[ma2(dom)], succs=[ma2(pdom)]
 
 }
 
 mair graph of fn @branch_loop {
-bs0: preds=[be1], succs=[be1, bs2, bs6]
+bs0: preds=[be1(pdom)], succs=[be1(dom), bs2(dom), bs6(dom)]
 
-be1: preds=[bs0], succs=[bs0, bs6]
+be1: preds=[bs0(dom)], succs=[bs0(pdom), bs6(pdom)]
 
-bs2: preds=[ma3, bs0], succs=[ma3]
+bs2: preds=[ma3(pdom), bs0(dom)], succs=[ma3(dom)]
 
-ma3: preds=[bs2, ma4], succs=[bs2, ma4]
+ma3: preds=[bs2(dom), ma4(pdom)], succs=[bs2(pdom), ma4(dom)]
   read ptr %p, 4
 
-ma4: preds=[ma3, be5], succs=[ma3, be5]
+ma4: preds=[ma3(dom), be5(pdom)], succs=[ma3(pdom), be5(dom)]
   write ptr %q, 4
 
-be5: preds=[ma4], succs=[ma4, bs6]
+be5: preds=[ma4(dom)], succs=[ma4(pdom), bs6(pdom)]
 
-bs6: preds=[ma7, be1, be5, bs0], succs=[ma7, bs10]
+bs6: preds=[ma7(pdom), be1(pdom), be5(pdom), bs0(dom)], succs=[ma7(dom), bs10(dom)]
 
-ma7: preds=[bs6, ma8], succs=[bs6, ma8]
+ma7: preds=[bs6(dom), ma8(pdom)], succs=[bs6(pdom), ma8(dom)]
   read ptr %p, 4
 
-ma8: preds=[ma7, be9], succs=[ma7, be9]
+ma8: preds=[ma7(dom), be9(pdom)], succs=[ma7(pdom), be9(dom)]
   write ptr %q, 4
 
-be9: preds=[ma8], succs=[ma8, bs10]
+be9: preds=[ma8(dom)], succs=[ma8(pdom), bs10(pdom)]
 
-bs10: preds=[be11, be9, bs6], succs=[be11]
+bs10: preds=[be11(pdom), be9(pdom), bs6(dom)], succs=[be11(dom)]
 
-be11: preds=[bs10], succs=[bs10]
+be11: preds=[bs10(dom)], succs=[bs10(pdom)]
 
 }
 

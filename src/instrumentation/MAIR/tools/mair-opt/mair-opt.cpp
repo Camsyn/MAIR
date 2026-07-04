@@ -38,21 +38,26 @@ int main(int argc, char **argv) {
   FAM.registerPass([] { return DominatorTreeAnalysis(); });
   FAM.registerPass([] { return PostDominatorTreeAnalysis(); });
 
+  SmallVector<MAIRGraph, 8> Graphs;
   for (Function &F : *M) {
     if (F.isDeclaration())
       continue;
 
-    MAIRGraph Graph = MAIRGraph::build<DefaultBarrierTrait>(F, FAM);
+    Graphs.push_back(MAIRGraph::build<DefaultBarrierTrait>(F, FAM));
+    MAIRGraph &Graph = Graphs.back();
     if (!Graph.verify(&errs())) {
       errs() << "invalid MAIRGraph for function " << F.getName() << "\n";
       Graph.print(errs());
       return 1;
     }
 
-    if (EmitLLVM)
-      dumpLLVM(Graph, *M, outs());
-    else
+    if (!EmitLLVM)
       dumpMAIR(Graph, outs());
+  }
+
+  if (EmitLLVM && !Graphs.empty()) {
+    SmallVector<const MAIRGraph *, 8> GraphPtrs(make_pointer_range(Graphs));
+    dumpLLVM(GraphPtrs, outs());
   }
 
   return 0;

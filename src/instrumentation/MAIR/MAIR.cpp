@@ -11,8 +11,6 @@
 #include "llvm/IR/Value.h"
 #include "llvm/Support/ErrorHandling.h"
 
-#include <cstring>
-
 using namespace llvm;
 
 namespace mair {
@@ -151,26 +149,30 @@ static std::string getPrintedValueName(const Value &V) {
   return Name;
 }
 
-static StringRef getPrintedMemoryOpcode(const Instruction &I,
-                                        SmallVectorImpl<char> &Storage) {
-  std::string InstText;
-  raw_string_ostream InstOS(InstText);
-  I.print(InstOS);
-  InstOS.flush();
-
-  StringRef Text = StringRef(InstText).ltrim();
-  if (Text.contains(" load ")) {
-    Storage.assign({'l', 'o', 'a', 'd'});
-    return StringRef(Storage.data(), Storage.size());
+static void printAccessKind(raw_ostream &OS, AccessKind Kind) {
+  switch (Kind) {
+  case AccessKind::Read:
+    OS << "read";
+    break;
+  case AccessKind::Write:
+    OS << "write";
+    break;
+  case AccessKind::ReadWrite:
+    OS << "read/write";
+    break;
   }
-  if (Text.starts_with("store ")) {
-    Storage.assign({'s', 't', 'o', 'r', 'e'});
-    return StringRef(Storage.data(), Storage.size());
-  }
-  Storage.assign(I.getOpcodeName(),
-                 I.getOpcodeName() + strlen(I.getOpcodeName()));
-  return StringRef(Storage.data(), Storage.size());
 }
+
+static void printAccessSize(raw_ostream &OS, LocationSize Size) {
+  if (!Size.hasValue()) {
+    OS << "unknown";
+    return;
+  }
+  if (!Size.isPrecise())
+    OS << "<=";
+  OS << Size.getValue();
+}
+
 } // namespace
 
 void MemoryAccess::mergeKind(AccessKind Other) {
@@ -213,33 +215,14 @@ MemoryAccess MemoryAccess::fromInstruction(const Instruction &I,
 
 void MemoryAccess::print(raw_ostream &OS, bool LLVM) const {
   (void)LLVM;
-  OS << "ma[";
-  if (Inst) {
-    SmallVector<char, 16> Opcode;
-    OS << "inst=" << getPrintedMemoryOpcode(*Inst, Opcode);
-    if (Inst->hasName())
-      OS << ",name=" << Inst->getName();
-  } else {
-    OS << "inst=<null>";
-  }
-  OS << ",kind=";
-  switch (Kind) {
-  case AccessKind::Read:
-    OS << "read";
-    break;
-  case AccessKind::Write:
-    OS << "write";
-    break;
-  case AccessKind::ReadWrite:
-    OS << "readwrite";
-    break;
-  }
-  OS << ",ptr=";
+  printAccessKind(OS, Kind);
+  OS << " ptr ";
   if (Loc.Ptr)
     OS << getPrintedValueName(*Loc.Ptr);
   else
     OS << "<unknown>";
-  OS << ",size=" << Loc.Size << "]";
+  OS << ", ";
+  printAccessSize(OS, Loc.Size);
 }
 
 Observation::Observation(StringRef N, const BasicBlock *Block,
@@ -283,38 +266,33 @@ std::string Observation::toString(bool LLVM) const {
 
 void Observation::print(raw_ostream &OS, bool LLVM) const {
   (void)LLVM;
-  OS << "obs " << Name << " {";
-  OS << "site=";
-  switch (Kind) {
-  case SiteKind::MemoryInst:
-    OS << "memory-inst";
-    break;
-  case SiteKind::BasicBlockEntry:
-    OS << "bb-entry";
-    break;
-  case SiteKind::BasicBlockExit:
-    OS << "bb-exit";
-    break;
+  OS << Name << ": preds=[";
+  if (const MAIRGraph *Graph = getParent()) {
+    MAIRGraph::ConstEdgeListType Preds = Graph->predecessors(*this);
+    bool First = true;
+    for (const Observation *Pred : Preds) {
+      if (!First)
+        OS << ", ";
+      OS << Pred->getName();
+      First = false;
+    }
   }
-  if (BB) {
-    OS << ",bb=";
-    OS << getPrintedValueName(*BB);
+  OS << "], succs=[";
+  if (const MAIRGraph *Graph = getParent()) {
+    MAIRGraph::ConstEdgeListType Succs = Graph->successors(*this);
+    bool First = true;
+    for (const Observation *Succ : Succs) {
+      if (!First)
+        OS << ", ";
+      OS << Succ->getName();
+      First = false;
+    }
   }
-  if (AnchorInst) {
-    SmallVector<char, 16> Opcode;
-    OS << ",anchor=" << getPrintedMemoryOpcode(*AnchorInst, Opcode);
-    if (AnchorInst->hasName())
-      OS << ":" << AnchorInst->getName();
-  }
-  OS << ",accesses=[";
-  bool First = true;
+  OS << "]";
   for (const MemoryAccess &A : Accesses) {
-    if (!First)
-      OS << ", ";
+    OS << "\n  ";
     A.print(OS, LLVM);
-    First = false;
   }
-  OS << "]}";
 }
 
 MAIRGraph::MAIRGraph(const Function &Func) : F(&Func) {}
@@ -498,25 +476,12 @@ void MAIRGraph::print(raw_ostream &OS, bool LLVM) const {
   (void)LLVM;
   OS << "mair graph";
   if (F) {
-    OS << " function ";
+    OS << " of fn ";
     OS << getPrintedValueName(*F);
   }
   OS << " {\n";
   for (const Observation &Obs : Observations) {
-    OS << "  ";
     Obs.print(OS, LLVM);
-    const ConstEdgeListType Succs = successors(Obs);
-    if (!Succs.empty()) {
-      OS << " ; succs=[";
-      bool First = true;
-      for (const Observation *Succ : Succs) {
-        if (!First)
-          OS << ", ";
-        OS << Succ->getName();
-        First = false;
-      }
-      OS << "]";
-    }
     OS << "\n";
   }
   OS << "}\n";

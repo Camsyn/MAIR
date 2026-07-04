@@ -226,9 +226,11 @@ entry:
   raw_string_ostream OS(Dump);
   dumpMAIR(Graph, OS);
   OS.flush();
-  EXPECT_NE(Dump.find("mair graph"), std::string::npos);
-  EXPECT_NE(Dump.find("obs bs0 {site=bb-entry"), std::string::npos);
-  EXPECT_NE(Dump.find("obs bs1"), std::string::npos);
+  EXPECT_NE(Dump.find("mair graph of fn @f {"), std::string::npos);
+  EXPECT_NE(Dump.find("bs0: preds=[]"), std::string::npos);
+  EXPECT_NE(Dump.find("bs1: preds=[bs0]"), std::string::npos);
+  EXPECT_NE(Dump.find("read ptr <unknown>, unknown"), std::string::npos);
+  EXPECT_NE(Dump.find("write ptr <unknown>, unknown"), std::string::npos);
   EXPECT_NE(Dump.find("succs=[bs1]"), std::string::npos);
 }
 

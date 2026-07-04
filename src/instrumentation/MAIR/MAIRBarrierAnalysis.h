@@ -18,6 +18,15 @@ struct DefaultBarrierTrait {
 class MAIRBarrierAnalysisCore {
 public:
   explicit MAIRBarrierAnalysisCore() {}
+  /// Query barriers in one basic block interval.
+  ///
+  /// Null \p From means the interval starts at the block begin; null \p To
+  /// means the interval ends at the block end. When both are present, \p From
+  /// must strictly precede \p To and the interval excludes both endpoints.
+  bool hasFwdBarrierBetween(const BasicBlock &BB, const Instruction *From,
+                            const Instruction *To);
+  bool hasBwdBarrierBetween(const BasicBlock &BB, const Instruction *From,
+                            const Instruction *To);
   bool hasFwdBarrierBetween(const Instruction *From, const Instruction *To);
   bool hasBwdBarrierBetween(const Instruction *From, const Instruction *To);
   bool hasFwdBarrierPath(const BasicBlock &From, const BasicBlock &To);
@@ -29,8 +38,8 @@ private:
 
 protected:
   virtual bool hasAnyBarrier(const BasicBlock &BB, bool Forward) const = 0;
-  virtual bool hasAnyBarrier(const Instruction *From, const Instruction *To,
-                             bool Forward) const = 0;
+  virtual bool hasAnyBarrier(const BasicBlock &BB, const Instruction *From,
+                             const Instruction *To, bool Forward) const = 0;
 
 private:
   void cacheBarrierBB(const BasicBlock &BB, bool Forward) {
@@ -40,8 +49,8 @@ private:
     return (Forward ? FwdBarrierBBMemo : BwdBarrierBBMemo).contains(&BB);
   }
   bool isBarrierBlock(const BasicBlock &BB, bool Foward);
-  bool hasBarrierBetween(const Instruction *From, const Instruction *To,
-                         bool Forward);
+  bool hasBarrierBetween(const BasicBlock &BB, const Instruction *From,
+                         const Instruction *To, bool Forward);
   bool hasBarrierPath(const BasicBlock &From, const BasicBlock &To,
                       bool Forward);
 };
@@ -57,15 +66,20 @@ protected:
                               : BarrierTrait::isBackwardBarrier);
   }
 
-  bool hasAnyBarrier(const Instruction *From, const Instruction *To,
-                     bool Forward) const override {
-    assert(From && To && From->getParent());
-    const BasicBlock &BB = *From->getParent();
-    assert(&BB == To->getParent());
-    assert(From != To && From->comesBefore(To));
-    auto Rng = make_range(std::next(From->getIterator()), To->getIterator());
-    return any_of(Rng, Forward ? BarrierTrait::isForwardBarrier
-                               : BarrierTrait::isBackwardBarrier);
+  bool hasAnyBarrier(const BasicBlock &BB, const Instruction *From,
+                     const Instruction *To, bool Forward) const override {
+    assert((!From || From->getParent() == &BB) &&
+           "From must belong to the queried basic block");
+    assert((!To || To->getParent() == &BB) &&
+           "To must belong to the queried basic block");
+    assert((!From || !To || (From != To && From->comesBefore(To))) &&
+           "From must strictly precede To");
+
+    auto Begin = From ? std::next(From->getIterator()) : BB.begin();
+    auto End = To ? To->getIterator() : BB.end();
+    return any_of(make_range(Begin, End), Forward
+                                             ? BarrierTrait::isForwardBarrier
+                                             : BarrierTrait::isBackwardBarrier);
   }
 };
 

@@ -84,15 +84,16 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
   // 2. Connect observations' edges intra-block
   // ===========================================================
   for (auto &Entry : OrderedObs) {
+    const BasicBlock &BB = *Entry.first;
     ArrayRef<Observation *> Points = Entry.second;
     assert(Points.size() > 1);
     for (unsigned I = 1; I < Points.size(); ++I) {
       Observation &Prev = *Points[I - 1], &Next = *Points[I];
       const Instruction *PrevI = Prev.getAnchor();
       const Instruction *NextI = Next.getAnchor();
-      if (!BA.hasFwdBarrierBetween(PrevI, NextI))
+      if (!BA.hasFwdBarrierBetween(BB, PrevI, NextI))
         Graph.addEdge(Prev, Next);
-      if (!BA.hasBwdBarrierBetween(PrevI, NextI))
+      if (!BA.hasBwdBarrierBetween(BB, PrevI, NextI))
         Graph.addEdge(Next, Prev);
     }
   }
@@ -358,13 +359,8 @@ Observation &MAIRGraph::addObservation(Observation &Obs) {
 
 Observation &MAIRGraph::createBBObservation(const BasicBlock &BB,
                                             bool IsEntry) {
-  const mair::Observation::SiteKind Kind =
-      IsEntry ? Observation::SiteKind::BasicBlockEntry
-              : Observation::SiteKind::BasicBlockExit;
-  const Instruction *Anchor =
-      IsEntry ? &*BB.getFirstNonPHIIt() : BB.getTerminator();
   return addObservation(allocateNode<Observation>(
-      createObservationName(IsEntry ? "bs" : "be"), &BB, Anchor,
+      createObservationName(IsEntry ? "bs" : "be"), &BB, nullptr,
       IsEntry ? Observation::SiteKind::BasicBlockEntry
               : Observation::SiteKind::BasicBlockExit));
 }

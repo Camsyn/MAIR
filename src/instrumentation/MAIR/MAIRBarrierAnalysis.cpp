@@ -20,23 +20,42 @@ bool MAIRBarrierAnalysisCore::isBarrierBlock(const BasicBlock &BB,
 }
 
 bool MAIRBarrierAnalysisCore::hasFwdBarrierBetween(
+    const BasicBlock &BB, const Instruction *ComesBefore,
+    const Instruction *ComesAfter) {
+  return hasBarrierBetween(BB, ComesBefore, ComesAfter, true);
+}
+
+bool MAIRBarrierAnalysisCore::hasBwdBarrierBetween(
+    const BasicBlock &BB, const Instruction *ComesBefore,
+    const Instruction *ComesAfter) {
+  return hasBarrierBetween(BB, ComesBefore, ComesAfter, false);
+}
+
+bool MAIRBarrierAnalysisCore::hasFwdBarrierBetween(
     const Instruction *ComesBefore, const Instruction *ComesAfter) {
-  return hasBarrierBetween(ComesBefore, ComesAfter, true);
+  assert(ComesBefore && ComesAfter && ComesBefore->getParent() &&
+         ComesAfter->getParent() == ComesBefore->getParent());
+  return hasBarrierBetween(*ComesBefore->getParent(), ComesBefore, ComesAfter,
+                           true);
 }
 
 bool MAIRBarrierAnalysisCore::hasBwdBarrierBetween(
     const Instruction *ComesBefore, const Instruction *ComesAfter) {
-  return hasBarrierBetween(ComesBefore, ComesAfter, false);
+  assert(ComesBefore && ComesAfter && ComesBefore->getParent() &&
+         ComesAfter->getParent() == ComesBefore->getParent());
+  return hasBarrierBetween(*ComesBefore->getParent(), ComesBefore, ComesAfter,
+                           false);
 }
 
-bool MAIRBarrierAnalysisCore::hasBarrierBetween(const Instruction *ComesBefore,
+bool MAIRBarrierAnalysisCore::hasBarrierBetween(const BasicBlock &BB,
+                                                const Instruction *ComesBefore,
                                                 const Instruction *ComesAfter,
                                                 bool Forward) {
-  if (ComesBefore == ComesAfter)
+  if (ComesBefore && ComesAfter && ComesBefore == ComesAfter)
     return false;
-  bool Result = hasAnyBarrier(ComesBefore, ComesAfter, Forward);
+  bool Result = hasAnyBarrier(BB, ComesBefore, ComesAfter, Forward);
   if (Result)
-    cacheBarrierBB(*ComesBefore->getParent(), Forward);
+    cacheBarrierBB(BB, Forward);
   return Result;
 }
 

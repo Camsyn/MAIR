@@ -50,14 +50,14 @@ MAIRAnnotatedWriter::findInstructionObservation(const Instruction *I) const {
 
 void MAIRAnnotatedWriter::emitObservationLine(const Observation &Obs,
                                               formatted_raw_ostream &OS) const {
-  OS << "\n  ; " << Obs.toString(true);
+  OS << "; " << Obs.toString(true) << "\n";
 }
 
 void MAIRAnnotatedWriter::emitFunctionAnnot(const Function *F,
                                             formatted_raw_ostream &OS) {
   if (!Graph.getFunction() || Graph.getFunction() != F)
     return;
-  OS << " ; MAIR fn";
+  OS << "; MAIR fn\n";
 }
 
 void MAIRAnnotatedWriter::emitBasicBlockStartAnnot(const BasicBlock *BB,

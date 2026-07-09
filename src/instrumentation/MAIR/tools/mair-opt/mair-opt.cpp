@@ -24,6 +24,9 @@ static cl::opt<std::string>
 static cl::opt<bool>
     EmitLLVM("emit-llvm", cl::desc("Print LLVM IR annotated with MAIR"),
              cl::init(false));
+static cl::opt<bool>
+    EmitDOT("emit-dot", cl::desc("Print MAIR graph as Graphviz DOT"),
+            cl::init(false));
 static cl::opt<bool> DisableOutput("disable-output",
                                    cl::desc("Do not emit MAIR or LLVM output"),
                                    cl::init(false));
@@ -34,6 +37,10 @@ static cl::opt<std::string>
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
   cl::ParseCommandLineOptions(argc, argv, "MAIR optimizer utility\n");
+  if (EmitLLVM && EmitDOT) {
+    errs() << "-emit-llvm and -emit-dot cannot be used together\n";
+    return 1;
+  }
 
   LLVMContext Ctx;
   SMDiagnostic Err;
@@ -55,6 +62,18 @@ int main(int argc, char **argv) {
   if (!PassPipeline.empty()) {
     if (Error Err = parseMAIRGraphPassPipeline(GPM, PassPipeline)) {
       errs() << toString(std::move(Err)) << "\n";
+      return 1;
+    }
+  }
+
+  if (EmitDOT) {
+    unsigned NumDefinitions = 0;
+    for (const Function &F : *M)
+      if (!F.isDeclaration())
+        ++NumDefinitions;
+    if (NumDefinitions > 1) {
+      errs() << "-emit-dot expects exactly one function definition; found "
+             << NumDefinitions << "\n";
       return 1;
     }
   }
@@ -84,7 +103,9 @@ int main(int argc, char **argv) {
                                            : StringRef("<unknown>"));
     }
 
-    if (!DisableOutput && !EmitLLVM) {
+    if (!DisableOutput && EmitDOT) {
+      dumpDOT(Graph, outs());
+    } else if (!DisableOutput && !EmitLLVM) {
       dumpMAIR(Graph, outs());
     }
   }

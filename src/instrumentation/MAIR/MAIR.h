@@ -1,10 +1,12 @@
 #pragma once
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/ADT/ilist_node.h"
+#include "llvm/ADT/iterator.h"
 #include "llvm/ADT/simple_ilist.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/BasicBlock.h"
@@ -19,7 +21,9 @@
 #include "MAIR/MAIRBarrierAnalysis.h"
 
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <variant>
@@ -123,6 +127,40 @@ public:
   ObsEdgeKind getKind() const { return Kind; }
   bool isDom() const { return Kind == ObsEdgeKind::Dom; }
   bool isPostDom() const { return Kind == ObsEdgeKind::PostDom; }
+};
+
+template <class NodeT> class ObservationEdgeIterator {
+  ArrayRef<ObservationEdge>::iterator It = nullptr;
+
+public:
+  using iterator_category = std::forward_iterator_tag;
+  using value_type = NodeT *;
+  using difference_type = std::ptrdiff_t;
+  using pointer = NodeT **;
+  using reference = NodeT *;
+
+  ObservationEdgeIterator() = default;
+  explicit ObservationEdgeIterator(ArrayRef<ObservationEdge>::iterator I)
+      : It(I) {}
+
+  reference operator*() const { return &It->getNode(); }
+  ObservationEdgeIterator &operator++() {
+    ++It;
+    return *this;
+  }
+  ObservationEdgeIterator operator++(int) {
+    ObservationEdgeIterator Tmp = *this;
+    ++*this;
+    return Tmp;
+  }
+  bool operator==(const ObservationEdgeIterator &Other) const {
+    return It == Other.It;
+  }
+  bool operator!=(const ObservationEdgeIterator &Other) const {
+    return !(*this == Other);
+  }
+
+  ObsEdgeKind getKind() const { return It->getKind(); }
 };
 
 class MemoryAccess final
@@ -349,3 +387,166 @@ private:
 };
 
 } // namespace mair
+
+namespace llvm {
+
+template <> struct GraphTraits<mair::MemoryAccess *> {
+  using NodeRef = mair::MemoryAccess *;
+  using ChildIteratorType = mair::MemoryAccess *const *;
+
+  static NodeRef getEntryNode(NodeRef Access) { return Access; }
+  static ChildIteratorType child_begin(NodeRef) { return nullptr; }
+  static ChildIteratorType child_end(NodeRef) { return nullptr; }
+};
+
+template <> struct GraphTraits<const mair::MemoryAccess *> {
+  using NodeRef = const mair::MemoryAccess *;
+  using ChildIteratorType = const mair::MemoryAccess *const *;
+
+  static NodeRef getEntryNode(NodeRef Access) { return Access; }
+  static ChildIteratorType child_begin(NodeRef) { return nullptr; }
+  static ChildIteratorType child_end(NodeRef) { return nullptr; }
+};
+
+template <> struct GraphTraits<mair::Observation *> {
+  using NodeRef = mair::Observation *;
+  using ChildIteratorType = mair::ObservationEdgeIterator<mair::Observation>;
+  using EdgeRef = mair::ObservationEdge;
+  using ChildEdgeIteratorType = ArrayRef<mair::ObservationEdge>::iterator;
+
+  static NodeRef getEntryNode(NodeRef Obs) { return Obs; }
+  static ChildIteratorType child_begin(NodeRef Obs) {
+    return ChildIteratorType(Obs->children().begin());
+  }
+  static ChildIteratorType child_end(NodeRef Obs) {
+    return ChildIteratorType(Obs->children().end());
+  }
+  static ChildEdgeIteratorType child_edge_begin(NodeRef Obs) {
+    return Obs->children().begin();
+  }
+  static ChildEdgeIteratorType child_edge_end(NodeRef Obs) {
+    return Obs->children().end();
+  }
+  static NodeRef edge_dest(EdgeRef Edge) { return &Edge.getNode(); }
+};
+
+template <> struct GraphTraits<const mair::Observation *> {
+  using NodeRef = const mair::Observation *;
+  using ChildIteratorType =
+      mair::ObservationEdgeIterator<const mair::Observation>;
+  using EdgeRef = mair::ObservationEdge;
+  using ChildEdgeIteratorType = ArrayRef<mair::ObservationEdge>::iterator;
+
+  static NodeRef getEntryNode(NodeRef Obs) { return Obs; }
+  static ChildIteratorType child_begin(NodeRef Obs) {
+    return ChildIteratorType(Obs->children().begin());
+  }
+  static ChildIteratorType child_end(NodeRef Obs) {
+    return ChildIteratorType(Obs->children().end());
+  }
+  static ChildEdgeIteratorType child_edge_begin(NodeRef Obs) {
+    return Obs->children().begin();
+  }
+  static ChildEdgeIteratorType child_edge_end(NodeRef Obs) {
+    return Obs->children().end();
+  }
+  static NodeRef edge_dest(EdgeRef Edge) { return &Edge.getNode(); }
+};
+
+template <> struct GraphTraits<Inverse<mair::Observation *>> {
+  using NodeRef = mair::Observation *;
+  using ChildIteratorType = mair::ObservationEdgeIterator<mair::Observation>;
+
+  static NodeRef getEntryNode(Inverse<mair::Observation *> G) {
+    return G.Graph;
+  }
+  static ChildIteratorType child_begin(NodeRef Obs) {
+    return ChildIteratorType(Obs->parents().begin());
+  }
+  static ChildIteratorType child_end(NodeRef Obs) {
+    return ChildIteratorType(Obs->parents().end());
+  }
+};
+
+template <> struct GraphTraits<Inverse<const mair::Observation *>> {
+  using NodeRef = const mair::Observation *;
+  using ChildIteratorType =
+      mair::ObservationEdgeIterator<const mair::Observation>;
+
+  static NodeRef getEntryNode(Inverse<const mair::Observation *> G) {
+    return G.Graph;
+  }
+  static ChildIteratorType child_begin(NodeRef Obs) {
+    return ChildIteratorType(Obs->parents().begin());
+  }
+  static ChildIteratorType child_end(NodeRef Obs) {
+    return ChildIteratorType(Obs->parents().end());
+  }
+};
+
+template <>
+struct GraphTraits<mair::MAIRGraph *> : public GraphTraits<mair::Observation *> {
+  using nodes_iterator = pointer_iterator<mair::MAIRGraph::iterator>;
+
+  static NodeRef getEntryNode(mair::MAIRGraph *G) {
+    return G && !G->empty() ? &*G->begin() : nullptr;
+  }
+  static nodes_iterator nodes_begin(mair::MAIRGraph *G) {
+    return nodes_iterator(G->begin());
+  }
+  static nodes_iterator nodes_end(mair::MAIRGraph *G) {
+    return nodes_iterator(G->end());
+  }
+  static size_t size(mair::MAIRGraph *G) { return G->size(); }
+};
+
+template <>
+struct GraphTraits<const mair::MAIRGraph *>
+    : public GraphTraits<const mair::Observation *> {
+  using nodes_iterator = pointer_iterator<mair::MAIRGraph::const_iterator>;
+
+  static NodeRef getEntryNode(const mair::MAIRGraph *G) {
+    return G && !G->empty() ? &*G->begin() : nullptr;
+  }
+  static nodes_iterator nodes_begin(const mair::MAIRGraph *G) {
+    return nodes_iterator(G->begin());
+  }
+  static nodes_iterator nodes_end(const mair::MAIRGraph *G) {
+    return nodes_iterator(G->end());
+  }
+  static size_t size(const mair::MAIRGraph *G) { return G->size(); }
+};
+
+template <>
+struct GraphTraits<Inverse<mair::MAIRGraph *>>
+    : public GraphTraits<Inverse<mair::Observation *>> {
+  using nodes_iterator = pointer_iterator<mair::MAIRGraph::iterator>;
+
+  static NodeRef getEntryNode(Inverse<mair::MAIRGraph *> G) {
+    return G.Graph && !G.Graph->empty() ? &*G.Graph->begin() : nullptr;
+  }
+  static nodes_iterator nodes_begin(Inverse<mair::MAIRGraph *> G) {
+    return nodes_iterator(G.Graph->begin());
+  }
+  static nodes_iterator nodes_end(Inverse<mair::MAIRGraph *> G) {
+    return nodes_iterator(G.Graph->end());
+  }
+};
+
+template <>
+struct GraphTraits<Inverse<const mair::MAIRGraph *>>
+    : public GraphTraits<Inverse<const mair::Observation *>> {
+  using nodes_iterator = pointer_iterator<mair::MAIRGraph::const_iterator>;
+
+  static NodeRef getEntryNode(Inverse<const mair::MAIRGraph *> G) {
+    return G.Graph && !G.Graph->empty() ? &*G.Graph->begin() : nullptr;
+  }
+  static nodes_iterator nodes_begin(Inverse<const mair::MAIRGraph *> G) {
+    return nodes_iterator(G.Graph->begin());
+  }
+  static nodes_iterator nodes_end(Inverse<const mair::MAIRGraph *> G) {
+    return nodes_iterator(G.Graph->end());
+  }
+};
+
+} // namespace llvm

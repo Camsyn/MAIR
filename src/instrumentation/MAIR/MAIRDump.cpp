@@ -5,13 +5,37 @@
 #include "llvm/IR/AssemblyAnnotationWriter.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/DOTGraphTraits.h"
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/GraphWriter.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 
 namespace mair {
+
+static StringRef getObservationSiteKindName(Observation::SiteKind Kind) {
+  switch (Kind) {
+  case Observation::SiteKind::MemoryInst:
+    return "memory";
+  case Observation::SiteKind::BasicBlockEntry:
+    return "bb.entry";
+  case Observation::SiteKind::BasicBlockExit:
+    return "bb.exit";
+  }
+  llvm_unreachable("unknown MAIR observation site kind");
+}
+
+static StringRef getObservationEdgeKindName(ObsEdgeKind Kind) {
+  switch (Kind) {
+  case ObsEdgeKind::Dom:
+    return "dom";
+  case ObsEdgeKind::PostDom:
+    return "pdom";
+  }
+  llvm_unreachable("unknown MAIR observation edge kind");
+}
 
 namespace {
 class MAIRLLVMWriter final : public AssemblyAnnotationWriter {
@@ -31,6 +55,69 @@ public:
   void printInfoComment(const Value &V, formatted_raw_ostream &OS) override;
 };
 } // namespace
+
+} // namespace mair
+
+namespace llvm {
+
+template <>
+struct DOTGraphTraits<const mair::MAIRGraph *> : public DefaultDOTGraphTraits {
+  using ChildIteratorType =
+      GraphTraits<const mair::Observation *>::ChildIteratorType;
+
+  explicit DOTGraphTraits(bool IsSimple = false)
+      : DefaultDOTGraphTraits(IsSimple) {}
+
+  static std::string getGraphName(const mair::MAIRGraph *Graph) {
+    if (Graph && Graph->getFunction())
+      return ("MAIRGraph for " + Graph->getFunction()->getName()).str();
+    return "MAIRGraph";
+  }
+
+  std::string getNodeLabel(const mair::Observation *Obs,
+                           const mair::MAIRGraph *) {
+    std::string Label;
+    raw_string_ostream OS(Label);
+    OS << Obs->getName() << "\\n";
+    OS << mair::getObservationSiteKindName(Obs->getSiteKind());
+    if (const BasicBlock *BB = Obs->getBasicBlock())
+      OS << " in " << BB->getName();
+    for (const mair::MemoryAccess &Access : Obs->accesses())
+      OS << "\\n" << Access.toString();
+    return OS.str();
+  }
+
+  static std::string getNodeAttributes(const mair::Observation *Obs,
+                                       const mair::MAIRGraph *) {
+    switch (Obs->getSiteKind()) {
+    case mair::Observation::SiteKind::MemoryInst:
+      return "style=filled, fillcolor=lightyellow";
+    case mair::Observation::SiteKind::BasicBlockEntry:
+      return "style=filled, fillcolor=lightcyan";
+    case mair::Observation::SiteKind::BasicBlockExit:
+      return "style=filled, fillcolor=lightgray";
+    }
+    llvm_unreachable("unknown MAIR observation site kind");
+  }
+
+  static std::string getEdgeAttributes(const mair::Observation *,
+                                       ChildIteratorType I,
+                                       const mair::MAIRGraph *) {
+    std::string Attrs;
+    raw_string_ostream OS(Attrs);
+    mair::ObsEdgeKind Kind = I.getKind();
+    OS << "label=\"" << mair::getObservationEdgeKindName(Kind) << "\"";
+    if (Kind == mair::ObsEdgeKind::Dom)
+      OS << ", color=blue";
+    else
+      OS << ", color=red";
+    return OS.str();
+  }
+};
+
+} // namespace llvm
+
+namespace mair {
 
 const MAIRGraph *MAIRLLVMWriter::findGraph(const Function *F) const {
   for (const MAIRGraph *Graph : Graphs)
@@ -97,6 +184,10 @@ void MAIRLLVMWriter::printInfoComment(const Value &V,
 }
 
 void dumpMAIR(const MAIRGraph &Graph, raw_ostream &OS) { Graph.print(OS); }
+
+void dumpDOT(const MAIRGraph &Graph, raw_ostream &OS) {
+  WriteGraph(OS, &Graph, /*ShortNames=*/false);
+}
 
 void dumpLLVM(const MAIRGraph &Graph, raw_ostream &OS) {
   const MAIRGraph *Graphs[] = {&Graph};

@@ -265,6 +265,69 @@ entry:
   EXPECT_FALSE(A.contains(*Merged));
 }
 
+TEST(MAIRGraph, GraphTraitsExposeObservationGraph) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %v = load i32, ptr %p, align 4
+  store i32 %v, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  ASSERT_TRUE(Graph.verify());
+
+  const Observation *Entry = Graph.find("bs0");
+  const Observation *Load = Graph.find("ma1");
+  const Observation *Store = Graph.find("ma2");
+  const Observation *Exit = Graph.find("be3");
+  ASSERT_NE(Entry, nullptr);
+  ASSERT_NE(Load, nullptr);
+  ASSERT_NE(Store, nullptr);
+  ASSERT_NE(Exit, nullptr);
+
+  llvm::SmallVector<const Observation *, 4> Nodes;
+  for (const Observation *Obs : llvm::nodes<const MAIRGraph *>(&Graph))
+    Nodes.push_back(Obs);
+  ASSERT_EQ(Nodes.size(), 4u);
+  EXPECT_EQ(Nodes[0], Entry);
+  EXPECT_EQ(Nodes[1], Load);
+  EXPECT_EQ(Nodes[2], Store);
+  EXPECT_EQ(Nodes[3], Exit);
+
+  llvm::SmallVector<const Observation *, 2> EntryChildren;
+  for (const Observation *Obs : llvm::children<const Observation *>(Entry))
+    EntryChildren.push_back(Obs);
+  ASSERT_EQ(EntryChildren.size(), 1u);
+  EXPECT_EQ(EntryChildren[0], Load);
+
+  llvm::SmallVector<const Observation *, 2> LoadParents;
+  for (const Observation *Obs :
+       llvm::inverse_children<const Observation *>(Load))
+    LoadParents.push_back(Obs);
+  ASSERT_EQ(LoadParents.size(), 2u);
+  EXPECT_EQ(LoadParents[0], Entry);
+  EXPECT_EQ(LoadParents[1], Store);
+
+  llvm::SmallVector<ObsEdgeKind, 2> LoadChildEdgeKinds;
+  for (ObservationEdge Edge : llvm::children_edges<const Observation *>(Load))
+    LoadChildEdgeKinds.push_back(Edge.getKind());
+  ASSERT_EQ(LoadChildEdgeKinds.size(), 2u);
+  EXPECT_EQ(LoadChildEdgeKinds[0], ObsEdgeKind::PostDom);
+  EXPECT_EQ(LoadChildEdgeKinds[1], ObsEdgeKind::Dom);
+
+  const MemoryAccess *Access = &Load->accesses().front();
+  EXPECT_EQ(llvm::GraphTraits<const MemoryAccess *>::getEntryNode(Access),
+            Access);
+  EXPECT_EQ(llvm::GraphTraits<const MemoryAccess *>::child_begin(Access),
+            llvm::GraphTraits<const MemoryAccess *>::child_end(Access));
+}
+
 TEST(MAIRGraph, AbstractAccessParsesConstantGEPOffset) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(

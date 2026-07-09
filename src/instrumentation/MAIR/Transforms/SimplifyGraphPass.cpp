@@ -1,4 +1,5 @@
 #include "MAIR/Transforms/SimplifyGraphPass.h"
+#include "MAIR/MAIR.h"
 
 #include "llvm/ADT/SmallVector.h"
 
@@ -22,15 +23,19 @@ MergeCandidate findMergeCandidate(MAIRGraph &G) {
       Observation &O2 = Edge.getNode();
       if (&O1 == &O2)
         continue;
-      if (G.hasEdge(O2, O1, ObservationEdgeKind::PostDom))
+      if (G.hasEdge(O2, O1, ObsEdgeKind::PostDom))
         return {&O1, &O2};
     }
   }
   return {};
 }
 
-void mergeObservationInto(MAIRGraph &G, Observation &Into,
-                          Observation &From) {
+void mergeObservationInto(MAIRGraph &G, Observation &Into, Observation &From) {
+  const std::optional<ObsEdgeKind> IntoToFrom = Into.hasChild(From);
+  const std::optional<ObsEdgeKind> FromToInto = From.hasChild(Into);
+  assert(IntoToFrom.has_value() && FromToInto.has_value() &&
+         "merged observations must be mutual children");
+
   Into.mergeAccessesFrom(From);
 
   SmallVector<ObservationEdge, 8> Incoming = G.parentEdges(From);

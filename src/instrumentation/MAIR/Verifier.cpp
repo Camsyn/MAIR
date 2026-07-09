@@ -118,9 +118,9 @@ private:
   void verifyCounters();
 
   unsigned countChildEdge(const Observation &From, const Observation &To,
-                          ObservationEdgeKind Kind) const;
+                          ObsEdgeKind Kind) const;
   unsigned countParentEdge(const Observation &To, const Observation &From,
-                           ObservationEdgeKind Kind) const;
+                           ObsEdgeKind Kind) const;
 };
 
 bool MAIRVerifier::verify(const MAIRGraph &G) {
@@ -234,7 +234,7 @@ void MAIRVerifier::verifyCounters() {
 
 unsigned MAIRVerifier::countChildEdge(const Observation &From,
                                       const Observation &To,
-                                      ObservationEdgeKind Kind) const {
+                                      ObsEdgeKind Kind) const {
   return llvm::count_if(From.children(), [&To, Kind](const auto &Edge) {
     return &Edge.getNode() == &To && Edge.getKind() == Kind;
   });
@@ -242,7 +242,7 @@ unsigned MAIRVerifier::countChildEdge(const Observation &From,
 
 unsigned MAIRVerifier::countParentEdge(const Observation &To,
                                        const Observation &From,
-                                       ObservationEdgeKind Kind) const {
+                                       ObsEdgeKind Kind) const {
   return llvm::count_if(To.parents(), [&From, Kind](const auto &Edge) {
     return &Edge.getNode() == &From && Edge.getKind() == Kind;
   });

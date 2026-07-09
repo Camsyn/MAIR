@@ -3,12 +3,12 @@
 #include "MAIR/MAIRDump.h"
 #include "MAIR/Transforms/SimplifyGraphPass.h"
 
-#include "llvm/AsmParser/Parser.h"
 #include "llvm/Analysis/PostDominators.h"
+#include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/IR/PassInstrumentation.h"
 #include "llvm/Support/SourceMgr.h"
 #include "gtest/gtest.h"
@@ -49,11 +49,12 @@ bool hasSuccessor(const MAIRGraph &Graph, const Observation &From,
 }
 
 bool hasSuccessor(const MAIRGraph &Graph, const Observation &From,
-                  const Observation &To, ObservationEdgeKind Kind) {
+                  const Observation &To, ObsEdgeKind Kind) {
   return Graph.hasEdge(From, To, Kind);
 }
 
-const Observation *findBlockEntry(const MAIRGraph &Graph, llvm::StringRef Name) {
+const Observation *findBlockEntry(const MAIRGraph &Graph,
+                                  llvm::StringRef Name) {
   for (const Observation &Obs : Graph)
     if (Obs.isBasicBlockEntrySite() && Obs.getBasicBlock() &&
         Obs.getBasicBlock()->getName() == Name)
@@ -130,8 +131,8 @@ merge:
   const llvm::BasicBlock &Entry = *F.begin();
   const llvm::BasicBlock &Then = *std::next(F.begin());
   const llvm::BasicBlock &Merge = *std::next(F.begin(), 3);
-  EXPECT_TRUE(Analysis.hasFwdBarrierBetween(Then, nullptr,
-                                            Then.getTerminator()));
+  EXPECT_TRUE(
+      Analysis.hasFwdBarrierBetween(Then, nullptr, Then.getTerminator()));
   EXPECT_FALSE(Analysis.hasFwdBarrierBetween(Merge, &Merge.front(),
                                              Merge.getTerminator()));
   EXPECT_TRUE(Analysis.hasFwdBarrierPath(Entry, Merge));
@@ -202,7 +203,7 @@ entry:
   Other.addAccess(
       MemoryAccess(nullptr, llvm::MemoryLocation(), AccessKind::Write));
   Obs.mergeAccessesFrom(Other);
-  Graph.addEdge(Entry, Obs, ObservationEdgeKind::Dom);
+  Graph.addEdge(Entry, Obs, ObsEdgeKind::Dom);
 
   EXPECT_TRUE(Graph.verify());
   ASSERT_EQ(Graph.size(), 2u);
@@ -258,7 +259,7 @@ entry:
   MAIRGraph Graph(F);
   auto &Entry = Graph.createBBObservation(BB, true);
   auto &Load = Graph.createInstObservation(BB, LoadInst);
-  Graph.addEdge(Entry, Load, ObservationEdgeKind::Dom);
+  Graph.addEdge(Entry, Load, ObsEdgeKind::Dom);
 
   Graph.erase(Load);
 
@@ -287,7 +288,7 @@ entry:
   MAIRGraph Graph(F);
   auto &Entry = Graph.createBBObservation(BB, true);
   auto &LoadObs = Graph.createInstObservation(BB, Load);
-  Graph.addEdge(Entry, LoadObs, ObservationEdgeKind::Dom);
+  Graph.addEdge(Entry, LoadObs, ObsEdgeKind::Dom);
 
   EXPECT_TRUE(Graph.verify());
   EXPECT_TRUE(Entry.isBasicBlockEntrySite());
@@ -334,12 +335,11 @@ entry:
   EXPECT_EQ(Load->accesses().front().getKind(), AccessKind::Read);
   EXPECT_EQ(Store->accesses().front().getKind(), AccessKind::Write);
   EXPECT_TRUE(hasSuccessor(Graph, *Entry, *Load));
-  EXPECT_TRUE(hasSuccessor(Graph, *Entry, *Load, ObservationEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *Entry, *Load, ObsEdgeKind::Dom));
   EXPECT_TRUE(hasSuccessor(Graph, *Load, *Store));
   EXPECT_TRUE(hasSuccessor(Graph, *Store, *Exit));
   EXPECT_TRUE(hasSuccessor(Graph, *Load, *Entry));
-  EXPECT_TRUE(
-      hasSuccessor(Graph, *Load, *Entry, ObservationEdgeKind::PostDom));
+  EXPECT_TRUE(hasSuccessor(Graph, *Load, *Entry, ObsEdgeKind::PostDom));
   EXPECT_TRUE(hasSuccessor(Graph, *Store, *Load));
   EXPECT_TRUE(hasSuccessor(Graph, *Exit, *Store));
   EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Exit));
@@ -417,8 +417,7 @@ entry:
   llvm::Function *FPtr = M->getFunction("f");
   ASSERT_NE(FPtr, nullptr);
   llvm::Function &F = *FPtr;
-  MAIRGraph Graph =
-      createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
+  MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
 
   ASSERT_TRUE(Graph.verify());
   const Observation *Load = Graph.find("ma1");
@@ -448,8 +447,7 @@ entry:
   llvm::Function *FPtr = M->getFunction("f");
   ASSERT_NE(FPtr, nullptr);
   llvm::Function &F = *FPtr;
-  MAIRGraph Graph =
-      createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
+  MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
 
   ASSERT_TRUE(Graph.verify());
   const Observation *Load = Graph.find("ma1");
@@ -543,8 +541,7 @@ merge:
   llvm::Function *FPtr = M->getFunction("f");
   ASSERT_NE(FPtr, nullptr);
   llvm::Function &F = *FPtr;
-  MAIRGraph Explicit =
-      createGraphWithExplicitAnalyses(F);
+  MAIRGraph Explicit = createGraphWithExplicitAnalyses(F);
   MAIRGraph FromFAM = createGraphWithFAM(F);
 
   ASSERT_TRUE(Explicit.verify());
@@ -576,10 +573,10 @@ entry:
   auto &Load = Graph.createInstObservation(BB, LoadInst);
   auto &Store = Graph.createInstObservation(BB, StoreInst);
   auto &Exit = Graph.createBBObservation(BB, false);
-  Graph.addEdge(Entry, Load, ObservationEdgeKind::Dom);
-  Graph.addEdge(Load, Store, ObservationEdgeKind::Dom);
-  Graph.addEdge(Store, Load, ObservationEdgeKind::PostDom);
-  Graph.addEdge(Store, Exit, ObservationEdgeKind::Dom);
+  Graph.addEdge(Entry, Load, ObsEdgeKind::Dom);
+  Graph.addEdge(Load, Store, ObsEdgeKind::Dom);
+  Graph.addEdge(Store, Load, ObsEdgeKind::PostDom);
+  Graph.addEdge(Store, Exit, ObsEdgeKind::Dom);
 
   MAIRGraphAnalysisManager AM;
   SimplifyGraphPass Pass;
@@ -592,8 +589,8 @@ entry:
   const Observation *Merged = Graph.find("ma1");
   ASSERT_NE(Merged, nullptr);
   EXPECT_EQ(Merged->accesses().size(), 2u);
-  EXPECT_TRUE(hasSuccessor(Graph, Entry, *Merged, ObservationEdgeKind::Dom));
-  EXPECT_TRUE(hasSuccessor(Graph, *Merged, Exit, ObservationEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, Entry, *Merged, ObsEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *Merged, Exit, ObsEdgeKind::Dom));
 }
 
 TEST(MAIRGraphPass, SimplifyGraphRequiresReversePostDomEdge) {
@@ -618,8 +615,8 @@ entry:
   MAIRGraph Graph(F);
   auto &Load = Graph.createInstObservation(BB, LoadInst);
   auto &Store = Graph.createInstObservation(BB, StoreInst);
-  Graph.addEdge(Load, Store, ObservationEdgeKind::Dom);
-  Graph.addEdge(Store, Load, ObservationEdgeKind::Dom);
+  Graph.addEdge(Load, Store, ObsEdgeKind::Dom);
+  Graph.addEdge(Store, Load, ObsEdgeKind::Dom);
 
   MAIRGraphAnalysisManager AM;
   SimplifyGraphPass Pass;

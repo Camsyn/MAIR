@@ -1,6 +1,6 @@
 #pragma once
 
-#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
@@ -21,8 +21,8 @@
 
 #include <cassert>
 #include <cstdint>
+#include <optional>
 #include <string>
-#include <utility>
 
 namespace mair {
 using namespace llvm;
@@ -32,23 +32,23 @@ class MAIRVerifier;
 class Observation;
 
 enum class AccessKind : uint8_t { Read = 1, Write = 2, ReadWrite = 3 };
-enum class ObservationEdgeKind : uint8_t { Dom, PostDom };
+enum class ObsEdgeKind : uint8_t { Dom, PostDom };
 
 class ObservationEdge {
   Observation *Node = nullptr;
-  ObservationEdgeKind Kind = ObservationEdgeKind::Dom;
+  ObsEdgeKind Kind = ObsEdgeKind::Dom;
 
 public:
   ObservationEdge() = default;
-  ObservationEdge(Observation &N, ObservationEdgeKind K) : Node(&N), Kind(K) {}
+  ObservationEdge(Observation &N, ObsEdgeKind K) : Node(&N), Kind(K) {}
 
   Observation &getNode() const {
     assert(Node && "MAIR observation edge has no endpoint");
     return *Node;
   }
-  ObservationEdgeKind getKind() const { return Kind; }
-  bool isDom() const { return Kind == ObservationEdgeKind::Dom; }
-  bool isPostDom() const { return Kind == ObservationEdgeKind::PostDom; }
+  ObsEdgeKind getKind() const { return Kind; }
+  bool isDom() const { return Kind == ObsEdgeKind::Dom; }
+  bool isPostDom() const { return Kind == ObsEdgeKind::PostDom; }
 };
 
 class MemoryAccess final
@@ -139,6 +139,8 @@ public:
   const_iterator end() const { return Accesses.end(); }
   bool empty() const { return NumAccesses == 0; }
   unsigned size() const { return NumAccesses; }
+  std::optional<ObsEdgeKind> hasChild(const Observation &Obs);
+  std::optional<ObsEdgeKind> hasParent(const Observation &Obs);
 
   MemoryAccess &addAccess(const MemoryAccess &A);
   iterator erase(iterator It);
@@ -150,6 +152,9 @@ public:
 private:
   friend class MAIRGraph;
   friend class MAIRVerifier;
+
+  static std::optional<ObsEdgeKind> hasEdgeTo(ArrayRef<ObservationEdge> Edges,
+                                              const Observation &Obs);
 
   static AccessListType Observation::*getSublistAccess(MemoryAccess *) {
     return &Observation::Accesses;
@@ -230,11 +235,11 @@ public:
   Observation *find(StringRef Name);
   const Observation *find(StringRef Name) const;
 
-  void addEdge(Observation &From, Observation &To, ObservationEdgeKind Kind);
+  void addEdge(Observation &From, Observation &To, ObsEdgeKind Kind);
   void removeEdge(Observation &From, Observation &To);
   bool hasEdge(const Observation &From, const Observation &To) const;
   bool hasEdge(const Observation &From, const Observation &To,
-               ObservationEdgeKind Kind) const;
+               ObsEdgeKind Kind) const;
   EdgeListType successors(Observation &Obs);
   ConstEdgeListType successors(const Observation &Obs) const;
   ObservationEdgeListType childEdges(const Observation &Obs) const;

@@ -10,6 +10,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/ErrorHandling.h"
+#include <optional>
 
 using namespace llvm;
 
@@ -98,9 +99,9 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
       const Instruction *PrevI = getBarrierRangeStart(Prev);
       const Instruction *NextI = getBarrierRangeEnd(Next);
       if (!BA.hasFwdBarrierBetween(BB, PrevI, NextI))
-        Graph.addEdge(Prev, Next, ObservationEdgeKind::Dom);
+        Graph.addEdge(Prev, Next, ObsEdgeKind::Dom);
       if (!BA.hasBwdBarrierBetween(BB, PrevI, NextI))
-        Graph.addEdge(Next, Prev, ObservationEdgeKind::PostDom);
+        Graph.addEdge(Next, Prev, ObsEdgeKind::PostDom);
     }
   }
 
@@ -121,13 +122,13 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
       Observation *Pred = BBEntryObs.lookup(IDom);
       assert(Pred);
       if (!BA.hasFwdBarrierPath(*IDom, BB))
-        Graph.addEdge(*Pred, *EntryObs, ObservationEdgeKind::Dom);
+        Graph.addEdge(*Pred, *EntryObs, ObsEdgeKind::Dom);
     }
     if (const BasicBlock *IPDom = GetIDom(PDT, BB)) {
       Observation *Succ = BBEntryObs.lookup(IPDom);
       assert(Succ);
       if (!BA.hasBwdBarrierPath(BB, *IPDom))
-        Graph.addEdge(*ExitObs, *Succ, ObservationEdgeKind::PostDom);
+        Graph.addEdge(*ExitObs, *Succ, ObsEdgeKind::PostDom);
     }
   }
 
@@ -173,12 +174,12 @@ static void printAccessSize(raw_ostream &OS, LocationSize Size) {
   OS << Size.getValue();
 }
 
-static void printEdgeKind(raw_ostream &OS, ObservationEdgeKind Kind) {
+static void printEdgeKind(raw_ostream &OS, ObsEdgeKind Kind) {
   switch (Kind) {
-  case ObservationEdgeKind::Dom:
+  case ObsEdgeKind::Dom:
     OS << "dom";
     break;
-  case ObservationEdgeKind::PostDom:
+  case ObsEdgeKind::PostDom:
     OS << "pdom";
     break;
   }
@@ -265,6 +266,24 @@ MemoryAccess &Observation::addAccess(const MemoryAccess &A) {
   Node.setParent(this);
   ++NumAccesses;
   return Node;
+}
+
+std::optional<ObsEdgeKind>
+Observation::hasEdgeTo(ArrayRef<ObservationEdge> Edges,
+                       const Observation &Obs) {
+  const auto *It = llvm::find_if(Edges, [&](const ObservationEdge &Edge) {
+    return &Edge.getNode() == &Obs;
+  });
+  if (It != Edges.end())
+    return (*It).getKind();
+  return std::nullopt;
+}
+
+std::optional<ObsEdgeKind> Observation::hasChild(const Observation &Obs) {
+  return Observation::hasEdgeTo(children(), Obs);
+}
+std::optional<ObsEdgeKind> Observation::hasParent(const Observation &Obs) {
+  return Observation::hasEdgeTo(parents(), Obs);
 }
 
 Observation::iterator Observation::erase(iterator It) {
@@ -401,8 +420,7 @@ const Observation *MAIRGraph::find(StringRef Name) const {
   return nullptr;
 }
 
-void MAIRGraph::addEdge(Observation &From, Observation &To,
-                        ObservationEdgeKind Kind) {
+void MAIRGraph::addEdge(Observation &From, Observation &To, ObsEdgeKind Kind) {
   assert(From.getParent() == this && To.getParent() == this &&
          "MAIRGraph edge endpoints must belong to this graph");
   for (const ObservationEdge &Edge : From.Children)
@@ -417,21 +435,19 @@ void MAIRGraph::removeEdge(Observation &From, Observation &To) {
   assert(From.getParent() == this && To.getParent() == this &&
          "MAIRGraph edge endpoints must belong to this graph");
   auto OldChildSize = From.Children.size();
-  From.Children.erase(
-      std::remove_if(From.Children.begin(), From.Children.end(),
-                     [&To](const ObservationEdge &Edge) {
-                       return &Edge.getNode() == &To;
-                     }),
-      From.Children.end());
+  From.Children.erase(std::remove_if(From.Children.begin(), From.Children.end(),
+                                     [&To](const ObservationEdge &Edge) {
+                                       return &Edge.getNode() == &To;
+                                     }),
+                      From.Children.end());
   auto Removed = OldChildSize - From.Children.size();
   if (Removed == 0)
     return;
-  To.Parents.erase(
-      std::remove_if(To.Parents.begin(), To.Parents.end(),
-                     [&From](const ObservationEdge &Edge) {
-                       return &Edge.getNode() == &From;
-                     }),
-      To.Parents.end());
+  To.Parents.erase(std::remove_if(To.Parents.begin(), To.Parents.end(),
+                                  [&From](const ObservationEdge &Edge) {
+                                    return &Edge.getNode() == &From;
+                                  }),
+                   To.Parents.end());
   NumEdges -= Removed;
 }
 
@@ -443,7 +459,7 @@ bool MAIRGraph::hasEdge(const Observation &From, const Observation &To) const {
 }
 
 bool MAIRGraph::hasEdge(const Observation &From, const Observation &To,
-                        ObservationEdgeKind Kind) const {
+                        ObsEdgeKind Kind) const {
   for (const ObservationEdge &Edge : From.children())
     if (&Edge.getNode() == &To && Edge.getKind() == Kind)
       return true;

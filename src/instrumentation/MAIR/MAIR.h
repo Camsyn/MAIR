@@ -6,7 +6,6 @@
 #include "llvm/ADT/Twine.h"
 #include "llvm/ADT/ilist_node.h"
 #include "llvm/ADT/simple_ilist.h"
-#include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DataLayout.h"
@@ -23,6 +22,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <variant>
 
 namespace mair {
 using namespace llvm;
@@ -33,6 +33,80 @@ class Observation;
 
 enum class AccessKind : uint8_t { Read = 1, Write = 2, ReadWrite = 3 };
 enum class ObsEdgeKind : uint8_t { Dom, PostDom };
+
+class AbstractValue {
+public:
+  enum class Kind : uint8_t { Unknown, Symbol, Constant };
+
+private:
+  using StorageT = std::variant<std::monostate, const Value *, uint64_t>;
+  StorageT Storage;
+
+public:
+  AbstractValue() = default;
+
+  static AbstractValue unknown() { return AbstractValue(); }
+  static AbstractValue symbol(const Value &V);
+  static AbstractValue constant(uint64_t C);
+
+  Kind getKind() const;
+  bool isUnknown() const {
+    return std::holds_alternative<std::monostate>(Storage);
+  }
+  bool isSymbol() const {
+    return std::holds_alternative<const Value *>(Storage);
+  }
+  bool isConstant() const {
+    return std::holds_alternative<uint64_t>(Storage);
+  }
+  const Value *getSymbol() const {
+    assert(isSymbol() && "abstract value is not symbolic");
+    return std::get<const Value *>(Storage);
+  }
+  uint64_t getConstant() const {
+    assert(isConstant() && "abstract value is not constant");
+    return std::get<uint64_t>(Storage);
+  }
+
+  bool operator==(const AbstractValue &Other) const {
+    return Storage == Other.Storage;
+  }
+  bool operator!=(const AbstractValue &Other) const {
+    return !(*this == Other);
+  }
+};
+
+class AbstractAccess {
+  const Value *Base = nullptr;
+  AbstractValue Offset;
+  AbstractValue Size;
+
+public:
+  AbstractAccess() = default;
+  AbstractAccess(const Value *B, AbstractValue O, AbstractValue S)
+      : Base(B), Offset(O), Size(S) {}
+
+  const Value *getBase() const { return Base; }
+  const AbstractValue &getOffset() const { return Offset; }
+  const AbstractValue &getSize() const { return Size; }
+
+  bool contains(const AbstractAccess &Other) const;
+
+  static AbstractAccess fromPointerAndSize(const Value &Ptr,
+                                           AbstractValue Size,
+                                           const DataLayout &DL);
+  static std::optional<AbstractAccess> merge(const AbstractAccess &A,
+                                             const AbstractAccess &B);
+
+  bool operator==(const AbstractAccess &Other) const {
+    return Base == Other.Base && Offset == Other.Offset && Size == Other.Size;
+  }
+  bool operator!=(const AbstractAccess &Other) const {
+    return !(*this == Other);
+  }
+
+  void print(raw_ostream &OS) const;
+};
 
 class ObservationEdge {
   Observation *Node = nullptr;
@@ -54,24 +128,25 @@ public:
 class MemoryAccess final
     : public ilist_node_with_parent<MemoryAccess, Observation,
                                     ilist_parent<Observation>> {
-  const Instruction *Inst = nullptr;
-  MemoryLocation Loc;
+  SmallVector<Instruction *, 2> Insts;
+  AbstractAccess Access;
   AccessKind Kind = AccessKind::Read;
 
 public:
   MemoryAccess() = default;
-  MemoryAccess(const Instruction *I, MemoryLocation L, AccessKind K)
-      : Inst(I), Loc(L), Kind(K) {}
+  MemoryAccess(ArrayRef<Instruction *> I, AbstractAccess A, AccessKind K)
+      : Insts(I.begin(), I.end()), Access(A), Kind(K) {}
 
   MemoryAccess(const MemoryAccess &) = delete;
   MemoryAccess &operator=(const MemoryAccess &) = delete;
   MemoryAccess(MemoryAccess &&) = delete;
   MemoryAccess &operator=(MemoryAccess &&) = delete;
 
-  const Instruction *getInstruction() const { return Inst; }
-  const MemoryLocation &getLocation() const { return Loc; }
-  LocationSize getSize() const { return Loc.Size; }
-  const Value *getPtr() const { return Loc.Ptr; }
+  ArrayRef<Instruction *> getInstructions() const { return Insts; }
+  const Instruction *getInstruction() const {
+    return Insts.empty() ? nullptr : Insts.front();
+  }
+  const AbstractAccess &getAccess() const { return Access; }
   AccessKind getKind() const { return Kind; }
   bool isRead() const { return Kind == AccessKind::Read; }
   bool isWrite() const { return Kind == AccessKind::Write; }
@@ -159,7 +234,8 @@ private:
   static AccessListType Observation::*getSublistAccess(MemoryAccess *) {
     return &Observation::Accesses;
   }
-  MemoryAccess &createAccess(const Instruction *I, MemoryLocation Loc,
+  MemoryAccess &createAccess(ArrayRef<Instruction *> Insts,
+                             const AbstractAccess &Access,
                              AccessKind Kind);
 };
 

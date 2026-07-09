@@ -197,11 +197,9 @@ entry:
   MAIRGraph Graph(F);
   auto &Entry = Graph.createBBObservation(BB, true);
   auto &Obs = Graph.createBBObservation(BB, true);
-  Obs.addAccess(
-      MemoryAccess(nullptr, llvm::MemoryLocation(), AccessKind::Read));
+  Obs.addAccess(MemoryAccess({}, AbstractAccess(), AccessKind::Read));
   Observation Other("o1", nullptr, nullptr);
-  Other.addAccess(
-      MemoryAccess(nullptr, llvm::MemoryLocation(), AccessKind::Write));
+  Other.addAccess(MemoryAccess({}, AbstractAccess(), AccessKind::Write));
   Obs.mergeAccessesFrom(Other);
   Graph.addEdge(Entry, Obs, ObsEdgeKind::Dom);
 
@@ -238,6 +236,82 @@ entry:
   EXPECT_NE(Dump.find("read ptr <unknown>, unknown"), std::string::npos);
   EXPECT_NE(Dump.find("write ptr <unknown>, unknown"), std::string::npos);
   EXPECT_NE(Dump.find("succs=[bs1(dom)]"), std::string::npos);
+}
+
+TEST(MAIRGraph, AbstractAccessMergesConcreteRanges) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(i32* %p) {
+entry:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  const llvm::Argument &P = *M->getFunction("f")->arg_begin();
+
+  AbstractAccess A(&P, AbstractValue::constant(0),
+                   AbstractValue::constant(4));
+  AbstractAccess B(&P, AbstractValue::constant(4),
+                   AbstractValue::constant(4));
+  std::optional<AbstractAccess> Merged = AbstractAccess::merge(A, B);
+
+  ASSERT_TRUE(Merged.has_value());
+  EXPECT_EQ(Merged->getBase(), &P);
+  EXPECT_EQ(Merged->getOffset(), AbstractValue::constant(0));
+  EXPECT_EQ(Merged->getSize(), AbstractValue::constant(8));
+  EXPECT_TRUE(Merged->contains(A));
+  EXPECT_TRUE(Merged->contains(B));
+  EXPECT_FALSE(A.contains(*Merged));
+}
+
+TEST(MAIRGraph, AbstractAccessParsesConstantGEPOffset) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(i32* %p) {
+entry:
+  %gep = getelementptr i32, ptr %p, i64 2
+  %v = load i32, ptr %gep, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  const llvm::Function &F = *M->begin();
+  const llvm::Argument &P = *F.arg_begin();
+  const auto &Load = cast<llvm::LoadInst>(*std::next(F.begin()->begin()));
+
+  MemoryAccess Access =
+      MemoryAccess::fromInstruction(Load, M->getDataLayout());
+
+  EXPECT_EQ(Access.getAccess().getBase(), &P);
+  EXPECT_EQ(Access.getAccess().getOffset(), AbstractValue::constant(8));
+  EXPECT_EQ(Access.getAccess().getSize(), AbstractValue::constant(4));
+}
+
+TEST(MAIRGraph, AbstractAccessKeepsSymbolicGEPOffset) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(i32* %p, i64 %i) {
+entry:
+  %gep = getelementptr i32, ptr %p, i64 %i
+  %v = load i32, ptr %gep, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  const llvm::Function &F = *M->begin();
+  const llvm::Argument &P = *F.arg_begin();
+  const auto &GEP = *F.begin()->begin();
+  const auto &Load = cast<llvm::LoadInst>(*std::next(F.begin()->begin()));
+
+  MemoryAccess Access =
+      MemoryAccess::fromInstruction(Load, M->getDataLayout());
+
+  EXPECT_EQ(Access.getAccess().getBase(), &P);
+  EXPECT_EQ(Access.getAccess().getOffset(), AbstractValue::symbol(GEP));
+  EXPECT_EQ(Access.getAccess().getSize(), AbstractValue::constant(4));
 }
 
 TEST(MAIRGraph, EraseObservationMaintainsEdges) {

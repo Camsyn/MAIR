@@ -1,8 +1,8 @@
 #include "MAIR/MAIR.h"
 
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/PostDominators.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Instruction.h"
@@ -150,6 +150,39 @@ static std::string getPrintedValueName(const Value &V) {
   return Name;
 }
 
+static std::optional<uint64_t> getNonNegativeU64(const APInt &Value) {
+  if (Value.isNegative())
+    return std::nullopt;
+  if (Value.getActiveBits() > 64)
+    return std::nullopt;
+  return Value.getZExtValue();
+}
+
+static std::optional<uint64_t> checkedEnd(uint64_t Begin, uint64_t Size) {
+  if (UINT64_MAX - Begin < Size)
+    return std::nullopt;
+  return Begin + Size;
+}
+
+static AbstractValue getStoreSize(Type &Ty, const DataLayout &DL) {
+  TypeSize Size = DL.getTypeStoreSize(&Ty);
+  if (Size.isScalable())
+    return AbstractValue::unknown();
+  return AbstractValue::constant(Size.getFixedValue());
+}
+
+static void printAbstractValue(raw_ostream &OS, const AbstractValue &Value) {
+  if (Value.isUnknown()) {
+    OS << "unknown";
+    return;
+  }
+  if (Value.isConstant()) {
+    OS << Value.getConstant();
+    return;
+  }
+  OS << getPrintedValueName(*Value.getSymbol());
+}
+
 static void printAccessKind(raw_ostream &OS, AccessKind Kind) {
   switch (Kind) {
   case AccessKind::Read:
@@ -162,16 +195,6 @@ static void printAccessKind(raw_ostream &OS, AccessKind Kind) {
     OS << "read/write";
     break;
   }
-}
-
-static void printAccessSize(raw_ostream &OS, LocationSize Size) {
-  if (!Size.hasValue()) {
-    OS << "unknown";
-    return;
-  }
-  if (!Size.isPrecise())
-    OS << "<=";
-  OS << Size.getValue();
 }
 
 static void printEdgeKind(raw_ostream &OS, ObsEdgeKind Kind) {
@@ -199,6 +222,111 @@ static void printEdgeList(raw_ostream &OS, ArrayRef<ObservationEdge> Edges) {
 
 } // namespace
 
+AbstractValue::Kind AbstractValue::getKind() const {
+  if (isUnknown())
+    return Kind::Unknown;
+  if (isSymbol())
+    return Kind::Symbol;
+  return Kind::Constant;
+}
+
+AbstractValue AbstractValue::symbol(const Value &V) {
+  AbstractValue Result;
+  Result.Storage = &V;
+  return Result;
+}
+
+AbstractValue AbstractValue::constant(uint64_t C) {
+  AbstractValue Result;
+  Result.Storage = C;
+  return Result;
+}
+
+AbstractAccess
+AbstractAccess::fromPointerAndSize(const Value &Ptr, AbstractValue Size,
+                                   const DataLayout &DL) {
+  APInt Offset(DL.getIndexTypeSizeInBits(Ptr.getType()), 0);
+  const Value *Base = Ptr.stripAndAccumulateConstantOffsets(
+      DL, Offset, /*AllowNonInbounds=*/true);
+  const Value *Underlying = getUnderlyingObject(&Ptr);
+  std::optional<uint64_t> ConcreteOffset = getNonNegativeU64(Offset);
+  if (Base && ConcreteOffset && (Base != &Ptr || Underlying == &Ptr))
+    return AbstractAccess(Base, AbstractValue::constant(*ConcreteOffset),
+                          Size);
+
+  if (Underlying && Underlying != &Ptr)
+    return AbstractAccess(Underlying, AbstractValue::symbol(Ptr), Size);
+
+  return AbstractAccess(&Ptr, AbstractValue::constant(0), Size);
+}
+
+bool AbstractAccess::contains(const AbstractAccess &Other) const {
+  if (*this == Other)
+    return true;
+  if (Base != Other.Base)
+    return false;
+  if (!Offset.isConstant() || !Size.isConstant() ||
+      !Other.Offset.isConstant() || !Other.Size.isConstant())
+    return false;
+
+  uint64_t ThisBegin = Offset.getConstant();
+  std::optional<uint64_t> ThisEnd = checkedEnd(ThisBegin, Size.getConstant());
+  uint64_t OtherBegin = Other.Offset.getConstant();
+  std::optional<uint64_t> OtherEnd =
+      checkedEnd(OtherBegin, Other.Size.getConstant());
+  if (!ThisEnd || !OtherEnd)
+    return false;
+  return ThisBegin <= OtherBegin && *OtherEnd <= *ThisEnd;
+}
+
+std::optional<AbstractAccess> AbstractAccess::merge(const AbstractAccess &A,
+                                                    const AbstractAccess &B) {
+  if (A == B)
+    return A;
+  if (A.Base != B.Base)
+    return std::nullopt;
+  if (A.contains(B))
+    return A;
+  if (B.contains(A))
+    return B;
+  if (!A.Offset.isConstant() || !A.Size.isConstant() ||
+      !B.Offset.isConstant() || !B.Size.isConstant())
+    return std::nullopt;
+
+  uint64_t ABegin = A.Offset.getConstant();
+  std::optional<uint64_t> AEnd = checkedEnd(ABegin, A.Size.getConstant());
+  uint64_t BBegin = B.Offset.getConstant();
+  std::optional<uint64_t> BEnd = checkedEnd(BBegin, B.Size.getConstant());
+  if (!AEnd || !BEnd)
+    return std::nullopt;
+  if (*AEnd < BBegin || *BEnd < ABegin)
+    return std::nullopt;
+
+  uint64_t Begin = std::min(ABegin, BBegin);
+  uint64_t End = std::max(*AEnd, *BEnd);
+
+  return AbstractAccess(A.Base, AbstractValue::constant(Begin),
+                        AbstractValue::constant(End - Begin));
+}
+
+void AbstractAccess::print(raw_ostream &OS) const {
+  if (!Base && Offset.isUnknown()) {
+    OS << "<unknown>";
+    return;
+  }
+  if (Base)
+    OS << getPrintedValueName(*Base);
+  else
+    OS << "unknown";
+  if (Offset.isConstant()) {
+    if (Offset.getConstant() != 0)
+      OS << " + " << Offset.getConstant();
+  } else {
+    OS << " + ";
+    printAbstractValue(OS, Offset);
+  }
+}
+
 void MemoryAccess::mergeKind(AccessKind Other) {
   Kind = ::mair::mergeKind(Kind, Other);
 }
@@ -213,40 +341,40 @@ std::string MemoryAccess::toString(bool LLVM) const {
 
 MemoryAccess MemoryAccess::fromInstruction(const Instruction &I,
                                            const DataLayout &DL) {
-  (void)DL;
-  std::string InstText;
-  raw_string_ostream InstOS(InstText);
-  I.print(InstOS);
-  InstOS.flush();
-
-  StringRef Text = StringRef(InstText).ltrim();
+  const Value *Ptr = nullptr;
+  AbstractValue Size = AbstractValue::unknown();
   AccessKind Kind = AccessKind::Read;
-  if (Text.contains(" load "))
+  if (const auto *LI = dyn_cast<LoadInst>(&I)) {
+    Ptr = LI->getPointerOperand();
+    Size = getStoreSize(*LI->getType(), DL);
     Kind = AccessKind::Read;
-  else if (Text.starts_with("store "))
+  } else if (const auto *SI = dyn_cast<StoreInst>(&I)) {
+    Ptr = SI->getPointerOperand();
+    Size = getStoreSize(*SI->getValueOperand()->getType(), DL);
     Kind = AccessKind::Write;
-  else if (I.mayReadFromMemory() && I.mayWriteToMemory())
+  } else if (I.mayReadFromMemory() && I.mayWriteToMemory()) {
     Kind = AccessKind::ReadWrite;
-  else if (I.mayWriteToMemory())
+  } else if (I.mayWriteToMemory()) {
     Kind = AccessKind::Write;
-  else if (!I.mayReadFromMemory())
+  } else if (!I.mayReadFromMemory()) {
     report_fatal_error(
         "MemoryAccess::fromInstruction expects a memory access instruction");
+  }
 
-  MemoryLocation Loc = MemoryLocation::get(&I);
-  return MemoryAccess(&I, Loc, Kind);
+  AbstractAccess Access =
+      Ptr ? AbstractAccess::fromPointerAndSize(*Ptr, Size, DL)
+          : AbstractAccess(nullptr, AbstractValue::unknown(), Size);
+  Instruction *Inst = const_cast<Instruction *>(&I);
+  return MemoryAccess(ArrayRef<Instruction *>(&Inst, 1), Access, Kind);
 }
 
 void MemoryAccess::print(raw_ostream &OS, bool LLVM) const {
   (void)LLVM;
   printAccessKind(OS, Kind);
   OS << " ptr ";
-  if (Loc.Ptr)
-    OS << getPrintedValueName(*Loc.Ptr);
-  else
-    OS << "<unknown>";
+  Access.print(OS);
   OS << ", ";
-  printAccessSize(OS, Loc.Size);
+  printAbstractValue(OS, Access.getSize());
 }
 
 Observation::Observation(StringRef N, const BasicBlock *Block,
@@ -255,13 +383,15 @@ Observation::Observation(StringRef N, const BasicBlock *Block,
 
 Observation::~Observation() { AccessAllocator.DestroyAll(); }
 
-MemoryAccess &Observation::createAccess(const Instruction *I,
-                                        MemoryLocation Loc, AccessKind Kind) {
-  return *new (AccessAllocator.Allocate()) MemoryAccess(I, Loc, Kind);
+MemoryAccess &Observation::createAccess(ArrayRef<Instruction *> Insts,
+                                        const AbstractAccess &Access,
+                                        AccessKind Kind) {
+  return *new (AccessAllocator.Allocate()) MemoryAccess(Insts, Access, Kind);
 }
 
 MemoryAccess &Observation::addAccess(const MemoryAccess &A) {
-  auto &Node = createAccess(A.getInstruction(), A.getLocation(), A.getKind());
+  auto &Node =
+      createAccess(A.getInstructions(), A.getAccess(), A.getKind());
   Accesses.push_back(Node);
   Node.setParent(this);
   ++NumAccesses;

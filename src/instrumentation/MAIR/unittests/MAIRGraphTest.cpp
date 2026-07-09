@@ -394,8 +394,8 @@ merge:
   const Observation *ElseExit = FindExit("else");
   ASSERT_NE(ThenExit, nullptr);
   ASSERT_NE(ElseExit, nullptr);
-  EXPECT_TRUE(hasSuccessor(Graph, *ThenExit, *Merge));
-  EXPECT_TRUE(hasSuccessor(Graph, *ElseExit, *Merge));
+  EXPECT_TRUE(hasSuccessor(Graph, *Merge, *ThenExit, ObsEdgeKind::PostDom));
+  EXPECT_TRUE(hasSuccessor(Graph, *Merge, *ElseExit, ObsEdgeKind::PostDom));
 }
 
 TEST(MAIRGraph, CreateFromHonorsBarrierTraitInsideBlock) {
@@ -627,4 +627,48 @@ entry:
   EXPECT_EQ(Graph.size(), 2u);
   EXPECT_NE(Graph.find("ma0"), nullptr);
   EXPECT_NE(Graph.find("ma1"), nullptr);
+}
+
+TEST(MAIRGraphPass, SimplifyGraphRewiresExternalPostDomEdges) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(i32* %p, i32* %q) {
+entry:
+  %v = load i32, i32* %p, align 4
+  store i32 %v, i32* %q, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  const llvm::Function &F = *M->begin();
+  const llvm::BasicBlock &BB = *F.begin();
+  const llvm::Instruction &LoadInst = *BB.begin();
+
+  MAIRGraph Graph(F);
+  auto &A = Graph.createBBObservation(BB, true);
+  auto &B = Graph.createInstObservation(BB, LoadInst);
+  auto &C = Graph.createBBObservation(BB, false);
+  auto &D = Graph.createBBObservation(BB, false);
+  auto &E = Graph.createBBObservation(BB, false);
+  Graph.addEdge(A, B, ObsEdgeKind::Dom);
+  Graph.addEdge(B, A, ObsEdgeKind::PostDom);
+  Graph.addEdge(C, B, ObsEdgeKind::PostDom);
+  Graph.addEdge(B, D, ObsEdgeKind::Dom);
+  Graph.addEdge(B, E, ObsEdgeKind::PostDom);
+
+  MAIRGraphAnalysisManager AM;
+  SimplifyGraphPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_FALSE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  EXPECT_EQ(Graph.find("ma1"), nullptr);
+  EXPECT_TRUE(hasSuccessor(Graph, C, A, ObsEdgeKind::PostDom));
+  EXPECT_TRUE(hasSuccessor(Graph, A, D, ObsEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, A, E, ObsEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, A, C));
+  EXPECT_FALSE(hasSuccessor(Graph, A, E, ObsEdgeKind::PostDom));
+  EXPECT_FALSE(hasSuccessor(Graph, D, A));
 }

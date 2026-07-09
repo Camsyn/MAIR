@@ -128,7 +128,7 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
       Observation *Succ = BBEntryObs.lookup(IPDom);
       assert(Succ);
       if (!BA.hasBwdBarrierPath(BB, *IPDom))
-        Graph.addEdge(*ExitObs, *Succ, ObsEdgeKind::PostDom);
+        Graph.addEdge(*Succ, *ExitObs, ObsEdgeKind::PostDom);
     }
   }
 
@@ -423,9 +423,8 @@ const Observation *MAIRGraph::find(StringRef Name) const {
 void MAIRGraph::addEdge(Observation &From, Observation &To, ObsEdgeKind Kind) {
   assert(From.getParent() == this && To.getParent() == this &&
          "MAIRGraph edge endpoints must belong to this graph");
-  for (const ObservationEdge &Edge : From.Children)
-    if (&Edge.getNode() == &To && Edge.getKind() == Kind)
-      return;
+  if (From.hasChild(To).has_value())
+    return;
   From.Children.push_back(ObservationEdge(To, Kind));
   To.Parents.push_back(ObservationEdge(From, Kind));
   ++NumEdges;

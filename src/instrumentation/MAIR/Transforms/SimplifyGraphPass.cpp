@@ -50,7 +50,7 @@ void mergeObservationInto(MAIRGraph &G, Observation &Into, Observation &From) {
   for (const ObservationEdge &Edge : Outgoing) {
     Observation &Succ = Edge.getNode();
     if (&Succ != &Into)
-      G.addEdge(Into, Succ, Edge.getKind());
+      G.addEdge(Into, Succ, *IntoToFrom);
   }
 
   G.erase(From);

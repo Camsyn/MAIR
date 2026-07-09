@@ -222,6 +222,35 @@ static void printEdgeList(raw_ostream &OS, ArrayRef<ObservationEdge> Edges) {
 
 } // namespace
 
+void MemoryUse::set(MemoryObject *NewObject) {
+  if (Object == NewObject)
+    return;
+  removeFromList();
+  Object = NewObject;
+  if (Object)
+    addToList(&Object->UseList);
+}
+
+void MemoryUse::addToList(MemoryUse **List) {
+  assert(!Prev && !Next && "MAIR memory use is already linked");
+  Next = *List;
+  if (Next)
+    Next->Prev = &Next;
+  Prev = List;
+  *Prev = this;
+}
+
+void MemoryUse::removeFromList() {
+  if (!Prev)
+    return;
+  *Prev = Next;
+  if (Next)
+    Next->Prev = Prev;
+  Object = nullptr;
+  Next = nullptr;
+  Prev = nullptr;
+}
+
 AbstractValue::Kind AbstractValue::getKind() const {
   if (isUnknown())
     return Kind::Unknown;
@@ -394,6 +423,8 @@ MemoryAccess &Observation::addAccess(const MemoryAccess &A) {
       createAccess(A.getInstructions(), A.getAccess(), A.getKind());
   Accesses.push_back(Node);
   Node.setParent(this);
+  if (MAIRGraph *Graph = getParent())
+    Graph->registerAccess(Node);
   ++NumAccesses;
   return Node;
 }
@@ -418,6 +449,10 @@ std::optional<ObsEdgeKind> Observation::hasParent(const Observation &Obs) {
 
 Observation::iterator Observation::erase(iterator It) {
   assert(It != Accesses.end() && "Cannot erase end iterator");
+  if (MAIRGraph *Graph = getParent())
+    Graph->unregisterAccess(*It);
+  else
+    It->clearMemoryObject();
   auto Next = Accesses.erase(It);
   --NumAccesses;
   return Next;
@@ -454,6 +489,8 @@ MAIRGraph::MAIRGraph(const Function &Func) : F(&Func) {}
 
 MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
     : F(Other.F), GraphAllocator(std::move(Other.GraphAllocator)),
+      MemoryObjectAllocator(std::move(Other.MemoryObjectAllocator)),
+      MemoryObjects(std::move(Other.MemoryObjects)),
       Observations(std::move(Other.Observations)),
       NumObservations(Other.NumObservations), NumEdges(Other.NumEdges),
       NextObservationID(Other.NextObservationID) {
@@ -467,6 +504,8 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   clear();
   F = Other.F;
   GraphAllocator = std::move(Other.GraphAllocator);
+  MemoryObjectAllocator = std::move(Other.MemoryObjectAllocator);
+  MemoryObjects = std::move(Other.MemoryObjects);
   Observations = std::move(Other.Observations);
   NumObservations = Other.NumObservations;
   NumEdges = Other.NumEdges;
@@ -492,6 +531,26 @@ Observation &MAIRGraph::addObservation(Observation &Obs) {
   Obs.setParent(this);
   ++NumObservations;
   return Obs;
+}
+
+MemoryObject &MAIRGraph::getOrCreateMemoryObject(const Value &Base) {
+  MemoryObject *&Object = MemoryObjects[&Base];
+  if (!Object)
+    Object = new (MemoryObjectAllocator.Allocate()) MemoryObject(Base);
+  return *Object;
+}
+
+void MAIRGraph::registerAccess(MemoryAccess &Access) {
+  const Value *Base = Access.getBase();
+  if (!Base) {
+    Access.clearMemoryObject();
+    return;
+  }
+  Access.setMemoryObject(&getOrCreateMemoryObject(*Base));
+}
+
+void MAIRGraph::unregisterAccess(MemoryAccess &Access) {
+  Access.clearMemoryObject();
 }
 
 Observation &MAIRGraph::createBBObservation(const BasicBlock &BB,
@@ -526,6 +585,8 @@ MAIRGraph::iterator MAIRGraph::erase(Observation &Obs) {
     removeEdge(Obs, *Succ);
   for (Observation *Pred : Preds)
     removeEdge(*Pred, Obs);
+  for (MemoryAccess &Access : Obs.Accesses)
+    unregisterAccess(Access);
   auto Next = Observations.erase(It);
   --NumObservations;
   return Next;
@@ -533,7 +594,9 @@ MAIRGraph::iterator MAIRGraph::erase(Observation &Obs) {
 
 void MAIRGraph::clear() {
   GraphAllocator.DestroyAll();
+  MemoryObjectAllocator.DestroyAll();
   Observations.clear();
+  MemoryObjects.clear();
   NumObservations = 0;
   NumEdges = 0;
   NextObservationID = 0;
@@ -637,6 +700,14 @@ MAIRGraph::parentEdges(const Observation &Obs) const {
   ObservationEdgeListType Result;
   Result.append(Obs.parents().begin(), Obs.parents().end());
   return Result;
+}
+
+MemoryObject *MAIRGraph::getMemoryObject(const Value &Base) {
+  return MemoryObjects.lookup(&Base);
+}
+
+const MemoryObject *MAIRGraph::getMemoryObject(const Value &Base) const {
+  return MemoryObjects.lookup(&Base);
 }
 
 std::string MAIRGraph::toString(bool LLVM) const {

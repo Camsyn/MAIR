@@ -328,6 +328,117 @@ entry:
             llvm::GraphTraits<const MemoryAccess *>::child_end(Access));
 }
 
+TEST(MAIRGraph, TracksMemoryAccessesByBasePointer) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, ptr %q) {
+entry:
+  %pv = load i32, ptr %p, align 4
+  store i32 %pv, ptr %p, align 4
+  %qv = load i32, ptr %q, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::Argument &P = *F.arg_begin();
+  llvm::Argument &Q = *std::next(F.arg_begin());
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  ASSERT_TRUE(Graph.verify());
+
+  MemoryObject *PObject = Graph.getMemoryObject(P);
+  MemoryObject *QObject = Graph.getMemoryObject(Q);
+  ASSERT_NE(PObject, nullptr);
+  ASSERT_NE(QObject, nullptr);
+  EXPECT_EQ(PObject->getBase(), &P);
+  EXPECT_EQ(QObject->getBase(), &Q);
+  EXPECT_FALSE(PObject->use_empty());
+
+  unsigned PUses = 0;
+  for (MemoryUse &Use : PObject->uses()) {
+    MemoryAccess *Access = Use.getUser();
+    ASSERT_NE(Access, nullptr);
+    EXPECT_EQ(Use.get(), PObject);
+    EXPECT_EQ(Access->getBase(), &P);
+    EXPECT_EQ(Access->getMemoryObject(), PObject);
+    ++PUses;
+  }
+  EXPECT_EQ(PUses, 2u);
+
+  unsigned PUsers = 0;
+  for (MemoryAccess &Access : PObject->users()) {
+    EXPECT_EQ(Access.getMemoryObject(), PObject);
+    ++PUsers;
+  }
+  EXPECT_EQ(PUsers, 2u);
+
+  const MAIRGraph &ConstGraph = Graph;
+  const MemoryObject *ConstQObject = ConstGraph.getMemoryObject(Q);
+  ASSERT_EQ(ConstQObject, QObject);
+  unsigned QUses = 0;
+  for (const MemoryAccess &Access : ConstQObject->users()) {
+    EXPECT_EQ(Access.getBase(), &Q);
+    EXPECT_EQ(Access.getMemoryObject(), QObject);
+    ++QUses;
+  }
+  EXPECT_EQ(QUses, 1u);
+
+  Observation *Store = Graph.find("ma2");
+  ASSERT_NE(Store, nullptr);
+  Graph.erase(*Store);
+
+  ASSERT_TRUE(Graph.verify());
+  PUses = 0;
+  for (MemoryAccess &Access : PObject->users()) {
+    EXPECT_EQ(Access.getBase(), &P);
+    EXPECT_EQ(Access.getMemoryObject(), PObject);
+    ++PUses;
+  }
+  EXPECT_EQ(PUses, 1u);
+
+  Observation *QLoad = Graph.find("ma3");
+  ASSERT_NE(QLoad, nullptr);
+  ASSERT_FALSE(QLoad->empty());
+  QLoad->erase(QLoad->begin());
+
+  ASSERT_TRUE(Graph.verify());
+  EXPECT_TRUE(QObject->use_empty());
+}
+
+TEST(MAIRGraph, PreservesMemoryObjectUsesAcrossMove) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %v = load i32, ptr %p, align 4
+  store i32 %v, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::Argument &P = *F.arg_begin();
+  MAIRGraph Source = createGraphWithExplicitAnalyses(F);
+  MemoryObject *ObjectBeforeMove = Source.getMemoryObject(P);
+  ASSERT_NE(ObjectBeforeMove, nullptr);
+
+  MAIRGraph Moved(std::move(Source));
+
+  ASSERT_TRUE(Moved.verify());
+  MemoryObject *ObjectAfterMove = Moved.getMemoryObject(P);
+  ASSERT_EQ(ObjectAfterMove, ObjectBeforeMove);
+  unsigned Users = 0;
+  for (MemoryAccess &Access : ObjectAfterMove->users()) {
+    EXPECT_EQ(Access.getMemoryObject(), ObjectAfterMove);
+    ++Users;
+  }
+  EXPECT_EQ(Users, 2u);
+}
+
 TEST(MAIRGraph, AbstractAccessParsesConstantGEPOffset) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(

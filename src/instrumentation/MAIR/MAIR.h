@@ -1,12 +1,15 @@
 #pragma once
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/ADT/ilist_node.h"
 #include "llvm/ADT/iterator.h"
+#include "llvm/ADT/iterator_range.h"
 #include "llvm/ADT/simple_ilist.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/BasicBlock.h"
@@ -26,6 +29,7 @@
 #include <iterator>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <variant>
 
 namespace mair {
@@ -33,6 +37,9 @@ using namespace llvm;
 
 class MAIRGraph;
 class MAIRVerifier;
+class MemoryAccess;
+class MemoryObject;
+class MemoryUse;
 class Observation;
 
 enum class AccessKind : uint8_t { Read = 1, Write = 2, ReadWrite = 3 };
@@ -129,6 +136,127 @@ public:
   bool isPostDom() const { return Kind == ObsEdgeKind::PostDom; }
 };
 
+/// The operand edge from a MemoryAccess user to a MemoryObject, analogous to
+/// llvm::Use. It maintains the object's intrusive use-list.
+class MemoryUse {
+  friend class MemoryAccess;
+  friend class MAIRGraph;
+
+  MemoryObject *Object = nullptr;
+  MemoryUse *Next = nullptr;
+  MemoryUse **Prev = nullptr;
+  MemoryAccess *Parent = nullptr;
+
+public:
+  MemoryUse() = default;
+  explicit MemoryUse(MemoryAccess &P) : Parent(&P) {}
+  ~MemoryUse() { set(nullptr); }
+
+  MemoryUse(const MemoryUse &) = delete;
+  MemoryUse &operator=(const MemoryUse &) = delete;
+  MemoryUse(MemoryUse &&) = delete;
+  MemoryUse &operator=(MemoryUse &&) = delete;
+
+  MemoryObject *get() const { return Object; }
+  MemoryAccess *getUser() const { return Parent; }
+  MemoryUse *getNext() const { return Next; }
+
+private:
+  void set(MemoryObject *NewObject);
+  void addToList(MemoryUse **List);
+  void removeFromList();
+};
+
+template <class UseT> class MemoryUseIterator {
+  UseT *Use = nullptr;
+
+public:
+  using iterator_category = std::forward_iterator_tag;
+  using value_type = std::remove_const_t<UseT>;
+  using difference_type = std::ptrdiff_t;
+  using pointer = UseT *;
+  using reference = UseT &;
+
+  MemoryUseIterator() = default;
+  explicit MemoryUseIterator(UseT *U) : Use(U) {}
+
+  reference operator*() const { return *Use; }
+  pointer operator->() const { return Use; }
+  MemoryUseIterator &operator++() {
+    Use = Use->getNext();
+    return *this;
+  }
+  MemoryUseIterator operator++(int) {
+    MemoryUseIterator Tmp = *this;
+    ++*this;
+    return Tmp;
+  }
+  bool operator==(const MemoryUseIterator &Other) const {
+    return Use == Other.Use;
+  }
+  bool operator!=(const MemoryUseIterator &Other) const {
+    return !(*this == Other);
+  }
+};
+
+struct MemoryUseToUser {
+  MemoryAccess &operator()(MemoryUse &Use) const { return *Use.getUser(); }
+  const MemoryAccess &operator()(const MemoryUse &Use) const {
+    return *Use.getUser();
+  }
+};
+
+/// A graph-owned wrapper for one LLVM base pointer, analogous to llvm::Value.
+/// Memory accesses referring to the base are reachable through its use-list.
+class MemoryObject {
+  friend class MemoryUse;
+
+  const Value *Base = nullptr;
+  MemoryUse *UseList = nullptr;
+
+public:
+  using use_iterator = MemoryUseIterator<MemoryUse>;
+  using const_use_iterator = MemoryUseIterator<const MemoryUse>;
+  using user_iterator = mapped_iterator<use_iterator, MemoryUseToUser>;
+  using const_user_iterator =
+      mapped_iterator<const_use_iterator, MemoryUseToUser>;
+
+  explicit MemoryObject(const Value &B) : Base(&B) {}
+  ~MemoryObject() {
+    assert(use_empty() && "destroying a MAIR memory object with uses");
+  }
+
+  MemoryObject(const MemoryObject &) = delete;
+  MemoryObject &operator=(const MemoryObject &) = delete;
+  MemoryObject(MemoryObject &&) = delete;
+  MemoryObject &operator=(MemoryObject &&) = delete;
+
+  const Value *getBase() const { return Base; }
+  bool use_empty() const { return UseList == nullptr; }
+
+  use_iterator use_begin() { return use_iterator(UseList); }
+  use_iterator use_end() { return use_iterator(); }
+  const_use_iterator use_begin() const { return const_use_iterator(UseList); }
+  const_use_iterator use_end() const { return const_use_iterator(); }
+  auto uses() { return make_range(use_begin(), use_end()); }
+  auto uses() const { return make_range(use_begin(), use_end()); }
+
+  user_iterator user_begin() {
+    return user_iterator(use_begin(), MemoryUseToUser());
+  }
+  user_iterator user_end() {
+    return user_iterator(use_end(), MemoryUseToUser());
+  }
+  const_user_iterator user_begin() const {
+    return const_user_iterator(use_begin(), MemoryUseToUser());
+  }
+  const_user_iterator user_end() const {
+    return const_user_iterator(use_end(), MemoryUseToUser());
+  }
+  auto users() { return make_range(user_begin(), user_end()); }
+  auto users() const { return make_range(user_begin(), user_end()); }
+};
+
 template <class NodeT> class ObservationEdgeIterator {
   ArrayRef<ObservationEdge>::iterator It = nullptr;
 
@@ -169,11 +297,13 @@ class MemoryAccess final
   SmallVector<Instruction *, 2> Insts;
   AbstractAccess Access;
   AccessKind Kind = AccessKind::Read;
+  /// Fixed base operand, analogous to a single llvm::User operand.
+  MemoryUse BaseUse;
 
 public:
   MemoryAccess() = default;
   MemoryAccess(ArrayRef<Instruction *> I, AbstractAccess A, AccessKind K)
-      : Insts(I.begin(), I.end()), Access(A), Kind(K) {}
+      : Insts(I.begin(), I.end()), Access(A), Kind(K), BaseUse(*this) {}
 
   MemoryAccess(const MemoryAccess &) = delete;
   MemoryAccess &operator=(const MemoryAccess &) = delete;
@@ -185,6 +315,9 @@ public:
     return Insts.empty() ? nullptr : Insts.front();
   }
   const AbstractAccess &getAccess() const { return Access; }
+  MemoryObject *getMemoryObject() const { return BaseUse.get(); }
+  const MemoryUse &getBaseUse() const { return BaseUse; }
+  const Value *getBase() const { return Access.getBase(); }
   AccessKind getKind() const { return Kind; }
   bool isRead() const { return Kind == AccessKind::Read; }
   bool isWrite() const { return Kind == AccessKind::Write; }
@@ -197,6 +330,13 @@ public:
 
   std::string toString(bool LLVM = false) const;
   void print(raw_ostream &OS, bool LLVM = false) const;
+
+private:
+  friend class MAIRGraph;
+  friend class Observation;
+
+  void setMemoryObject(MemoryObject *Object) { BaseUse.set(Object); }
+  void clearMemoryObject() { BaseUse.set(nullptr); }
 };
 
 class Observation final
@@ -279,6 +419,7 @@ private:
 
 class MAIRGraph final {
   friend class MAIRVerifier;
+  friend class Observation;
 
 public:
   using ObservationListType =
@@ -292,6 +433,8 @@ public:
 private:
   const Function *F = nullptr;
   SpecificBumpPtrAllocator<Observation> GraphAllocator;
+  SpecificBumpPtrAllocator<MemoryObject> MemoryObjectAllocator;
+  DenseMap<const Value *, MemoryObject *> MemoryObjects;
   ObservationListType Observations;
   unsigned NumObservations = 0;
   unsigned NumEdges = 0;
@@ -360,6 +503,8 @@ public:
   EdgeListType predecessors(Observation &Obs);
   ConstEdgeListType predecessors(const Observation &Obs) const;
   ObservationEdgeListType parentEdges(const Observation &Obs) const;
+  MemoryObject *getMemoryObject(const Value &Base);
+  const MemoryObject *getMemoryObject(const Value &Base) const;
 
   bool verify(raw_ostream *OS = nullptr) const;
   std::string toString(bool LLVM = false) const;
@@ -370,6 +515,9 @@ private:
   template <class T, class... Args> T &allocateNode(Args &&...ArgsPack);
   std::string createObservationName(StringRef Prefix);
   Observation &addObservation(Observation &Obs);
+  MemoryObject &getOrCreateMemoryObject(const Value &Base);
+  void registerAccess(MemoryAccess &Access);
+  void unregisterAccess(MemoryAccess &Access);
 
   /// Construct the raw MAIR graph once dominance and barrier analyses are
   /// fixed.

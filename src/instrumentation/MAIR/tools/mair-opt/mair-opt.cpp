@@ -11,8 +11,10 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
@@ -21,6 +23,10 @@ using namespace mair;
 static cl::opt<std::string>
     InputFilename(cl::Positional, cl::desc("<input LLVM IR>"), cl::init("-"),
                   cl::value_desc("filename"));
+static cl::opt<std::string> OutputFilename("o",
+                                           cl::desc("Write output to <file>"),
+                                           cl::value_desc("filename"),
+                                           cl::init("-"));
 static cl::opt<bool>
     EmitLLVM("emit-llvm", cl::desc("Print LLVM IR annotated with MAIR"),
              cl::init(false));
@@ -71,11 +77,25 @@ int main(int argc, char **argv) {
     for (const Function &F : *M)
       if (!F.isDeclaration())
         ++NumDefinitions;
-    if (NumDefinitions > 1) {
+    if (NumDefinitions != 1) {
       errs() << "-emit-dot expects exactly one function definition; found "
              << NumDefinitions << "\n";
       return 1;
     }
+  }
+
+  std::unique_ptr<ToolOutputFile> OutputFile;
+  raw_ostream *OutputOS = &outs();
+  if (!DisableOutput) {
+    std::error_code EC;
+    OutputFile = std::make_unique<ToolOutputFile>(OutputFilename, EC,
+                                                  sys::fs::OF_Text);
+    if (EC) {
+      errs() << "failed to open output file '" << OutputFilename
+             << "': " << EC.message() << "\n";
+      return 1;
+    }
+    OutputOS = &OutputFile->os();
   }
 
   SmallVector<MAIRGraph, 8> Graphs;
@@ -104,16 +124,19 @@ int main(int argc, char **argv) {
     }
 
     if (!DisableOutput && EmitDOT) {
-      dumpDOT(Graph, outs());
+      dumpDOT(Graph, *OutputOS);
     } else if (!DisableOutput && !EmitLLVM) {
-      dumpMAIR(Graph, outs());
+      dumpMAIR(Graph, *OutputOS);
     }
   }
 
   if (!DisableOutput && EmitLLVM && !Graphs.empty()) {
     SmallVector<const MAIRGraph *, 8> GraphPtrs(make_pointer_range(Graphs));
-    dumpLLVM(GraphPtrs, outs());
+    dumpLLVM(GraphPtrs, *OutputOS);
   }
+
+  if (OutputFile)
+    OutputFile->keep();
 
   return 0;
 }

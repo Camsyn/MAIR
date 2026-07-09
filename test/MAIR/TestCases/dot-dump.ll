@@ -1,6 +1,8 @@
 ; RUN: mair-opt -emit-dot %s | FileCheck %s --check-prefix=DOT
+; RUN: mair-opt -emit-dot -o %t.dot %s > %t.dot.stdout && FileCheck %s --check-prefix=DOT --input-file=%t.dot && wc -c < %t.dot.stdout | FileCheck %s --check-prefix=EMPTY
 ; RUN: not mair-opt -emit-dot -emit-llvm %s 2>&1 | FileCheck %s --check-prefix=CONFLICT
 
+; EMPTY: 0
 ; DOT: digraph "MAIRGraph for f" {
 ; DOT: label="MAIRGraph for f";
 ; DOT-DAG: [label="dom", color=blue];

@@ -554,10 +554,7 @@ MemoryObject &MAIRGraph::getOrCreateMemoryObject(const Value &Base) {
 
 void MAIRGraph::registerAccess(MemoryAccess &Access) {
   const Value *Base = Access.getBase();
-  if (!Base) {
-    Access.clearMemoryObject();
-    return;
-  }
+  assert(Base && "cannot add a base-less memory access to a MAIRGraph");
   Access.setMemoryObject(&getOrCreateMemoryObject(*Base));
 }
 

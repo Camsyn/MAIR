@@ -12,10 +12,19 @@
 #include "llvm/IR/PassInstrumentation.h"
 #include "llvm/Support/SourceMgr.h"
 #include "gtest/gtest.h"
+#include <type_traits>
+#include <utility>
 
 using namespace mair;
 
 namespace {
+static_assert(
+    std::is_same_v<decltype(std::declval<MemoryAccess &>().getMemoryObject()),
+                   MemoryObject &>);
+static_assert(std::is_same_v<
+              decltype(std::declval<const MemoryAccess &>().getMemoryObject()),
+              const MemoryObject &>);
+
 std::unique_ptr<llvm::Module> parseModule(llvm::StringRef IR,
                                           llvm::LLVMContext &Ctx) {
   llvm::SMDiagnostic Err;
@@ -193,13 +202,14 @@ entry:
 
   const llvm::Function &F = *M->begin();
   const llvm::BasicBlock &BB = *F.begin();
+  const llvm::Instruction &Load = *BB.begin();
 
   MAIRGraph Graph(F);
   auto &Entry = Graph.createBBObservation(BB, true);
   auto &Obs = Graph.createBBObservation(BB, true);
-  Obs.addAccess(MemoryAccess({}, AbstractAccess(), AccessKind::Read));
+  Obs.addAccess(MemoryAccess::fromInstruction(Load, M->getDataLayout()));
   Observation Other("o1", nullptr, nullptr);
-  Other.addAccess(MemoryAccess({}, AbstractAccess(), AccessKind::Write));
+  Other.addAccess(MemoryAccess::fromInstruction(Load, M->getDataLayout()));
   Obs.mergeAccessesFrom(Other);
   Graph.addEdge(Entry, Obs, ObsEdgeKind::Dom);
 
@@ -233,8 +243,7 @@ entry:
   EXPECT_NE(Dump.find("mair graph of fn @f {"), std::string::npos);
   EXPECT_NE(Dump.find("bs0: preds=[]"), std::string::npos);
   EXPECT_NE(Dump.find("bs1: preds=[bs0(dom)]"), std::string::npos);
-  EXPECT_NE(Dump.find("read ptr <unknown>, unknown"), std::string::npos);
-  EXPECT_NE(Dump.find("write ptr <unknown>, unknown"), std::string::npos);
+  EXPECT_NE(Dump.find("read ptr %p, 4"), std::string::npos);
   EXPECT_NE(Dump.find("succs=[bs1(dom)]"), std::string::npos);
 }
 
@@ -362,14 +371,14 @@ entry:
     ASSERT_NE(Access, nullptr);
     EXPECT_EQ(Use.get(), PObject);
     EXPECT_EQ(Access->getBase(), &P);
-    EXPECT_EQ(Access->getMemoryObject(), PObject);
+    EXPECT_EQ(&Access->getMemoryObject(), PObject);
     ++PUses;
   }
   EXPECT_EQ(PUses, 2u);
 
   unsigned PUsers = 0;
   for (MemoryAccess &Access : PObject->users()) {
-    EXPECT_EQ(Access.getMemoryObject(), PObject);
+    EXPECT_EQ(&Access.getMemoryObject(), PObject);
     ++PUsers;
   }
   EXPECT_EQ(PUsers, 2u);
@@ -380,7 +389,7 @@ entry:
   unsigned QUses = 0;
   for (const MemoryAccess &Access : ConstQObject->users()) {
     EXPECT_EQ(Access.getBase(), &Q);
-    EXPECT_EQ(Access.getMemoryObject(), QObject);
+    EXPECT_EQ(&Access.getMemoryObject(), QObject);
     ++QUses;
   }
   EXPECT_EQ(QUses, 1u);
@@ -393,7 +402,7 @@ entry:
   PUses = 0;
   for (MemoryAccess &Access : PObject->users()) {
     EXPECT_EQ(Access.getBase(), &P);
-    EXPECT_EQ(Access.getMemoryObject(), PObject);
+    EXPECT_EQ(&Access.getMemoryObject(), PObject);
     ++PUses;
   }
   EXPECT_EQ(PUses, 1u);
@@ -433,7 +442,7 @@ entry:
   ASSERT_EQ(ObjectAfterMove, ObjectBeforeMove);
   unsigned Users = 0;
   for (MemoryAccess &Access : ObjectAfterMove->users()) {
-    EXPECT_EQ(Access.getMemoryObject(), ObjectAfterMove);
+    EXPECT_EQ(&Access.getMemoryObject(), ObjectAfterMove);
     ++Users;
   }
   EXPECT_EQ(Users, 2u);

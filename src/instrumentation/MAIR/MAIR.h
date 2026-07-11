@@ -315,7 +315,14 @@ public:
     return Insts.empty() ? nullptr : Insts.front();
   }
   const AbstractAccess &getAccess() const { return Access; }
-  MemoryObject *getMemoryObject() const { return BaseUse.get(); }
+  MemoryObject &getMemoryObject() {
+    assert(BaseUse.get() && "MAIR memory access has no memory object");
+    return *BaseUse.get();
+  }
+  const MemoryObject &getMemoryObject() const {
+    assert(BaseUse.get() && "MAIR memory access has no memory object");
+    return *BaseUse.get();
+  }
   const MemoryUse &getBaseUse() const { return BaseUse; }
   const Value *getBase() const { return Access.getBase(); }
   AccessKind getKind() const { return Kind; }

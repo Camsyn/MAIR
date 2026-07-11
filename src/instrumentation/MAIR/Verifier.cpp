@@ -190,30 +190,26 @@ void MAIRVerifier::verifyMemoryAccess(const Observation &Obs,
           Obs, AccessI, Obs.getAnchor());
   }
 
-  if (const Value *Base = Access.getBase()) {
-    const MemoryObject *Object = Access.getMemoryObject();
-    CheckFatal(Object,
-               "memory access with base is not linked to a memory object",
-               Access, Obs, Base);
-    Check(Object->getBase() == Base,
-          "memory access is linked to an object for a different base", Access,
-          Obs, Base);
-    Check(Graph->getMemoryObject(*Base) == Object,
-          "memory access is not linked to the graph's canonical object",
-          Access, Obs, Base);
-    bool FoundUse = false;
-    for (const MemoryAccess &User : Object->users())
-      if (&User == &Access) {
-        FoundUse = true;
-        break;
-      }
-    Check(FoundUse, "memory object use-list does not contain this access",
-          Access, Obs, Base);
-  } else {
-    Check(!Access.getMemoryObject(),
-          "memory access without base is linked to a memory object", Access,
-          Obs);
-  }
+  const Value *Base = Access.getBase();
+  CheckFatal(Base, "memory access has no base", Access, Obs);
+  CheckFatal(Access.getBaseUse().get(),
+             "memory access is not linked to a memory object", Access, Obs,
+             Base);
+  const MemoryObject &Object = Access.getMemoryObject();
+  Check(Object.getBase() == Base,
+        "memory access is linked to an object for a different base", Access,
+        Obs, Base);
+  Check(Graph->getMemoryObject(*Base) == &Object,
+        "memory access is not linked to the graph's canonical object", Access,
+        Obs, Base);
+  bool FoundUse = false;
+  for (const MemoryAccess &User : Object.users())
+    if (&User == &Access) {
+      FoundUse = true;
+      break;
+    }
+  Check(FoundUse, "memory object use-list does not contain this access", Access,
+        Obs, Base);
 }
 
 void MAIRVerifier::verifyChildEdge(const Observation &From,

@@ -28,11 +28,8 @@ void eraseAccess(Observation &Obs, MemoryAccess &Access) {
 
 bool mergeLocations(Observation &Obs) {
   DenseMap<MemoryObject *, AccessGroup> Groups;
-  for (MemoryAccess &Access : Obs) {
-    if (!Access.getMemoryObject())
-      continue;
-    Groups[Access.getMemoryObject()].push_back(&Access);
-  }
+  for (MemoryAccess &Access : Obs)
+    Groups[&Access.getMemoryObject()].push_back(&Access);
 
   bool Changed = false;
   for (auto &Entry : Groups) {

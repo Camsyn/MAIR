@@ -1,6 +1,8 @@
+#include "MAIR/Analysis/RedundantObservationAnalysis.h"
 #include "MAIR/MAIR.h"
 #include "MAIR/MAIRBarrierAnalysis.h"
 #include "MAIR/MAIRDump.h"
+#include "MAIR/Transforms/RedundantObservationEliminationPass.h"
 #include "MAIR/Transforms/SimplifyGraphPass.h"
 
 #include "llvm/Analysis/PostDominators.h"
@@ -804,6 +806,153 @@ merge:
   ASSERT_TRUE(Explicit.verify());
   ASSERT_TRUE(FromFAM.verify());
   EXPECT_EQ(FromFAM.toString(), Explicit.toString());
+}
+
+TEST(MAIRGraphPass, RedundantObservationDoesNotDeleteSelfReachableAccess) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(i32* %p) {
+entry:
+  %v = load i32, i32* %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  const llvm::Function &F = *M->begin();
+  const llvm::BasicBlock &BB = *F.begin();
+  const llvm::Instruction &LoadInst = *BB.begin();
+  MAIRGraph Graph(F);
+  auto &Load = Graph.createInstObservation(BB, LoadInst);
+  Graph.addEdge(Load, Load, ObsEdgeKind::Dom);
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  RedundantObservationEliminationPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_TRUE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  EXPECT_EQ(Load.size(), 1u);
+}
+
+TEST(MAIRGraphPass, RedundantObservationDoesNotEliminateWithinObservation) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(i32* %p) {
+entry:
+  %a = load i32, i32* %p, align 4
+  %b = load i32, i32* %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  const llvm::Function &F = *M->begin();
+  const llvm::BasicBlock &BB = *F.begin();
+  auto InstIt = BB.begin();
+  const llvm::Instruction &FirstLoad = *InstIt++;
+  const llvm::Instruction &SecondLoad = *InstIt++;
+  MAIRGraph Graph(F);
+  auto &Obs = Graph.createInstObservation(BB, FirstLoad);
+  MemoryAccess Second =
+      MemoryAccess::fromInstruction(SecondLoad, M->getDataLayout());
+  Obs.addAccess(Second);
+  Graph.addEdge(Obs, Obs, ObsEdgeKind::Dom);
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  RedundantObservationEliminationPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_TRUE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  EXPECT_EQ(Obs.size(), 2u);
+}
+
+TEST(MAIRGraphPass, RedundantObservationUnionsAllPredecessorFacts) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(i32* %p, i32* %q) {
+entry:
+  %p0 = load i32, i32* %p, align 4
+  %q0 = load i32, i32* %q, align 4
+  %p1 = load i32, i32* %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  const llvm::Function &F = *M->begin();
+  const llvm::BasicBlock &BB = *F.begin();
+  auto InstIt = BB.begin();
+  const llvm::Instruction &PLoad = *InstIt++;
+  const llvm::Instruction &QLoad = *InstIt++;
+  const llvm::Instruction &RedundantPLoad = *InstIt++;
+  MAIRGraph Graph(F);
+  auto &P = Graph.createInstObservation(BB, PLoad);
+  auto &Q = Graph.createInstObservation(BB, QLoad);
+  auto &Merge = Graph.createInstObservation(BB, RedundantPLoad);
+  Graph.addEdge(P, Merge, ObsEdgeKind::Dom);
+  Graph.addEdge(Q, Merge, ObsEdgeKind::PostDom);
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  RedundantObservationEliminationPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_FALSE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  EXPECT_EQ(P.size(), 1u);
+  EXPECT_EQ(Q.size(), 1u);
+  EXPECT_TRUE(Merge.empty());
+}
+
+TEST(MAIRGraphPass, RedundantReadWriteAccessCoversReadAndWrite) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(i32* %p) {
+entry:
+  %a = load i32, i32* %p, align 4
+  %b = load i32, i32* %p, align 4
+  store i32 %b, i32* %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  const llvm::Function &F = *M->begin();
+  const llvm::BasicBlock &BB = *F.begin();
+  auto InstIt = BB.begin();
+  const llvm::Instruction &FirstLoad = *InstIt++;
+  const llvm::Instruction &SecondLoad = *InstIt++;
+  const llvm::Instruction &StoreInst = *InstIt++;
+  MAIRGraph Graph(F);
+  auto &ReadWrite = Graph.createInstObservation(BB, FirstLoad);
+  ReadWrite.begin()->mergeKind(AccessKind::Write);
+  auto &Read = Graph.createInstObservation(BB, SecondLoad);
+  auto &Write = Graph.createInstObservation(BB, StoreInst);
+  Graph.addEdge(ReadWrite, Read, ObsEdgeKind::Dom);
+  Graph.addEdge(Read, Write, ObsEdgeKind::Dom);
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  RedundantObservationEliminationPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_FALSE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  EXPECT_EQ(ReadWrite.size(), 1u);
+  EXPECT_TRUE(Read.empty());
+  EXPECT_TRUE(Write.empty());
 }
 
 TEST(MAIRGraphPass, SimplifyGraphMergesMutualDomPairAndRewiresEdges) {

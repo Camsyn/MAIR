@@ -13,7 +13,9 @@
 #endif
 
 MAIR_GRAPH_ANALYSIS("stat", MAIRStatAnalysis())
+MAIR_GRAPH_ANALYSIS("redundant-observation", RedundantObservationAnalysis())
 MAIR_GRAPH_PASS("locationmerge", LocationMergePass())
+MAIR_GRAPH_PASS("redundantobservationelimination", RedundantObservationEliminationPass())
 MAIR_GRAPH_PASS("simplifygraph", SimplifyGraphPass())
 MAIR_GRAPH_PASS("print<stat>", MAIRStatPrinterPass(errs()))
 

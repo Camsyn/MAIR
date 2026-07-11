@@ -1,6 +1,8 @@
 set(MAIR_SOURCES
   Analysis/MAIRStatAnalysis.cpp
+  Analysis/RedundantObservationAnalysis.cpp
   Transforms/LocationMergePass.cpp
+  Transforms/RedundantObservationEliminationPass.cpp
   Transforms/SimplifyGraphPass.cpp
   MAIR.cpp
   MAIRBarrierAnalysis.cpp

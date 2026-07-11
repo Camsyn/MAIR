@@ -1,7 +1,9 @@
 #include "MAIR/MAIRPasses.h"
 
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
+#include "MAIR/Analysis/RedundantObservationAnalysis.h"
 #include "MAIR/Transforms/LocationMergePass.h"
+#include "MAIR/Transforms/RedundantObservationEliminationPass.h"
 #include "MAIR/Transforms/SimplifyGraphPass.h"
 
 #include "llvm/ADT/StringExtras.h"

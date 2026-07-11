@@ -360,6 +360,18 @@ void MemoryAccess::mergeKind(AccessKind Other) {
   Kind = ::mair::mergeKind(Kind, Other);
 }
 
+bool MemoryAccess::mergeWith(const MemoryAccess &Other) {
+  std::optional<AbstractAccess> Merged =
+      AbstractAccess::merge(Access, Other.Access);
+  if (!Merged)
+    return false;
+
+  Access = *Merged;
+  Insts.append(Other.Insts);
+  mergeKind(Other.Kind);
+  return true;
+}
+
 std::string MemoryAccess::toString(bool LLVM) const {
   std::string S;
   raw_string_ostream OS(S);

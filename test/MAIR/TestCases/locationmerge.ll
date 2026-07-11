@@ -1,0 +1,83 @@
+; RUN: mair-opt -passes="simplifygraph,locationmerge" %s | FileCheck %s
+; RUN: mair-opt -passes="simplifygraph,locationmerge" --disable-output %s
+; RUN: mair-opt -passes=locationmerge %s | FileCheck %s --check-prefix=LOCAL
+
+define void @merge_adjacent_out_of_order(ptr %p) {
+; CHECK-LABEL: mair graph of fn @merge_adjacent_out_of_order {
+; CHECK-NEXT:  bs0: preds=[], succs=[]
+; CHECK-NEXT:    read/write ptr %p, 12
+; CHECK-EMPTY:
+; CHECK-NEXT:  }
+; LOCAL-LABEL: mair graph of fn @merge_adjacent_out_of_order {
+; LOCAL:       ma1: preds=
+; LOCAL-NEXT:    read ptr %p + 8, 4
+; LOCAL:       ma2: preds=
+; LOCAL-NEXT:    read ptr %p, 4
+; LOCAL:       ma3: preds=
+; LOCAL-NEXT:    write ptr %p + 4, 4
+entry:
+  %p8 = getelementptr i8, ptr %p, i64 8
+  %v8 = load i32, ptr %p8, align 4
+  %v0 = load i32, ptr %p, align 4
+  %p4 = getelementptr i8, ptr %p, i64 4
+  store i32 %v0, ptr %p4, align 4
+  ret void
+}
+
+define void @keep_different_objects_and_gaps(ptr %p, ptr %q) {
+; CHECK-LABEL: mair graph of fn @keep_different_objects_and_gaps {
+; CHECK-NEXT:  bs0: preds=[], succs=[]
+; CHECK-DAG:     read ptr %p, 4
+; CHECK-DAG:     write ptr %p + 8, 4
+; CHECK-DAG:     read ptr %q, 4
+; CHECK-EMPTY:
+; CHECK-NEXT:  }
+entry:
+  %p0 = load i32, ptr %p, align 4
+  %p8 = getelementptr i8, ptr %p, i64 8
+  store i32 %p0, ptr %p8, align 4
+  %q0 = load i32, ptr %q, align 4
+  ret void
+}
+
+define void @keep_symbolic_locations(ptr %p, i64 %i, i64 %j) {
+; CHECK-LABEL: mair graph of fn @keep_symbolic_locations {
+; CHECK-NEXT:  bs0: preds=[], succs=[]
+; CHECK-DAG:     read ptr %p + %pi, 4
+; CHECK-DAG:     write ptr %p + %pj, 4
+; CHECK-EMPTY:
+; CHECK-NEXT:  }
+entry:
+  %pi = getelementptr i8, ptr %p, i64 %i
+  %vi = load i32, ptr %pi, align 4
+  %pj = getelementptr i8, ptr %p, i64 %j
+  store i32 %vi, ptr %pj, align 4
+  ret void
+}
+
+define void @merge_identical_symbolic_location(ptr %p, i64 %i) {
+; CHECK-LABEL: mair graph of fn @merge_identical_symbolic_location {
+; CHECK-NEXT:  bs0: preds=[], succs=[]
+; CHECK-NEXT:    read/write ptr %p + %pi, 4
+; CHECK-EMPTY:
+; CHECK-NEXT:  }
+entry:
+  %pi = getelementptr i8, ptr %p, i64 %i
+  %v = load i32, ptr %pi, align 4
+  store i32 %v, ptr %pi, align 4
+  ret void
+}
+
+define void @merge_overlapping_and_contained(ptr %p) {
+; CHECK-LABEL: mair graph of fn @merge_overlapping_and_contained {
+; CHECK-NEXT:  bs0: preds=[], succs=[]
+; CHECK-NEXT:    read/write ptr %p, 12
+; CHECK-EMPTY:
+; CHECK-NEXT:  }
+entry:
+  %wide = load i64, ptr %p, align 8
+  %narrow = load i32, ptr %p, align 4
+  %p4 = getelementptr i8, ptr %p, i64 4
+  store i64 %wide, ptr %p4, align 4
+  ret void
+}

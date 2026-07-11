@@ -323,6 +323,7 @@ public:
   bool isWrite() const { return Kind == AccessKind::Write; }
   bool isReadWrite() const { return Kind == AccessKind::ReadWrite; }
 
+  bool mergeWith(const MemoryAccess &Other);
   void mergeKind(AccessKind Other);
 
   static MemoryAccess fromInstruction(const Instruction &I,

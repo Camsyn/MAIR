@@ -2,6 +2,7 @@
 #include "MAIR/MAIR.h"
 #include "MAIR/MAIRBarrierAnalysis.h"
 #include "MAIR/MAIRDump.h"
+#include "MAIR/Transforms/CommonMAMotionPass.h"
 #include "MAIR/Transforms/RedundantObservationEliminationPass.h"
 #include "MAIR/Transforms/SimplifyGraphPass.h"
 
@@ -68,6 +69,14 @@ const Observation *findBlockEntry(const MAIRGraph &Graph,
                                   llvm::StringRef Name) {
   for (const Observation &Obs : Graph)
     if (Obs.isBasicBlockEntrySite() && Obs.getBasicBlock() &&
+        Obs.getBasicBlock()->getName() == Name)
+      return &Obs;
+  return nullptr;
+}
+
+const Observation *findBlockExit(const MAIRGraph &Graph, llvm::StringRef Name) {
+  for (const Observation &Obs : Graph)
+    if (Obs.isBasicBlockExitSite() && Obs.getBasicBlock() &&
         Obs.getBasicBlock()->getName() == Name)
       return &Obs;
   return nullptr;
@@ -1073,8 +1082,252 @@ entry:
   EXPECT_EQ(Graph.find("ma1"), nullptr);
   EXPECT_TRUE(hasSuccessor(Graph, C, A, ObsEdgeKind::PostDom));
   EXPECT_TRUE(hasSuccessor(Graph, A, D, ObsEdgeKind::Dom));
-  EXPECT_TRUE(hasSuccessor(Graph, A, E, ObsEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, A, E, ObsEdgeKind::PostDom));
   EXPECT_FALSE(hasSuccessor(Graph, A, C));
-  EXPECT_FALSE(hasSuccessor(Graph, A, E, ObsEdgeKind::PostDom));
+  EXPECT_FALSE(hasSuccessor(Graph, A, E, ObsEdgeKind::Dom));
   EXPECT_FALSE(hasSuccessor(Graph, D, A));
+}
+
+TEST(MAIRGraphPass, SimplifyGraphPreservesParallelTypedEdges) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %v = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->begin();
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  llvm::Instruction &LoadInst = *BB.begin();
+  MAIRGraph Graph(F);
+  Observation &Into = Graph.createBBObservation(BB, true);
+  Observation &From = Graph.createInstObservation(BB, LoadInst);
+  Observation &External = Graph.createBBObservation(BB, false);
+  Graph.addEdge(Into, From, ObsEdgeKind::Dom);
+  Graph.addEdge(From, Into, ObsEdgeKind::PostDom);
+  Graph.addEdge(From, External, ObsEdgeKind::Dom);
+  Graph.addEdge(From, External, ObsEdgeKind::PostDom);
+  SimplifyGraphPass Pass;
+  MAIRGraphAnalysisManager AM;
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+
+  ASSERT_TRUE(Graph.verify());
+  ASSERT_EQ(Graph.size(), 2u);
+  EXPECT_TRUE(Graph.hasEdge(Into, External, ObsEdgeKind::Dom));
+  EXPECT_TRUE(Graph.hasEdge(Into, External, ObsEdgeKind::PostDom));
+}
+
+TEST(MAIRGraphPass, SimplifyGraphUpdatesCrossBlockRepresentatives) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i1 %cond) {
+entry:
+  br i1 %cond, label %left, label %right
+left:
+  %a = load i32, ptr %p, align 4
+  ret void
+right:
+  %b = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->begin();
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  SimplifyGraphPass Pass;
+  MAIRGraphAnalysisManager AM;
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+
+  ASSERT_TRUE(Graph.verify());
+  for (const llvm::BasicBlock &BB : F) {
+    const Observation *Entry = Graph.getBBEntryRepresentative(BB);
+    const Observation *Exit = Graph.getBBExitRepresentative(BB);
+    ASSERT_NE(Entry, nullptr);
+    ASSERT_NE(Exit, nullptr);
+    EXPECT_TRUE(Entry->representsBlock(BB));
+    EXPECT_TRUE(Exit->representsBlock(BB));
+  }
+}
+
+TEST(MAIRGraph, EraseClearsBoundaryRepresentativeMaps) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f() {
+entry:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->begin();
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  MAIRGraph Graph(F);
+  Observation &Entry = Graph.createBBObservation(BB, true);
+  Graph.createBBObservation(BB, false);
+  ASSERT_EQ(Graph.getBBEntryRepresentative(BB), &Entry);
+
+  Graph.erase(Entry);
+
+  EXPECT_EQ(Graph.getBBEntryRepresentative(BB), nullptr);
+  ASSERT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraphPass, CommonMAMotionHoistsToExitAndPreservesProvenance) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(i1 %cond) {
+entry:
+  %p = alloca i32, align 4
+  br i1 %cond, label %left, label %right
+left:
+  %a = load i32, ptr %p, align 4
+  ret void
+right:
+  %b = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->begin();
+  const llvm::Instruction *LeftLoad = &*std::next(F.begin())->begin();
+  const llvm::Instruction *RightLoad = &*std::next(F.begin(), 2)->begin();
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  const llvm::Value &Alloca = *F.getEntryBlock().begin();
+  const MemoryObject *Object = Graph.getMemoryObject(Alloca);
+  ASSERT_NE(Object, nullptr);
+  EXPECT_EQ(llvm::range_size(Object->users()), 2u);
+
+  MAIRGraphAnalysisManager AM;
+  CommonMAMotionPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_FALSE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  const Observation *Target = findBlockExit(Graph, "entry");
+  ASSERT_NE(Target, nullptr);
+  ASSERT_EQ(Target->size(), 1u);
+  EXPECT_EQ(Target->begin()->getInstructions().size(), 2u);
+  EXPECT_TRUE(llvm::is_contained(Target->begin()->getInstructions(), LeftLoad));
+  EXPECT_TRUE(
+      llvm::is_contained(Target->begin()->getInstructions(), RightLoad));
+  EXPECT_EQ(llvm::range_size(Object->users()), 1u);
+  EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
+}
+
+TEST(MAIRGraphPass, CommonMAMotionSinksToEntryAndPreservesProvenance) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i1 %cond) {
+entry:
+  br i1 %cond, label %left, label %right
+left:
+  %a = load i32, ptr %p, align 4
+  br label %merge
+right:
+  %b = load i32, ptr %p, align 4
+  br label %merge
+merge:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->begin();
+  const llvm::Instruction *LeftLoad = &*std::next(F.begin())->begin();
+  const llvm::Instruction *RightLoad = &*std::next(F.begin(), 2)->begin();
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  const MemoryObject *Object = Graph.getMemoryObject(*F.getArg(0));
+  ASSERT_NE(Object, nullptr);
+  EXPECT_EQ(llvm::range_size(Object->users()), 2u);
+
+  MAIRGraphAnalysisManager AM;
+  CommonMAMotionPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_FALSE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  const Observation *Target = findBlockEntry(Graph, "merge");
+  ASSERT_NE(Target, nullptr);
+  ASSERT_EQ(Target->size(), 1u);
+  EXPECT_EQ(Target->begin()->getInstructions().size(), 2u);
+  EXPECT_TRUE(llvm::is_contained(Target->begin()->getInstructions(), LeftLoad));
+  EXPECT_TRUE(
+      llvm::is_contained(Target->begin()->getInstructions(), RightLoad));
+  EXPECT_EQ(llvm::range_size(Object->users()), 1u);
+  EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
+}
+
+TEST(MAIRGraphPass, CommonMAMotionRespectsForwardBarrierInTarget) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @barrier()
+define void @f(ptr %p, i1 %cond) {
+entry:
+  call void @barrier()
+  br i1 %cond, label %left, label %right
+left:
+  %a = load i32, ptr %p, align 4
+  ret void
+right:
+  %b = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *std::next(M->begin());
+  MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
+  MAIRGraphAnalysisManager AM;
+  CommonMAMotionPass Pass;
+
+  EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  const Observation *Target = findBlockExit(Graph, "entry");
+  ASSERT_NE(Target, nullptr);
+  EXPECT_TRUE(Target->empty());
+}
+
+TEST(MAIRGraphPass, CommonMAMotionRespectsBackwardBarrierInPredecessor) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @barrier()
+define void @f(ptr %p, i1 %cond) {
+entry:
+  call void @barrier()
+  br i1 %cond, label %left, label %right
+left:
+  %a = load i32, ptr %p, align 4
+  call void @barrier()
+  br label %merge
+right:
+  %b = load i32, ptr %p, align 4
+  br label %merge
+merge:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *std::next(M->begin());
+  MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
+  MAIRGraphAnalysisManager AM;
+  CommonMAMotionPass Pass;
+
+  EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  const Observation *Target = findBlockEntry(Graph, "merge");
+  ASSERT_NE(Target, nullptr);
+  EXPECT_TRUE(Target->empty());
 }

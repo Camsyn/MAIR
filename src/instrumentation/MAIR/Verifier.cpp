@@ -124,6 +124,7 @@ private:
   void verifyChildEdge(const Observation &From, const ObservationEdge &Edge);
   void verifyParentEdge(const Observation &To, const ObservationEdge &Edge);
   void verifyCounters();
+  void verifyBoundaryRepresentatives();
 
   unsigned countChildEdge(const Observation &From, const Observation &To,
                           ObsEdgeKind Kind) const;
@@ -137,9 +138,44 @@ bool MAIRVerifier::verify(const MAIRGraph &G) {
 
   for (const Observation &Obs : G.Observations)
     verifyObservation(Obs);
+  verifyBoundaryRepresentatives();
   verifyCounters();
 
   return !Broken;
+}
+
+void MAIRVerifier::verifyBoundaryRepresentatives() {
+  auto IsLive = [&](const Observation *Representative) {
+    return llvm::any_of(Graph->Observations, [&](const Observation &Obs) {
+      return &Obs == Representative;
+    });
+  };
+  for (const auto &Entry : Graph->BBEntryRepresentatives) {
+    const BasicBlock *BB = Entry.first;
+    const Observation *Representative = Entry.second;
+    CheckFatal(BB && Representative, "invalid BB-entry representative");
+    CheckFatal(IsLive(Representative), "BB-entry representative is not live",
+               Representative, BB);
+    Check(Representative->getParent() == Graph,
+          "BB-entry representative does not belong to graph", Representative,
+          BB);
+    Check(Representative->representsBlock(*BB),
+          "BB-entry representative does not represent its block",
+          Representative, BB);
+  }
+  for (const auto &Entry : Graph->BBExitRepresentatives) {
+    const BasicBlock *BB = Entry.first;
+    const Observation *Representative = Entry.second;
+    CheckFatal(BB && Representative, "invalid BB-exit representative");
+    CheckFatal(IsLive(Representative), "BB-exit representative is not live",
+               Representative, BB);
+    Check(Representative->getParent() == Graph,
+          "BB-exit representative does not belong to graph", Representative,
+          BB);
+    Check(Representative->representsBlock(*BB),
+          "BB-exit representative does not represent its block", Representative,
+          BB);
+  }
 }
 
 void MAIRVerifier::verifyObservation(const Observation &Obs) {

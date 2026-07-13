@@ -5,6 +5,7 @@
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/ADT/ilist_node.h"
@@ -366,6 +367,7 @@ private:
   AccessListType Accesses;
   EdgeListType Children;
   EdgeListType Parents;
+  SmallPtrSet<const BasicBlock *, 2> RepresentedBlocks;
   unsigned NumAccesses = 0;
 
 public:
@@ -389,6 +391,9 @@ public:
     return Kind == SiteKind::BasicBlockEntry;
   }
   bool isBasicBlockExitSite() const { return Kind == SiteKind::BasicBlockExit; }
+  bool representsBlock(const BasicBlock &Block) const {
+    return RepresentedBlocks.contains(&Block);
+  }
 
   const AccessListType &accesses() const { return Accesses; }
   AccessListType &accesses() { return Accesses; }
@@ -423,6 +428,7 @@ private:
   MemoryAccess &createAccess(ArrayRef<Instruction *> Insts,
                              const AbstractAccess &Access,
                              AccessKind Kind);
+  void mergeRepresentationFrom(const Observation &Other);
 };
 
 class MAIRGraph final {
@@ -443,6 +449,8 @@ private:
   SpecificBumpPtrAllocator<Observation> GraphAllocator;
   SpecificBumpPtrAllocator<MemoryObject> MemoryObjectAllocator;
   DenseMap<const Value *, MemoryObject *> MemoryObjects;
+  DenseMap<const BasicBlock *, Observation *> BBEntryRepresentatives;
+  DenseMap<const BasicBlock *, Observation *> BBExitRepresentatives;
   ObservationListType Observations;
   unsigned NumObservations = 0;
   unsigned NumEdges = 0;
@@ -499,6 +507,11 @@ public:
 
   Observation *find(StringRef Name);
   const Observation *find(StringRef Name) const;
+  Observation *getBBEntryRepresentative(const BasicBlock &BB);
+  const Observation *getBBEntryRepresentative(const BasicBlock &BB) const;
+  Observation *getBBExitRepresentative(const BasicBlock &BB);
+  const Observation *getBBExitRepresentative(const BasicBlock &BB) const;
+  void replaceObservation(Observation &From, Observation &Into);
 
   void addEdge(Observation &From, Observation &To, ObsEdgeKind Kind);
   void removeEdge(Observation &From, Observation &To);
@@ -641,7 +654,8 @@ template <> struct GraphTraits<Inverse<const mair::Observation *>> {
 };
 
 template <>
-struct GraphTraits<mair::MAIRGraph *> : public GraphTraits<mair::Observation *> {
+struct GraphTraits<mair::MAIRGraph *>
+    : public GraphTraits<mair::Observation *> {
   using nodes_iterator = pointer_iterator<mair::MAIRGraph::iterator>;
 
   static NodeRef getEntryNode(mair::MAIRGraph *G) {

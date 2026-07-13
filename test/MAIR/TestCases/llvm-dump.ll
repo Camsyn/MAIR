@@ -35,12 +35,12 @@ define void @branch_loop(i32* %p, i32* %q, i1 %c, i32 %n) {
 ; LLVM-NEXT:  [[ENTRY:.*]]:
 ; LLVM-NEXT:  ; bs0: preds=[be1(pdom)], succs=[be1(dom), bs2(dom), bs6(dom)]
 ; LLVM-NEXT:  ; be1: preds=[bs0(dom), bs6(pdom)], succs=[bs0(pdom)]
-; SIMPLIFYLLVM:       ; bs0: preds=[], succs=[bs2(dom)]
+; SIMPLIFYLLVM:       ; bs0: preds=[], succs=[bs2(dom), bs2(pdom)]
 ; LLVM-NEXT:    br i1 [[C]], label %[[THEN:.*]], label %[[LOOP:.*]]
 ; LLVM:       [[THEN]]:
 ; LLVM-NEXT:  ; bs2: preds=[ma3(pdom), bs0(dom)], succs=[ma3(dom)]
 ; LLVM-NEXT:  ; ma3: preds=[bs2(dom), ma4(pdom)], succs=[bs2(pdom), ma4(dom)]
-; SIMPLIFYLLVM:       ; bs2: preds=[bs0(dom)], succs=[]
+; SIMPLIFYLLVM:       ; bs2: preds=[bs0(dom), bs0(pdom)], succs=[]
 ; SIMPLIFYLLVM-NOT:   ; bs6:
 ; LLVM-NEXT:  ; read ptr [[P]], 4
 ; LLVM-NEXT:    [[TV:%.*]] = load i32, ptr [[P]], align 4

@@ -53,6 +53,7 @@ void mergeObservationInto(MAIRGraph &G, Observation &Into, Observation &From) {
       G.addEdge(Into, Succ, *IntoToFrom);
   }
 
+  G.replaceObservation(From, Into);
   G.erase(From);
 }
 

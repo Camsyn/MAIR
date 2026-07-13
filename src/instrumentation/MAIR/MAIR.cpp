@@ -420,7 +420,10 @@ void MemoryAccess::print(raw_ostream &OS, bool LLVM) const {
 
 Observation::Observation(StringRef N, const BasicBlock *Block,
                          const Instruction *Anchor, SiteKind K)
-    : Name(N.str()), BB(Block), AnchorInst(Anchor), Kind(K) {}
+    : Name(N.str()), BB(Block), AnchorInst(Anchor), Kind(K) {
+  if (Block)
+    RepresentedBlocks.insert(Block);
+}
 
 Observation::~Observation() { AccessAllocator.DestroyAll(); }
 
@@ -475,6 +478,10 @@ void Observation::mergeAccessesFrom(const Observation &Other) {
     addAccess(A);
 }
 
+void Observation::mergeRepresentationFrom(const Observation &Other) {
+  RepresentedBlocks.insert_range(Other.RepresentedBlocks);
+}
+
 std::string Observation::toString(bool LLVM) const {
   std::string S;
   raw_string_ostream OS(S);
@@ -503,6 +510,8 @@ MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
     : F(Other.F), GraphAllocator(std::move(Other.GraphAllocator)),
       MemoryObjectAllocator(std::move(Other.MemoryObjectAllocator)),
       MemoryObjects(std::move(Other.MemoryObjects)),
+      BBEntryRepresentatives(std::move(Other.BBEntryRepresentatives)),
+      BBExitRepresentatives(std::move(Other.BBExitRepresentatives)),
       Observations(std::move(Other.Observations)),
       NumObservations(Other.NumObservations), NumEdges(Other.NumEdges),
       NextObservationID(Other.NextObservationID) {
@@ -518,6 +527,8 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   GraphAllocator = std::move(Other.GraphAllocator);
   MemoryObjectAllocator = std::move(Other.MemoryObjectAllocator);
   MemoryObjects = std::move(Other.MemoryObjects);
+  BBEntryRepresentatives = std::move(Other.BBEntryRepresentatives);
+  BBExitRepresentatives = std::move(Other.BBExitRepresentatives);
   Observations = std::move(Other.Observations);
   NumObservations = Other.NumObservations;
   NumEdges = Other.NumEdges;
@@ -566,10 +577,12 @@ Observation &MAIRGraph::createBBObservation(const BasicBlock &BB,
                                             bool IsEntry) {
   const Instruction *Anchor =
       IsEntry ? &*BB.getFirstNonPHIIt() : BB.getTerminator();
-  return addObservation(allocateNode<Observation>(
+  Observation &Obs = addObservation(allocateNode<Observation>(
       createObservationName(IsEntry ? "bs" : "be"), &BB, Anchor,
       IsEntry ? Observation::SiteKind::BasicBlockEntry
               : Observation::SiteKind::BasicBlockExit));
+  (IsEntry ? BBEntryRepresentatives : BBExitRepresentatives)[&BB] = &Obs;
+  return Obs;
 }
 
 Observation &MAIRGraph::createInstObservation(const BasicBlock &BB,
@@ -588,6 +601,18 @@ MAIRGraph::iterator MAIRGraph::erase(Observation &Obs) {
   });
   assert(It != Observations.end() &&
          "Observation does not belong to this MAIRGraph");
+  SmallVector<const BasicBlock *, 4> EntryKeys;
+  SmallVector<const BasicBlock *, 4> ExitKeys;
+  for (const auto &Entry : BBEntryRepresentatives)
+    if (Entry.second == &Obs)
+      EntryKeys.push_back(Entry.first);
+  for (const auto &Entry : BBExitRepresentatives)
+    if (Entry.second == &Obs)
+      ExitKeys.push_back(Entry.first);
+  for (const BasicBlock *BB : EntryKeys)
+    BBEntryRepresentatives.erase(BB);
+  for (const BasicBlock *BB : ExitKeys)
+    BBExitRepresentatives.erase(BB);
   SmallVector<Observation *, 4> Succs = successors(Obs);
   SmallVector<Observation *, 4> Preds = predecessors(Obs);
   for (Observation *Succ : Succs)
@@ -606,6 +631,8 @@ void MAIRGraph::clear() {
   MemoryObjectAllocator.DestroyAll();
   Observations.clear();
   MemoryObjects.clear();
+  BBEntryRepresentatives.clear();
+  BBExitRepresentatives.clear();
   NumObservations = 0;
   NumEdges = 0;
   NextObservationID = 0;
@@ -622,10 +649,40 @@ const Observation *MAIRGraph::find(StringRef Name) const {
   return nullptr;
 }
 
+Observation *MAIRGraph::getBBEntryRepresentative(const BasicBlock &BB) {
+  return BBEntryRepresentatives.lookup(&BB);
+}
+
+const Observation *
+MAIRGraph::getBBEntryRepresentative(const BasicBlock &BB) const {
+  return BBEntryRepresentatives.lookup(&BB);
+}
+
+Observation *MAIRGraph::getBBExitRepresentative(const BasicBlock &BB) {
+  return BBExitRepresentatives.lookup(&BB);
+}
+
+const Observation *
+MAIRGraph::getBBExitRepresentative(const BasicBlock &BB) const {
+  return BBExitRepresentatives.lookup(&BB);
+}
+
+void MAIRGraph::replaceObservation(Observation &From, Observation &Into) {
+  assert(From.getParent() == this && Into.getParent() == this &&
+         "replacement observations must belong to this graph");
+  Into.mergeRepresentationFrom(From);
+  for (auto &Entry : BBEntryRepresentatives)
+    if (Entry.second == &From)
+      Entry.second = &Into;
+  for (auto &Entry : BBExitRepresentatives)
+    if (Entry.second == &From)
+      Entry.second = &Into;
+}
+
 void MAIRGraph::addEdge(Observation &From, Observation &To, ObsEdgeKind Kind) {
   assert(From.getParent() == this && To.getParent() == this &&
          "MAIRGraph edge endpoints must belong to this graph");
-  if (From.hasChild(To).has_value())
+  if (hasEdge(From, To, Kind))
     return;
   From.Children.push_back(ObservationEdge(To, Kind));
   To.Parents.push_back(ObservationEdge(From, Kind));

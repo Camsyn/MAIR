@@ -44,6 +44,9 @@ static cl::opt<bool> EmitDOT("emit-dot",
 static cl::opt<bool> DisableOutput("disable-output",
                                    cl::desc("Do not emit MAIR or LLVM output"),
                                    cl::init(false));
+static cl::opt<bool>
+    O1("O1", cl::desc("Run the standard MAIR O1 optimization pipeline"),
+       cl::init(false));
 static cl::opt<std::string> PassPipeline("passes",
                                          cl::desc("MAIRGraph pass pipeline"),
                                          cl::value_desc("pipeline"));
@@ -78,7 +81,13 @@ int main(int argc, char **argv) {
   MAIRGraphAnalysisManager GAM;
   registerMAIRGraphAnalyses(GAM, &PIC, &FAM);
   MAIRGraphPassManager GPM;
-  if (!PassPipeline.empty()) {
+  if (O1 && !PassPipeline.empty()) {
+    errs() << "-O1 cannot be combined with -passes\n";
+    return 1;
+  }
+  if (O1) {
+    buildMAIRGraphO1Pipeline(GPM);
+  } else if (!PassPipeline.empty()) {
     if (Error Err = parseMAIRGraphPassPipeline(GPM, PassPipeline)) {
       errs() << toString(std::move(Err)) << "\n";
       return 1;
@@ -124,7 +133,7 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    if (!PassPipeline.empty()) {
+    if (O1 || !PassPipeline.empty()) {
       GPM.run(Graph, GAM);
       if (!Graph.verify(&errs())) {
         errs() << "invalid MAIRGraph after pass pipeline for function "

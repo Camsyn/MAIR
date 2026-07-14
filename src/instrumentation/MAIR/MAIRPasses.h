@@ -24,6 +24,8 @@ void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
                                llvm::PassInstrumentationCallbacks *PIC,
                                llvm::FunctionAnalysisManager *FAM);
 
+void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM);
+
 llvm::Error parseMAIRGraphPassPipeline(MAIRGraphPassManager &PM,
                                        llvm::StringRef PipelineText);
 

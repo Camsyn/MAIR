@@ -48,6 +48,19 @@ void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
 #include "MAIR/PassRegistry.def"
 }
 
+void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
+  PM.addPass(SimplifyGraphPass());
+  PM.addPass(CommonMAMotionPass());
+  PM.addPass(LoopInvariantObservationMotionPass());
+  PM.addPass(LoopPeriodicObservationCombinePass());
+  PM.addPass(LocationMergePass());
+  PM.addPass(RedundantObservationEliminationPass());
+  PM.addPass(CommonMAMotionPass());
+  PM.addPass(LocationMergePass());
+  PM.addPass(RedundantObservationEliminationPass());
+  PM.addPass(SimplifyGraphPass());
+}
+
 Error parseMAIRGraphPassPipeline(MAIRGraphPassManager &PM,
                                  StringRef PipelineText) {
   SmallVector<StringRef, 8> Pipeline;
@@ -56,6 +69,11 @@ Error parseMAIRGraphPassPipeline(MAIRGraphPassManager &PM,
     PassName = PassName.trim();
     if (PassName.empty())
       continue;
+
+    if (PassName == "default<O1>") {
+      buildMAIRGraphO1Pipeline(PM);
+      continue;
+    }
 
 #define MAIR_GRAPH_PASS(NAME, CREATE_PASS)                                     \
   if (PassName == NAME) {                                                      \

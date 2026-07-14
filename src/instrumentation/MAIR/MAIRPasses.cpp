@@ -6,7 +6,7 @@
 #include "MAIR/Transforms/CommonMAMotionPass.h"
 #include "MAIR/Transforms/LocationMergePass.h"
 #include "MAIR/Transforms/LoopInvariantObservationMotionPass.h"
-#include "MAIR/Transforms/LoopRangeAggregationPass.h"
+#include "MAIR/Transforms/LoopPeriodicObservationCombinePass.h"
 #include "MAIR/Transforms/RedundantObservationEliminationPass.h"
 #include "MAIR/Transforms/SimplifyGraphPass.h"
 

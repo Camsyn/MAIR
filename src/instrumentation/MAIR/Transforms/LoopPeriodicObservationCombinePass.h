@@ -6,8 +6,8 @@
 
 namespace mair {
 
-class LoopRangeAggregationPass
-    : public llvm::PassInfoMixin<LoopRangeAggregationPass> {
+class LoopPeriodicObservationCombinePass
+    : public llvm::PassInfoMixin<LoopPeriodicObservationCombinePass> {
 public:
   llvm::PreservedAnalyses run(MAIRGraph &G, MAIRGraphAnalysisManager &AM);
 };

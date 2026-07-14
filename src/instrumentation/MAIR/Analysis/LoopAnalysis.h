@@ -10,6 +10,12 @@
 
 namespace mair {
 
+struct MAIRLoopExit {
+  llvm::BasicBlock *Exiting = nullptr;
+  llvm::BasicBlock *Exit = nullptr;
+  bool IsDedicated = false;
+};
+
 class MAIRLoopInfo {
   MAIRGraph *Graph = nullptr;
   llvm::FunctionAnalysisManager *FAM = nullptr;
@@ -26,6 +32,12 @@ public:
 
   llvm::Loop *getLoopFor(const Observation &Obs) const;
   bool isSimpleLoop(const llvm::Loop &L) const;
+  bool isValueAvailableAt(const llvm::Value &V,
+                          const ObservationSite &Site) const;
+  bool executesOncePerRelevantIteration(const Observation &Obs,
+                                        const llvm::Loop &L) const;
+  const llvm::SCEV *getExactExecutionCountSCEV(const Observation &Obs,
+                                               const llvm::Loop &L) const;
   bool isEveryIterationAccess(const MemoryAccess &Access,
                               const llvm::Loop &L) const;
   bool isGuaranteedOnLoopEntry(const MemoryAccess &Access,
@@ -34,6 +46,7 @@ public:
   llvm::Loop *getTopInvariantLoop(const MemoryAccess &Access,
                                   llvm::Loop &Start) const;
   Observation *getPreheaderExit(const llvm::Loop &L) const;
+  std::optional<MAIRLoopExit> describeUniqueExit(const llvm::Loop &L) const;
   bool hasDedicatedExit(const llvm::Loop &L) const;
   Observation *getUniqueExitEntry(const llvm::Loop &L) const;
   llvm::ScalarEvolution &getSE() const;

@@ -5,7 +5,7 @@ set(MAIR_SOURCES
   Transforms/CommonMAMotionPass.cpp
   Transforms/LocationMergePass.cpp
   Transforms/LoopInvariantObservationMotionPass.cpp
-  Transforms/LoopRangeAggregationPass.cpp
+  Transforms/LoopPeriodicObservationCombinePass.cpp
   Transforms/RedundantObservationEliminationPass.cpp
   Transforms/SimplifyGraphPass.cpp
   MAIR.cpp

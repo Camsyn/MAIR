@@ -15,6 +15,45 @@ bool isSameAccess(const MemoryAccess &LHS, const MemoryAccess &RHS) {
          LHS.getRegion() == RHS.getRegion() && LHS.getKind() == RHS.getKind();
 }
 
+bool isAbstractValueAvailableAt(const AbstractValue &Value,
+                                const ObservationSite &Site,
+                                const MAIRLoopInfo &Loops) {
+  if (Value.isConstant())
+    return true;
+  return Value.isSymbol() && Loops.isValueAvailableAt(*Value.getSymbol(), Site);
+}
+
+bool isRegionAvailableAt(const AbstractAccess &Region,
+                         const ObservationSite &Site,
+                         const MAIRLoopInfo &Loops) {
+  return Region.getBase() &&
+         Loops.isValueAvailableAt(*Region.getBase(), Site) &&
+         isAbstractValueAvailableAt(Region.getOffset(), Site, Loops) &&
+         isAbstractValueAvailableAt(Region.getSize(), Site, Loops);
+}
+
+std::optional<AnyProvenanceExecutedGuard>
+makeExecutionGuard(const MemoryAccess &Access) {
+  SmallVector<Instruction *, 4> Provenance;
+  for (Instruction *I : Access.getInstructions()) {
+    if (!I)
+      return std::nullopt;
+    if (!llvm::is_contained(Provenance, I))
+      Provenance.push_back(I);
+  }
+  if (Provenance.empty())
+    return std::nullopt;
+  return AnyProvenanceExecutedGuard(Provenance);
+}
+
+Observation *findEvent(MAIRGraph &G, const ObservationSite &Site,
+                       const ObservationGuard &Guard) {
+  for (Observation &Obs : G)
+    if (Obs.getSite() == Site && Obs.getGuard() == Guard)
+      return &Obs;
+  return nullptr;
+}
+
 void eraseAccess(MemoryAccess &Access) {
   Observation &Parent = *Access.getParent();
   auto It = llvm::find_if(Parent.accesses(), [&](MemoryAccess &Candidate) {
@@ -47,31 +86,52 @@ bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops) {
     return false;
 
   for (Observation &Obs : G) {
+    if (!Obs.hasAlwaysGuard())
+      continue;
     Loop *L = Loops.getLoopFor(Obs);
     if (!L || !Loops.isSimpleLoop(*L))
       continue;
 
     for (MemoryAccess &Access : Obs) {
-      // First prove that the access executes on every loop entry and that its
-      // complete MAIR location is invariant in the highest enclosing simple
-      // loop. Only then move it to that loop's existing preheader point.
-      if (!Loops.isEveryIterationAccess(Access, *L))
-        continue;
-      if (!Loops.isLoopInvariant(Access, *L))
+      const AbstractAccess *Region = Access.getContiguousRegion();
+      if (!Region || !Loops.isLoopInvariant(Access, *L))
         continue;
 
       Loop *Top = Loops.getTopInvariantLoop(Access, *L);
       if (!Top)
         continue;
-      if (!Loops.isGuaranteedOnLoopEntry(Access, *Top))
+
+      if (Loops.isGuaranteedOnLoopEntry(Access, *Top)) {
+        Observation *Target = Loops.getPreheaderExit(*Top);
+        if (!Target || Target == &Obs ||
+            !isRegionAvailableAt(*Region, Target->getSite(), Loops))
+          continue;
+        moveAccessTo(Access, *Target);
+        return true;
+      }
+
+      std::optional<MAIRLoopExit> Exit = Loops.describeUniqueExit(*Top);
+      std::optional<AnyProvenanceExecutedGuard> ExecutionGuard =
+          makeExecutionGuard(Access);
+      if (!Exit || !ExecutionGuard)
         continue;
 
-      Observation *Target = Loops.getPreheaderExit(*Top);
-      if (!Target || Target == &Obs)
+      ObservationSite TargetSite;
+      if (Exit->IsDedicated) {
+        Observation *ExitEntry = G.getBBEntryRepresentative(*Exit->Exit);
+        if (!ExitEntry)
+          continue;
+        TargetSite = ExitEntry->getSite();
+      } else {
+        TargetSite = ObservationSite::edge(*Exit->Exiting, *Exit->Exit);
+      }
+      if (!isRegionAvailableAt(*Region, TargetSite, Loops))
         continue;
 
-      // CFG-changing exit and indicator cases are intentionally not modeled by
-      // this graph-only pass; they require the later instantiate layer.
+      ObservationGuard Guard = std::move(*ExecutionGuard);
+      Observation *Target = findEvent(G, TargetSite, Guard);
+      if (!Target)
+        Target = &G.createObservation(TargetSite, Guard);
       moveAccessTo(Access, *Target);
       return true;
     }

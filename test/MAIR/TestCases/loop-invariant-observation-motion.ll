@@ -56,11 +56,13 @@ exit:
   ret void
 }
 
-define void @keep_branch_only(ptr %p, i32 %n, i1 %cond) {
-; CHECK-LABEL: mair graph of fn @keep_branch_only {
+define void @sink_branch_only(ptr %p, i32 %n, i1 %cond) {
+; CHECK-LABEL: mair graph of fn @sink_branch_only {
 ; CHECK:       be1: preds=
 ; CHECK-EMPTY:
 ; CHECK:       ma7: preds=
+; CHECK-EMPTY:
+; CHECK:       va13: site=bb.entry(%exit), guard=any(%v), preds=[], succs=[]
 ; CHECK-NEXT:    read ptr %p, 4
 entry:
   br label %header
@@ -85,11 +87,13 @@ exit:
   ret void
 }
 
-define void @keep_zero_trip_body(ptr %p, i32 %n) {
-; CHECK-LABEL: mair graph of fn @keep_zero_trip_body {
+define void @sink_zero_trip_body(ptr %p, i32 %n) {
+; CHECK-LABEL: mair graph of fn @sink_zero_trip_body {
 ; CHECK:       be1: preds=
 ; CHECK-EMPTY:
 ; CHECK:       ma5: preds=
+; CHECK-EMPTY:
+; CHECK:       va9: site=bb.entry(%exit), guard=any(%v), preds=[], succs=[]
 ; CHECK-NEXT:    read ptr %p, 4
 entry:
   br label %header
@@ -101,6 +105,39 @@ header:
 
 body:
   %v = load i32, ptr %p, align 4
+  %next = add i32 %i, 1
+  br label %header
+
+exit:
+  ret void
+}
+
+define void @sink_branch_to_shared_exit(ptr %p, i32 %n, i1 %cond,
+                                        i1 %bypass) {
+; CHECK-LABEL: mair graph of fn @sink_branch_to_shared_exit {
+; CHECK:       ma9: preds=
+; CHECK-EMPTY:
+; CHECK:       ve15: site=edge(%header -> %exit), guard=any(%v), preds=[], succs=[]
+; CHECK-NEXT:    read ptr %p, 4
+entry:
+  br i1 %bypass, label %exit, label %preheader
+
+preheader:
+  br label %header
+
+header:
+  %i = phi i32 [ 0, %preheader ], [ %next, %latch ]
+  %more = icmp slt i32 %i, %n
+  br i1 %more, label %body, label %exit
+
+body:
+  br i1 %cond, label %then, label %latch
+
+then:
+  %v = load i32, ptr %p, align 4
+  br label %latch
+
+latch:
   %next = add i32 %i, 1
   br label %header
 

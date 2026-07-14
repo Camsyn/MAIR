@@ -6,8 +6,8 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/DOTGraphTraits.h"
-#include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/GraphWriter.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -23,6 +23,8 @@ static StringRef getObservationSiteKindName(Observation::SiteKind Kind) {
     return "bb.entry";
   case Observation::SiteKind::BasicBlockExit:
     return "bb.exit";
+  case Observation::SiteKind::Edge:
+    return "edge";
   }
   llvm_unreachable("unknown MAIR observation site kind");
 }
@@ -82,6 +84,25 @@ struct DOTGraphTraits<const mair::MAIRGraph *> : public DefaultDOTGraphTraits {
     OS << mair::getObservationSiteKindName(Obs->getSiteKind());
     if (const BasicBlock *BB = Obs->getBasicBlock())
       OS << " in " << BB->getName();
+    if (Obs->isEdgeSite() || !Obs->hasAlwaysGuard()) {
+      OS << "\\n";
+      Obs->getSite().print(OS);
+    }
+    if (const auto *Guard =
+            std::get_if<mair::AnyProvenanceExecutedGuard>(&Obs->getGuard())) {
+      OS << "\\nguard=any(";
+      bool First = true;
+      for (const Instruction *I : Guard->getProvenance()) {
+        if (!First)
+          OS << ", ";
+        if (I)
+          I->printAsOperand(OS, false);
+        else
+          OS << "null";
+        First = false;
+      }
+      OS << ")";
+    }
     for (const mair::MemoryAccess &Access : Obs->accesses())
       OS << "\\n" << Access.toString();
     return OS.str();
@@ -96,6 +117,8 @@ struct DOTGraphTraits<const mair::MAIRGraph *> : public DefaultDOTGraphTraits {
       return "style=filled, fillcolor=lightcyan";
     case mair::Observation::SiteKind::BasicBlockExit:
       return "style=filled, fillcolor=lightgray";
+    case mair::Observation::SiteKind::Edge:
+      return "style=filled, fillcolor=mistyrose";
     }
     llvm_unreachable("unknown MAIR observation site kind");
   }
@@ -146,13 +169,14 @@ static const Module &getModuleForDump(ArrayRef<const MAIRGraph *> Graphs) {
   return *M;
 }
 
-void MAIRLLVMWriter::emitAnchoredObservations(
-    const Instruction *I, formatted_raw_ostream &OS) const {
+void MAIRLLVMWriter::emitAnchoredObservations(const Instruction *I,
+                                              formatted_raw_ostream &OS) const {
   const MAIRGraph *Graph = findGraph(I->getFunction());
   if (!Graph)
     return;
   for (const Observation &Obs : *Graph)
-    if (Obs.getAnchor() == I)
+    if (Obs.getAnchor() == I || (Obs.isEdgeSite() && Obs.getEdgeFrom() &&
+                                 Obs.getEdgeFrom()->getTerminator() == I))
       emitObservationLine(Obs, OS);
 }
 

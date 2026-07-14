@@ -4,10 +4,8 @@
 
 define void @merge_adjacent_out_of_order(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @merge_adjacent_out_of_order {
-; CHECK-NEXT:  bs0: preds=[], succs=[]
+; CHECK:       ma1: preds=
 ; CHECK-NEXT:    read/write ptr %p, 12
-; CHECK-EMPTY:
-; CHECK-NEXT:  }
 ; LOCAL-LABEL: mair graph of fn @merge_adjacent_out_of_order {
 ; LOCAL:       ma1: preds=
 ; LOCAL-NEXT:    read ptr %p + 8, 4
@@ -26,12 +24,10 @@ entry:
 
 define void @keep_different_objects_and_gaps(ptr %p, ptr %q) {
 ; CHECK-LABEL: mair graph of fn @keep_different_objects_and_gaps {
-; CHECK-NEXT:  bs0: preds=[], succs=[]
+; CHECK:       ma1: preds=
 ; CHECK-DAG:     read ptr %p, 4
 ; CHECK-DAG:     write ptr %p + 8, 4
 ; CHECK-DAG:     read ptr %q, 4
-; CHECK-EMPTY:
-; CHECK-NEXT:  }
 entry:
   %p0 = load i32, ptr %p, align 4
   %p8 = getelementptr i8, ptr %p, i64 8
@@ -42,11 +38,9 @@ entry:
 
 define void @keep_symbolic_locations(ptr %p, i64 %i, i64 %j) {
 ; CHECK-LABEL: mair graph of fn @keep_symbolic_locations {
-; CHECK-NEXT:  bs0: preds=[], succs=[]
+; CHECK:       ma1: preds=
 ; CHECK-DAG:     read ptr %p + %pi, 4
 ; CHECK-DAG:     write ptr %p + %pj, 4
-; CHECK-EMPTY:
-; CHECK-NEXT:  }
 entry:
   %pi = getelementptr i8, ptr %p, i64 %i
   %vi = load i32, ptr %pi, align 4
@@ -57,10 +51,8 @@ entry:
 
 define void @merge_identical_symbolic_location(ptr %p, i64 %i) {
 ; CHECK-LABEL: mair graph of fn @merge_identical_symbolic_location {
-; CHECK-NEXT:  bs0: preds=[], succs=[]
+; CHECK:       ma1: preds=
 ; CHECK-NEXT:    read/write ptr %p + %pi, 4
-; CHECK-EMPTY:
-; CHECK-NEXT:  }
 entry:
   %pi = getelementptr i8, ptr %p, i64 %i
   %v = load i32, ptr %pi, align 4
@@ -70,10 +62,8 @@ entry:
 
 define void @merge_overlapping_and_contained(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @merge_overlapping_and_contained {
-; CHECK-NEXT:  bs0: preds=[], succs=[]
+; CHECK:       ma1: preds=
 ; CHECK-NEXT:    read/write ptr %p, 12
-; CHECK-EMPTY:
-; CHECK-NEXT:  }
 entry:
   %wide = load i64, ptr %p, align 8
   %narrow = load i32, ptr %p, align 4

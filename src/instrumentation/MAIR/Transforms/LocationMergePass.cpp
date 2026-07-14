@@ -14,8 +14,9 @@ namespace {
 using AccessGroup = SmallVector<MemoryAccess *, 8>;
 
 bool hasConcreteRange(const MemoryAccess &Access) {
-  const AbstractAccess &Location = Access.getAccess();
-  return Location.getOffset().isConstant() && Location.getSize().isConstant();
+  const AbstractAccess *Location = Access.getContiguousRegion();
+  return Location && Location->getOffset().isConstant() &&
+         Location->getSize().isConstant();
 }
 
 void eraseAccess(Observation &Obs, MemoryAccess &Access) {
@@ -29,22 +30,23 @@ void eraseAccess(Observation &Obs, MemoryAccess &Access) {
 bool mergeLocations(Observation &Obs) {
   DenseMap<MemoryObject *, AccessGroup> Groups;
   for (MemoryAccess &Access : Obs)
-    Groups[&Access.getMemoryObject()].push_back(&Access);
+    if (Access.isContiguous())
+      Groups[&Access.getMemoryObject()].push_back(&Access);
 
   bool Changed = false;
   for (auto &Entry : Groups) {
     AccessGroup &Accesses = Entry.second;
-    llvm::stable_sort(Accesses,
-                      [](const MemoryAccess *LHS, const MemoryAccess *RHS) {
-                        bool LConcrete = hasConcreteRange(*LHS);
-                        bool RConcrete = hasConcreteRange(*RHS);
-                        if (LConcrete != RConcrete)
-                          return LConcrete;
-                        if (!LConcrete)
-                          return false;
-                        return LHS->getAccess().getOffset().getConstant() <
-                               RHS->getAccess().getOffset().getConstant();
-                      });
+    llvm::stable_sort(
+        Accesses, [](const MemoryAccess *LHS, const MemoryAccess *RHS) {
+          bool LConcrete = hasConcreteRange(*LHS);
+          bool RConcrete = hasConcreteRange(*RHS);
+          if (LConcrete != RConcrete)
+            return LConcrete;
+          if (!LConcrete)
+            return false;
+          return LHS->getContiguousRegion()->getOffset().getConstant() <
+                 RHS->getContiguousRegion()->getOffset().getConstant();
+        });
 
     size_t ConcreteEnd = llvm::find_if(Accesses,
                                        [](const MemoryAccess *Access) {
@@ -69,7 +71,7 @@ bool mergeLocations(Observation &Obs) {
       Current = Accesses[I];
       for (size_t J = I + 1; J < Accesses.size();) {
         MemoryAccess *Next = Accesses[J];
-        if (Current->getAccess() != Next->getAccess()) {
+        if (*Current->getContiguousRegion() != *Next->getContiguousRegion()) {
           ++J;
           continue;
         }

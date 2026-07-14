@@ -1,11 +1,12 @@
 #pragma once
 
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/GraphTraits.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/ADT/ilist_node.h"
@@ -19,6 +20,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/Type.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -28,6 +30,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -42,6 +45,9 @@ class MemoryAccess;
 class MemoryObject;
 class MemoryUse;
 class Observation;
+class MAIRScalarExpr;
+struct MAIRScalarExprNode;
+struct MAIRScalarExprOwner;
 
 enum class AccessKind : uint8_t { Read = 1, Write = 2, ReadWrite = 3 };
 enum class ObsEdgeKind : uint8_t { Dom, PostDom };
@@ -68,9 +74,7 @@ public:
   bool isSymbol() const {
     return std::holds_alternative<const Value *>(Storage);
   }
-  bool isConstant() const {
-    return std::holds_alternative<uint64_t>(Storage);
-  }
+  bool isConstant() const { return std::holds_alternative<uint64_t>(Storage); }
   const Value *getSymbol() const {
     assert(isSymbol() && "abstract value is not symbolic");
     return std::get<const Value *>(Storage);
@@ -104,8 +108,7 @@ public:
 
   bool contains(const AbstractAccess &Other) const;
 
-  static AbstractAccess fromPointerAndSize(const Value &Ptr,
-                                           AbstractValue Size,
+  static AbstractAccess fromPointerAndSize(const Value &Ptr, AbstractValue Size,
                                            const DataLayout &DL);
   static std::optional<AbstractAccess> merge(const AbstractAccess &A,
                                              const AbstractAccess &B);
@@ -119,6 +122,165 @@ public:
 
   void print(raw_ostream &OS) const;
 };
+
+/// A physical placement for one observation event. Edge sites remain virtual
+/// until instantiate() creates a dedicated CFG block in a later stage.
+class ObservationSite {
+public:
+  enum class Kind : uint8_t {
+    MemoryInst,
+    BasicBlockEntry,
+    BasicBlockExit,
+    Edge
+  };
+
+private:
+  Kind SiteKind = Kind::MemoryInst;
+  const BasicBlock *BB = nullptr;
+  const Instruction *Anchor = nullptr;
+  const BasicBlock *From = nullptr;
+  const BasicBlock *To = nullptr;
+
+public:
+  ObservationSite() = default;
+
+  static ObservationSite anchored(const BasicBlock *BB,
+                                  const Instruction *Anchor, Kind K);
+  static ObservationSite edge(const BasicBlock &From, const BasicBlock &To);
+
+  Kind getKind() const { return SiteKind; }
+  bool isAnchored() const { return SiteKind != Kind::Edge; }
+  bool isEdge() const { return SiteKind == Kind::Edge; }
+  const BasicBlock *getBasicBlock() const {
+    return isAnchored() ? BB : nullptr;
+  }
+  const Instruction *getAnchor() const {
+    return isAnchored() ? Anchor : nullptr;
+  }
+  const BasicBlock *getEdgeFrom() const { return isEdge() ? From : nullptr; }
+  const BasicBlock *getEdgeTo() const { return isEdge() ? To : nullptr; }
+
+  bool operator==(const ObservationSite &Other) const {
+    return SiteKind == Other.SiteKind && BB == Other.BB &&
+           Anchor == Other.Anchor && From == Other.From && To == Other.To;
+  }
+  bool operator!=(const ObservationSite &Other) const {
+    return !(*this == Other);
+  }
+
+  void print(raw_ostream &OS) const;
+};
+
+/// Execute the observation whenever control reaches its site.
+struct AlwaysGuard {
+  bool operator==(const AlwaysGuard &) const { return true; }
+  bool operator!=(const AlwaysGuard &) const { return false; }
+};
+
+/// Execute only if at least one represented source instruction ran. The
+/// instruction list has set semantics; storage order is retained for dumps.
+class AnyProvenanceExecutedGuard {
+  SmallVector<Instruction *, 2> Provenance;
+
+public:
+  AnyProvenanceExecutedGuard() = default;
+  explicit AnyProvenanceExecutedGuard(ArrayRef<Instruction *> Instructions)
+      : Provenance(Instructions) {}
+
+  ArrayRef<Instruction *> getProvenance() const { return Provenance; }
+  bool operator==(const AnyProvenanceExecutedGuard &Other) const;
+  bool operator!=(const AnyProvenanceExecutedGuard &Other) const {
+    return !(*this == Other);
+  }
+};
+
+using ObservationGuard = std::variant<AlwaysGuard, AnyProvenanceExecutedGuard>;
+
+/// An immutable handle into a MAIRGraph-owned typed expression arena.
+/// Expressions store materializable semantics, never Loop or SCEV objects.
+class MAIRScalarExpr {
+public:
+  enum class Kind : uint8_t {
+    Constant,
+    LLVMValue,
+    Add,
+    Mul,
+    UDiv,
+    Truncate,
+    ZeroExtend,
+    SignExtend,
+    SMin,
+    UMin,
+    SMax,
+    UMax,
+  };
+
+private:
+  const MAIRScalarExprNode *Node = nullptr;
+
+  explicit MAIRScalarExpr(const MAIRScalarExprNode &N) : Node(&N) {}
+
+public:
+  MAIRScalarExpr() = default;
+
+  bool isValid() const { return Node != nullptr; }
+  Kind getKind() const;
+  Type *getType() const;
+  const APInt &getConstant() const;
+  const Value *getLLVMValue() const;
+  ArrayRef<MAIRScalarExpr> operands() const;
+  const void *getOpaqueNode() const { return Node; }
+
+  bool operator==(const MAIRScalarExpr &Other) const;
+  bool operator!=(const MAIRScalarExpr &Other) const {
+    return !(*this == Other);
+  }
+
+  void print(raw_ostream &OS, bool Signed = false) const;
+
+private:
+  friend class MAIRGraph;
+  friend class MAIRVerifier;
+  friend struct PeriodicRegion;
+
+  const MAIRScalarExprOwner *getOwner() const;
+};
+
+/// The bytes touched by Start + i * Stride for 0 <= i < TripCount.
+/// Base is only the canonical MemoryObject identity; Start is the complete
+/// address of iteration zero. A zero TripCount denotes the empty region.
+struct PeriodicRegion {
+  const Value *Base = nullptr;
+  MAIRScalarExpr Start;
+  MAIRScalarExpr Stride;
+  MAIRScalarExpr AccessSize;
+  MAIRScalarExpr TripCount;
+
+  PeriodicRegion() = default;
+  PeriodicRegion(const Value *B, MAIRScalarExpr S, MAIRScalarExpr Step,
+                 MAIRScalarExpr Size, MAIRScalarExpr Trips)
+      : Base(B), Start(S), Stride(Step), AccessSize(Size), TripCount(Trips) {}
+
+  const Value *getBase() const { return Base; }
+  const MAIRScalarExpr &getStart() const { return Start; }
+  const MAIRScalarExpr &getStride() const { return Stride; }
+  const MAIRScalarExpr &getAccessSize() const { return AccessSize; }
+  const MAIRScalarExpr &getTripCount() const { return TripCount; }
+
+  bool operator==(const PeriodicRegion &Other) const {
+    return Base == Other.Base && Start == Other.Start &&
+           Stride == Other.Stride && AccessSize == Other.AccessSize &&
+           TripCount == Other.TripCount;
+  }
+  bool operator!=(const PeriodicRegion &Other) const {
+    return !(*this == Other);
+  }
+
+  void print(raw_ostream &OS) const;
+};
+
+/// A contiguous or explicitly periodic memory-access region.
+using MemoryRegion = std::variant<AbstractAccess, PeriodicRegion>;
 
 class ObservationEdge {
   Observation *Node = nullptr;
@@ -296,7 +458,7 @@ class MemoryAccess final
     : public ilist_node_with_parent<MemoryAccess, Observation,
                                     ilist_parent<Observation>> {
   SmallVector<Instruction *, 2> Insts;
-  AbstractAccess Access;
+  MemoryRegion Region;
   AccessKind Kind = AccessKind::Read;
   /// Fixed base operand, analogous to a single llvm::User operand.
   MemoryUse BaseUse;
@@ -304,7 +466,10 @@ class MemoryAccess final
 public:
   MemoryAccess() = default;
   MemoryAccess(ArrayRef<Instruction *> I, AbstractAccess A, AccessKind K)
-      : Insts(I.begin(), I.end()), Access(A), Kind(K), BaseUse(*this) {}
+      : MemoryAccess(I, MemoryRegion(std::move(A)), K) {}
+  MemoryAccess(ArrayRef<Instruction *> I, MemoryRegion R, AccessKind K)
+      : Insts(I.begin(), I.end()), Region(std::move(R)), Kind(K),
+        BaseUse(*this) {}
 
   MemoryAccess(const MemoryAccess &) = delete;
   MemoryAccess &operator=(const MemoryAccess &) = delete;
@@ -315,7 +480,19 @@ public:
   const Instruction *getInstruction() const {
     return Insts.empty() ? nullptr : Insts.front();
   }
-  const AbstractAccess &getAccess() const { return Access; }
+  const MemoryRegion &getRegion() const { return Region; }
+  const AbstractAccess *getContiguousRegion() const {
+    return std::get_if<AbstractAccess>(&Region);
+  }
+  const PeriodicRegion *getPeriodicRegion() const {
+    return std::get_if<PeriodicRegion>(&Region);
+  }
+  bool isContiguous() const {
+    return std::holds_alternative<AbstractAccess>(Region);
+  }
+  bool isPeriodic() const {
+    return std::holds_alternative<PeriodicRegion>(Region);
+  }
   MemoryObject &getMemoryObject() {
     assert(BaseUse.get() && "MAIR memory access has no memory object");
     return *BaseUse.get();
@@ -325,7 +502,7 @@ public:
     return *BaseUse.get();
   }
   const MemoryUse &getBaseUse() const { return BaseUse; }
-  const Value *getBase() const { return Access.getBase(); }
+  const Value *getBase() const;
   AccessKind getKind() const { return Kind; }
   bool isRead() const { return Kind == AccessKind::Read; }
   bool isWrite() const { return Kind == AccessKind::Write; }
@@ -352,7 +529,7 @@ class Observation final
     : public ilist_node_with_parent<Observation, MAIRGraph,
                                     ilist_parent<MAIRGraph>> {
 public:
-  enum class SiteKind : uint8_t { MemoryInst, BasicBlockEntry, BasicBlockExit };
+  using SiteKind = ObservationSite::Kind;
   using AccessListType = simple_ilist<MemoryAccess, ilist_parent<Observation>>;
   using iterator = AccessListType::iterator;
   using const_iterator = AccessListType::const_iterator;
@@ -360,9 +537,8 @@ public:
 
 private:
   std::string Name;
-  const BasicBlock *BB = nullptr;
-  const Instruction *AnchorInst = nullptr;
-  SiteKind Kind = SiteKind::MemoryInst;
+  ObservationSite Site;
+  ObservationGuard Guard = AlwaysGuard{};
   SpecificBumpPtrAllocator<MemoryAccess> AccessAllocator;
   AccessListType Accesses;
   EdgeListType Children;
@@ -374,6 +550,7 @@ public:
   Observation() = default;
   Observation(StringRef N, const BasicBlock *Block, const Instruction *Anchor,
               SiteKind K = SiteKind::MemoryInst);
+  Observation(StringRef N, ObservationSite S, ObservationGuard G);
   ~Observation();
 
   Observation(const Observation &) = delete;
@@ -382,15 +559,30 @@ public:
   Observation &operator=(Observation &&) = delete;
 
   StringRef getName() const { return Name; }
-  const BasicBlock *getBasicBlock() const { return BB; }
-  const Instruction *getAnchor() const { return AnchorInst; }
-  SiteKind getSiteKind() const { return Kind; }
+  const ObservationSite &getSite() const { return Site; }
+  const ObservationGuard &getGuard() const { return Guard; }
+  const BasicBlock *getBasicBlock() const { return Site.getBasicBlock(); }
+  const Instruction *getAnchor() const { return Site.getAnchor(); }
+  const BasicBlock *getEdgeFrom() const { return Site.getEdgeFrom(); }
+  const BasicBlock *getEdgeTo() const { return Site.getEdgeTo(); }
+  SiteKind getSiteKind() const { return Site.getKind(); }
 
-  bool isMemoryInstSite() const { return Kind == SiteKind::MemoryInst; }
-  bool isBasicBlockEntrySite() const {
-    return Kind == SiteKind::BasicBlockEntry;
+  bool isMemoryInstSite() const {
+    return getSiteKind() == SiteKind::MemoryInst;
   }
-  bool isBasicBlockExitSite() const { return Kind == SiteKind::BasicBlockExit; }
+  bool isBasicBlockEntrySite() const {
+    return getSiteKind() == SiteKind::BasicBlockEntry;
+  }
+  bool isBasicBlockExitSite() const {
+    return getSiteKind() == SiteKind::BasicBlockExit;
+  }
+  bool isEdgeSite() const { return Site.isEdge(); }
+  bool hasAlwaysGuard() const {
+    return std::holds_alternative<AlwaysGuard>(Guard);
+  }
+  bool hasExecutionGuard() const {
+    return std::holds_alternative<AnyProvenanceExecutedGuard>(Guard);
+  }
   bool representsBlock(const BasicBlock &Block) const {
     return RepresentedBlocks.contains(&Block);
   }
@@ -407,6 +599,9 @@ public:
   unsigned size() const { return NumAccesses; }
   std::optional<ObsEdgeKind> hasChild(const Observation &Obs);
   std::optional<ObsEdgeKind> hasParent(const Observation &Obs);
+  /// Merging preserves execution semantics only for equal guards and equal
+  /// anchored kinds, or for observations on the exact same CFG edge.
+  bool hasCompatibleMergeSemantics(const Observation &Other) const;
 
   MemoryAccess &addAccess(const MemoryAccess &A);
   iterator erase(iterator It);
@@ -426,8 +621,7 @@ private:
     return &Observation::Accesses;
   }
   MemoryAccess &createAccess(ArrayRef<Instruction *> Insts,
-                             const AbstractAccess &Access,
-                             AccessKind Kind);
+                             const MemoryRegion &Region, AccessKind Kind);
   void mergeRepresentationFrom(const Observation &Other);
 };
 
@@ -448,6 +642,8 @@ private:
   const Function *F = nullptr;
   SpecificBumpPtrAllocator<Observation> GraphAllocator;
   SpecificBumpPtrAllocator<MemoryObject> MemoryObjectAllocator;
+  std::unique_ptr<MAIRScalarExprOwner> ScalarExprOwner;
+  SpecificBumpPtrAllocator<MAIRScalarExprNode> ScalarExprAllocator;
   DenseMap<const Value *, MemoryObject *> MemoryObjects;
   DenseMap<const BasicBlock *, Observation *> BBEntryRepresentatives;
   DenseMap<const BasicBlock *, Observation *> BBExitRepresentatives;
@@ -457,7 +653,7 @@ private:
   unsigned NextObservationID = 0;
 
 public:
-  MAIRGraph() = default;
+  MAIRGraph();
   explicit MAIRGraph(const Function &Func);
   MAIRGraph(const MAIRGraph &) = delete;
   MAIRGraph &operator=(const MAIRGraph &) = delete;
@@ -501,6 +697,20 @@ public:
   Observation &createBBObservation(const BasicBlock &BB, bool IsEntry);
   Observation &createInstObservation(const BasicBlock &BB,
                                      const Instruction &Anchor);
+  /// Create an additional semantic event without changing boundary maps.
+  Observation &createObservation(ObservationSite Site,
+                                 ObservationGuard Guard = AlwaysGuard{});
+  Observation &createEdgeObservation(const BasicBlock &From,
+                                     const BasicBlock &To,
+                                     ObservationGuard Guard = AlwaysGuard{});
+
+  MAIRScalarExpr createConstantExpr(Type &Ty, const APInt &Value);
+  MAIRScalarExpr createValueExpr(const Value &Value);
+  MAIRScalarExpr createUnaryExpr(MAIRScalarExpr::Kind Kind, Type &ResultType,
+                                 MAIRScalarExpr Operand);
+  MAIRScalarExpr createBinaryExpr(MAIRScalarExpr::Kind Kind, Type &ResultType,
+                                  MAIRScalarExpr LHS, MAIRScalarExpr RHS);
+  bool ownsScalarExpr(MAIRScalarExpr Expr) const;
 
   iterator erase(Observation &Obs);
   void clear();

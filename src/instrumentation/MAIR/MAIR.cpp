@@ -1,6 +1,7 @@
 #include "MAIR/MAIR.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/BasicBlock.h"
@@ -15,6 +16,23 @@
 using namespace llvm;
 
 namespace mair {
+
+struct MAIRScalarExprOwner {};
+
+struct MAIRScalarExprNode {
+  const MAIRScalarExprOwner *Owner = nullptr;
+  MAIRScalarExpr::Kind Kind = MAIRScalarExpr::Kind::Constant;
+  Type *ResultType = nullptr;
+  APInt Constant = APInt(1, 0);
+  const Value *LLVMValue = nullptr;
+  SmallVector<MAIRScalarExpr, 2> Operands;
+
+  MAIRScalarExprNode(const MAIRScalarExprOwner &O, MAIRScalarExpr::Kind K,
+                     Type &Ty, const APInt &C, const Value *V,
+                     ArrayRef<MAIRScalarExpr> Ops)
+      : Owner(&O), Kind(K), ResultType(&Ty), Constant(C), LLVMValue(V),
+        Operands(Ops) {}
+};
 
 namespace {
 const Instruction *getBarrierRangeStart(const Observation &Obs) {
@@ -222,6 +240,200 @@ static void printEdgeList(raw_ostream &OS, ArrayRef<ObservationEdge> Edges) {
 
 } // namespace
 
+ObservationSite ObservationSite::anchored(const BasicBlock *BB,
+                                          const Instruction *Anchor, Kind K) {
+  assert(K != Kind::Edge && "an anchored site cannot have edge kind");
+  ObservationSite Site;
+  Site.SiteKind = K;
+  Site.BB = BB;
+  Site.Anchor = Anchor;
+  return Site;
+}
+
+ObservationSite ObservationSite::edge(const BasicBlock &From,
+                                      const BasicBlock &To) {
+  ObservationSite Site;
+  Site.SiteKind = Kind::Edge;
+  Site.From = &From;
+  Site.To = &To;
+  return Site;
+}
+
+void ObservationSite::print(raw_ostream &OS) const {
+  if (!isEdge()) {
+    switch (SiteKind) {
+    case Kind::MemoryInst:
+      OS << "memory(";
+      break;
+    case Kind::BasicBlockEntry:
+      OS << "bb.entry(";
+      break;
+    case Kind::BasicBlockExit:
+      OS << "bb.exit(";
+      break;
+    case Kind::Edge:
+      llvm_unreachable("handled edge observation site");
+    }
+    if (BB)
+      BB->printAsOperand(OS, false);
+    else
+      OS << "null";
+    if (SiteKind == Kind::MemoryInst) {
+      OS << ", ";
+      if (Anchor)
+        Anchor->printAsOperand(OS, false);
+      else
+        OS << "null";
+    }
+    OS << ")";
+    return;
+  }
+  OS << "edge(";
+  if (From)
+    From->printAsOperand(OS, false);
+  else
+    OS << "null";
+  OS << " -> ";
+  if (To)
+    To->printAsOperand(OS, false);
+  else
+    OS << "null";
+  OS << ")";
+}
+
+bool AnyProvenanceExecutedGuard::operator==(
+    const AnyProvenanceExecutedGuard &Other) const {
+  if (Provenance.size() != Other.Provenance.size())
+    return false;
+  return llvm::all_of(Provenance, [&](const Instruction *I) {
+    return llvm::is_contained(Other.Provenance, I);
+  });
+}
+
+MAIRScalarExpr::Kind MAIRScalarExpr::getKind() const {
+  assert(Node && "invalid MAIR scalar expression");
+  return Node->Kind;
+}
+
+Type *MAIRScalarExpr::getType() const {
+  assert(Node && "invalid MAIR scalar expression");
+  return Node->ResultType;
+}
+
+const APInt &MAIRScalarExpr::getConstant() const {
+  assert(Node && Node->Kind == Kind::Constant &&
+         "MAIR scalar expression is not a constant");
+  return Node->Constant;
+}
+
+const Value *MAIRScalarExpr::getLLVMValue() const {
+  assert(Node && Node->Kind == Kind::LLVMValue &&
+         "MAIR scalar expression is not an LLVM value");
+  return Node->LLVMValue;
+}
+
+ArrayRef<MAIRScalarExpr> MAIRScalarExpr::operands() const {
+  assert(Node && "invalid MAIR scalar expression");
+  return Node->Operands;
+}
+
+const MAIRScalarExprOwner *MAIRScalarExpr::getOwner() const {
+  return Node ? Node->Owner : nullptr;
+}
+
+bool MAIRScalarExpr::operator==(const MAIRScalarExpr &Other) const {
+  if (Node == Other.Node)
+    return true;
+  if (!Node || !Other.Node || Node->Kind != Other.Node->Kind ||
+      Node->ResultType != Other.Node->ResultType ||
+      Node->LLVMValue != Other.Node->LLVMValue ||
+      Node->Operands.size() != Other.Node->Operands.size())
+    return false;
+  if (Node->Kind == Kind::Constant && Node->Constant != Other.Node->Constant)
+    return false;
+  for (size_t I = 0; I < Node->Operands.size(); ++I)
+    if (Node->Operands[I] != Other.Node->Operands[I])
+      return false;
+  return true;
+}
+
+void MAIRScalarExpr::print(raw_ostream &OS, bool Signed) const {
+  if (!Node) {
+    OS << "<invalid>";
+    return;
+  }
+  if (Node->Kind == Kind::Constant) {
+    SmallString<32> Text;
+    Node->Constant.toString(Text, 10, Signed);
+    OS << Text;
+    return;
+  }
+  if (Node->Kind == Kind::LLVMValue) {
+    if (Node->LLVMValue)
+      OS << getPrintedValueName(*Node->LLVMValue);
+    else
+      OS << "<null>";
+    return;
+  }
+
+  auto PrintBinary = [&](StringRef Operator) {
+    OS << "(";
+    if (!Node->Operands.empty())
+      Node->Operands[0].print(OS, Signed);
+    OS << " " << Operator << " ";
+    if (Node->Operands.size() > 1)
+      Node->Operands[1].print(OS, Signed);
+    OS << ")";
+  };
+  switch (Node->Kind) {
+  case Kind::Add:
+    return PrintBinary("+");
+  case Kind::Mul:
+    return PrintBinary("*");
+  case Kind::UDiv:
+    return PrintBinary("udiv");
+  case Kind::SMin:
+    return PrintBinary("smin");
+  case Kind::UMin:
+    return PrintBinary("umin");
+  case Kind::SMax:
+    return PrintBinary("smax");
+  case Kind::UMax:
+    return PrintBinary("umax");
+  case Kind::Truncate:
+    OS << "trunc(";
+    break;
+  case Kind::ZeroExtend:
+    OS << "zext(";
+    break;
+  case Kind::SignExtend:
+    OS << "sext(";
+    break;
+  case Kind::Constant:
+  case Kind::LLVMValue:
+    llvm_unreachable("handled scalar expression leaf");
+  }
+  if (!Node->Operands.empty())
+    Node->Operands.front().print(OS, Signed);
+  OS << " to ";
+  if (Node->ResultType)
+    Node->ResultType->print(OS);
+  else
+    OS << "<null>";
+  OS << ")";
+}
+
+void PeriodicRegion::print(raw_ostream &OS) const {
+  OS << "period start=";
+  Start.print(OS);
+  OS << ", stride=";
+  Stride.print(OS, true);
+  OS << ", access-size=";
+  AccessSize.print(OS);
+  OS << ", trips=";
+  TripCount.print(OS);
+}
+
 void MemoryUse::set(MemoryObject *NewObject) {
   if (Object == NewObject)
     return;
@@ -271,17 +483,16 @@ AbstractValue AbstractValue::constant(uint64_t C) {
   return Result;
 }
 
-AbstractAccess
-AbstractAccess::fromPointerAndSize(const Value &Ptr, AbstractValue Size,
-                                   const DataLayout &DL) {
+AbstractAccess AbstractAccess::fromPointerAndSize(const Value &Ptr,
+                                                  AbstractValue Size,
+                                                  const DataLayout &DL) {
   APInt Offset(DL.getIndexTypeSizeInBits(Ptr.getType()), 0);
   const Value *Base = Ptr.stripAndAccumulateConstantOffsets(
       DL, Offset, /*AllowNonInbounds=*/true);
   const Value *Underlying = getUnderlyingObject(&Ptr);
   std::optional<uint64_t> ConcreteOffset = getNonNegativeU64(Offset);
   if (Base && ConcreteOffset && (Base != &Ptr || Underlying == &Ptr))
-    return AbstractAccess(Base, AbstractValue::constant(*ConcreteOffset),
-                          Size);
+    return AbstractAccess(Base, AbstractValue::constant(*ConcreteOffset), Size);
 
   if (Underlying && Underlying != &Ptr)
     return AbstractAccess(Underlying, AbstractValue::symbol(Ptr), Size);
@@ -360,13 +571,29 @@ void MemoryAccess::mergeKind(AccessKind Other) {
   Kind = ::mair::mergeKind(Kind, Other);
 }
 
-bool MemoryAccess::mergeWith(const MemoryAccess &Other) {
-  std::optional<AbstractAccess> Merged =
-      AbstractAccess::merge(Access, Other.Access);
-  if (!Merged)
-    return false;
+const Value *MemoryAccess::getBase() const {
+  return std::visit([](const auto &R) { return R.getBase(); }, Region);
+}
 
-  Access = *Merged;
+bool MemoryAccess::mergeWith(const MemoryAccess &Other) {
+  if (const auto *ThisAccess = getContiguousRegion()) {
+    const auto *OtherAccess = Other.getContiguousRegion();
+    if (!OtherAccess)
+      return false;
+    std::optional<AbstractAccess> Merged =
+        AbstractAccess::merge(*ThisAccess, *OtherAccess);
+    if (!Merged)
+      return false;
+    Region = *Merged;
+  } else {
+    const auto *ThisPeriodic = getPeriodicRegion();
+    const auto *OtherPeriodic = Other.getPeriodicRegion();
+    if (!ThisPeriodic || !OtherPeriodic || *ThisPeriodic != *OtherPeriodic)
+      return false;
+  }
+
+  if (getBase() != Other.getBase())
+    return false;
   Insts.append(Other.Insts);
   mergeKind(Other.Kind);
   return true;
@@ -412,15 +639,25 @@ MemoryAccess MemoryAccess::fromInstruction(const Instruction &I,
 void MemoryAccess::print(raw_ostream &OS, bool LLVM) const {
   (void)LLVM;
   printAccessKind(OS, Kind);
-  OS << " ptr ";
-  Access.print(OS);
-  OS << ", ";
-  printAbstractValue(OS, Access.getSize());
+  if (const auto *Access = getContiguousRegion()) {
+    OS << " ptr ";
+    Access->print(OS);
+    OS << ", ";
+    printAbstractValue(OS, Access->getSize());
+    return;
+  }
+  OS << " ";
+  getPeriodicRegion()->print(OS);
 }
 
 Observation::Observation(StringRef N, const BasicBlock *Block,
                          const Instruction *Anchor, SiteKind K)
-    : Name(N.str()), BB(Block), AnchorInst(Anchor), Kind(K) {
+    : Observation(N, ObservationSite::anchored(Block, Anchor, K),
+                  AlwaysGuard{}) {}
+
+Observation::Observation(StringRef N, ObservationSite S, ObservationGuard G)
+    : Name(N.str()), Site(std::move(S)), Guard(std::move(G)) {
+  const BasicBlock *Block = Site.getBasicBlock();
   if (Block)
     RepresentedBlocks.insert(Block);
 }
@@ -428,14 +665,13 @@ Observation::Observation(StringRef N, const BasicBlock *Block,
 Observation::~Observation() { AccessAllocator.DestroyAll(); }
 
 MemoryAccess &Observation::createAccess(ArrayRef<Instruction *> Insts,
-                                        const AbstractAccess &Access,
+                                        const MemoryRegion &Region,
                                         AccessKind Kind) {
-  return *new (AccessAllocator.Allocate()) MemoryAccess(Insts, Access, Kind);
+  return *new (AccessAllocator.Allocate()) MemoryAccess(Insts, Region, Kind);
 }
 
 MemoryAccess &Observation::addAccess(const MemoryAccess &A) {
-  auto &Node =
-      createAccess(A.getInstructions(), A.getAccess(), A.getKind());
+  auto &Node = createAccess(A.getInstructions(), A.getRegion(), A.getKind());
   Accesses.push_back(Node);
   Node.setParent(this);
   if (MAIRGraph *Graph = getParent())
@@ -462,6 +698,14 @@ std::optional<ObsEdgeKind> Observation::hasParent(const Observation &Obs) {
   return Observation::hasEdgeTo(parents(), Obs);
 }
 
+bool Observation::hasCompatibleMergeSemantics(const Observation &Other) const {
+  if (Guard != Other.Guard)
+    return false;
+  if (!isEdgeSite() && !Other.isEdgeSite())
+    return getSiteKind() == Other.getSiteKind();
+  return isEdgeSite() && Other.isEdgeSite() && Site == Other.Site;
+}
+
 Observation::iterator Observation::erase(iterator It) {
   assert(It != Accesses.end() && "Cannot erase end iterator");
   if (MAIRGraph *Graph = getParent())
@@ -474,6 +718,8 @@ Observation::iterator Observation::erase(iterator It) {
 }
 
 void Observation::mergeAccessesFrom(const Observation &Other) {
+  assert(hasCompatibleMergeSemantics(Other) &&
+         "cannot merge observations with incompatible site or guard semantics");
   for (const MemoryAccess &A : Other.Accesses)
     addAccess(A);
 }
@@ -492,7 +738,28 @@ std::string Observation::toString(bool LLVM) const {
 
 void Observation::print(raw_ostream &OS, bool LLVM) const {
   (void)LLVM;
-  OS << Name << ": preds=[";
+  OS << Name << ": ";
+  if (isEdgeSite() || !hasAlwaysGuard()) {
+    OS << "site=";
+    Site.print(OS);
+    if (const auto *ExecutionGuard =
+            std::get_if<AnyProvenanceExecutedGuard>(&Guard)) {
+      OS << ", guard=any(";
+      bool First = true;
+      for (const Instruction *I : ExecutionGuard->getProvenance()) {
+        if (!First)
+          OS << ", ";
+        if (I)
+          OS << getPrintedValueName(*I);
+        else
+          OS << "null";
+        First = false;
+      }
+      OS << ")";
+    }
+    OS << ", ";
+  }
+  OS << "preds=[";
   printEdgeList(OS, Parents);
   OS << "], succs=[";
   printEdgeList(OS, Children);
@@ -504,11 +771,17 @@ void Observation::print(raw_ostream &OS, bool LLVM) const {
   OS << "\n";
 }
 
-MAIRGraph::MAIRGraph(const Function &Func) : F(&Func) {}
+MAIRGraph::MAIRGraph()
+    : ScalarExprOwner(std::make_unique<MAIRScalarExprOwner>()) {}
+
+MAIRGraph::MAIRGraph(const Function &Func)
+    : F(&Func), ScalarExprOwner(std::make_unique<MAIRScalarExprOwner>()) {}
 
 MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
     : F(Other.F), GraphAllocator(std::move(Other.GraphAllocator)),
       MemoryObjectAllocator(std::move(Other.MemoryObjectAllocator)),
+      ScalarExprOwner(std::move(Other.ScalarExprOwner)),
+      ScalarExprAllocator(std::move(Other.ScalarExprAllocator)),
       MemoryObjects(std::move(Other.MemoryObjects)),
       BBEntryRepresentatives(std::move(Other.BBEntryRepresentatives)),
       BBExitRepresentatives(std::move(Other.BBExitRepresentatives)),
@@ -526,6 +799,8 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   F = Other.F;
   GraphAllocator = std::move(Other.GraphAllocator);
   MemoryObjectAllocator = std::move(Other.MemoryObjectAllocator);
+  ScalarExprOwner = std::move(Other.ScalarExprOwner);
+  ScalarExprAllocator = std::move(Other.ScalarExprAllocator);
   MemoryObjects = std::move(Other.MemoryObjects);
   BBEntryRepresentatives = std::move(Other.BBEntryRepresentatives);
   BBExitRepresentatives = std::move(Other.BBExitRepresentatives);
@@ -595,6 +870,58 @@ Observation &MAIRGraph::createInstObservation(const BasicBlock &BB,
   return Obs;
 }
 
+Observation &MAIRGraph::createObservation(ObservationSite Site,
+                                          ObservationGuard Guard) {
+  StringRef Prefix = Site.isEdge() ? "ve" : "va";
+  return addObservation(allocateNode<Observation>(
+      createObservationName(Prefix), std::move(Site), std::move(Guard)));
+}
+
+Observation &MAIRGraph::createEdgeObservation(const BasicBlock &From,
+                                              const BasicBlock &To,
+                                              ObservationGuard Guard) {
+  return createObservation(ObservationSite::edge(From, To), std::move(Guard));
+}
+
+MAIRScalarExpr MAIRGraph::createConstantExpr(Type &Ty, const APInt &Value) {
+  assert(ScalarExprOwner && "cannot create an expression on a moved graph");
+  auto *Node = new (ScalarExprAllocator.Allocate()) MAIRScalarExprNode(
+      *ScalarExprOwner, MAIRScalarExpr::Kind::Constant, Ty, Value, nullptr, {});
+  return MAIRScalarExpr(*Node);
+}
+
+MAIRScalarExpr MAIRGraph::createValueExpr(const Value &Value) {
+  assert(ScalarExprOwner && "cannot create an expression on a moved graph");
+  auto *Node = new (ScalarExprAllocator.Allocate())
+      MAIRScalarExprNode(*ScalarExprOwner, MAIRScalarExpr::Kind::LLVMValue,
+                         *Value.getType(), APInt(1, 0), &Value, {});
+  return MAIRScalarExpr(*Node);
+}
+
+MAIRScalarExpr MAIRGraph::createUnaryExpr(MAIRScalarExpr::Kind Kind,
+                                          Type &ResultType,
+                                          MAIRScalarExpr Operand) {
+  assert(ScalarExprOwner && "cannot create an expression on a moved graph");
+  MAIRScalarExpr Operands[] = {Operand};
+  auto *Node = new (ScalarExprAllocator.Allocate()) MAIRScalarExprNode(
+      *ScalarExprOwner, Kind, ResultType, APInt(1, 0), nullptr, Operands);
+  return MAIRScalarExpr(*Node);
+}
+
+MAIRScalarExpr MAIRGraph::createBinaryExpr(MAIRScalarExpr::Kind Kind,
+                                           Type &ResultType, MAIRScalarExpr LHS,
+                                           MAIRScalarExpr RHS) {
+  assert(ScalarExprOwner && "cannot create an expression on a moved graph");
+  MAIRScalarExpr Operands[] = {LHS, RHS};
+  auto *Node = new (ScalarExprAllocator.Allocate()) MAIRScalarExprNode(
+      *ScalarExprOwner, Kind, ResultType, APInt(1, 0), nullptr, Operands);
+  return MAIRScalarExpr(*Node);
+}
+
+bool MAIRGraph::ownsScalarExpr(MAIRScalarExpr Expr) const {
+  return ScalarExprOwner && Expr.getOwner() == ScalarExprOwner.get();
+}
+
 MAIRGraph::iterator MAIRGraph::erase(Observation &Obs) {
   auto It = llvm::find_if(Observations, [&Obs](Observation &Candidate) {
     return &Candidate == &Obs;
@@ -628,6 +955,7 @@ MAIRGraph::iterator MAIRGraph::erase(Observation &Obs) {
 
 void MAIRGraph::clear() {
   GraphAllocator.DestroyAll();
+  ScalarExprAllocator.DestroyAll();
   MemoryObjectAllocator.DestroyAll();
   Observations.clear();
   MemoryObjects.clear();
@@ -670,6 +998,8 @@ MAIRGraph::getBBExitRepresentative(const BasicBlock &BB) const {
 void MAIRGraph::replaceObservation(Observation &From, Observation &Into) {
   assert(From.getParent() == this && Into.getParent() == this &&
          "replacement observations must belong to this graph");
+  assert(Into.hasCompatibleMergeSemantics(From) &&
+         "replacement observations have incompatible semantics");
   Into.mergeRepresentationFrom(From);
   for (auto &Entry : BBEntryRepresentatives)
     if (Entry.second == &From)

@@ -23,6 +23,8 @@ MergeCandidate findMergeCandidate(MAIRGraph &G) {
       Observation &O2 = Edge.getNode();
       if (&O1 == &O2)
         continue;
+      if (!O1.hasCompatibleMergeSemantics(O2))
+        continue;
       if (G.hasEdge(O2, O1, ObsEdgeKind::PostDom))
         return {&O1, &O2};
     }
@@ -50,7 +52,7 @@ void mergeObservationInto(MAIRGraph &G, Observation &Into, Observation &From) {
   for (const ObservationEdge &Edge : Outgoing) {
     Observation &Succ = Edge.getNode();
     if (&Succ != &Into)
-      G.addEdge(Into, Succ, *IntoToFrom);
+      G.addEdge(Into, Succ, Edge.getKind());
   }
 
   G.replaceObservation(From, Into);

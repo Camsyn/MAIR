@@ -3,6 +3,13 @@
 #include "MAIR/MAIRPasses.h"
 
 #include "llvm/ADT/iterator.h"
+#include "llvm/Analysis/AssumptionCache.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/PostDominators.h"
+#include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassInstrumentation.h"
@@ -20,25 +27,26 @@
 using namespace llvm;
 using namespace mair;
 
-static cl::opt<std::string>
-    InputFilename(cl::Positional, cl::desc("<input LLVM IR>"), cl::init("-"),
-                  cl::value_desc("filename"));
+static cl::opt<std::string> InputFilename(cl::Positional,
+                                          cl::desc("<input LLVM IR>"),
+                                          cl::init("-"),
+                                          cl::value_desc("filename"));
 static cl::opt<std::string> OutputFilename("o",
                                            cl::desc("Write output to <file>"),
                                            cl::value_desc("filename"),
                                            cl::init("-"));
-static cl::opt<bool>
-    EmitLLVM("emit-llvm", cl::desc("Print LLVM IR annotated with MAIR"),
-             cl::init(false));
-static cl::opt<bool>
-    EmitDOT("emit-dot", cl::desc("Print MAIR graph as Graphviz DOT"),
-            cl::init(false));
+static cl::opt<bool> EmitLLVM("emit-llvm",
+                              cl::desc("Print LLVM IR annotated with MAIR"),
+                              cl::init(false));
+static cl::opt<bool> EmitDOT("emit-dot",
+                             cl::desc("Print MAIR graph as Graphviz DOT"),
+                             cl::init(false));
 static cl::opt<bool> DisableOutput("disable-output",
                                    cl::desc("Do not emit MAIR or LLVM output"),
                                    cl::init(false));
-static cl::opt<std::string>
-    PassPipeline("passes", cl::desc("MAIRGraph pass pipeline"),
-                 cl::value_desc("pipeline"));
+static cl::opt<std::string> PassPipeline("passes",
+                                         cl::desc("MAIRGraph pass pipeline"),
+                                         cl::value_desc("pipeline"));
 
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
@@ -59,11 +67,16 @@ int main(int argc, char **argv) {
   PassInstrumentationCallbacks PIC;
   FunctionAnalysisManager FAM;
   FAM.registerPass([&] { return PassInstrumentationAnalysis(&PIC); });
+  FAM.registerPass([] { return TargetLibraryAnalysis(); });
+  FAM.registerPass([] { return TargetIRAnalysis(); });
+  FAM.registerPass([] { return AssumptionAnalysis(); });
   FAM.registerPass([] { return DominatorTreeAnalysis(); });
   FAM.registerPass([] { return PostDominatorTreeAnalysis(); });
+  FAM.registerPass([] { return llvm::LoopAnalysis(); });
+  FAM.registerPass([] { return ScalarEvolutionAnalysis(); });
 
   MAIRGraphAnalysisManager GAM;
-  registerMAIRGraphAnalyses(GAM, &PIC);
+  registerMAIRGraphAnalyses(GAM, &PIC, &FAM);
   MAIRGraphPassManager GPM;
   if (!PassPipeline.empty()) {
     if (Error Err = parseMAIRGraphPassPipeline(GPM, PassPipeline)) {
@@ -88,8 +101,8 @@ int main(int argc, char **argv) {
   raw_ostream *OutputOS = &outs();
   if (!DisableOutput) {
     std::error_code EC;
-    OutputFile = std::make_unique<ToolOutputFile>(OutputFilename, EC,
-                                                  sys::fs::OF_Text);
+    OutputFile =
+        std::make_unique<ToolOutputFile>(OutputFilename, EC, sys::fs::OF_Text);
     if (EC) {
       errs() << "failed to open output file '" << OutputFilename
              << "': " << EC.message() << "\n";

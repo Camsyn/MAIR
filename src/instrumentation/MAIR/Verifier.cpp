@@ -2,6 +2,9 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/CFG.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -121,6 +124,11 @@ public:
 private:
   void verifyObservation(const Observation &Obs);
   void verifyMemoryAccess(const Observation &Obs, const MemoryAccess &Access);
+  void verifyGuard(const Observation &Obs);
+  void verifyScalarExpr(const MAIRScalarExpr &Expr, const MemoryAccess &Access,
+                        const Observation &Obs);
+  void verifyPeriodicRegion(const PeriodicRegion &Region,
+                            const MemoryAccess &Access, const Observation &Obs);
   void verifyChildEdge(const Observation &From, const ObservationEdge &Edge);
   void verifyParentEdge(const Observation &To, const ObservationEdge &Edge);
   void verifyCounters();
@@ -162,6 +170,10 @@ void MAIRVerifier::verifyBoundaryRepresentatives() {
     Check(Representative->representsBlock(*BB),
           "BB-entry representative does not represent its block",
           Representative, BB);
+    Check(!Representative->isEdgeSite(),
+          "BB-entry representative is an edge site", Representative, BB);
+    Check(Representative->isBasicBlockEntrySite(),
+          "BB-entry representative is not a BB-entry site", Representative, BB);
   }
   for (const auto &Entry : Graph->BBExitRepresentatives) {
     const BasicBlock *BB = Entry.first;
@@ -175,6 +187,10 @@ void MAIRVerifier::verifyBoundaryRepresentatives() {
     Check(Representative->representsBlock(*BB),
           "BB-exit representative does not represent its block", Representative,
           BB);
+    Check(!Representative->isEdgeSite(),
+          "BB-exit representative is an edge site", Representative, BB);
+    Check(Representative->isBasicBlockExitSite(),
+          "BB-exit representative is not a BB-exit site", Representative, BB);
   }
 }
 
@@ -182,25 +198,44 @@ void MAIRVerifier::verifyObservation(const Observation &Obs) {
   CheckFatal(Obs.getParent() == Graph,
              "observation parent does not match graph", Obs);
 
-  const BasicBlock *BB = Obs.getBasicBlock();
-  CheckFatal(BB, "observation has no basic block", Obs);
+  if (Obs.isEdgeSite()) {
+    const BasicBlock *From = Obs.getEdgeFrom();
+    const BasicBlock *To = Obs.getEdgeTo();
+    CheckFatal(From && To, "edge site has a null endpoint", Obs);
+    Check(From != To, "edge site is a self edge", Obs, From, To);
+    CheckFatal(From->getParent() && To->getParent(),
+               "edge site endpoint has no function", Obs, From, To);
+    Check(From->getParent() == To->getParent(), "edge site crosses functions",
+          Obs, From, To);
+    Check(From->getParent() == Graph->getFunction(),
+          "edge site is outside graph function", Obs, From, To);
+    Check(llvm::is_contained(successors(From), To),
+          "edge site is not a current CFG edge", Obs, From, To);
+  } else {
+    const BasicBlock *BB = Obs.getBasicBlock();
+    CheckFatal(BB, "observation has no basic block", Obs);
+    Check(BB->getParent() == Graph->getFunction(),
+          "observation block is outside graph function", Obs, BB);
 
-  const Instruction *Anchor = Obs.getAnchor();
-  CheckFatal(Anchor, "observation has no anchor", Obs);
-  CheckFatal(Anchor->getParent() == BB,
-             "observation anchor is outside its block", Obs, Anchor, BB);
+    const Instruction *Anchor = Obs.getAnchor();
+    CheckFatal(Anchor, "observation has no anchor", Obs);
+    CheckFatal(Anchor->getParent() == BB,
+               "observation anchor is outside its block", Obs, Anchor, BB);
 
-  if (Obs.isBasicBlockEntrySite()) {
-    Check(Anchor == &*BB->getFirstNonPHIIt(),
-          "basic-block entry observation is not anchored at first non-PHI", Obs,
-          Anchor, BB);
+    if (Obs.isBasicBlockEntrySite()) {
+      Check(Anchor == &*BB->getFirstNonPHIIt(),
+            "basic-block entry observation is not anchored at first non-PHI",
+            Obs, Anchor, BB);
+    }
+
+    if (Obs.isBasicBlockExitSite()) {
+      Check(Anchor == BB->getTerminator(),
+            "basic-block exit observation is not anchored at terminator", Obs,
+            Anchor, BB);
+    }
   }
 
-  if (Obs.isBasicBlockExitSite()) {
-    Check(Anchor == BB->getTerminator(),
-          "basic-block exit observation is not anchored at terminator", Obs,
-          Anchor, BB);
-  }
+  verifyGuard(Obs);
 
   for (const MemoryAccess &Access : Obs)
     verifyMemoryAccess(Obs, Access);
@@ -209,6 +244,23 @@ void MAIRVerifier::verifyObservation(const Observation &Obs) {
     verifyChildEdge(Obs, Edge);
   for (const ObservationEdge &Edge : Obs.parents())
     verifyParentEdge(Obs, Edge);
+}
+
+void MAIRVerifier::verifyGuard(const Observation &Obs) {
+  const auto *Guard = std::get_if<AnyProvenanceExecutedGuard>(&Obs.getGuard());
+  if (!Guard)
+    return;
+
+  ArrayRef<Instruction *> Provenance = Guard->getProvenance();
+  Check(!Provenance.empty(), "execution guard has empty provenance", Obs);
+  SmallPtrSet<const Instruction *, 8> Seen;
+  for (const Instruction *I : Provenance) {
+    CheckFatal(I, "execution guard has null provenance", Obs);
+    Check(I->getFunction() == Graph->getFunction(),
+          "execution guard provenance is outside graph function", Obs, I);
+    Check(Seen.insert(I).second,
+          "execution guard contains duplicate provenance", Obs, I);
+  }
 }
 
 void MAIRVerifier::verifyMemoryAccess(const Observation &Obs,
@@ -224,6 +276,13 @@ void MAIRVerifier::verifyMemoryAccess(const Observation &Obs,
     Check(AccessI->getFunction() == Obs.getAnchor()->getFunction(),
           "memory access instruction is outside observation function", Access,
           Obs, AccessI, Obs.getAnchor());
+  }
+
+  for (const Instruction *AccessI : Access.getInstructions()) {
+    CheckFatal(AccessI, "memory access has null provenance", Access, Obs);
+    Check(AccessI->getFunction() == Graph->getFunction(),
+          "memory access provenance is outside graph function", Access, Obs,
+          AccessI);
   }
 
   const Value *Base = Access.getBase();
@@ -246,6 +305,135 @@ void MAIRVerifier::verifyMemoryAccess(const Observation &Obs,
     }
   Check(FoundUse, "memory object use-list does not contain this access", Access,
         Obs, Base);
+
+  if (const PeriodicRegion *Region = Access.getPeriodicRegion())
+    verifyPeriodicRegion(*Region, Access, Obs);
+}
+
+void MAIRVerifier::verifyScalarExpr(const MAIRScalarExpr &Expr,
+                                    const MemoryAccess &Access,
+                                    const Observation &Obs) {
+  CheckFatal(Expr.isValid(), "invalid scalar expression", Access, Obs);
+  Check(Graph->ownsScalarExpr(Expr),
+        "scalar expression belongs to another graph", Access, Obs);
+  Type *Ty = Expr.getType();
+  CheckFatal(Ty, "scalar expression has no type", Access, Obs);
+
+  ArrayRef<MAIRScalarExpr> Operands = Expr.operands();
+  using Kind = MAIRScalarExpr::Kind;
+  switch (Expr.getKind()) {
+  case Kind::Constant:
+    Check(Operands.empty(), "constant scalar expression has operands", Access,
+          Obs);
+    Check(Ty->isIntegerTy(), "scalar constant is not integer typed", Access,
+          Obs);
+    if (Ty->isIntegerTy())
+      Check(cast<IntegerType>(Ty)->getBitWidth() ==
+                Expr.getConstant().getBitWidth(),
+            "scalar constant bit width does not match its type", Access, Obs);
+    break;
+  case Kind::LLVMValue: {
+    Check(Operands.empty(), "LLVM-value scalar expression has operands", Access,
+          Obs);
+    const Value *V = Expr.getLLVMValue();
+    CheckFatal(V, "LLVM-value scalar expression is null", Access, Obs);
+    Check(V->getType() == Ty,
+          "LLVM-value scalar expression type does not match value", Access, Obs,
+          V);
+    if (const auto *I = dyn_cast<Instruction>(V))
+      Check(I->getFunction() == Graph->getFunction(),
+            "scalar LLVM value is outside graph function", Access, Obs, V);
+    if (const auto *A = dyn_cast<Argument>(V))
+      Check(A->getParent() == Graph->getFunction(),
+            "scalar LLVM argument is outside graph function", Access, Obs, V);
+    if (const auto *GV = dyn_cast<GlobalValue>(V))
+      Check(GV->getParent() == Graph->getFunction()->getParent(),
+            "scalar global is outside graph module", Access, Obs, V);
+    break;
+  }
+  case Kind::Truncate:
+  case Kind::ZeroExtend:
+  case Kind::SignExtend:
+    Check(Operands.size() == 1,
+          "scalar cast expression does not have one operand", Access, Obs);
+    break;
+  case Kind::Add:
+  case Kind::Mul:
+  case Kind::UDiv:
+  case Kind::SMin:
+  case Kind::UMin:
+  case Kind::SMax:
+  case Kind::UMax:
+    Check(Operands.size() == 2,
+          "scalar binary expression does not have two operands", Access, Obs);
+    break;
+  }
+
+  for (const MAIRScalarExpr &Operand : Operands)
+    verifyScalarExpr(Operand, Access, Obs);
+
+  if (llvm::any_of(Operands, [](const MAIRScalarExpr &Operand) {
+        return !Operand.isValid() || !Operand.getType();
+      }))
+    return;
+  if (Operands.empty())
+    return;
+  if (Expr.getKind() == Kind::Truncate || Expr.getKind() == Kind::ZeroExtend ||
+      Expr.getKind() == Kind::SignExtend) {
+    Check(Ty->isIntegerTy() && Operands.front().getType()->isIntegerTy(),
+          "scalar cast operands are not integer typed", Access, Obs);
+    if (Ty->isIntegerTy() && Operands.front().getType()->isIntegerTy()) {
+      unsigned ResultWidth = cast<IntegerType>(Ty)->getBitWidth();
+      unsigned OperandWidth =
+          cast<IntegerType>(Operands.front().getType())->getBitWidth();
+      if (Expr.getKind() == Kind::Truncate)
+        Check(ResultWidth < OperandWidth, "scalar truncate does not narrow",
+              Access, Obs);
+      else
+        Check(ResultWidth > OperandWidth, "scalar extension does not widen",
+              Access, Obs);
+    }
+    return;
+  }
+  if (Expr.getKind() == Kind::Add && Ty->isPointerTy()) {
+    Check(Operands.size() == 2 && Operands[0].getType() == Ty &&
+              Operands[1].getType()->isIntegerTy(),
+          "pointer add must use pointer plus integer byte offset", Access, Obs);
+    return;
+  }
+  Check(Ty->isIntegerTy(), "scalar arithmetic result is not integer typed",
+        Access, Obs);
+  for (const MAIRScalarExpr &Operand : Operands)
+    Check(Operand.getType() == Ty,
+          "scalar arithmetic operand type does not match result", Access, Obs);
+}
+
+void MAIRVerifier::verifyPeriodicRegion(const PeriodicRegion &Region,
+                                        const MemoryAccess &Access,
+                                        const Observation &Obs) {
+  CheckFatal(Region.getBase(), "periodic region has no base", Access, Obs);
+  verifyScalarExpr(Region.getStart(), Access, Obs);
+  verifyScalarExpr(Region.getStride(), Access, Obs);
+  verifyScalarExpr(Region.getAccessSize(), Access, Obs);
+  verifyScalarExpr(Region.getTripCount(), Access, Obs);
+
+  if (!Region.getStart().isValid() || !Region.getStride().isValid() ||
+      !Region.getAccessSize().isValid() || !Region.getTripCount().isValid())
+    return;
+  Check(Region.getStart().getType()->isPointerTy(),
+        "periodic region start is not pointer typed", Access, Obs);
+  Check(Region.getStride().getType()->isIntegerTy(),
+        "periodic region stride is not integer typed", Access, Obs);
+  Check(Region.getAccessSize().getType()->isIntegerTy(),
+        "periodic region access size is not integer typed", Access, Obs);
+  Check(Region.getTripCount().getType()->isIntegerTy(),
+        "periodic region trip count is not integer typed", Access, Obs);
+  if (Region.getStride().getKind() == MAIRScalarExpr::Kind::Constant)
+    Check(!Region.getStride().getConstant().isZero(),
+          "periodic region has zero stride", Access, Obs);
+  if (Region.getAccessSize().getKind() == MAIRScalarExpr::Kind::Constant)
+    Check(!Region.getAccessSize().getConstant().isZero(),
+          "periodic region has zero access size", Access, Obs);
 }
 
 void MAIRVerifier::verifyChildEdge(const Observation &From,

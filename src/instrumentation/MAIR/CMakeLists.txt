@@ -1,8 +1,11 @@
 set(MAIR_SOURCES
+  Analysis/LoopAnalysis.cpp
   Analysis/MAIRStatAnalysis.cpp
   Analysis/RedundantObservationAnalysis.cpp
   Transforms/CommonMAMotionPass.cpp
   Transforms/LocationMergePass.cpp
+  Transforms/LoopInvariantObservationMotionPass.cpp
+  Transforms/LoopRangeAggregationPass.cpp
   Transforms/RedundantObservationEliminationPass.cpp
   Transforms/SimplifyGraphPass.cpp
   MAIR.cpp

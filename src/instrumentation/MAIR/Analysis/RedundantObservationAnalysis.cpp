@@ -15,17 +15,22 @@ bool kindCovers(AccessKind Available, AccessKind Required) {
          static_cast<unsigned>(Required);
 }
 
-AvailableAccess extract(const MemoryAccess &Access) {
-  return {&Access, Access.getParent(), &Access.getMemoryObject(),
-          Access.getAccess(), Access.getKind()};
+std::optional<AvailableAccess> extract(const MemoryAccess &Access) {
+  const AbstractAccess *Region = Access.getContiguousRegion();
+  if (!Region)
+    return std::nullopt;
+  return AvailableAccess{&Access, Access.getParent(), &Access.getMemoryObject(),
+                         *Region, Access.getKind()};
 }
 
 } // namespace
 
 bool AvailableAccess::covers(const MemoryAccess &Other) const {
+  const AbstractAccess *OtherRegion = Other.getContiguousRegion();
+  if (!OtherRegion)
+    return false;
   return SourceObservation != Other.getParent() &&
-         Object == &Other.getMemoryObject() &&
-         Access.contains(Other.getAccess()) &&
+         Object == &Other.getMemoryObject() && Access.contains(*OtherRegion) &&
          kindCovers(Kind, Other.getKind());
 }
 
@@ -102,7 +107,8 @@ RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
 
       AvailableAccessSet Out = In;
       for (const MemoryAccess &Access : Obs)
-        Out.insert(extract(Access));
+        if (std::optional<AvailableAccess> Available = extract(Access))
+          Out.insert(*Available);
 
       AvailableAccessSet &OldIn = Result.InSets.find(&Obs)->second;
       AvailableAccessSet &OldOut = Result.OutSets.find(&Obs)->second;

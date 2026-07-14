@@ -14,7 +14,7 @@ namespace {
 
 bool isSameAccess(const MemoryAccess &LHS, const MemoryAccess &RHS) {
   return &LHS.getMemoryObject() == &RHS.getMemoryObject() &&
-         LHS.getAccess() == RHS.getAccess() && LHS.getKind() == RHS.getKind();
+         LHS.getRegion() == RHS.getRegion() && LHS.getKind() == RHS.getKind();
 }
 
 bool isValueAvailableAt(const Value *Value, const Instruction &Anchor) {
@@ -29,14 +29,16 @@ bool isAccessAvailableAt(const MemoryAccess &Access,
                          const Observation &Target) {
   const Instruction *Anchor = Target.getAnchor();
   assert(Anchor && "motion target must have an anchor");
-  const AbstractAccess &Location = Access.getAccess();
-  if (!isValueAvailableAt(Location.getBase(), *Anchor))
+  const AbstractAccess *Location = Access.getContiguousRegion();
+  if (!Location)
     return false;
-  if (Location.getOffset().isSymbol() &&
-      !isValueAvailableAt(Location.getOffset().getSymbol(), *Anchor))
+  if (!isValueAvailableAt(Location->getBase(), *Anchor))
     return false;
-  return !Location.getSize().isSymbol() ||
-         isValueAvailableAt(Location.getSize().getSymbol(), *Anchor);
+  if (Location->getOffset().isSymbol() &&
+      !isValueAvailableAt(Location->getOffset().getSymbol(), *Anchor))
+    return false;
+  return !Location->getSize().isSymbol() ||
+         isValueAvailableAt(Location->getSize().getSymbol(), *Anchor);
 }
 
 void eraseAccess(MemoryAccess &Access) {

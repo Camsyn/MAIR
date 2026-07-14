@@ -35,13 +35,14 @@ define void @branch_loop(i32* %p, i32* %q, i1 %c, i32 %n) {
 ; LLVM-NEXT:  [[ENTRY:.*]]:
 ; LLVM-NEXT:  ; bs0: preds=[be1(pdom)], succs=[be1(dom), bs2(dom), bs6(dom)]
 ; LLVM-NEXT:  ; be1: preds=[bs0(dom), bs6(pdom)], succs=[bs0(pdom)]
-; SIMPLIFYLLVM:       ; bs0: preds=[], succs=[bs2(dom), bs2(pdom)]
+; SIMPLIFYLLVM:       ; bs0: preds=[be1(pdom)], succs=[be1(dom), bs2(dom), bs6(dom)]
+; SIMPLIFYLLVM-NEXT:  ; be1: preds=[bs0(dom), bs6(pdom)], succs=[bs0(pdom)]
 ; LLVM-NEXT:    br i1 [[C]], label %[[THEN:.*]], label %[[LOOP:.*]]
 ; LLVM:       [[THEN]]:
 ; LLVM-NEXT:  ; bs2: preds=[ma3(pdom), bs0(dom)], succs=[ma3(dom)]
 ; LLVM-NEXT:  ; ma3: preds=[bs2(dom), ma4(pdom)], succs=[bs2(pdom), ma4(dom)]
-; SIMPLIFYLLVM:       ; bs2: preds=[bs0(dom), bs0(pdom)], succs=[]
-; SIMPLIFYLLVM-NOT:   ; bs6:
+; SIMPLIFYLLVM:       ; bs2: preds=[ma3(pdom), bs0(dom)], succs=[ma3(dom)]
+; SIMPLIFYLLVM-NEXT:  ; ma3: preds=[bs2(dom), be5(pdom)], succs=[bs2(pdom), be5(dom)]
 ; LLVM-NEXT:  ; read ptr [[P]], 4
 ; LLVM-NEXT:    [[TV:%.*]] = load i32, ptr [[P]], align 4
 ; LLVM-NEXT:  ; ma4: preds=[ma3(dom), be5(pdom)], succs=[ma3(pdom), be5(dom)]
@@ -52,6 +53,8 @@ define void @branch_loop(i32* %p, i32* %q, i1 %c, i32 %n) {
 ; LLVM:       [[LOOP]]:
 ; LLVM-NEXT:    [[I:%.*]] = phi i32 [ 0, %[[ENTRY]] ], [ 0, %[[THEN]] ], [ [[NEXT:%.*]], %[[LOOP]] ]
 ; LLVM-NEXT:  ; bs6: preds=[ma7(pdom), bs0(dom)], succs=[ma7(dom), be1(pdom), be5(pdom), bs10(dom)]
+; SIMPLIFYLLVM:       ; bs6: preds=[ma7(pdom), bs0(dom)], succs=[ma7(dom), be1(pdom), be5(pdom), bs10(dom)]
+; SIMPLIFYLLVM-NEXT:  ; ma7: preds=[bs6(dom), be9(pdom)], succs=[bs6(pdom), be9(dom)]
 ; LLVM-NEXT:  ; ma7: preds=[bs6(dom), ma8(pdom)], succs=[bs6(pdom), ma8(dom)]
 ; LLVM-NEXT:  ; read ptr [[P]], 4
 ; LLVM-NEXT:    [[LV:%.*]] = load i32, ptr [[P]], align 4

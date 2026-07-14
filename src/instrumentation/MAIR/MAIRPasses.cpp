@@ -1,9 +1,12 @@
 #include "MAIR/MAIRPasses.h"
 
+#include "MAIR/Analysis/LoopAnalysis.h"
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/Analysis/RedundantObservationAnalysis.h"
 #include "MAIR/Transforms/CommonMAMotionPass.h"
 #include "MAIR/Transforms/LocationMergePass.h"
+#include "MAIR/Transforms/LoopInvariantObservationMotionPass.h"
+#include "MAIR/Transforms/LoopRangeAggregationPass.h"
 #include "MAIR/Transforms/RedundantObservationEliminationPass.h"
 #include "MAIR/Transforms/SimplifyGraphPass.h"
 
@@ -32,8 +35,15 @@ namespace mair {
 
 void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
                                PassInstrumentationCallbacks *PIC) {
+  registerMAIRGraphAnalyses(AM, PIC, nullptr);
+}
+
+void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
+                               PassInstrumentationCallbacks *PIC,
+                               FunctionAnalysisManager *FAM) {
   AM.registerPass([PIC] { return PassInstrumentationAnalysis(PIC); });
-#define MAIR_GRAPH_ANALYSIS(NAME, CREATE_PASS)                                \
+  AM.registerPass([FAM] { return LoopAnalysis(FAM); });
+#define MAIR_GRAPH_ANALYSIS(NAME, CREATE_PASS)                                 \
   AM.registerPass([] { return CREATE_PASS; });
 #include "MAIR/PassRegistry.def"
 }

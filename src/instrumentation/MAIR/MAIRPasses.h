@@ -20,6 +20,9 @@ using MAIRGraphPassManager =
 
 void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
                                llvm::PassInstrumentationCallbacks *PIC);
+void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
+                               llvm::PassInstrumentationCallbacks *PIC,
+                               llvm::FunctionAnalysisManager *FAM);
 
 llvm::Error parseMAIRGraphPassPipeline(MAIRGraphPassManager &PM,
                                        llvm::StringRef PipelineText);

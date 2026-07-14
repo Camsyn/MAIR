@@ -12,6 +12,7 @@ set(MAIR_SOURCES
   MAIRBarrierAnalysis.cpp
   MAIRDump.cpp
   MAIRPasses.cpp
+  Materialization/MAIRMaterialization.cpp
   Verifier.cpp
 )
 

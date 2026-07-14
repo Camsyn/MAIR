@@ -22,6 +22,7 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Allocator.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "MAIR/MAIRBarrierAnalysis.h"
@@ -41,6 +42,7 @@ using namespace llvm;
 
 class MAIRGraph;
 class MAIRVerifier;
+class MAIRObservationBackend;
 class MemoryAccess;
 class MemoryObject;
 class MemoryUse;
@@ -48,6 +50,7 @@ class Observation;
 class MAIRScalarExpr;
 struct MAIRScalarExprNode;
 struct MAIRScalarExprOwner;
+struct MAIRInstantiationResult;
 
 enum class AccessKind : uint8_t { Read = 1, Write = 2, ReadWrite = 3 };
 enum class ObsEdgeKind : uint8_t { Dom, PostDom };
@@ -639,7 +642,11 @@ public:
   using ObservationEdgeListType = SmallVector<ObservationEdge, 2>;
 
 private:
+  enum class State : uint8_t { Live, ConsumedByInstantiation, MovedFrom };
+
   const Function *F = nullptr;
+  Function *MutableF = nullptr;
+  State GraphState = State::Live;
   SpecificBumpPtrAllocator<Observation> GraphAllocator;
   SpecificBumpPtrAllocator<MemoryObject> MemoryObjectAllocator;
   std::unique_ptr<MAIRScalarExprOwner> ScalarExprOwner;
@@ -655,6 +662,7 @@ private:
 public:
   MAIRGraph();
   explicit MAIRGraph(const Function &Func);
+  explicit MAIRGraph(Function &Func);
   MAIRGraph(const MAIRGraph &) = delete;
   MAIRGraph &operator=(const MAIRGraph &) = delete;
   MAIRGraph(MAIRGraph &&Other) noexcept;
@@ -662,8 +670,19 @@ public:
   ~MAIRGraph();
 
   const Function *getFunction() const { return F; }
-  bool empty() const { return NumObservations == 0; }
-  size_t size() const { return NumObservations; }
+  Function *getMutableFunction() { return MutableF; }
+  bool isLive() const { return GraphState == State::Live; }
+  bool isConsumed() const {
+    return GraphState == State::ConsumedByInstantiation;
+  }
+  bool empty() const {
+    assertLive("query");
+    return NumObservations == 0;
+  }
+  size_t size() const {
+    assertLive("query");
+    return NumObservations;
+  }
 
   /// Build a MAIR graph for \p F using DT/PDT results owned by \p FAM.
   ///
@@ -689,10 +708,22 @@ public:
     return build(F, DT, PDT, BarrierAnalysis);
   }
 
-  iterator begin() { return Observations.begin(); }
-  iterator end() { return Observations.end(); }
-  const_iterator begin() const { return Observations.begin(); }
-  const_iterator end() const { return Observations.end(); }
+  iterator begin() {
+    assertLive("iterate");
+    return Observations.begin();
+  }
+  iterator end() {
+    assertLive("iterate");
+    return Observations.end();
+  }
+  const_iterator begin() const {
+    assertLive("iterate");
+    return Observations.begin();
+  }
+  const_iterator end() const {
+    assertLive("iterate");
+    return Observations.end();
+  }
 
   Observation &createBBObservation(const BasicBlock &BB, bool IsEntry);
   Observation &createInstObservation(const BasicBlock &BB,
@@ -742,7 +773,15 @@ public:
   void print(raw_ostream &OS, bool LLVM = false) const;
   void dump(raw_ostream &OS) const { print(OS); }
 
+  llvm::Expected<MAIRInstantiationResult>
+  instantiate(llvm::FunctionAnalysisManager &FAM,
+              MAIRObservationBackend &Backend);
+
 private:
+  void assertLive(StringRef Operation) const;
+  void markConsumed() { GraphState = State::ConsumedByInstantiation; }
+  void clearStorage();
+
   template <class T, class... Args> T &allocateNode(Args &&...ArgsPack);
   std::string createObservationName(StringRef Prefix);
   Observation &addObservation(Observation &Obs);

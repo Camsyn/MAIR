@@ -12,7 +12,7 @@ namespace mair {
 AnalysisKey LoopAnalysis::Key;
 
 MAIRLoopInfo::MAIRLoopInfo(MAIRGraph &G, FunctionAnalysisManager &Manager)
-    : Graph(&G), FAM(&Manager), Func(const_cast<Function *>(G.getFunction())) {
+    : Graph(&G), FAM(&Manager), Func(G.getMutableFunction()) {
   if (!Func)
     return;
   LI = &FAM->getResult<llvm::LoopAnalysis>(*Func);
@@ -219,6 +219,8 @@ ScalarEvolution &MAIRLoopInfo::getSE() const {
 
 LoopAnalysis::Result LoopAnalysis::run(MAIRGraph &G,
                                        MAIRGraphAnalysisManager &) {
+  if (!G.isLive())
+    report_fatal_error("MAIR LoopAnalysis cannot run on a consumed graph");
   if (!FAM)
     report_fatal_error(
         "MAIR LoopAnalysis requires a FunctionAnalysisManager bridge");

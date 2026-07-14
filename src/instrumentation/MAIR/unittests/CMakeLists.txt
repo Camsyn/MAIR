@@ -7,6 +7,7 @@ set(LLVM_LINK_COMPONENTS
   Analysis
   AsmParser
   Core
+  TransformUtils
   Support
 )
 
@@ -14,6 +15,7 @@ set(MAIR_GTEST_DIR ${LLVM_MAIN_SRC_DIR}/../third-party/unittest/googletest)
 if(EXISTS ${MAIR_GTEST_DIR}/src/gtest-all.cc)
   add_llvm_executable(MAIRGraphTest
     MAIRGraphTest.cpp
+    MAIRMaterializationTest.cpp
     ${MAIR_GTEST_DIR}/src/gtest-all.cc
     ${MAIR_GTEST_DIR}/src/gtest_main.cc
     $<TARGET_OBJECTS:MAIRCore>
@@ -23,6 +25,7 @@ if(EXISTS ${MAIR_GTEST_DIR}/src/gtest-all.cc)
 else()
   add_unittest(MAIRUnitTests MAIRGraphTest
     MAIRGraphTest.cpp
+    MAIRMaterializationTest.cpp
     $<TARGET_OBJECTS:MAIRCore>
   )
 endif()

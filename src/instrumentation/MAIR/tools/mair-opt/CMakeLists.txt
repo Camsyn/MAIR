@@ -4,6 +4,7 @@ set(LLVM_LINK_COMPONENTS
   Analysis
   Core
   IRReader
+  TransformUtils
   Support
 )
 

@@ -774,11 +774,21 @@ void Observation::print(raw_ostream &OS, bool LLVM) const {
 MAIRGraph::MAIRGraph()
     : ScalarExprOwner(std::make_unique<MAIRScalarExprOwner>()) {}
 
+void MAIRGraph::assertLive(StringRef Operation) const {
+  if (!isLive())
+    report_fatal_error(Twine("cannot ") + Operation + " a non-live MAIRGraph");
+}
+
 MAIRGraph::MAIRGraph(const Function &Func)
     : F(&Func), ScalarExprOwner(std::make_unique<MAIRScalarExprOwner>()) {}
 
+MAIRGraph::MAIRGraph(Function &Func)
+    : F(&Func), MutableF(&Func),
+      ScalarExprOwner(std::make_unique<MAIRScalarExprOwner>()) {}
+
 MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
-    : F(Other.F), GraphAllocator(std::move(Other.GraphAllocator)),
+    : F(Other.F), MutableF(Other.MutableF), GraphState(Other.GraphState),
+      GraphAllocator(std::move(Other.GraphAllocator)),
       MemoryObjectAllocator(std::move(Other.MemoryObjectAllocator)),
       ScalarExprOwner(std::move(Other.ScalarExprOwner)),
       ScalarExprAllocator(std::move(Other.ScalarExprAllocator)),
@@ -790,13 +800,18 @@ MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
       NextObservationID(Other.NextObservationID) {
   for (Observation &Obs : Observations)
     Obs.setParent(this);
+  Other.F = nullptr;
+  Other.MutableF = nullptr;
+  Other.GraphState = State::MovedFrom;
 }
 
 MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   if (this == &Other)
     return *this;
-  clear();
+  clearStorage();
   F = Other.F;
+  MutableF = Other.MutableF;
+  GraphState = Other.GraphState;
   GraphAllocator = std::move(Other.GraphAllocator);
   MemoryObjectAllocator = std::move(Other.MemoryObjectAllocator);
   ScalarExprOwner = std::move(Other.ScalarExprOwner);
@@ -810,10 +825,13 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   NextObservationID = Other.NextObservationID;
   for (Observation &Obs : Observations)
     Obs.setParent(this);
+  Other.F = nullptr;
+  Other.MutableF = nullptr;
+  Other.GraphState = State::MovedFrom;
   return *this;
 }
 
-MAIRGraph::~MAIRGraph() { clear(); }
+MAIRGraph::~MAIRGraph() { clearStorage(); }
 
 template <class T, class... Args>
 T &MAIRGraph::allocateNode(Args &&...ArgsPack) {
@@ -850,6 +868,7 @@ void MAIRGraph::unregisterAccess(MemoryAccess &Access) {
 
 Observation &MAIRGraph::createBBObservation(const BasicBlock &BB,
                                             bool IsEntry) {
+  assertLive("create an observation on");
   const Instruction *Anchor =
       IsEntry ? &*BB.getFirstNonPHIIt() : BB.getTerminator();
   Observation &Obs = addObservation(allocateNode<Observation>(
@@ -862,6 +881,7 @@ Observation &MAIRGraph::createBBObservation(const BasicBlock &BB,
 
 Observation &MAIRGraph::createInstObservation(const BasicBlock &BB,
                                               const Instruction &Anchor) {
+  assertLive("create an observation on");
   auto &Obs = addObservation(
       allocateNode<Observation>(createObservationName("ma"), &BB, &Anchor,
                                 Observation::SiteKind::MemoryInst));
@@ -872,6 +892,7 @@ Observation &MAIRGraph::createInstObservation(const BasicBlock &BB,
 
 Observation &MAIRGraph::createObservation(ObservationSite Site,
                                           ObservationGuard Guard) {
+  assertLive("create an observation on");
   StringRef Prefix = Site.isEdge() ? "ve" : "va";
   return addObservation(allocateNode<Observation>(
       createObservationName(Prefix), std::move(Site), std::move(Guard)));
@@ -880,10 +901,12 @@ Observation &MAIRGraph::createObservation(ObservationSite Site,
 Observation &MAIRGraph::createEdgeObservation(const BasicBlock &From,
                                               const BasicBlock &To,
                                               ObservationGuard Guard) {
+  assertLive("create an observation on");
   return createObservation(ObservationSite::edge(From, To), std::move(Guard));
 }
 
 MAIRScalarExpr MAIRGraph::createConstantExpr(Type &Ty, const APInt &Value) {
+  assertLive("create an expression on");
   assert(ScalarExprOwner && "cannot create an expression on a moved graph");
   auto *Node = new (ScalarExprAllocator.Allocate()) MAIRScalarExprNode(
       *ScalarExprOwner, MAIRScalarExpr::Kind::Constant, Ty, Value, nullptr, {});
@@ -891,6 +914,7 @@ MAIRScalarExpr MAIRGraph::createConstantExpr(Type &Ty, const APInt &Value) {
 }
 
 MAIRScalarExpr MAIRGraph::createValueExpr(const Value &Value) {
+  assertLive("create an expression on");
   assert(ScalarExprOwner && "cannot create an expression on a moved graph");
   auto *Node = new (ScalarExprAllocator.Allocate())
       MAIRScalarExprNode(*ScalarExprOwner, MAIRScalarExpr::Kind::LLVMValue,
@@ -901,6 +925,7 @@ MAIRScalarExpr MAIRGraph::createValueExpr(const Value &Value) {
 MAIRScalarExpr MAIRGraph::createUnaryExpr(MAIRScalarExpr::Kind Kind,
                                           Type &ResultType,
                                           MAIRScalarExpr Operand) {
+  assertLive("create an expression on");
   assert(ScalarExprOwner && "cannot create an expression on a moved graph");
   MAIRScalarExpr Operands[] = {Operand};
   auto *Node = new (ScalarExprAllocator.Allocate()) MAIRScalarExprNode(
@@ -911,6 +936,7 @@ MAIRScalarExpr MAIRGraph::createUnaryExpr(MAIRScalarExpr::Kind Kind,
 MAIRScalarExpr MAIRGraph::createBinaryExpr(MAIRScalarExpr::Kind Kind,
                                            Type &ResultType, MAIRScalarExpr LHS,
                                            MAIRScalarExpr RHS) {
+  assertLive("create an expression on");
   assert(ScalarExprOwner && "cannot create an expression on a moved graph");
   MAIRScalarExpr Operands[] = {LHS, RHS};
   auto *Node = new (ScalarExprAllocator.Allocate()) MAIRScalarExprNode(
@@ -919,10 +945,12 @@ MAIRScalarExpr MAIRGraph::createBinaryExpr(MAIRScalarExpr::Kind Kind,
 }
 
 bool MAIRGraph::ownsScalarExpr(MAIRScalarExpr Expr) const {
+  assertLive("query");
   return ScalarExprOwner && Expr.getOwner() == ScalarExprOwner.get();
 }
 
 MAIRGraph::iterator MAIRGraph::erase(Observation &Obs) {
+  assertLive("erase from");
   auto It = llvm::find_if(Observations, [&Obs](Observation &Candidate) {
     return &Candidate == &Obs;
   });
@@ -953,7 +981,7 @@ MAIRGraph::iterator MAIRGraph::erase(Observation &Obs) {
   return Next;
 }
 
-void MAIRGraph::clear() {
+void MAIRGraph::clearStorage() {
   GraphAllocator.DestroyAll();
   ScalarExprAllocator.DestroyAll();
   MemoryObjectAllocator.DestroyAll();
@@ -966,11 +994,18 @@ void MAIRGraph::clear() {
   NextObservationID = 0;
 }
 
+void MAIRGraph::clear() {
+  assertLive("clear");
+  clearStorage();
+}
+
 Observation *MAIRGraph::find(StringRef Name) {
+  assertLive("find in");
   return const_cast<Observation *>(std::as_const(*this).find(Name));
 }
 
 const Observation *MAIRGraph::find(StringRef Name) const {
+  assertLive("find in");
   for (const Observation &Obs : Observations)
     if (Obs.getName() == Name)
       return &Obs;
@@ -978,24 +1013,29 @@ const Observation *MAIRGraph::find(StringRef Name) const {
 }
 
 Observation *MAIRGraph::getBBEntryRepresentative(const BasicBlock &BB) {
+  assertLive("query");
   return BBEntryRepresentatives.lookup(&BB);
 }
 
 const Observation *
 MAIRGraph::getBBEntryRepresentative(const BasicBlock &BB) const {
+  assertLive("query");
   return BBEntryRepresentatives.lookup(&BB);
 }
 
 Observation *MAIRGraph::getBBExitRepresentative(const BasicBlock &BB) {
+  assertLive("query");
   return BBExitRepresentatives.lookup(&BB);
 }
 
 const Observation *
 MAIRGraph::getBBExitRepresentative(const BasicBlock &BB) const {
+  assertLive("query");
   return BBExitRepresentatives.lookup(&BB);
 }
 
 void MAIRGraph::replaceObservation(Observation &From, Observation &Into) {
+  assertLive("replace observations in");
   assert(From.getParent() == this && Into.getParent() == this &&
          "replacement observations must belong to this graph");
   assert(Into.hasCompatibleMergeSemantics(From) &&
@@ -1010,6 +1050,7 @@ void MAIRGraph::replaceObservation(Observation &From, Observation &Into) {
 }
 
 void MAIRGraph::addEdge(Observation &From, Observation &To, ObsEdgeKind Kind) {
+  assertLive("add an edge to");
   assert(From.getParent() == this && To.getParent() == this &&
          "MAIRGraph edge endpoints must belong to this graph");
   if (hasEdge(From, To, Kind))
@@ -1020,6 +1061,7 @@ void MAIRGraph::addEdge(Observation &From, Observation &To, ObsEdgeKind Kind) {
 }
 
 void MAIRGraph::removeEdge(Observation &From, Observation &To) {
+  assertLive("remove an edge from");
   assert(From.getParent() == this && To.getParent() == this &&
          "MAIRGraph edge endpoints must belong to this graph");
   auto OldChildSize = From.Children.size();
@@ -1040,6 +1082,7 @@ void MAIRGraph::removeEdge(Observation &From, Observation &To) {
 }
 
 bool MAIRGraph::hasEdge(const Observation &From, const Observation &To) const {
+  assertLive("query");
   for (const ObservationEdge &Edge : From.children())
     if (&Edge.getNode() == &To)
       return true;
@@ -1048,6 +1091,7 @@ bool MAIRGraph::hasEdge(const Observation &From, const Observation &To) const {
 
 bool MAIRGraph::hasEdge(const Observation &From, const Observation &To,
                         ObsEdgeKind Kind) const {
+  assertLive("query");
   for (const ObservationEdge &Edge : From.children())
     if (&Edge.getNode() == &To && Edge.getKind() == Kind)
       return true;
@@ -1055,6 +1099,7 @@ bool MAIRGraph::hasEdge(const Observation &From, const Observation &To,
 }
 
 MAIRGraph::EdgeListType MAIRGraph::successors(Observation &Obs) {
+  assertLive("query");
   EdgeListType Result;
   for (const ObservationEdge &Edge : Obs.children())
     Result.push_back(&Edge.getNode());
@@ -1063,6 +1108,7 @@ MAIRGraph::EdgeListType MAIRGraph::successors(Observation &Obs) {
 
 MAIRGraph::ConstEdgeListType
 MAIRGraph::successors(const Observation &Obs) const {
+  assertLive("query");
   ConstEdgeListType Result;
   for (const ObservationEdge &Edge : Obs.children())
     Result.push_back(&Edge.getNode());
@@ -1071,12 +1117,14 @@ MAIRGraph::successors(const Observation &Obs) const {
 
 MAIRGraph::ObservationEdgeListType
 MAIRGraph::childEdges(const Observation &Obs) const {
+  assertLive("query");
   ObservationEdgeListType Result;
   Result.append(Obs.children().begin(), Obs.children().end());
   return Result;
 }
 
 MAIRGraph::EdgeListType MAIRGraph::predecessors(Observation &Obs) {
+  assertLive("query");
   EdgeListType Result;
   for (const ObservationEdge &Edge : Obs.parents())
     Result.push_back(&Edge.getNode());
@@ -1085,6 +1133,7 @@ MAIRGraph::EdgeListType MAIRGraph::predecessors(Observation &Obs) {
 
 MAIRGraph::ConstEdgeListType
 MAIRGraph::predecessors(const Observation &Obs) const {
+  assertLive("query");
   ConstEdgeListType Result;
   for (const ObservationEdge &Edge : Obs.parents())
     Result.push_back(&Edge.getNode());
@@ -1093,16 +1142,19 @@ MAIRGraph::predecessors(const Observation &Obs) const {
 
 MAIRGraph::ObservationEdgeListType
 MAIRGraph::parentEdges(const Observation &Obs) const {
+  assertLive("query");
   ObservationEdgeListType Result;
   Result.append(Obs.parents().begin(), Obs.parents().end());
   return Result;
 }
 
 MemoryObject *MAIRGraph::getMemoryObject(const Value &Base) {
+  assertLive("query");
   return MemoryObjects.lookup(&Base);
 }
 
 const MemoryObject *MAIRGraph::getMemoryObject(const Value &Base) const {
+  assertLive("query");
   return MemoryObjects.lookup(&Base);
 }
 
@@ -1115,6 +1167,7 @@ std::string MAIRGraph::toString(bool LLVM) const {
 }
 
 void MAIRGraph::print(raw_ostream &OS, bool LLVM) const {
+  assertLive("print");
   (void)LLVM;
   OS << "mair graph";
   if (F) {

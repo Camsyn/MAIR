@@ -502,6 +502,11 @@ unsigned MAIRVerifier::countParentEdge(const Observation &To,
 }
 
 bool MAIRGraph::verify(raw_ostream *OS) const {
+  if (!isLive()) {
+    if (OS)
+      *OS << "MAIRGraph is not live\n";
+    return false;
+  }
   // Keep the no-diagnostics path cheap; printing MAIR objects is relatively
   // expensive and should only happen on explicit request.
   MAIRVerifier Verifier(OS);

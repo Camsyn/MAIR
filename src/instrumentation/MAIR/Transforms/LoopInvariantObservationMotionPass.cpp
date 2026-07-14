@@ -63,13 +63,16 @@ void eraseAccess(MemoryAccess &Access) {
   Parent.erase(It);
 }
 
-void moveAccessTo(MemoryAccess &Access, Observation &Target) {
+void moveAccessTo(MemoryAccess &Access, Observation &Target,
+                  bool MergeEquivalentAccesses) {
   MemoryAccess *Accumulator = nullptr;
-  for (MemoryAccess &Existing : Target)
-    if (isSameAccess(Existing, Access)) {
-      Accumulator = &Existing;
-      break;
-    }
+  if (MergeEquivalentAccesses) {
+    for (MemoryAccess &Existing : Target)
+      if (isSameAccess(Existing, Access)) {
+        Accumulator = &Existing;
+        break;
+      }
+  }
 
   if (!Accumulator) {
     Target.addAccess(Access);
@@ -81,7 +84,8 @@ void moveAccessTo(MemoryAccess &Access, Observation &Target) {
   eraseAccess(Access);
 }
 
-bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops) {
+bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops,
+                            bool MergeEquivalentAccesses) {
   if (!Loops.isAvailable())
     return false;
 
@@ -106,7 +110,7 @@ bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops) {
         if (!Target || Target == &Obs ||
             !isRegionAvailableAt(*Region, Target->getSite(), Loops))
           continue;
-        moveAccessTo(Access, *Target);
+        moveAccessTo(Access, *Target, MergeEquivalentAccesses);
         return true;
       }
 
@@ -132,7 +136,7 @@ bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops) {
       Observation *Target = findEvent(G, TargetSite, Guard);
       if (!Target)
         Target = &G.createObservation(TargetSite, Guard);
-      moveAccessTo(Access, *Target);
+      moveAccessTo(Access, *Target, MergeEquivalentAccesses);
       return true;
     }
   }
@@ -146,7 +150,7 @@ LoopInvariantObservationMotionPass::run(MAIRGraph &G,
                                         MAIRGraphAnalysisManager &AM) {
   bool Changed = false;
   MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
-  while (moveOneInvariantAccess(G, Loops))
+  while (moveOneInvariantAccess(G, Loops, MergeEquivalentAccesses))
     Changed = true;
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

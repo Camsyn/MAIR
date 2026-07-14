@@ -4,6 +4,7 @@
 #include "MAIR/MAIRBarrierAnalysis.h"
 #include "MAIR/MAIRDump.h"
 #include "MAIR/Transforms/CommonMAMotionPass.h"
+#include "MAIR/Transforms/LoopInvariantObservationMotionPass.h"
 #include "MAIR/Transforms/LoopPeriodicObservationCombinePass.h"
 #include "MAIR/Transforms/RedundantObservationEliminationPass.h"
 #include "MAIR/Transforms/SimplifyGraphPass.h"
@@ -1334,6 +1335,88 @@ exit:
   const Observation *Exit = findBlockEntry(Graph, "exit");
   ASSERT_NE(Exit, nullptr);
   EXPECT_TRUE(Exit->empty());
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraphPass, InvariantMotionCanPreserveSingleInstructionProvenance) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i32 %n) {
+entry:
+  br label %header
+header:
+  %i = phi i32 [ 0, %entry ], [ %next, %body ]
+  %a = load i32, ptr %p, align 4
+  %b = load i32, ptr %p, align 4
+  %more = icmp slt i32 %i, %n
+  br i1 %more, label %body, label %exit
+body:
+  %next = add i32 %i, 1
+  br label %header
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  LoopInvariantObservationMotionPass Pass(/*MergeEquivalentAccesses=*/false);
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+
+  const Observation *EntryExit = findBlockExit(Graph, "entry");
+  ASSERT_NE(EntryExit, nullptr);
+  ASSERT_EQ(EntryExit->size(), 2u);
+  for (const MemoryAccess &Access : *EntryExit)
+    EXPECT_EQ(Access.getInstructions().size(), 1u);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraphPass, PeriodicCombineCanPreserveSingleInstructionProvenance) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  br label %header
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %header ]
+  %pi = getelementptr i8, ptr %p, i64 %i
+  %a = load i8, ptr %pi, align 1
+  %b = load i8, ptr %pi, align 1
+  %next = add i64 %i, 1
+  %done = icmp eq i64 %next, 4
+  br i1 %done, label %exit, label %header
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  LoopPeriodicObservationCombinePass Pass(
+      /*MergeEquivalentAccesses=*/false);
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+
+  const Observation *ExitEntry = findBlockEntry(Graph, "exit");
+  ASSERT_NE(ExitEntry, nullptr);
+  ASSERT_EQ(ExitEntry->size(), 2u);
+  for (const MemoryAccess &Access : *ExitEntry)
+    EXPECT_EQ(Access.getInstructions().size(), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 

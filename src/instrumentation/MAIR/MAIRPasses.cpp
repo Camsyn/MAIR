@@ -50,6 +50,10 @@ void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
 
 void buildMAIRGraphOgPipeline(MAIRGraphPassManager &PM) {
   PM.addPass(SimplifyGraphPass());
+  PM.addPass(LoopInvariantObservationMotionPass(
+      /*MergeEquivalentAccesses=*/false));
+  PM.addPass(LoopPeriodicObservationCombinePass(
+      /*MergeEquivalentAccesses=*/false));
   PM.addPass(RedundantObservationEliminationPass());
   PM.addPass(SimplifyGraphPass());
 }

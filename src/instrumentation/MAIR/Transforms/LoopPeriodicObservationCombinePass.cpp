@@ -231,19 +231,22 @@ void eraseAccess(MemoryAccess &Access) {
 }
 
 void addOrMergeAccess(Observation &Target, const MemoryAccess &Access,
-                      const MemoryRegion &Region) {
+                      const MemoryRegion &Region,
+                      bool MergeEquivalentAccesses) {
   MemoryAccess NewAccess(Access.getInstructions(), Region, Access.getKind());
-  for (MemoryAccess &Existing : Target) {
-    if (&Existing.getMemoryObject() != &Access.getMemoryObject())
-      continue;
-    if (Existing.getKind() != Access.getKind())
-      continue;
-    if (Existing.getRegion() != Region)
-      continue;
-    bool Merged = Existing.mergeWith(NewAccess);
-    assert(Merged && "identical aggregate accesses must be mergeable");
-    (void)Merged;
-    return;
+  if (MergeEquivalentAccesses) {
+    for (MemoryAccess &Existing : Target) {
+      if (&Existing.getMemoryObject() != &Access.getMemoryObject())
+        continue;
+      if (Existing.getKind() != Access.getKind())
+        continue;
+      if (Existing.getRegion() != Region)
+        continue;
+      bool Merged = Existing.mergeWith(NewAccess);
+      assert(Merged && "identical aggregate accesses must be mergeable");
+      (void)Merged;
+      return;
+    }
   }
   Target.addAccess(NewAccess);
 }
@@ -316,7 +319,8 @@ getAggregateTarget(MAIRGraph &G, const MAIRLoopInfo &Loops, const Loop &L) {
 }
 
 bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
-                             Observation &Obs, MemoryAccess &Access) {
+                             Observation &Obs, MemoryAccess &Access,
+                             bool MergeEquivalentAccesses) {
   const AbstractAccess *Location = Access.getContiguousRegion();
   std::optional<uint64_t> AccessSize = getConstantAccessSize(Access);
   if (!Location || !Location->getBase() || !AccessSize || *AccessSize == 0 ||
@@ -389,17 +393,19 @@ bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
   Observation *TargetEvent = Target->Event;
   if (!TargetEvent)
     TargetEvent = &G.createObservation(Target->Site);
-  addOrMergeAccess(*TargetEvent, Access, Aggregate);
+  addOrMergeAccess(*TargetEvent, Access, Aggregate, MergeEquivalentAccesses);
   eraseAccess(Access);
   return true;
 }
 
-bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops) {
+bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
+                             bool MergeEquivalentAccesses) {
   if (!Loops.isAvailable())
     return false;
   for (Observation &Obs : G)
     for (MemoryAccess &Access : Obs)
-      if (aggregateOneObservation(G, Loops, Obs, Access))
+      if (aggregateOneObservation(G, Loops, Obs, Access,
+                                  MergeEquivalentAccesses))
         return true;
   return false;
 }
@@ -411,7 +417,7 @@ LoopPeriodicObservationCombinePass::run(MAIRGraph &G,
                                         MAIRGraphAnalysisManager &AM) {
   bool Changed = false;
   MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
-  while (aggregateOneObservation(G, Loops))
+  while (aggregateOneObservation(G, Loops, MergeEquivalentAccesses))
     Changed = true;
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

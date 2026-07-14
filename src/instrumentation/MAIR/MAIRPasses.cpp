@@ -48,6 +48,12 @@ void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
 #include "MAIR/PassRegistry.def"
 }
 
+void buildMAIRGraphOgPipeline(MAIRGraphPassManager &PM) {
+  PM.addPass(SimplifyGraphPass());
+  PM.addPass(RedundantObservationEliminationPass());
+  PM.addPass(SimplifyGraphPass());
+}
+
 void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
   PM.addPass(SimplifyGraphPass());
   PM.addPass(CommonMAMotionPass());
@@ -70,6 +76,10 @@ Error parseMAIRGraphPassPipeline(MAIRGraphPassManager &PM,
     if (PassName.empty())
       continue;
 
+    if (PassName == "default<Og>") {
+      buildMAIRGraphOgPipeline(PM);
+      continue;
+    }
     if (PassName == "default<O1>") {
       buildMAIRGraphO1Pipeline(PM);
       continue;

@@ -2272,6 +2272,57 @@ entry:
   EXPECT_EQ(A.getInstructions().size(), 2u);
 }
 
+TEST(MAIRSchema, ContainingContiguousMergeKeepsCoveringInstructionFirst) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %wide = load i64, ptr %p, align 8
+  %p4 = getelementptr i8, ptr %p, i64 4
+  %narrow = load i32, ptr %p4, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::Argument &P = *F.arg_begin();
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  llvm::Instruction *Wide = &BB.front();
+  llvm::Instruction *Narrow = &*std::next(BB.begin(), 1);
+  MemoryAccess WideAccess(
+      {Wide},
+      MemoryRegion(AbstractAccess(&P, AbstractValue::constant(0),
+                                  AbstractValue::constant(8))),
+      AccessKind::Read);
+  MemoryAccess NarrowAccess(
+      {Narrow},
+      MemoryRegion(AbstractAccess(&P, AbstractValue::constant(4),
+                                  AbstractValue::constant(4))),
+      AccessKind::Read);
+
+  EXPECT_TRUE(WideAccess.mergeWith(NarrowAccess));
+  EXPECT_EQ(WideAccess.getInstructions().size(), 2u);
+  EXPECT_EQ(WideAccess.getInstructions().front(), Wide);
+  EXPECT_EQ(WideAccess.getInstructions().back(), Narrow);
+
+  MemoryAccess Reversed(
+      {Narrow},
+      MemoryRegion(AbstractAccess(&P, AbstractValue::constant(4),
+                                  AbstractValue::constant(4))),
+      AccessKind::Read);
+  MemoryAccess Covering(
+      {Wide},
+      MemoryRegion(AbstractAccess(&P, AbstractValue::constant(0),
+                                  AbstractValue::constant(8))),
+      AccessKind::Read);
+  EXPECT_TRUE(Reversed.mergeWith(Covering));
+  EXPECT_EQ(Reversed.getInstructions().size(), 2u);
+  EXPECT_EQ(Reversed.getInstructions().front(), Wide);
+  EXPECT_EQ(Reversed.getInstructions().back(), Narrow);
+}
+
 TEST(MAIRSchema, NewSemanticsHaveExplicitStableDumpSyntax) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(

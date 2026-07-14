@@ -5,7 +5,7 @@
 ; RUN: diff -u %t.o1 %t.default
 ; RUN: not mair-opt -O1 -passes=simplifygraph %s 2>&1 | FileCheck %s --check-prefix=CONFLICT
 
-; CONFLICT: -O1 cannot be combined with -passes
+; CONFLICT: -Og/-O1 cannot be combined with -passes
 
 define void @o1_common_before_location_merge(ptr %p, ptr %q, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @o1_common_before_location_merge {

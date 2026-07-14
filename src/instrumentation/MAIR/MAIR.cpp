@@ -576,25 +576,36 @@ const Value *MemoryAccess::getBase() const {
 }
 
 bool MemoryAccess::mergeWith(const MemoryAccess &Other) {
+  if (getBase() != Other.getBase())
+    return false;
+
   if (const auto *ThisAccess = getContiguousRegion()) {
     const auto *OtherAccess = Other.getContiguousRegion();
     if (!OtherAccess)
       return false;
+    const bool ThisContainsOther = ThisAccess->contains(*OtherAccess);
+    const bool OtherContainsThis = OtherAccess->contains(*ThisAccess);
     std::optional<AbstractAccess> Merged =
         AbstractAccess::merge(*ThisAccess, *OtherAccess);
     if (!Merged)
       return false;
     Region = *Merged;
+    if (OtherContainsThis && !ThisContainsOther) {
+      SmallVector<Instruction *, 2> OrderedInsts;
+      OrderedInsts.append(Other.Insts.begin(), Other.Insts.end());
+      OrderedInsts.append(Insts.begin(), Insts.end());
+      Insts = std::move(OrderedInsts);
+    } else {
+      Insts.append(Other.Insts);
+    }
   } else {
     const auto *ThisPeriodic = getPeriodicRegion();
     const auto *OtherPeriodic = Other.getPeriodicRegion();
     if (!ThisPeriodic || !OtherPeriodic || *ThisPeriodic != *OtherPeriodic)
       return false;
+    Insts.append(Other.Insts);
   }
 
-  if (getBase() != Other.getBase())
-    return false;
-  Insts.append(Other.Insts);
   mergeKind(Other.Kind);
   return true;
 }

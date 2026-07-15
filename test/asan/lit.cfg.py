@@ -61,8 +61,8 @@ target_cxxflags = config.cxx_mode_flags + target_cflags
 clang_asan_static_cflags = (
     [
         # "-fsanitize=address",
-        # "-asan",
-        "-xsan",
+        "-asan",
+        # "-xsan",
         # "-fno-sanitize=thread",
         # "-fno-sanitize=memory",
         "-fsanitize-recover=memory",

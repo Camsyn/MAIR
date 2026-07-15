@@ -4,8 +4,13 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Statistic.h"
 
 using namespace llvm;
+
+#define DEBUG_TYPE "mair-locationmerge"
+
+STATISTIC(NumMergedAccesses, "Number of accesses merged by location merging");
 
 namespace mair {
 
@@ -65,6 +70,7 @@ bool mergeLocations(Observation &Obs) {
       Accesses.erase(Accesses.begin() + I);
       --ConcreteEnd;
       Changed = true;
+      ++NumMergedAccesses;
     }
 
     for (size_t I = ConcreteEnd; I < Accesses.size(); ++I) {
@@ -83,6 +89,7 @@ bool mergeLocations(Observation &Obs) {
         eraseAccess(Obs, *Next);
         Accesses.erase(Accesses.begin() + J);
         Changed = true;
+        ++NumMergedAccesses;
       }
     }
   }

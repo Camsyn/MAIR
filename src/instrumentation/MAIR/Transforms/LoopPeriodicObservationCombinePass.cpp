@@ -3,10 +3,20 @@
 #include "MAIR/MAIR.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/Instructions.h"
 
 using namespace llvm;
+
+#define DEBUG_TYPE "mair-loop-periodic-combine"
+
+STATISTIC(NumAggregatedAccesses,
+          "Number of accesses aggregated across loop iterations");
+STATISTIC(NumRangeAggregates,
+          "Number of loop accesses aggregated into contiguous ranges");
+STATISTIC(NumPeriodicAggregates,
+          "Number of loop accesses aggregated into periodic regions");
 
 namespace mair {
 
@@ -361,9 +371,11 @@ bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
   // A constant recurrence that fits the contiguous MAIR abstraction keeps the
   // compact range form. Everything else must survive as an explicit periodic
   // region with no later dependence on LLVM SCEV objects.
+  bool IsRangeAggregate = false;
   if (std::optional<AbstractAccess> Range = buildContiguousAggregate(
           Access, *Recurrence, ExecutionCount, *AccessSize, SE)) {
     Aggregate = *Range;
+    IsRangeAggregate = true;
   } else {
     const SCEV *Start = Recurrence->getStart();
     const SCEV *Stride = Recurrence->getStepRecurrence(SE);
@@ -394,6 +406,11 @@ bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
     TargetEvent = &G.createObservation(Target->Site);
   addOrMergeAccess(*TargetEvent, Access, Aggregate, MergeEquivalentAccesses);
   eraseAccess(Access);
+  ++NumAggregatedAccesses;
+  if (IsRangeAggregate)
+    ++NumRangeAggregates;
+  else
+    ++NumPeriodicAggregates;
   return true;
 }
 

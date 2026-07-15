@@ -3,8 +3,15 @@
 #include "MAIR/MAIR.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Statistic.h"
 
 using namespace llvm;
+
+#define DEBUG_TYPE "mair-loop-invariant-motion"
+
+STATISTIC(NumMovedToPreheaders,
+          "Number of invariant accesses moved to loop preheaders");
+STATISTIC(NumMovedToExits, "Number of invariant accesses moved to loop exits");
 
 namespace mair {
 
@@ -112,6 +119,7 @@ bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops,
             !isRegionAvailableAt(*Region, Target->getSite(), Loops))
           continue;
         moveAccessTo(Access, *Target, MergeEquivalentAccesses);
+        ++NumMovedToPreheaders;
         return true;
       }
 
@@ -138,6 +146,7 @@ bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops,
       if (!Target)
         Target = &G.createObservation(TargetSite, Guard);
       moveAccessTo(Access, *Target, MergeEquivalentAccesses);
+      ++NumMovedToExits;
       return true;
     }
   }

@@ -3,8 +3,13 @@
 
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Statistic.h"
 
 using namespace llvm;
+
+#define DEBUG_TYPE "mair-redundant-observation-elimination"
+
+STATISTIC(NumEliminatedAccesses, "Number of redundant accesses eliminated");
 
 namespace mair {
 
@@ -33,6 +38,7 @@ RedundantObservationEliminationPass::run(MAIRGraph &G,
     assert(It != Parent->end() && "redundant access must belong to parent");
     Parent->erase(It);
   }
+  NumEliminatedAccesses += Redundant.size();
   return Redundant.empty() ? PreservedAnalyses::all()
                            : PreservedAnalyses::none();
 }

@@ -4,10 +4,16 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Dominators.h"
 
 using namespace llvm;
+
+#define DEBUG_TYPE "mair-commonmamotion"
+
+STATISTIC(NumHoistedAccesses, "Number of accesses hoisted by common MA motion");
+STATISTIC(NumSunkAccesses, "Number of accesses sunk by common MA motion");
 
 namespace mair {
 
@@ -211,6 +217,11 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink,
       }
       for (MemoryAccess *Access : Matches)
         eraseAccess(*Access);
+
+      if (Sink)
+        ++NumSunkAccesses;
+      else
+        ++NumHoistedAccesses;
 
       // Move one common access per call; the outer fixed-point loop restarts
       // the scan with fresh iterators and exposes cascaded opportunities.

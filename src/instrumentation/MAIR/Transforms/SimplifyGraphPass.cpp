@@ -2,8 +2,14 @@
 #include "MAIR/MAIR.h"
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Statistic.h"
 
 using namespace llvm;
+
+#define DEBUG_TYPE "mair-simplifygraph"
+
+STATISTIC(NumMergedObservations,
+          "Number of observations merged by graph simplification");
 
 namespace mair {
 
@@ -72,6 +78,7 @@ PreservedAnalyses SimplifyGraphPass::run(MAIRGraph &G,
     if (!Candidate.Into)
       break;
     mergeObservationInto(G, *Candidate.Into, *Candidate.From);
+    ++NumMergedObservations;
     Changed = true;
   }
 

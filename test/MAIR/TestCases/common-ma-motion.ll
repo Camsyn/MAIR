@@ -6,14 +6,14 @@ define void @hoist_diamond(ptr %p, ptr %q, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @hoist_diamond {
 ; CHECK:       be1: preds=
 ; CHECK-NEXT:    read ptr %p, 4
-; CHECK:       ma3: preds=
+; CHECK:       ma4: preds=
 ; CHECK-NEXT:    read ptr %q, 4
-; CHECK:       ma7: preds=
+; CHECK:       ma8: preds=
 ; CHECK-NEXT:    read ptr %p + 4, 4
 ; SIMPLIFY-LABEL: mair graph of fn @hoist_diamond {
-; SIMPLIFY:       ma3: preds=
+; SIMPLIFY:       ma4: preds=
 ; SIMPLIFY-NEXT:    read ptr %p, 4
-; SIMPLIFY:       ma7: preds=
+; SIMPLIFY:       ma8: preds=
 ; SIMPLIFY-NEXT:    read ptr %p, 4
 entry:
   br i1 %cond, label %left, label %right
@@ -32,14 +32,20 @@ right:
 
 define void @sink_diamond(ptr %p, ptr %q, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @sink_diamond {
-; CHECK:       ma3: preds=
+; CHECK:       ma8: preds=
 ; CHECK-NEXT:    read ptr %q, 4
-; CHECK:       ma7: preds=
+; CHECK:       ma12: preds=
 ; CHECK-NEXT:    read ptr %p + 4, 4
-; CHECK:       bs10: preds=
+; CHECK:       bs14: preds=
 ; CHECK-NEXT:    read ptr %p, 4
 entry:
-  br i1 %cond, label %left, label %right
+  br i1 %cond, label %left.path, label %right.path
+
+left.path:
+  br label %left
+
+right.path:
+  br label %right
 
 left:
   %left.common = load i32, ptr %p, align 4
@@ -113,7 +119,7 @@ define void @keep_non_common(ptr %p, ptr %q, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @keep_non_common {
 ; CHECK:       ma3: preds=
 ; CHECK-NEXT:    read ptr %p, 4
-; CHECK:       ma6: preds=
+; CHECK:       ma7: preds=
 ; CHECK-NEXT:    write ptr %p, 4
 ; CHECK-NEXT:    read ptr %q, 4
 entry:
@@ -187,21 +193,31 @@ right:
 
 define void @sink_nested_fixed_point(ptr %p, i1 %outer, i1 %inner) {
 ; CHECK-LABEL: mair graph of fn @sink_nested_fixed_point {
-; CHECK:       bs2: preds=
+; CHECK:       ma13: preds=
 ; CHECK-EMPTY:
-; CHECK:       bs4: preds=
+; CHECK:       ma16: preds=
 ; CHECK-EMPTY:
-; CHECK:       bs7: preds=
+; CHECK:       ma21: preds=
 ; CHECK-EMPTY:
-; CHECK:       bs12: preds=
-; CHECK-EMPTY:
-; CHECK:       bs15: preds=
+; CHECK:       bs23: preds=
 ; CHECK-NEXT:    read ptr %p, 4
 entry:
-  br i1 %outer, label %left, label %right
+  br i1 %outer, label %left.path, label %right.path
+
+left.path:
+  br label %left
+
+right.path:
+  br label %right
 
 left:
-  br i1 %inner, label %left.a, label %left.b
+  br i1 %inner, label %left.a.path, label %left.b.path
+
+left.a.path:
+  br label %left.a
+
+left.b.path:
+  br label %left.b
 
 left.a:
   %a = load i32, ptr %p, align 4

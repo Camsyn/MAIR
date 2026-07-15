@@ -26,7 +26,8 @@ MergeCandidate findMergeCandidate(MAIRGraph &G) {
       if (!O1.hasCompatibleMergeSemantics(O2))
         continue;
       if (G.hasEdge(O2, O1, ObsEdgeKind::PostDom))
-        return {&O1, &O2};
+        // Retain the post-dominating site so contraction sinks accesses.
+        return {&O2, &O1};
     }
   }
   return {};
@@ -38,7 +39,7 @@ void mergeObservationInto(MAIRGraph &G, Observation &Into, Observation &From) {
   assert(IntoToFrom.has_value() && FromToInto.has_value() &&
          "merged observations must be mutual children");
 
-  Into.mergeAccessesFrom(From);
+  Into.prependAccessesFrom(From);
 
   SmallVector<ObservationEdge, 8> Incoming = G.parentEdges(From);
   SmallVector<ObservationEdge, 8> Outgoing = G.childEdges(From);

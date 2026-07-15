@@ -735,6 +735,19 @@ void Observation::mergeAccessesFrom(const Observation &Other) {
     addAccess(A);
 }
 
+void Observation::prependAccessesFrom(const Observation &Other) {
+  assert(hasCompatibleMergeSemantics(Other) &&
+         "cannot merge observations with incompatible site or guard semantics");
+  for (const MemoryAccess &A : llvm::reverse(Other.Accesses)) {
+    auto &Node = createAccess(A.getInstructions(), A.getRegion(), A.getKind());
+    Accesses.push_front(Node);
+    Node.setParent(this);
+    if (MAIRGraph *Graph = getParent())
+      Graph->registerAccess(Node);
+    ++NumAccesses;
+  }
+}
+
 void Observation::mergeRepresentationFrom(const Observation &Other) {
   RepresentedBlocks.insert_range(Other.RepresentedBlocks);
 }

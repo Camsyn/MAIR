@@ -5,6 +5,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/Dominators.h"
 
 using namespace llvm;
 
@@ -17,28 +18,28 @@ bool isSameAccess(const MemoryAccess &LHS, const MemoryAccess &RHS) {
          LHS.getRegion() == RHS.getRegion() && LHS.getKind() == RHS.getKind();
 }
 
-bool isValueAvailableAt(const Value *Value, const Instruction &Anchor) {
+bool isValueAvailableAt(const Value *Value, const Instruction &Anchor,
+                        DominatorTree &DT) {
   const auto *Def = dyn_cast_or_null<Instruction>(Value);
   if (!Def)
     return true;
-  return Def->getParent() == Anchor.getParent() && Def != &Anchor &&
-         Def->comesBefore(&Anchor);
+  return Def != &Anchor && DT.dominates(Def, &Anchor);
 }
 
-bool isAccessAvailableAt(const MemoryAccess &Access,
-                         const Observation &Target) {
+bool isAccessAvailableAt(const MemoryAccess &Access, const Observation &Target,
+                         DominatorTree &DT) {
   const Instruction *Anchor = Target.getAnchor();
   assert(Anchor && "motion target must have an anchor");
   const AbstractAccess *Location = Access.getContiguousRegion();
   if (!Location)
     return false;
-  if (!isValueAvailableAt(Location->getBase(), *Anchor))
+  if (!isValueAvailableAt(Location->getBase(), *Anchor, DT))
     return false;
   if (Location->getOffset().isSymbol() &&
-      !isValueAvailableAt(Location->getOffset().getSymbol(), *Anchor))
+      !isValueAvailableAt(Location->getOffset().getSymbol(), *Anchor, DT))
     return false;
   return !Location->getSize().isSymbol() ||
-         isValueAvailableAt(Location->getSize().getSymbol(), *Anchor);
+         isValueAvailableAt(Location->getSize().getSymbol(), *Anchor, DT);
 }
 
 void eraseAccess(MemoryAccess &Access) {
@@ -131,7 +132,8 @@ bool collectSourceGroups(MAIRGraph &G, Observation &ProofRoot,
   return true;
 }
 
-bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink) {
+bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink,
+                         DominatorTree &DT) {
   // Resolve the logical entry/exit boundary after SimplifyGraph contraction,
   // then require the complete, de-duplicated CFG neighbor set. Self-edges and
   // fewer than two distinct neighbors are deliberately no-ops.
@@ -171,7 +173,7 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink) {
   // then compute the exact object/location/kind intersection of all groups.
   for (Observation *Obs : Groups.front()) {
     for (MemoryAccess &Candidate : *Obs) {
-      if (!isAccessAvailableAt(Candidate, *Target))
+      if (!isAccessAvailableAt(Candidate, *Target, DT))
         continue;
       SmallVector<MemoryAccess *, 4> Matches = {&Candidate};
       bool Common = true;
@@ -217,35 +219,35 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink) {
   return false;
 }
 
+bool moveCommonAccessesToFixedPoint(MAIRGraph &G, bool Sink,
+                                    DominatorTree &DT) {
+  bool Changed = false;
+  const Function *F = G.getFunction();
+  assert(F && "CommonMAMotion requires a function-backed graph");
+  while (true) {
+    bool Moved = false;
+    for (const BasicBlock &BB : *F) {
+      if (!moveOneCommonAccess(G, BB, Sink, DT))
+        continue;
+      Moved = true;
+      Changed = true;
+      break;
+    }
+    if (!Moved)
+      return Changed;
+  }
+}
+
 } // namespace
 
 PreservedAnalyses CommonMAMotionPass::run(MAIRGraph &G,
                                           MAIRGraphAnalysisManager &AM) {
   (void)AM;
-  bool Changed = false;
-  // Every rewrite removes at least two sources and creates at most one access.
-  while (true) {
-    bool Moved = false;
-    const Function *F = G.getFunction();
-    assert(F && "CommonMAMotion requires a function-backed graph");
-    for (const BasicBlock &BB : *F) {
-      if (moveOneCommonAccess(G, BB, /*Sink=*/true)) {
-        Moved = true;
-        break;
-      }
-    }
-    if (!Moved) {
-      for (const BasicBlock &BB : *F) {
-        if (moveOneCommonAccess(G, BB, /*Sink=*/false)) {
-          Moved = true;
-          break;
-        }
-      }
-    }
-    if (!Moved)
-      break;
-    Changed = true;
-  }
+  const Function *F = G.getFunction();
+  assert(F && "CommonMAMotion requires a function-backed graph");
+  DominatorTree DT(*const_cast<Function *>(F));
+  bool Changed = moveCommonAccessesToFixedPoint(G, /*Sink=*/false, DT);
+  Changed |= moveCommonAccessesToFixedPoint(G, /*Sink=*/true, DT);
 
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

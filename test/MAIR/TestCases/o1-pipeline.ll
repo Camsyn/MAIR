@@ -11,9 +11,9 @@ define void @o1_common_before_location_merge(ptr %p, ptr %q, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @o1_common_before_location_merge {
 ; CHECK:       be1: preds=
 ; CHECK-NEXT:    read ptr %p, 4
-; CHECK:       ma3: preds=
+; CHECK:       ma4: preds=
 ; CHECK-NEXT:    read ptr %q, 4
-; CHECK:       ma7: preds=
+; CHECK:       ma8: preds=
 ; CHECK-NEXT:    read ptr %p + 4, 4
 entry:
   br i1 %cond, label %left, label %right
@@ -32,7 +32,7 @@ right:
 
 define void @o1_location_merge_after_motion(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @o1_location_merge_after_motion {
-; CHECK:       ma1: preds=
+; CHECK:       ma3: preds=
 ; CHECK-NEXT:    read/write ptr %p, 12
 entry:
   %p8 = getelementptr i8, ptr %p, i64 8

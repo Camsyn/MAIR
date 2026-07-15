@@ -609,6 +609,7 @@ public:
   MemoryAccess &addAccess(const MemoryAccess &A);
   iterator erase(iterator It);
   void mergeAccessesFrom(const Observation &Other);
+  void prependAccessesFrom(const Observation &Other);
 
   std::string toString(bool LLVM = false) const;
   void print(raw_ostream &OS, bool LLVM = false) const;

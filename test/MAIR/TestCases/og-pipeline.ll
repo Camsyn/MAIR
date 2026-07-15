@@ -42,7 +42,7 @@ define void @og_includes_provenance_preserving_loop_transforms(ptr %p,
 ; CHECK:       be1: preds=
 ; CHECK-NEXT:    read ptr %p, 4
 ; CHECK-NEXT:    read ptr %p, 4
-; CHECK:       ma3: preds=
+; CHECK:       ma4: preds=
 ; CHECK-EMPTY:
 entry:
   br label %header

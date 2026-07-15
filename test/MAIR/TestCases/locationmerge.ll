@@ -4,7 +4,7 @@
 
 define void @merge_adjacent_out_of_order(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @merge_adjacent_out_of_order {
-; CHECK:       ma1: preds=
+; CHECK:       ma3: preds=
 ; CHECK-NEXT:    read/write ptr %p, 12
 ; LOCAL-LABEL: mair graph of fn @merge_adjacent_out_of_order {
 ; LOCAL:       ma1: preds=
@@ -24,7 +24,7 @@ entry:
 
 define void @keep_different_objects_and_gaps(ptr %p, ptr %q) {
 ; CHECK-LABEL: mair graph of fn @keep_different_objects_and_gaps {
-; CHECK:       ma1: preds=
+; CHECK:       ma3: preds=
 ; CHECK-DAG:     read ptr %p, 4
 ; CHECK-DAG:     write ptr %p + 8, 4
 ; CHECK-DAG:     read ptr %q, 4
@@ -38,7 +38,7 @@ entry:
 
 define void @keep_symbolic_locations(ptr %p, i64 %i, i64 %j) {
 ; CHECK-LABEL: mair graph of fn @keep_symbolic_locations {
-; CHECK:       ma1: preds=
+; CHECK:       ma2: preds=
 ; CHECK-DAG:     read ptr %p + %pi, 4
 ; CHECK-DAG:     write ptr %p + %pj, 4
 entry:
@@ -51,7 +51,7 @@ entry:
 
 define void @merge_identical_symbolic_location(ptr %p, i64 %i) {
 ; CHECK-LABEL: mair graph of fn @merge_identical_symbolic_location {
-; CHECK:       ma1: preds=
+; CHECK:       ma2: preds=
 ; CHECK-NEXT:    read/write ptr %p + %pi, 4
 entry:
   %pi = getelementptr i8, ptr %p, i64 %i
@@ -62,7 +62,7 @@ entry:
 
 define void @merge_overlapping_and_contained(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @merge_overlapping_and_contained {
-; CHECK:       ma1: preds=
+; CHECK:       ma3: preds=
 ; CHECK-NEXT:    read/write ptr %p, 12
 entry:
   %wide = load i64, ptr %p, align 8

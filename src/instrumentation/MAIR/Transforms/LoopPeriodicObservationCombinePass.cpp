@@ -243,9 +243,8 @@ void addOrMergeAccess(Observation &Target, const MemoryAccess &Access,
       if (Existing.getRegion() != Region)
         continue;
       bool Merged = Existing.mergeWith(NewAccess);
-      assert(Merged && "identical aggregate accesses must be mergeable");
-      (void)Merged;
-      return;
+      if (Merged)
+        return;
     }
   }
   Target.addAccess(NewAccess);

@@ -39,6 +39,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/ProfileData/InstrProf.h"
+#include "llvm/Support/AtomicOrdering.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -209,11 +210,40 @@ struct XsanThreadSanitizer : public ThreadSanitizer {
 
 #ifndef XSAN_PASS
 struct TsanMAIRBarrierTrait {
+  static bool isReleaseSync(const Instruction &I) {
+    if (const auto *LI = dyn_cast<LoadInst>(&I))
+      return isReleaseOrStronger(LI->getOrdering());
+    if (const auto *SI = dyn_cast<StoreInst>(&I))
+      return isReleaseOrStronger(SI->getOrdering());
+    if (const auto *RMW = dyn_cast<AtomicRMWInst>(&I))
+      return isReleaseOrStronger(RMW->getOrdering());
+    if (const auto *XCHG = dyn_cast<AtomicCmpXchgInst>(&I))
+      return isReleaseOrStronger(XCHG->getSuccessOrdering());
+    if (const auto *FI = dyn_cast<FenceInst>(&I))
+      return isReleaseOrStronger(FI->getOrdering());
+    return false;
+  }
+
+  static bool isAcquireSync(const Instruction &I) {
+    if (const auto *LI = dyn_cast<LoadInst>(&I))
+      return isAcquireOrStronger(LI->getOrdering());
+    if (const auto *SI = dyn_cast<StoreInst>(&I))
+      return isAcquireOrStronger(SI->getOrdering());
+    if (const auto *RMW = dyn_cast<AtomicRMWInst>(&I))
+      return isAcquireOrStronger(RMW->getOrdering());
+    if (const auto *XCHG = dyn_cast<AtomicCmpXchgInst>(&I))
+      return isAcquireOrStronger(XCHG->getSuccessOrdering()) ||
+             isAcquireOrStronger(XCHG->getFailureOrdering());
+    if (const auto *FI = dyn_cast<FenceInst>(&I))
+      return isAcquireOrStronger(FI->getOrdering());
+    return false;
+  }
+
   static bool isForwardBarrier(const Instruction &I) {
-    return isa<CallBase>(I) || I.isAtomic();
+    return isa<CallBase>(I) || isReleaseSync(I);
   }
   static bool isBackwardBarrier(const Instruction &I) {
-    return isForwardBarrier(I);
+    return isa<CallBase>(I) || isAcquireSync(I);
   }
 };
 #endif
@@ -1101,45 +1131,62 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
   if (ClInstrumentMemoryAccesses && SanitizeFunction) {
 #ifndef XSAN_PASS
     SmallPtrSet<const Instruction *, 32> MAIRTargets;
-    for (const auto &II : AllLoadsAndStores)
+    for (const auto &II : AllLoadsAndStores) {
+      Type *AccessTy = getLoadStoreType(II.Inst);
+      bool IsVolatile =
+          isa<LoadInst>(II.Inst)
+              ? cast<LoadInst>(II.Inst)->isVolatile()
+              : cast<StoreInst>(II.Inst)->isVolatile();
+      if ((II.Flags & InstructionInfo::kCompoundRW) || IsVolatile ||
+          isVtableAccess(II.Inst) || AccessTy->isVectorTy() ||
+          AccessTy->isScalableTy())
+        continue;
       MAIRTargets.insert(II.Inst);
+    }
 
-    mair::MAOpt<TsanMAIRBarrierTrait> Opt(F, FAM, nullptr,
-                                          /*KeepFullDebug=*/true);
-    Opt.build();
-    if (Error Err = Opt.optimize())
-      report_fatal_error(Twine(toString(std::move(Err))));
+    if (!MAIRTargets.empty()) {
+      mair::MAOpt<TsanMAIRBarrierTrait> Opt(F, FAM, nullptr,
+                                            /*KeepFullDebug=*/true);
+      Opt.build();
+      Opt.retainAccessesForInstructions(MAIRTargets);
+      if (Error Err = Opt.optimize())
+        report_fatal_error(Twine(toString(std::move(Err))));
 
-    class ThreadSanitizerBackend final : public mair::MAIRObservationBackend {
-      XsanThreadSanitizer &TSan;
-      const SmallPtrSetImpl<const Instruction *> &Targets;
-      const DataLayout &DL;
-      bool Changed = false;
+      class ThreadSanitizerBackend final : public mair::MAIRObservationBackend {
+        XsanThreadSanitizer &TSan;
+        const SmallPtrSetImpl<const Instruction *> &Targets;
+        const DataLayout &DL;
+        bool Changed = false;
 
-    public:
-      ThreadSanitizerBackend(
-          XsanThreadSanitizer &TSan,
-          const SmallPtrSetImpl<const Instruction *> &Targets,
-          const DataLayout &DL)
-          : TSan(TSan), Targets(Targets), DL(DL) {}
+      public:
+        ThreadSanitizerBackend(
+            XsanThreadSanitizer &TSan,
+            const SmallPtrSetImpl<const Instruction *> &Targets,
+            const DataLayout &DL)
+            : TSan(TSan), Targets(Targets), DL(DL) {}
 
-      Error prepare(const mair::MAIRMaterializationPlan &) override {
-        return Error::success();
-      }
+        Error prepare(const mair::MAIRMaterializationPlan &) override {
+          return Error::success();
+        }
 
-      void emit(const mair::MaterializedObservation &Observation,
-                IRBuilderBase &Builder) override {
-        for (const mair::MaterializedAccess &Access : Observation.Accesses)
-          Changed |= TSan.instrumentMAIRAccess(Access, Builder, Targets, DL);
-      }
+        void emit(const mair::MaterializedObservation &Observation,
+                  IRBuilderBase &Builder) override {
+          for (const mair::MaterializedAccess &Access : Observation.Accesses)
+            Changed |= TSan.instrumentMAIRAccess(Access, Builder, Targets, DL);
+        }
 
-      bool changed() const { return Changed; }
-    } Backend(*this, MAIRTargets, DL);
+        bool changed() const { return Changed; }
+      } Backend(*this, MAIRTargets, DL);
 
-    Expected<mair::MAIRInstantiationResult> Result = Opt.instantiate(Backend);
-    if (!Result)
-      report_fatal_error(Twine(toString(Result.takeError())));
-    Res |= Backend.changed();
+      Expected<mair::MAIRInstantiationResult> Result = Opt.instantiate(Backend);
+      if (!Result)
+        report_fatal_error(Twine(toString(Result.takeError())));
+      Res |= Backend.changed();
+    }
+
+    for (const auto &II : AllLoadsAndStores)
+      if (!MAIRTargets.contains(II.Inst))
+        Res |= instrumentLoadOrStore(II, DL);
 #else
     for (const auto &II : AllLoadsAndStores)
       Res |= instrumentLoadOrStore(II, DL);

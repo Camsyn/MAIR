@@ -108,6 +108,57 @@ TEST(MAOpt, BuildsOptimizesAndExposesObservationAccesses) {
   EXPECT_TRUE(O1.getGraph().verify());
 }
 
+TEST(MAOpt, RetainsAccessesForTargetInstructions) {
+  llvm::LLVMContext Ctx;
+  std::unique_ptr<llvm::Module> M = parseModule(R"(
+    define void @f(ptr %p, ptr %q) {
+    entry:
+      %a = load i32, ptr %p
+      %b = load i32, ptr %q
+      ret void
+    }
+  )",
+                                                Ctx);
+  ASSERT_NE(M, nullptr);
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &Entry = F.getEntryBlock();
+  llvm::Instruction *Target = &Entry.front();
+  llvm::Argument *P = F.getArg(0);
+  llvm::Argument *Q = F.getArg(1);
+
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  FAM.registerPass([&] { return llvm::PassInstrumentationAnalysis(&PIC); });
+  FAM.registerPass([] { return llvm::TargetLibraryAnalysis(); });
+  FAM.registerPass([] { return llvm::TargetIRAnalysis(); });
+  FAM.registerPass([] { return llvm::AssumptionAnalysis(); });
+  FAM.registerPass([] { return llvm::DominatorTreeAnalysis(); });
+  FAM.registerPass([] { return llvm::PostDominatorTreeAnalysis(); });
+  FAM.registerPass([] { return llvm::LoopAnalysis(); });
+  FAM.registerPass([] { return llvm::ScalarEvolutionAnalysis(); });
+
+  MAOpt<> Opt(F, FAM, &PIC, /*KeepFullDebug=*/true);
+  MAIRGraph &Graph = Opt.build();
+  const MemoryObject *PObject = Graph.getMemoryObject(*P);
+  const MemoryObject *QObject = Graph.getMemoryObject(*Q);
+  ASSERT_NE(PObject, nullptr);
+  ASSERT_NE(QObject, nullptr);
+  EXPECT_EQ(llvm::range_size(PObject->users()), 1u);
+  EXPECT_EQ(llvm::range_size(QObject->users()), 1u);
+
+  llvm::SmallPtrSet<const llvm::Instruction *, 1> Targets;
+  Targets.insert(Target);
+  Opt.retainAccessesForInstructions(Targets);
+
+  size_t NumAccesses = 0;
+  for (const Observation &Obs : Graph)
+    NumAccesses += Obs.size();
+  EXPECT_EQ(NumAccesses, 1u);
+  EXPECT_EQ(llvm::range_size(PObject->users()), 1u);
+  EXPECT_EQ(llvm::range_size(QObject->users()), 0u);
+  EXPECT_TRUE(Graph.verify());
+}
+
 bool hasSuccessor(const MAIRGraph &Graph, const Observation &From,
                   const Observation &To) {
   for (const Observation *Succ : Graph.successors(From))
@@ -1575,7 +1626,7 @@ entry:
   EXPECT_TRUE(Merge.empty());
 }
 
-TEST(MAIRGraphPass, RedundantReadWriteAccessCoversReadAndWrite) {
+TEST(MAIRGraphPass, RedundantReadWriteAccessDoesNotCoverDifferentKinds) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(i32* %p) {
@@ -1609,11 +1660,88 @@ entry:
   RedundantObservationEliminationPass Pass;
   llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
 
-  EXPECT_FALSE(PA.areAllPreserved());
+  EXPECT_TRUE(PA.areAllPreserved());
   ASSERT_TRUE(Graph.verify());
   EXPECT_EQ(ReadWrite.size(), 1u);
-  EXPECT_TRUE(Read.empty());
-  EXPECT_TRUE(Write.empty());
+  EXPECT_EQ(Read.size(), 1u);
+  EXPECT_EQ(Write.size(), 1u);
+}
+
+TEST(MAIRGraphPass, RedundantObservationKeepsMismatchedAccessKinds) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %value = load i32, ptr %p, align 4
+  store i32 %value, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  const llvm::Function &F = *M->begin();
+  const llvm::BasicBlock &BB = *F.begin();
+  auto InstIt = BB.begin();
+  const llvm::Instruction &Load = *InstIt++;
+  const llvm::Instruction &Store = *InstIt++;
+  MAIRGraph Graph(F);
+  auto &Read = Graph.createInstObservation(BB, Load);
+  auto &Write = Graph.createInstObservation(BB, Store);
+  Graph.addEdge(Read, Write, ObsEdgeKind::Dom);
+
+  MemoryAccess Copy = MemoryAccess::fromInstruction(Load, M->getDataLayout());
+  EXPECT_FALSE(Copy.mergeWith(*Write.begin()));
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  RedundantObservationEliminationPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_TRUE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  EXPECT_EQ(Read.size(), 1u);
+  EXPECT_EQ(Write.size(), 1u);
+}
+
+TEST(MAIRGraphPass, RedundantObservationKeepsAtomicAccesses) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %plain = load i32, ptr %p, align 4
+  %atomic = load atomic i32, ptr %p seq_cst, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  const llvm::Function &F = *M->begin();
+  const llvm::BasicBlock &BB = *F.begin();
+  auto InstIt = BB.begin();
+  const llvm::Instruction &PlainLoad = *InstIt++;
+  const llvm::Instruction &AtomicLoad = *InstIt++;
+  MAIRGraph Graph(F);
+  auto &Plain = Graph.createInstObservation(BB, PlainLoad);
+  auto &Atomic = Graph.createInstObservation(BB, AtomicLoad);
+  Graph.addEdge(Plain, Atomic, ObsEdgeKind::Dom);
+
+  MemoryAccess Copy =
+      MemoryAccess::fromInstruction(PlainLoad, M->getDataLayout());
+  EXPECT_FALSE(Copy.mergeWith(*Atomic.begin()));
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  RedundantObservationEliminationPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_TRUE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  EXPECT_EQ(Plain.size(), 1u);
+  EXPECT_EQ(Atomic.size(), 1u);
 }
 
 TEST(MAIRGraphPass, SimplifyGraphMergesMutualDomPairAndRewiresEdges) {
@@ -2469,7 +2597,7 @@ entry:
   EXPECT_NE(Error.find("invalid scalar expression"), std::string::npos);
 }
 
-TEST(MAIRSchema, EqualPeriodicRegionsMergeStructurally) {
+TEST(MAIRSchema, EqualPeriodicRegionsRequireSameAccessKindToMerge) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -2504,9 +2632,9 @@ entry:
       {BInst}, MemoryRegion(PeriodicRegion(&P, StartB, StrideB, SizeB, TripsB)),
       AccessKind::Write);
 
-  EXPECT_TRUE(A.mergeWith(B));
-  EXPECT_EQ(A.getKind(), AccessKind::ReadWrite);
-  EXPECT_EQ(A.getInstructions().size(), 2u);
+  EXPECT_FALSE(A.mergeWith(B));
+  EXPECT_EQ(A.getKind(), AccessKind::Read);
+  EXPECT_EQ(A.getInstructions().size(), 1u);
 }
 
 TEST(MAIRSchema, ContainingContiguousMergeKeepsCoveringInstructionFirst) {
@@ -2514,7 +2642,7 @@ TEST(MAIRSchema, ContainingContiguousMergeKeepsCoveringInstructionFirst) {
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
 entry:
-  %wide = load i64, ptr %p, align 8
+  %wide = load i32, ptr %p, align 4
   %p4 = getelementptr i8, ptr %p, i64 4
   %narrow = load i32, ptr %p4, align 4
   ret void
@@ -2527,7 +2655,7 @@ entry:
   llvm::Argument &P = *F.arg_begin();
   llvm::BasicBlock &BB = F.getEntryBlock();
   llvm::Instruction *Wide = &BB.front();
-  llvm::Instruction *Narrow = &*std::next(BB.begin(), 1);
+  llvm::Instruction *Narrow = &*std::next(BB.begin(), 2);
   MemoryAccess WideAccess(
       {Wide},
       MemoryRegion(AbstractAccess(&P, AbstractValue::constant(0),

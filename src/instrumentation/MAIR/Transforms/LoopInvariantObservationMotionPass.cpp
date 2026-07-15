@@ -12,6 +12,7 @@ namespace {
 
 bool isSameAccess(const MemoryAccess &LHS, const MemoryAccess &RHS) {
   return &LHS.getMemoryObject() == &RHS.getMemoryObject() &&
+         LHS.hasSameOptimizationShape(RHS) &&
          LHS.getRegion() == RHS.getRegion() && LHS.getKind() == RHS.getKind();
 }
 

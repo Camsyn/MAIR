@@ -1300,7 +1300,7 @@ struct AsanToInstrument {
 #ifndef XSAN_PASS
 struct AsanMAIRBarrierTrait {
   static bool isForwardBarrier(const Instruction &I) {
-    return isa<CallBase>(I) || I.isAtomic();
+    return isa<CallBase>(I) && I.mayWriteToMemory();
   }
   static bool isBackwardBarrier(const Instruction &I) {
     return isForwardBarrier(I);
@@ -1308,8 +1308,13 @@ struct AsanMAIRBarrierTrait {
 };
 
 bool canOptimizeAsanOperandWithMAIR(InterestingMemoryOperand &Operand) {
+  if (ClDebugMin >= 0 && ClDebugMax >= 0)
+    return false;
+
   Instruction *I = Operand.getInsn();
-  if (I->isAtomic() || Operand.MaybeMask)
+  if (I->isAtomic() || Operand.MaybeMask || Operand.MaybeEVL ||
+      Operand.MaybeStride || Operand.MaybeByteOffset ||
+      Operand.OpType->isVectorTy() || Operand.TypeStoreSize.isScalable())
     return false;
   if (auto *LI = dyn_cast<LoadInst>(I))
     return !LI->isVolatile();
@@ -4165,6 +4170,28 @@ bool XsanAddressSanitizer::instrumentMAIRAccess(
     return true;
   }
 
+  Value *SourceAddr = isa<LoadInst>(Source)
+                          ? cast<LoadInst>(Source)->getPointerOperand()
+                          : cast<StoreInst>(Source)->getPointerOperand();
+  TypeSize SourceStoreSize =
+      Source->getDataLayout().getTypeStoreSize(SourceType);
+  if (ClOpt && ClOptGlobals) {
+    GlobalVariable *G =
+        dyn_cast<GlobalVariable>(getUnderlyingObject(SourceAddr));
+    if (G && (!ClInitializers || GlobalIsLinkerInitialized(G)) &&
+        isSafeAccess(ObjSizeVis, SourceAddr, SourceStoreSize)) {
+      NumOptimizedAccessesToGlobalVar++;
+      return false;
+    }
+  }
+  if (ClOpt && ClOptStack) {
+    if (isa<AllocaInst>(getUnderlyingObject(SourceAddr)) &&
+        isSafeAccess(ObjSizeVis, SourceAddr, SourceStoreSize)) {
+      NumOptimizedAccessesToStackVar++;
+      return false;
+    }
+  }
+
   assert(Builder.GetInsertBlock() &&
          Builder.GetInsertPoint() != Builder.GetInsertBlock()->end());
   Instruction *InsertBefore = &*Builder.GetInsertPoint();
@@ -4247,50 +4274,69 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
   int NumInstrumented = 0;
 #ifndef XSAN_PASS
   SmallPtrSet<const Instruction *, 32> MAIRTargets;
+  auto IsElidedByNativeAsanOpt = [&](InterestingMemoryOperand &Operand) {
+    Value *Addr = Operand.getPtr();
+    if (ClOpt && ClOptGlobals) {
+      GlobalVariable *G = dyn_cast<GlobalVariable>(getUnderlyingObject(Addr));
+      if (G && (!ClInitializers || GlobalIsLinkerInitialized(G)) &&
+          isSafeAccess(ObjSizeVis, Addr, Operand.TypeStoreSize))
+        return true;
+    }
+    if (ClOpt && ClOptStack) {
+      if (isa<AllocaInst>(getUnderlyingObject(Addr)) &&
+          isSafeAccess(ObjSizeVis, Addr, Operand.TypeStoreSize))
+        return true;
+    }
+    return false;
+  };
   for (InterestingMemoryOperand &Operand : OperandsToInstrument)
-    if (canOptimizeAsanOperandWithMAIR(Operand))
+    if (canOptimizeAsanOperandWithMAIR(Operand) &&
+        !IsElidedByNativeAsanOpt(Operand))
       MAIRTargets.insert(Operand.getInsn());
 
-  mair::MAOpt<AsanMAIRBarrierTrait> Opt(F, FAM, nullptr,
-                                        /*KeepFullDebug=*/true);
-  Opt.build();
-  if (Error Err = Opt.optimize())
-    report_fatal_error(Twine(toString(std::move(Err))));
+  if (!MAIRTargets.empty()) {
+    mair::MAOpt<AsanMAIRBarrierTrait> Opt(F, FAM, nullptr,
+                                          /*KeepFullDebug=*/true);
+    Opt.build();
+    Opt.retainAccessesForInstructions(MAIRTargets);
+    if (Error Err = Opt.optimize())
+      report_fatal_error(Twine(toString(std::move(Err))));
 
-  class AddressSanitizerBackend final : public mair::MAIRObservationBackend {
-    XsanAddressSanitizer &ASan;
-    const SmallPtrSetImpl<const Instruction *> &Targets;
-    bool UseCalls;
-    ObjectSizeOffsetVisitor &ObjSizeVis;
-    RuntimeCallInserter &RTCI;
-    bool Changed = false;
+    class AddressSanitizerBackend final : public mair::MAIRObservationBackend {
+      XsanAddressSanitizer &ASan;
+      const SmallPtrSetImpl<const Instruction *> &Targets;
+      bool UseCalls;
+      ObjectSizeOffsetVisitor &ObjSizeVis;
+      RuntimeCallInserter &RTCI;
+      bool Changed = false;
 
-  public:
-    AddressSanitizerBackend(XsanAddressSanitizer &ASan,
-                            const SmallPtrSetImpl<const Instruction *> &Targets,
-                            bool UseCalls, ObjectSizeOffsetVisitor &ObjSizeVis,
-                            RuntimeCallInserter &RTCI)
-        : ASan(ASan), Targets(Targets), UseCalls(UseCalls),
-          ObjSizeVis(ObjSizeVis), RTCI(RTCI) {}
+    public:
+      AddressSanitizerBackend(
+          XsanAddressSanitizer &ASan,
+          const SmallPtrSetImpl<const Instruction *> &Targets, bool UseCalls,
+          ObjectSizeOffsetVisitor &ObjSizeVis, RuntimeCallInserter &RTCI)
+          : ASan(ASan), Targets(Targets), UseCalls(UseCalls),
+            ObjSizeVis(ObjSizeVis), RTCI(RTCI) {}
 
-    Error prepare(const mair::MAIRMaterializationPlan &) override {
-      return Error::success();
-    }
+      Error prepare(const mair::MAIRMaterializationPlan &) override {
+        return Error::success();
+      }
 
-    void emit(const mair::MaterializedObservation &Observation,
-              IRBuilderBase &Builder) override {
-      for (const mair::MaterializedAccess &Access : Observation.Accesses)
-        Changed |= ASan.instrumentMAIRAccess(Access, Builder, Targets, UseCalls,
-                                             ObjSizeVis, RTCI);
-    }
+      void emit(const mair::MaterializedObservation &Observation,
+                IRBuilderBase &Builder) override {
+        for (const mair::MaterializedAccess &Access : Observation.Accesses)
+          Changed |= ASan.instrumentMAIRAccess(
+              Access, Builder, Targets, UseCalls, ObjSizeVis, RTCI);
+      }
 
-    bool changed() const { return Changed; }
-  } Backend(*this, MAIRTargets, UseCalls, ObjSizeVis, RTCI);
+      bool changed() const { return Changed; }
+    } Backend(*this, MAIRTargets, UseCalls, ObjSizeVis, RTCI);
 
-  Expected<mair::MAIRInstantiationResult> Result = Opt.instantiate(Backend);
-  if (!Result)
-    report_fatal_error(Twine(toString(Result.takeError())));
-  FunctionModified |= Backend.changed();
+    Expected<mair::MAIRInstantiationResult> Result = Opt.instantiate(Backend);
+    if (!Result)
+      report_fatal_error(Twine(toString(Result.takeError())));
+    FunctionModified |= Backend.changed();
+  }
 
   for (auto &Operand : OperandsToInstrument) {
     if (MAIRTargets.contains(Operand.getInsn()))

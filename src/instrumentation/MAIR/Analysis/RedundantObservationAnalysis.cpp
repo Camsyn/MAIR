@@ -30,6 +30,7 @@ bool AvailableAccess::covers(const MemoryAccess &Other) const {
   if (!OtherRegion)
     return false;
   return SourceObservation != Other.getParent() &&
+         Source->hasSameOptimizationShape(Other) &&
          Object == &Other.getMemoryObject() && Access.contains(*OtherRegion) &&
          kindCovers(Kind, Other.getKind());
 }

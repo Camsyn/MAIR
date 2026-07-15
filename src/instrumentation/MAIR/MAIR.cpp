@@ -575,8 +575,19 @@ const Value *MemoryAccess::getBase() const {
   return std::visit([](const auto &R) { return R.getBase(); }, Region);
 }
 
+bool MemoryAccess::isAtomic() const {
+  return llvm::any_of(Insts,
+                      [](const Instruction *I) { return I && I->isAtomic(); });
+}
+
+bool MemoryAccess::hasSameOptimizationShape(const MemoryAccess &Other) const {
+  return !isAtomic() && !Other.isAtomic() && Kind == Other.Kind;
+}
+
 bool MemoryAccess::mergeWith(const MemoryAccess &Other) {
   if (getBase() != Other.getBase())
+    return false;
+  if (!hasSameOptimizationShape(Other))
     return false;
 
   if (const auto *ThisAccess = getContiguousRegion()) {

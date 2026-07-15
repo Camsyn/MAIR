@@ -4,6 +4,7 @@
 #include "MAIR/Materialization/MAIRMaterialization.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/PassInstrumentation.h"
 #include "llvm/Support/Error.h"
@@ -44,6 +45,29 @@ public:
         MAIRGraph::template build<BarrierTrait>(F, FAM));
     rebuildObservationAccesses();
     return *Graph;
+  }
+
+  void retainAccessesForInstructions(
+      const llvm::SmallPtrSetImpl<const llvm::Instruction *> &Targets) {
+    assert(Graph && "MAOpt graph has not been built");
+    assert(!Optimized && "MAOpt graph has already been optimized");
+
+    for (Observation &Obs : *Graph) {
+      for (auto It = Obs.begin(); It != Obs.end();) {
+        bool Keep = false;
+        for (llvm::Instruction *I : It->getInstructions()) {
+          if (Targets.contains(I)) {
+            Keep = true;
+            break;
+          }
+        }
+        if (Keep)
+          ++It;
+        else
+          It = Obs.erase(It);
+      }
+    }
+    rebuildObservationAccesses();
   }
 
   llvm::Error optimize() {

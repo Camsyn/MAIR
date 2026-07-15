@@ -76,8 +76,10 @@ bool mergeLocations(Observation &Obs) {
           continue;
         }
         bool Merged = Current->mergeWith(*Next);
-        assert(Merged && "identical memory accesses must be mergeable");
-        (void)Merged;
+        if (!Merged) {
+          ++J;
+          continue;
+        }
         eraseAccess(Obs, *Next);
         Accesses.erase(Accesses.begin() + J);
         Changed = true;

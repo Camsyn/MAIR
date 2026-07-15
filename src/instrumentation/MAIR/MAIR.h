@@ -510,6 +510,8 @@ public:
   bool isRead() const { return Kind == AccessKind::Read; }
   bool isWrite() const { return Kind == AccessKind::Write; }
   bool isReadWrite() const { return Kind == AccessKind::ReadWrite; }
+  bool isAtomic() const;
+  bool hasSameOptimizationShape(const MemoryAccess &Other) const;
 
   bool mergeWith(const MemoryAccess &Other);
   void mergeKind(AccessKind Other);

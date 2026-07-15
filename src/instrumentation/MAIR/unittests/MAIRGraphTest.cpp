@@ -3,6 +3,7 @@
 #include "MAIR/MAIR.h"
 #include "MAIR/MAIRBarrierAnalysis.h"
 #include "MAIR/MAIRDump.h"
+#include "MAIR/MAOpt.h"
 #include "MAIR/Transforms/CommonMAMotionPass.h"
 #include "MAIR/Transforms/LoopInvariantObservationMotionPass.h"
 #include "MAIR/Transforms/LoopPeriodicObservationCombinePass.h"
@@ -57,6 +58,54 @@ MAIRGraph createGraphWithFAM(Function &F) {
   FAM.registerPass([] { return llvm::DominatorTreeAnalysis(); });
   FAM.registerPass([] { return llvm::PostDominatorTreeAnalysis(); });
   return MAIRGraph::build<BarrierTrait>(F, FAM);
+}
+
+TEST(MAOpt, BuildsOptimizesAndExposesObservationAccesses) {
+  llvm::LLVMContext Ctx;
+  std::unique_ptr<llvm::Module> M = parseModule(R"(
+    define void @f(ptr %p, ptr %q) {
+    entry:
+      %a = load i32, ptr %p
+      %b = load i32, ptr %q
+      ret void
+    }
+  )",
+                                                Ctx);
+  ASSERT_NE(M, nullptr);
+  llvm::Function &F = *M->getFunction("f");
+
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  FAM.registerPass([&] { return llvm::PassInstrumentationAnalysis(&PIC); });
+  FAM.registerPass([] { return llvm::TargetLibraryAnalysis(); });
+  FAM.registerPass([] { return llvm::TargetIRAnalysis(); });
+  FAM.registerPass([] { return llvm::AssumptionAnalysis(); });
+  FAM.registerPass([] { return llvm::DominatorTreeAnalysis(); });
+  FAM.registerPass([] { return llvm::PostDominatorTreeAnalysis(); });
+  FAM.registerPass([] { return llvm::LoopAnalysis(); });
+  FAM.registerPass([] { return llvm::ScalarEvolutionAnalysis(); });
+
+  MAOpt<> Opt(F, FAM, &PIC, /*KeepFullDebug=*/true);
+  MAIRGraph &Graph = Opt.build();
+  ASSERT_TRUE(Graph.verify());
+  ASSERT_FALSE(Opt.optimize());
+
+  size_t NumMappedAccesses = 0;
+  for (const auto &Entry : Opt.getObservationMAs()) {
+    ASSERT_NE(Entry.first, nullptr);
+    EXPECT_EQ(Entry.second.size(), Opt.getObservationMAs(*Entry.first).size());
+    for (const MemoryAccess *Access : Entry.second) {
+      ASSERT_NE(Access, nullptr);
+      EXPECT_EQ(Access->getInstructions().size(), 1u);
+      ++NumMappedAccesses;
+    }
+  }
+  EXPECT_EQ(NumMappedAccesses, 2u);
+
+  MAOpt<> O1(F, FAM, &PIC, /*KeepFullDebug=*/false);
+  O1.build();
+  ASSERT_FALSE(O1.optimize());
+  EXPECT_TRUE(O1.getGraph().verify());
 }
 
 bool hasSuccessor(const MAIRGraph &Graph, const Observation &From,

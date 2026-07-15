@@ -93,6 +93,7 @@
 
 #include "Analysis/MopRecurrenceReducer.h"
 #include "Instrumentation.h"
+#include "MAIR/MAOpt.h"
 #include "PassRegistry.h"
 #include "Utils/MetaDataUtils.h"
 #include "Utils/Options.h"
@@ -1296,6 +1297,28 @@ struct AsanToInstrument {
   bool IsBug11395 = false;
 };
 
+#ifndef XSAN_PASS
+struct AsanMAIRBarrierTrait {
+  static bool isForwardBarrier(const Instruction &I) {
+    return isa<CallBase>(I) || I.isAtomic();
+  }
+  static bool isBackwardBarrier(const Instruction &I) {
+    return isForwardBarrier(I);
+  }
+};
+
+bool canOptimizeAsanOperandWithMAIR(InterestingMemoryOperand &Operand) {
+  Instruction *I = Operand.getInsn();
+  if (I->isAtomic() || Operand.MaybeMask)
+    return false;
+  if (auto *LI = dyn_cast<LoadInst>(I))
+    return !LI->isVolatile();
+  if (auto *SI = dyn_cast<StoreInst>(I))
+    return !SI->isVolatile();
+  return false;
+}
+#endif
+
 struct XsanModuleAddressSanitizer : public ModuleAddressSanitizer {
 public:
   using ModuleAddressSanitizer::ModuleAddressSanitizer;
@@ -1306,6 +1329,13 @@ struct XsanAddressSanitizer : public AddressSanitizer {
 public:
   using AddressSanitizer::AddressSanitizer;
   bool instrumentFunction(Function &F, FunctionAnalysisManager &FAM);
+
+#ifndef XSAN_PASS
+  bool instrumentMAIRAccess(
+      const mair::MaterializedAccess &Access, IRBuilderBase &Builder,
+      const SmallPtrSetImpl<const Instruction *> &Targets, bool UseCalls,
+      ObjectSizeOffsetVisitor &ObjSizeVis, RuntimeCallInserter &RTCI);
+#endif
 
 private:
   bool shouldSkipFunction(Function &F);
@@ -4086,13 +4116,78 @@ bool XsanAddressSanitizer::prepareAsanTargetsToInstrument(
   return true;
 }
 
+#ifndef XSAN_PASS
+bool XsanAddressSanitizer::instrumentMAIRAccess(
+    const mair::MaterializedAccess &Access, IRBuilderBase &Builder,
+    const SmallPtrSetImpl<const Instruction *> &Targets, bool UseCalls,
+    ObjectSizeOffsetVisitor &ObjSizeVis, RuntimeCallInserter &RTCI) {
+  if (!Access.Source)
+    report_fatal_error("ASan MAIR access has no source");
+
+  SmallVector<Instruction *, 4> SelectedSources;
+  for (Instruction *Source : Access.Source->getInstructions())
+    if (Source && Targets.contains(Source))
+      SelectedSources.push_back(Source);
+  if (SelectedSources.empty())
+    return false;
+
+  auto InstrumentAtSource = [&](Instruction &Source) {
+    if (auto *LI = dyn_cast<LoadInst>(&Source)) {
+      InterestingMemoryOperand Operand(&Source, LI->getPointerOperandIndex(),
+                                       false, LI->getType(), LI->getAlign());
+      instrumentMop(ObjSizeVis, Operand, UseCalls, Source.getDataLayout(),
+                    RTCI);
+      return;
+    }
+    auto *SI = dyn_cast<StoreInst>(&Source);
+    if (!SI)
+      report_fatal_error("ASan MAIR provenance is not a load or store");
+    InterestingMemoryOperand Operand(&Source, SI->getPointerOperandIndex(),
+                                     true, SI->getValueOperand()->getType(),
+                                     SI->getAlign());
+    instrumentMop(ObjSizeVis, Operand, UseCalls, Source.getDataLayout(), RTCI);
+  };
+
+  Instruction *Source = SelectedSources.front();
+  Type *SourceType =
+      isa<LoadInst>(Source)
+          ? cast<LoadInst>(Source)->getType()
+          : cast<StoreInst>(Source)->getValueOperand()->getType();
+  const auto *Size = dyn_cast_or_null<ConstantInt>(Access.AccessSize);
+  bool CanUseOptimizedSite = SelectedSources.size() == 1 &&
+                             Access.Source->getInstructions().size() == 1 &&
+                             Access.Source->isContiguous() &&
+                             !SourceType->isVectorTy() && Size &&
+                             Size->getValue().getActiveBits() < 32;
+  if (!CanUseOptimizedSite) {
+    for (Instruction *Selected : SelectedSources)
+      InstrumentAtSource(*Selected);
+    return true;
+  }
+
+  assert(Builder.GetInsertBlock() &&
+         Builder.GetInsertPoint() != Builder.GetInsertBlock()->end());
+  Instruction *InsertBefore = &*Builder.GetInsertPoint();
+  MaybeAlign Alignment = isa<LoadInst>(Source)
+                             ? MaybeAlign(cast<LoadInst>(Source)->getAlign())
+                             : MaybeAlign(cast<StoreInst>(Source)->getAlign());
+  TypeSize SizeInBits = TypeSize::getFixed(Size->getZExtValue() * 8);
+  bool IsWrite = Access.Kind != mair::AccessKind::Read;
+  doInstrumentAddress(this, Source, InsertBefore, Access.Address, Alignment,
+                      1U << Mapping.Scale, SizeInBits, IsWrite, nullptr,
+                      UseCalls, ClForceExperiment, RTCI);
+  return true;
+}
+#endif
+
 bool XsanAddressSanitizer::instrumentFunction(Function &F,
                                               FunctionAnalysisManager &FAM) {
   const TargetLibraryInfo *TLI = &FAM.getResult<TargetLibraryAnalysis>(F);
   const TargetTransformInfo *TTI = &FAM.getResult<TargetIRAnalysis>(F);
 #ifndef XSAN_PASS
-  return AddressSanitizer::instrumentFunction(F, TLI, TTI);
-#else
+  if (!mair::isMAIROptEnabled())
+    return AddressSanitizer::instrumentFunction(F, TLI, TTI);
+#endif
   if (shouldSkipFunction(F))
     return false;
 
@@ -4130,8 +4225,13 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
     markCatchParametersAsUninteresting(F);
 
   AsanToInstrument Targets;
+#ifndef XSAN_PASS
+  if (!collectTargetsToIntrument(F, TLI, TTI, Targets))
+    return false;
+#else
   if (!prepareAsanTargetsToInstrument(F, FAM, TLI, TTI, Targets))
     return false;
+#endif
 
   auto &[OperandsToInstrument, IntrinToInstrument, NoReturnCalls,
          PointerComparisonsOrSubtracts, IsBug11395] = Targets;
@@ -4145,11 +4245,67 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
   ObjectSizeOffsetVisitor ObjSizeVis(DL, TLI, F.getContext());
 
   int NumInstrumented = 0;
+#ifndef XSAN_PASS
+  SmallPtrSet<const Instruction *, 32> MAIRTargets;
+  for (InterestingMemoryOperand &Operand : OperandsToInstrument)
+    if (canOptimizeAsanOperandWithMAIR(Operand))
+      MAIRTargets.insert(Operand.getInsn());
+
+  mair::MAOpt<AsanMAIRBarrierTrait> Opt(F, FAM, nullptr,
+                                        /*KeepFullDebug=*/true);
+  Opt.build();
+  if (Error Err = Opt.optimize())
+    report_fatal_error(Twine(toString(std::move(Err))));
+
+  class AddressSanitizerBackend final : public mair::MAIRObservationBackend {
+    XsanAddressSanitizer &ASan;
+    const SmallPtrSetImpl<const Instruction *> &Targets;
+    bool UseCalls;
+    ObjectSizeOffsetVisitor &ObjSizeVis;
+    RuntimeCallInserter &RTCI;
+    bool Changed = false;
+
+  public:
+    AddressSanitizerBackend(XsanAddressSanitizer &ASan,
+                            const SmallPtrSetImpl<const Instruction *> &Targets,
+                            bool UseCalls, ObjectSizeOffsetVisitor &ObjSizeVis,
+                            RuntimeCallInserter &RTCI)
+        : ASan(ASan), Targets(Targets), UseCalls(UseCalls),
+          ObjSizeVis(ObjSizeVis), RTCI(RTCI) {}
+
+    Error prepare(const mair::MAIRMaterializationPlan &) override {
+      return Error::success();
+    }
+
+    void emit(const mair::MaterializedObservation &Observation,
+              IRBuilderBase &Builder) override {
+      for (const mair::MaterializedAccess &Access : Observation.Accesses)
+        Changed |= ASan.instrumentMAIRAccess(Access, Builder, Targets, UseCalls,
+                                             ObjSizeVis, RTCI);
+    }
+
+    bool changed() const { return Changed; }
+  } Backend(*this, MAIRTargets, UseCalls, ObjSizeVis, RTCI);
+
+  Expected<mair::MAIRInstantiationResult> Result = Opt.instantiate(Backend);
+  if (!Result)
+    report_fatal_error(Twine(toString(Result.takeError())));
+  FunctionModified |= Backend.changed();
+
+  for (auto &Operand : OperandsToInstrument) {
+    if (MAIRTargets.contains(Operand.getInsn()))
+      continue;
+    if (!suppressInstrumentationSiteForDebug(NumInstrumented))
+      instrumentMop(ObjSizeVis, Operand, UseCalls, F.getDataLayout(), RTCI);
+    FunctionModified = true;
+  }
+#else
   for (auto &Operand : OperandsToInstrument) {
     if (!suppressInstrumentationSiteForDebug(NumInstrumented))
       instrumentMop(ObjSizeVis, Operand, UseCalls, F.getDataLayout(), RTCI);
     FunctionModified = true;
   }
+#endif
   for (auto *Inst : IntrinToInstrument) {
     if (!suppressInstrumentationSiteForDebug(NumInstrumented))
       instrumentMemIntrinsic(Inst, RTCI);
@@ -4175,7 +4331,6 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
   LLVM_DEBUG(dbgs() << "ASAN done instrumenting: " << FunctionModified << " "
                     << F << "\n");
   return FunctionModified;
-#endif
 }
 
 } // namespace

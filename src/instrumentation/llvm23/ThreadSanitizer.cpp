@@ -20,6 +20,7 @@
 
 #include "llvm/Transforms/Instrumentation/ThreadSanitizer.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
@@ -49,6 +50,7 @@
 #include "Analysis/MopRecurrenceReducer.h"
 #include "Analysis/TsanMopAnalysis.h"
 #include "Instrumentation.h"
+#include "MAIR/MAOpt.h"
 #include "PassRegistry.h"
 #include "Utils/MetaDataUtils.h"
 #include "Utils/Options.h"
@@ -192,12 +194,29 @@ struct XsanThreadSanitizer : public ThreadSanitizer {
   using ThreadSanitizer::ThreadSanitizer;
   bool shouldSkipFunction(Function &F);
   bool sanitizeFunction(Function &F, FunctionAnalysisManager &FAM);
+#ifndef XSAN_PASS
+  bool instrumentMAIRAccess(const mair::MaterializedAccess &Access,
+                            IRBuilderBase &Builder,
+                            const SmallPtrSetImpl<const Instruction *> &Targets,
+                            const DataLayout &DL);
+#endif
   bool collectTargetsToIntrument(Function &F, const TargetLibraryInfo &TLI,
                                  __xsan::TsanToInstrument &Targets);
   bool prepareTsanTargetsToInstrument(Function &F, FunctionAnalysisManager &FAM,
                                       const TargetLibraryInfo &TLI,
                                       __xsan::TsanToInstrument &Targets);
 };
+
+#ifndef XSAN_PASS
+struct TsanMAIRBarrierTrait {
+  static bool isForwardBarrier(const Instruction &I) {
+    return isa<CallBase>(I) || I.isAtomic();
+  }
+  static bool isBackwardBarrier(const Instruction &I) {
+    return isForwardBarrier(I);
+  }
+};
+#endif
 
 void insertModuleCtor(Module &M) {
   getOrCreateSanitizerCtorAndInitFunctions(
@@ -969,21 +988,104 @@ bool XsanThreadSanitizer::collectTargetsToIntrument(
   return true;
 }
 
+#ifndef XSAN_PASS
+bool XsanThreadSanitizer::instrumentMAIRAccess(
+    const mair::MaterializedAccess &Access, IRBuilderBase &Builder,
+    const SmallPtrSetImpl<const Instruction *> &Targets, const DataLayout &DL) {
+  if (!Access.Source)
+    report_fatal_error("TSan MAIR access has no source");
+
+  SmallVector<Instruction *, 4> SelectedSources;
+  for (Instruction *Source : Access.Source->getInstructions())
+    if (Source && Targets.contains(Source))
+      SelectedSources.push_back(Source);
+  if (SelectedSources.empty())
+    return false;
+
+  auto InstrumentAtSource = [&](Instruction &Source) {
+    return instrumentLoadOrStore(InstructionInfo(&Source), DL);
+  };
+
+  Instruction *Source = SelectedSources.front();
+  Type *SourceType =
+      isa<LoadInst>(Source)
+          ? cast<LoadInst>(Source)->getType()
+          : cast<StoreInst>(Source)->getValueOperand()->getType();
+  const auto *Size = dyn_cast_or_null<ConstantInt>(Access.AccessSize);
+  bool IsVolatile = isa<LoadInst>(Source)
+                        ? cast<LoadInst>(Source)->isVolatile()
+                        : cast<StoreInst>(Source)->isVolatile();
+  TypeSize SourceSize = DL.getTypeStoreSize(SourceType);
+  bool CanUseOptimizedSite =
+      SelectedSources.size() == 1 &&
+      Access.Source->getInstructions().size() == 1 &&
+      Access.Source->isContiguous() && !SourceType->isVectorTy() &&
+      !SourceSize.isScalable() && Size &&
+      Size->getValue().getActiveBits() < 32 &&
+      Size->getZExtValue() == SourceSize.getFixedValue() &&
+      !isVtableAccess(Source) && !IsVolatile;
+  if (!CanUseOptimizedSite) {
+    bool Changed = false;
+    for (Instruction *Selected : SelectedSources)
+      Changed |= InstrumentAtSource(*Selected);
+    return Changed;
+  }
+
+  if (Access.Address->isSwiftError())
+    return false;
+  int Idx = getMemoryAccessFuncIndex(SourceType, Access.Address, DL);
+  if (Idx < 0)
+    return false;
+
+  Align Alignment = isa<LoadInst>(Source) ? cast<LoadInst>(Source)->getAlign()
+                                          : cast<StoreInst>(Source)->getAlign();
+  uint32_t TypeSizeInBits = DL.getTypeStoreSizeInBits(SourceType);
+  bool IsCompoundRW = Access.Kind == mair::AccessKind::ReadWrite;
+  bool IsWrite = Access.Kind != mair::AccessKind::Read;
+  FunctionCallee OnAccessFunc;
+  if (Alignment >= Align(8) ||
+      (Alignment.value() % (TypeSizeInBits / 8)) == 0) {
+    if (IsCompoundRW)
+      OnAccessFunc = TsanCompoundRW[Idx];
+    else
+      OnAccessFunc = IsWrite ? TsanWrite[Idx] : TsanRead[Idx];
+  } else if (IsCompoundRW) {
+    OnAccessFunc = TsanUnalignedCompoundRW[Idx];
+  } else {
+    OnAccessFunc = IsWrite ? TsanUnalignedWrite[Idx] : TsanUnalignedRead[Idx];
+  }
+
+  __xsan::InstrumentationIRBuilder IRB(Builder);
+  IRB.CreateCall(OnAccessFunc, Access.Address);
+  if (IsCompoundRW || IsWrite)
+    NumInstrumentedWrites++;
+  if (IsCompoundRW || !IsWrite)
+    NumInstrumentedReads++;
+  return true;
+}
+#endif
+
 bool XsanThreadSanitizer::sanitizeFunction(Function &F,
                                            FunctionAnalysisManager &FAM) {
   const TargetLibraryInfo &TLI = FAM.getResult<TargetLibraryAnalysis>(F);
 
 #ifndef XSAN_PASS
-  return ThreadSanitizer::sanitizeFunction(F, TLI);
-#else
+  if (!mair::isMAIROptEnabled())
+    return ThreadSanitizer::sanitizeFunction(F, TLI);
+#endif
   if (shouldSkipFunction(F))
     return false;
 
   initialize(*F.getParent(), TLI);
 
   __xsan::TsanToInstrument Targets;
+#ifndef XSAN_PASS
+  if (!collectTargetsToIntrument(F, TLI, Targets))
+    return false;
+#else
   if (!prepareTsanTargetsToInstrument(F, FAM, TLI, Targets))
     return false;
+#endif
 
   auto &[AllLoadsAndStores, AtomicAccesses, MemIntrinCalls, HasCalls] = Targets;
 
@@ -996,9 +1098,53 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
   // (e.g. variables that do not escape, etc).
 
   // Instrument memory accesses only if we want to report bugs in the function.
-  if (ClInstrumentMemoryAccesses && SanitizeFunction)
+  if (ClInstrumentMemoryAccesses && SanitizeFunction) {
+#ifndef XSAN_PASS
+    SmallPtrSet<const Instruction *, 32> MAIRTargets;
+    for (const auto &II : AllLoadsAndStores)
+      MAIRTargets.insert(II.Inst);
+
+    mair::MAOpt<TsanMAIRBarrierTrait> Opt(F, FAM, nullptr,
+                                          /*KeepFullDebug=*/true);
+    Opt.build();
+    if (Error Err = Opt.optimize())
+      report_fatal_error(Twine(toString(std::move(Err))));
+
+    class ThreadSanitizerBackend final : public mair::MAIRObservationBackend {
+      XsanThreadSanitizer &TSan;
+      const SmallPtrSetImpl<const Instruction *> &Targets;
+      const DataLayout &DL;
+      bool Changed = false;
+
+    public:
+      ThreadSanitizerBackend(
+          XsanThreadSanitizer &TSan,
+          const SmallPtrSetImpl<const Instruction *> &Targets,
+          const DataLayout &DL)
+          : TSan(TSan), Targets(Targets), DL(DL) {}
+
+      Error prepare(const mair::MAIRMaterializationPlan &) override {
+        return Error::success();
+      }
+
+      void emit(const mair::MaterializedObservation &Observation,
+                IRBuilderBase &Builder) override {
+        for (const mair::MaterializedAccess &Access : Observation.Accesses)
+          Changed |= TSan.instrumentMAIRAccess(Access, Builder, Targets, DL);
+      }
+
+      bool changed() const { return Changed; }
+    } Backend(*this, MAIRTargets, DL);
+
+    Expected<mair::MAIRInstantiationResult> Result = Opt.instantiate(Backend);
+    if (!Result)
+      report_fatal_error(Twine(toString(Result.takeError())));
+    Res |= Backend.changed();
+#else
     for (const auto &II : AllLoadsAndStores)
       Res |= instrumentLoadOrStore(II, DL);
+#endif
+  }
 
   // Instrument atomic memory accesses in any case (they can be used to
   // implement synchronization).
@@ -1037,7 +1183,6 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
     Res = true;
   }
   return Res;
-#endif
 }
 
 #ifndef XSAN_PASS

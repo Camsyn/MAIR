@@ -240,10 +240,10 @@ struct TsanMAIRBarrierTrait {
   }
 
   static bool isForwardBarrier(const Instruction &I) {
-    return isa<CallBase>(I) || isReleaseSync(I);
+    return (isa<CallBase>(I) && !isa<AnyMemIntrinsic>(I)) || isReleaseSync(I);
   }
   static bool isBackwardBarrier(const Instruction &I) {
-    return isa<CallBase>(I) || isAcquireSync(I);
+    return (isa<CallBase>(I) && !isa<AnyMemIntrinsic>(I)) || isAcquireSync(I);
   }
 };
 #endif

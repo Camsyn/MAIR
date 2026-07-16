@@ -10,6 +10,7 @@ namespace mair {
 struct PlannedAccess {
   const MemoryAccess *Source = nullptr;
   AccessKind Kind = AccessKind::Read;
+  AccessProperty Properties = AccessProperty::None;
   MemoryRegion Region;
 };
 
@@ -36,6 +37,7 @@ public:
 struct MaterializedAccess {
   const MemoryAccess *Source = nullptr;
   AccessKind Kind = AccessKind::Read;
+  AccessProperty Properties = AccessProperty::None;
   llvm::Value *Address = nullptr;
   llvm::Value *AccessSize = nullptr;
   llvm::Value *Stride = nullptr;

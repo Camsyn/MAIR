@@ -23,14 +23,23 @@ struct MergeCandidate {
   Observation *From = nullptr;
 };
 
+bool hasSpecialAccess(const Observation &Obs) {
+  return llvm::any_of(
+      Obs, [](const MemoryAccess &Access) { return !Access.isOptimizable(); });
+}
+
 MergeCandidate findMergeCandidate(MAIRGraph &G) {
   for (Observation &O1 : G) {
+    if (hasSpecialAccess(O1))
+      continue;
     for (const ObservationEdge &Edge : O1.children()) {
       if (!Edge.isDom())
         continue;
 
       Observation &O2 = Edge.getNode();
       if (&O1 == &O2)
+        continue;
+      if (hasSpecialAccess(O2))
         continue;
       if (!O1.hasCompatibleMergeSemantics(O2))
         continue;

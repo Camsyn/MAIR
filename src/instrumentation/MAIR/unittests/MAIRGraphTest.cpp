@@ -18,6 +18,7 @@
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassInstrumentation.h"
@@ -212,11 +213,11 @@ void registerLoopTestAnalyses(llvm::FunctionAnalysisManager &FAM,
 
 struct CallBarrierTrait {
   static bool isForwardBarrier(const llvm::Instruction &I) {
-    return llvm::isa<llvm::CallBase>(I);
+    return llvm::isa<llvm::CallBase>(I) && !llvm::isa<llvm::AnyMemIntrinsic>(I);
   }
 
   static bool isBackwardBarrier(const llvm::Instruction &I) {
-    return llvm::isa<llvm::CallBase>(I);
+    return isForwardBarrier(I);
   }
 };
 
@@ -227,6 +228,16 @@ struct UnmatchedBarrierTrait {
 
   static bool isBackwardBarrier(const llvm::Instruction &I) {
     return llvm::isa<llvm::FenceInst>(I);
+  }
+};
+
+struct AtomicBarrierTrait {
+  static bool isForwardBarrier(const llvm::Instruction &I) {
+    return I.isAtomic();
+  }
+
+  static bool isBackwardBarrier(const llvm::Instruction &I) {
+    return I.isAtomic();
   }
 };
 
@@ -889,6 +900,176 @@ entry:
   ASSERT_NE(Store, nullptr);
   EXPECT_TRUE(hasSuccessor(Graph, *Load, *Store));
   EXPECT_TRUE(hasSuccessor(Graph, *Store, *Load));
+}
+
+TEST(MAIRGraph, ModelsMemoryAccessPropertiesAndMemoryIntrinsics) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
+declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)
+declare void @llvm.memcpy.element.unordered.atomic.p0.p0.i64(ptr, ptr, i64, i32 immarg)
+declare <4 x i32> @llvm.masked.load.v4i32.p0(ptr, i32 immarg, <4 x i1>, <4 x i32>)
+declare void @llvm.masked.store.v4i32.p0(<4 x i32>, ptr, i32 immarg, <4 x i1>)
+
+define void @f(ptr %p, ptr %q, i64 %size, <4 x i1> %mask,
+               <4 x i32> %values) {
+entry:
+  %volatile_load = load volatile i32, ptr %p, align 4
+  %atomic_load = load atomic i32, ptr %p monotonic, align 4
+  %rmw = atomicrmw add ptr %p, i32 1 monotonic
+  %cas = cmpxchg ptr %p, i32 0, i32 1 monotonic monotonic
+  call void @llvm.memset.p0.i64(ptr %p, i8 0, i64 %size, i1 false)
+  call void @llvm.memcpy.p0.p0.i64(ptr %p, ptr %q, i64 %size, i1 true)
+  call void @llvm.memmove.p0.p0.i64(ptr %q, ptr %p, i64 %size, i1 false)
+  call void @llvm.memcpy.element.unordered.atomic.p0.p0.i64(
+      ptr %p, ptr %q, i64 %size, i32 4)
+  %masked_load = call <4 x i32> @llvm.masked.load.v4i32.p0(
+      ptr %p, i32 4, <4 x i1> %mask, <4 x i32> zeroinitializer)
+  call void @llvm.masked.store.v4i32.p0(
+      <4 x i32> %values, ptr %q, i32 4, <4 x i1> %mask)
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  ASSERT_TRUE(Graph.verify());
+
+  unsigned NumObservations = 0;
+  unsigned NumAccesses = 0;
+  unsigned NumAtomic = 0;
+  unsigned NumVolatile = 0;
+  unsigned NumCallLike = 0;
+  unsigned NumMasked = 0;
+  const Observation *Memcpy = nullptr;
+  for (const Observation &Obs : Graph) {
+    if (!Obs.isMemoryInstSite())
+      continue;
+    ++NumObservations;
+    NumAccesses += Obs.size();
+    if (const auto *MI = llvm::dyn_cast<llvm::MemCpyInst>(Obs.getAnchor()))
+      Memcpy = &Obs;
+    for (const MemoryAccess &Access : Obs) {
+      NumAtomic += Access.isAtomic();
+      NumVolatile += Access.isVolatile();
+      NumCallLike += Access.isCallLike();
+      NumMasked += Access.isMasked();
+    }
+  }
+
+  EXPECT_EQ(NumObservations, 10u);
+  EXPECT_EQ(NumAccesses, 13u);
+  EXPECT_EQ(NumAtomic, 5u);
+  EXPECT_EQ(NumVolatile, 3u);
+  EXPECT_EQ(NumCallLike, 9u);
+  EXPECT_EQ(NumMasked, 2u);
+
+  ASSERT_NE(Memcpy, nullptr);
+  ASSERT_EQ(Memcpy->size(), 2u);
+  auto It = Memcpy->begin();
+  const MemoryAccess &Dest = *It++;
+  const MemoryAccess &Source = *It;
+  EXPECT_TRUE(Dest.isWrite());
+  EXPECT_EQ(Dest.getBase(), F.getArg(0));
+  EXPECT_TRUE(Source.isRead());
+  EXPECT_EQ(Source.getBase(), F.getArg(1));
+  EXPECT_TRUE(Dest.getContiguousRegion()->getSize().isSymbol());
+  EXPECT_EQ(Dest.getContiguousRegion()->getSize().getSymbol(), F.getArg(2));
+}
+
+TEST(MAIRGraph, MemoryIntrinsicsAreAccessesRatherThanCallBarriers) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
+
+define void @f(ptr %p, ptr %q) {
+entry:
+  %before = load i8, ptr %p
+  call void @llvm.memcpy.p0.p0.i64(ptr %p, ptr %q, i64 4, i1 false)
+  store i8 %before, ptr %q
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
+  ASSERT_TRUE(Graph.verify());
+  const Observation *Load = Graph.find("ma1");
+  const Observation *Memcpy = Graph.find("ma2");
+  const Observation *Store = Graph.find("ma3");
+  ASSERT_NE(Load, nullptr);
+  ASSERT_NE(Memcpy, nullptr);
+  ASSERT_NE(Store, nullptr);
+  EXPECT_TRUE(hasSuccessor(Graph, *Load, *Memcpy));
+  EXPECT_TRUE(hasSuccessor(Graph, *Memcpy, *Load));
+  EXPECT_TRUE(hasSuccessor(Graph, *Memcpy, *Store));
+  EXPECT_TRUE(hasSuccessor(Graph, *Store, *Memcpy));
+}
+
+TEST(MAIRGraph, AtomicAccessObservationRemainsABarrierEndpoint) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %before = load i32, ptr %p
+  %atomic = load atomic i32, ptr %p acquire, align 4
+  store i32 %before, ptr %p
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses<AtomicBarrierTrait>(F);
+  ASSERT_TRUE(Graph.verify());
+  const Observation *Load = Graph.find("ma1");
+  const Observation *Atomic = Graph.find("ma2");
+  const Observation *Store = Graph.find("ma3");
+  ASSERT_NE(Load, nullptr);
+  ASSERT_NE(Atomic, nullptr);
+  ASSERT_NE(Store, nullptr);
+  EXPECT_TRUE(hasSuccessor(Graph, *Load, *Atomic));
+  EXPECT_TRUE(hasSuccessor(Graph, *Atomic, *Load));
+  EXPECT_FALSE(hasSuccessor(Graph, *Atomic, *Store));
+  EXPECT_FALSE(hasSuccessor(Graph, *Store, *Atomic));
+}
+
+TEST(MAIRGraphPass, SpecialAccessesRemainAtTheirOriginalObservation) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+
+define void @f(ptr %p) {
+entry:
+  call void @llvm.memset.p0.i64(ptr %p, i8 0, i64 4, i1 false)
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  Observation *Memset = Graph.find("ma1");
+  ASSERT_NE(Memset, nullptr);
+  ASSERT_EQ(Memset->size(), 1u);
+  EXPECT_TRUE(Memset->begin()->isCallLike());
+
+  MAIRGraphAnalysisManager AM;
+  llvm::PassInstrumentationCallbacks PIC;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  SimplifyGraphPass Pass;
+  EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
+  EXPECT_EQ(Graph.find("ma1"), Memset);
+  ASSERT_EQ(Memset->size(), 1u);
+  EXPECT_TRUE(Memset->begin()->isCallLike());
+  EXPECT_TRUE(Graph.verify());
 }
 
 TEST(MAIRGraph, CreateFromHandlesFunctionWithoutMemoryAccesses) {

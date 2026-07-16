@@ -108,6 +108,8 @@ bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops,
       continue;
 
     for (MemoryAccess &Access : Obs) {
+      if (!Access.isOptimizable())
+        continue;
       const AbstractAccess *Region = Access.getContiguousRegion();
       if (!Region || !Loops.isLoopInvariant(Access, *L))
         continue;

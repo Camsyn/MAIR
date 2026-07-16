@@ -8,6 +8,8 @@
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -61,12 +63,25 @@ SmallVector<BasicBlock *, 16> collectReachableBlocks(Function &F) {
   return Blocks;
 }
 
+bool isMaskedMemoryIntrinsic(const Instruction &I) {
+  const auto *II = dyn_cast<IntrinsicInst>(&I);
+  if (!II)
+    return false;
+  switch (II->getIntrinsicID()) {
+  case Intrinsic::masked_load:
+  case Intrinsic::masked_store:
+    return true;
+  default:
+    return false;
+  }
+}
+
 bool isInterestingMop(const Instruction &I) {
   if (I.hasMetadata(LLVMContext::MD_nosanitize))
     return false;
-  if (I.isAtomic())
-    return false;
-  return isa<LoadInst>(I) || isa<StoreInst>(I);
+  return isa<LoadInst, StoreInst, AtomicRMWInst, AtomicCmpXchgInst,
+             AnyMemIntrinsic>(I) ||
+         isMaskedMemoryIntrinsic(I);
 }
 } // namespace
 
@@ -116,9 +131,13 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
       Observation &Prev = *Points[I - 1], &Next = *Points[I];
       const Instruction *PrevI = getBarrierRangeStart(Prev);
       const Instruction *NextI = getBarrierRangeEnd(Next);
-      if (!BA.hasFwdBarrierBetween(BB, PrevI, NextI))
+      bool FwdEndpointBarrier =
+          Prev.isMemoryInstSite() && PrevI && BA.isFwdBarrier(*PrevI);
+      bool BwdEndpointBarrier =
+          Prev.isMemoryInstSite() && PrevI && BA.isBwdBarrier(*PrevI);
+      if (!FwdEndpointBarrier && !BA.hasFwdBarrierBetween(BB, PrevI, NextI))
         Graph.addEdge(Prev, Next, ObsEdgeKind::Dom);
-      if (!BA.hasBwdBarrierBetween(BB, PrevI, NextI))
+      if (!BwdEndpointBarrier && !BA.hasBwdBarrierBetween(BB, PrevI, NextI))
         Graph.addEdge(Next, Prev, ObsEdgeKind::PostDom);
     }
   }
@@ -187,6 +206,46 @@ static AbstractValue getStoreSize(Type &Ty, const DataLayout &DL) {
   if (Size.isScalable())
     return AbstractValue::unknown();
   return AbstractValue::constant(Size.getFixedValue());
+}
+
+static AbstractValue getAccessSize(const Value &Value) {
+  const auto *Size = dyn_cast<ConstantInt>(&Value);
+  if (!Size || Size->getValue().isNegative() ||
+      Size->getValue().getActiveBits() > 64)
+    return AbstractValue::symbol(Value);
+  return AbstractValue::constant(Size->getZExtValue());
+}
+
+static AccessProperty getInstructionProperties(const Instruction &I) {
+  AccessProperty Properties = AccessProperty::None;
+  if (I.isAtomic())
+    Properties |= AccessProperty::Atomic;
+  if (const auto *LI = dyn_cast<LoadInst>(&I)) {
+    if (LI->isVolatile())
+      Properties |= AccessProperty::Volatile;
+  } else if (const auto *SI = dyn_cast<StoreInst>(&I)) {
+    if (SI->isVolatile())
+      Properties |= AccessProperty::Volatile;
+  } else if (const auto *MI = dyn_cast<AnyMemIntrinsic>(&I)) {
+    Properties |= AccessProperty::CallLike;
+    if (MI->isVolatile())
+      Properties |= AccessProperty::Volatile;
+    if (MI->isAtomic())
+      Properties |= AccessProperty::Atomic;
+  } else if (isMaskedMemoryIntrinsic(I)) {
+    Properties |= AccessProperty::CallLike | AccessProperty::Masked;
+  }
+  return Properties;
+}
+
+static MemoryAccess makeAccess(const Instruction &I, const Value &Ptr,
+                               AbstractValue Size, AccessKind Kind,
+                               const DataLayout &DL) {
+  AbstractAccess Access =
+      AbstractAccess::fromPointerAndSize(Ptr, std::move(Size), DL);
+  Instruction *Inst = const_cast<Instruction *>(&I);
+  return MemoryAccess(ArrayRef<Instruction *>(&Inst, 1), std::move(Access),
+                      Kind, getInstructionProperties(I));
 }
 
 static void printAbstractValue(raw_ostream &OS, const AbstractValue &Value) {
@@ -575,13 +634,8 @@ const Value *MemoryAccess::getBase() const {
   return std::visit([](const auto &R) { return R.getBase(); }, Region);
 }
 
-bool MemoryAccess::isAtomic() const {
-  return llvm::any_of(Insts,
-                      [](const Instruction *I) { return I && I->isAtomic(); });
-}
-
 bool MemoryAccess::hasSameOptimizationShape(const MemoryAccess &Other) const {
-  return !isAtomic() && !Other.isAtomic() && Kind == Other.Kind;
+  return isOptimizable() && Other.isOptimizable() && Kind == Other.Kind;
 }
 
 bool MemoryAccess::mergeWith(const MemoryAccess &Other) {
@@ -642,6 +696,32 @@ MemoryAccess MemoryAccess::fromInstruction(const Instruction &I,
     Ptr = SI->getPointerOperand();
     Size = getStoreSize(*SI->getValueOperand()->getType(), DL);
     Kind = AccessKind::Write;
+  } else if (const auto *RMW = dyn_cast<AtomicRMWInst>(&I)) {
+    Ptr = RMW->getPointerOperand();
+    Size = getStoreSize(*RMW->getValOperand()->getType(), DL);
+    Kind = AccessKind::ReadWrite;
+  } else if (const auto *XCHG = dyn_cast<AtomicCmpXchgInst>(&I)) {
+    Ptr = XCHG->getPointerOperand();
+    Size = getStoreSize(*XCHG->getCompareOperand()->getType(), DL);
+    Kind = AccessKind::ReadWrite;
+  } else if (isa<AnyMemTransferInst>(I)) {
+    report_fatal_error(
+        "MemoryAccess::fromInstruction cannot represent a memory transfer");
+  } else if (const auto *MI = dyn_cast<AnyMemSetInst>(&I)) {
+    Ptr = MI->getRawDest();
+    Size = getAccessSize(*MI->getLength());
+    Kind = AccessKind::Write;
+  } else if (const auto *II = dyn_cast<IntrinsicInst>(&I);
+             II && isMaskedMemoryIntrinsic(I)) {
+    // The full vector width is an upper bound. Masked pins the access so no
+    // transform interprets this as an exact contiguous footprint.
+    bool IsWrite = II->getIntrinsicID() == Intrinsic::masked_store;
+    unsigned PtrOperand = IsWrite ? 1 : 0;
+    Type *AccessType =
+        IsWrite ? II->getArgOperand(0)->getType() : II->getType();
+    Ptr = II->getArgOperand(PtrOperand);
+    Size = getStoreSize(*AccessType, DL);
+    Kind = IsWrite ? AccessKind::Write : AccessKind::Read;
   } else if (I.mayReadFromMemory() && I.mayWriteToMemory()) {
     Kind = AccessKind::ReadWrite;
   } else if (I.mayWriteToMemory()) {
@@ -651,16 +731,22 @@ MemoryAccess MemoryAccess::fromInstruction(const Instruction &I,
         "MemoryAccess::fromInstruction expects a memory access instruction");
   }
 
-  AbstractAccess Access =
-      Ptr ? AbstractAccess::fromPointerAndSize(*Ptr, Size, DL)
-          : AbstractAccess(nullptr, AbstractValue::unknown(), Size);
-  Instruction *Inst = const_cast<Instruction *>(&I);
-  return MemoryAccess(ArrayRef<Instruction *>(&Inst, 1), Access, Kind);
+  if (!Ptr)
+    report_fatal_error("memory access instruction has no modeled pointer");
+  return makeAccess(I, *Ptr, std::move(Size), Kind, DL);
 }
 
 void MemoryAccess::print(raw_ostream &OS, bool LLVM) const {
   (void)LLVM;
   printAccessKind(OS, Kind);
+  if (isVolatile())
+    OS << " volatile";
+  if (isAtomic())
+    OS << " atomic";
+  if (isCallLike())
+    OS << " call";
+  if (isMasked())
+    OS << " masked";
   if (const auto *Access = getContiguousRegion()) {
     OS << " ptr ";
     Access->print(OS);
@@ -688,12 +774,15 @@ Observation::~Observation() { AccessAllocator.DestroyAll(); }
 
 MemoryAccess &Observation::createAccess(ArrayRef<Instruction *> Insts,
                                         const MemoryRegion &Region,
-                                        AccessKind Kind) {
-  return *new (AccessAllocator.Allocate()) MemoryAccess(Insts, Region, Kind);
+                                        AccessKind Kind,
+                                        AccessProperty Properties) {
+  return *new (AccessAllocator.Allocate())
+      MemoryAccess(Insts, Region, Kind, Properties);
 }
 
 MemoryAccess &Observation::addAccess(const MemoryAccess &A) {
-  auto &Node = createAccess(A.getInstructions(), A.getRegion(), A.getKind());
+  auto &Node = createAccess(A.getInstructions(), A.getRegion(), A.getKind(),
+                            A.getProperties());
   Accesses.push_back(Node);
   Node.setParent(this);
   if (MAIRGraph *Graph = getParent())
@@ -750,7 +839,8 @@ void Observation::prependAccessesFrom(const Observation &Other) {
   assert(hasCompatibleMergeSemantics(Other) &&
          "cannot merge observations with incompatible site or guard semantics");
   for (const MemoryAccess &A : llvm::reverse(Other.Accesses)) {
-    auto &Node = createAccess(A.getInstructions(), A.getRegion(), A.getKind());
+    auto &Node = createAccess(A.getInstructions(), A.getRegion(), A.getKind(),
+                              A.getProperties());
     Accesses.push_front(Node);
     Node.setParent(this);
     if (MAIRGraph *Graph = getParent())
@@ -920,8 +1010,17 @@ Observation &MAIRGraph::createInstObservation(const BasicBlock &BB,
   auto &Obs = addObservation(
       allocateNode<Observation>(createObservationName("ma"), &BB, &Anchor,
                                 Observation::SiteKind::MemoryInst));
-  Obs.addAccess(MemoryAccess::fromInstruction(
-      Anchor, Anchor.getModule()->getDataLayout()));
+  const DataLayout &DL = Anchor.getModule()->getDataLayout();
+  if (const auto *Transfer = dyn_cast<AnyMemTransferInst>(&Anchor)) {
+    Obs.addAccess(makeAccess(Anchor, *Transfer->getRawDest(),
+                             getAccessSize(*Transfer->getLength()),
+                             AccessKind::Write, DL));
+    Obs.addAccess(makeAccess(Anchor, *Transfer->getRawSource(),
+                             getAccessSize(*Transfer->getLength()),
+                             AccessKind::Read, DL));
+  } else {
+    Obs.addAccess(MemoryAccess::fromInstruction(Anchor, DL));
+  }
   return Obs;
 }
 

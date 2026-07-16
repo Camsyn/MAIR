@@ -246,7 +246,8 @@ void eraseAccess(MemoryAccess &Access) {
 void addOrMergeAccess(Observation &Target, const MemoryAccess &Access,
                       const MemoryRegion &Region,
                       bool MergeEquivalentAccesses) {
-  MemoryAccess NewAccess(Access.getInstructions(), Region, Access.getKind());
+  MemoryAccess NewAccess(Access.getInstructions(), Region, Access.getKind(),
+                         Access.getProperties());
   if (MergeEquivalentAccesses) {
     for (MemoryAccess &Existing : Target) {
       if (&Existing.getMemoryObject() != &Access.getMemoryObject())
@@ -335,8 +336,8 @@ bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
                              bool MergeEquivalentAccesses) {
   const AbstractAccess *Location = Access.getContiguousRegion();
   std::optional<uint64_t> AccessSize = getConstantAccessSize(Access);
-  if (!Location || !Location->getBase() || !AccessSize || *AccessSize == 0 ||
-      Access.getInstructions().empty())
+  if (!Access.isOptimizable() || !Location || !Location->getBase() ||
+      !AccessSize || *AccessSize == 0 || Access.getInstructions().empty())
     return false;
 
   // First bind the access to the loop described by its pointer recurrence,

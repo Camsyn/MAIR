@@ -1300,7 +1300,7 @@ struct AsanToInstrument {
 #ifndef XSAN_PASS
 struct AsanMAIRBarrierTrait {
   static bool isForwardBarrier(const Instruction &I) {
-    return isa<CallBase>(I) && I.mayWriteToMemory();
+    return isa<CallBase>(I) && !isa<AnyMemIntrinsic>(I) && I.mayWriteToMemory();
   }
   static bool isBackwardBarrier(const Instruction &I) {
     return isForwardBarrier(I);

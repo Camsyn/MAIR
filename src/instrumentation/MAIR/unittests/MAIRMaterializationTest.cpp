@@ -48,6 +48,8 @@ public:
   unsigned EmittedObservations = 0;
   unsigned EmittedAccesses = 0;
   bool SawCompletePlan = true;
+  SmallVector<AccessProperty, 4> PlannedProperties;
+  SmallVector<AccessProperty, 4> EmittedProperties;
 
   Error prepare(const MAIRMaterializationPlan &Plan) override {
     PreparedUnits = Plan.units().size();
@@ -57,8 +59,10 @@ public:
           Unit.Site.isEdge()
               ? Unit.Site.getEdgeFrom() && Unit.Site.getEdgeTo()
               : Unit.Site.getBasicBlock() && Unit.Site.getAnchor();
-      for (const PlannedAccess &Access : Unit.Accesses)
+      for (const PlannedAccess &Access : Unit.Accesses) {
         SawCompletePlan &= Access.Source != nullptr;
+        PlannedProperties.push_back(Access.Properties);
+      }
     }
     if (Reject)
       return createStringError(inconvertibleErrorCode(),
@@ -71,6 +75,7 @@ public:
     ++EmittedObservations;
     EmittedAccesses += Observation.Accesses.size();
     for (const MaterializedAccess &Access : Observation.Accesses) {
+      EmittedProperties.push_back(Access.Properties);
       Builder.CreateFreeze(Access.Address, "mair.test.address");
       Builder.CreateFreeze(Access.AccessSize, "mair.test.size");
       if (Access.Stride)
@@ -80,6 +85,37 @@ public:
     }
   }
 };
+
+TEST(MAIRMaterialization, PreservesMemoryAccessProperties) {
+  LLVMContext Ctx;
+  auto M = parseMaterializationModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %v = load volatile i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                                      Ctx);
+  ASSERT_TRUE(M);
+  Function &F = *M->getFunction("f");
+  MAIRGraph Graph = MAIRGraph::build(F, DominatorTree(F), PostDominatorTree(F));
+  ASSERT_TRUE(Graph.verify());
+
+  PassInstrumentationCallbacks PIC;
+  FunctionAnalysisManager FAM;
+  registerMaterializationAnalyses(FAM, PIC);
+  RecordingBackend Backend;
+  auto Result = Graph.instantiate(FAM, Backend);
+  if (!Result) {
+    ADD_FAILURE() << toString(Result.takeError());
+    return;
+  }
+
+  ASSERT_EQ(Backend.PlannedProperties.size(), 1u);
+  ASSERT_EQ(Backend.EmittedProperties.size(), 1u);
+  EXPECT_EQ(Backend.PlannedProperties.front(), AccessProperty::Volatile);
+  EXPECT_EQ(Backend.EmittedProperties.front(), AccessProperty::Volatile);
+}
 
 TEST(MAIRMaterialization, BackendRejectionLeavesModuleAndGraphLive) {
   LLVMContext Ctx;

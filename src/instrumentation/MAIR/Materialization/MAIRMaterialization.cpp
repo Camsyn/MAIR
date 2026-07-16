@@ -177,7 +177,8 @@ Expected<MAIRMaterializationPlan> buildPlan(const MAIRGraph &Graph, Function &F,
     Unit.Site = Obs.getSite();
     Unit.Guard = Obs.getGuard();
     for (const MemoryAccess &Access : Obs)
-      Unit.Accesses.push_back({&Access, Access.getKind(), Access.getRegion()});
+      Unit.Accesses.push_back({&Access, Access.getKind(),
+                               Access.getProperties(), Access.getRegion()});
     Plan.addUnit(std::move(Unit));
   }
   return Plan;
@@ -405,6 +406,7 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
       MaterializedAccess Materialized;
       Materialized.Source = Access.Source;
       Materialized.Kind = Access.Kind;
+      Materialized.Properties = Access.Properties;
       DenseMap<const void *, Value *> Cache;
       if (const auto *Contiguous =
               std::get_if<AbstractAccess>(&Access.Region)) {

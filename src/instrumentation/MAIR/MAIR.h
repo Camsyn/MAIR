@@ -53,6 +53,27 @@ struct MAIRScalarExprOwner;
 struct MAIRInstantiationResult;
 
 enum class AccessKind : uint8_t { Read = 1, Write = 2, ReadWrite = 3 };
+/// Orthogonal source semantics. Current transforms only optimize accesses with
+/// no properties; CallLike denotes a known access originating from CallBase,
+/// not an arbitrary call's unknown memory effects.
+enum class AccessProperty : uint8_t {
+  None = 0,
+  Volatile = 1 << 0,
+  Atomic = 1 << 1,
+  CallLike = 1 << 2,
+  Masked = 1 << 3,
+};
+
+constexpr AccessProperty operator|(AccessProperty LHS, AccessProperty RHS) {
+  return static_cast<AccessProperty>(static_cast<uint8_t>(LHS) |
+                                     static_cast<uint8_t>(RHS));
+}
+
+constexpr AccessProperty &operator|=(AccessProperty &LHS, AccessProperty RHS) {
+  LHS = LHS | RHS;
+  return LHS;
+}
+
 enum class ObsEdgeKind : uint8_t { Dom, PostDom };
 
 class AbstractValue {
@@ -463,15 +484,18 @@ class MemoryAccess final
   SmallVector<Instruction *, 2> Insts;
   MemoryRegion Region;
   AccessKind Kind = AccessKind::Read;
+  AccessProperty Properties = AccessProperty::None;
   /// Fixed base operand, analogous to a single llvm::User operand.
   MemoryUse BaseUse;
 
 public:
   MemoryAccess() = default;
-  MemoryAccess(ArrayRef<Instruction *> I, AbstractAccess A, AccessKind K)
-      : MemoryAccess(I, MemoryRegion(std::move(A)), K) {}
-  MemoryAccess(ArrayRef<Instruction *> I, MemoryRegion R, AccessKind K)
-      : Insts(I.begin(), I.end()), Region(std::move(R)), Kind(K),
+  MemoryAccess(ArrayRef<Instruction *> I, AbstractAccess A, AccessKind K,
+               AccessProperty P = AccessProperty::None)
+      : MemoryAccess(I, MemoryRegion(std::move(A)), K, P) {}
+  MemoryAccess(ArrayRef<Instruction *> I, MemoryRegion R, AccessKind K,
+               AccessProperty P = AccessProperty::None)
+      : Insts(I.begin(), I.end()), Region(std::move(R)), Kind(K), Properties(P),
         BaseUse(*this) {}
 
   MemoryAccess(const MemoryAccess &) = delete;
@@ -510,7 +534,16 @@ public:
   bool isRead() const { return Kind == AccessKind::Read; }
   bool isWrite() const { return Kind == AccessKind::Write; }
   bool isReadWrite() const { return Kind == AccessKind::ReadWrite; }
-  bool isAtomic() const;
+  AccessProperty getProperties() const { return Properties; }
+  bool hasProperty(AccessProperty Property) const {
+    return (static_cast<uint8_t>(Properties) &
+            static_cast<uint8_t>(Property)) != 0;
+  }
+  bool isVolatile() const { return hasProperty(AccessProperty::Volatile); }
+  bool isAtomic() const { return hasProperty(AccessProperty::Atomic); }
+  bool isCallLike() const { return hasProperty(AccessProperty::CallLike); }
+  bool isMasked() const { return hasProperty(AccessProperty::Masked); }
+  bool isOptimizable() const { return Properties == AccessProperty::None; }
   bool hasSameOptimizationShape(const MemoryAccess &Other) const;
 
   bool mergeWith(const MemoryAccess &Other);
@@ -627,7 +660,8 @@ private:
     return &Observation::Accesses;
   }
   MemoryAccess &createAccess(ArrayRef<Instruction *> Insts,
-                             const MemoryRegion &Region, AccessKind Kind);
+                             const MemoryRegion &Region, AccessKind Kind,
+                             AccessProperty Properties);
   void mergeRepresentationFrom(const Observation &Other);
 };
 

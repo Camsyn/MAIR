@@ -31,6 +31,12 @@ public:
   bool hasBwdBarrierBetween(const Instruction *From, const Instruction *To);
   bool hasFwdBarrierPath(const BasicBlock &From, const BasicBlock &To);
   bool hasBwdBarrierPath(const BasicBlock &From, const BasicBlock &To);
+  bool isFwdBarrier(const Instruction &I) const {
+    return isBarrier(I, /*Forward=*/true);
+  }
+  bool isBwdBarrier(const Instruction &I) const {
+    return isBarrier(I, /*Forward=*/false);
+  }
 
 private:
   SmallSetVector<const BasicBlock *, 16> FwdBarrierBBMemo;
@@ -40,6 +46,7 @@ protected:
   virtual bool hasAnyBarrier(const BasicBlock &BB, bool Forward) const = 0;
   virtual bool hasAnyBarrier(const BasicBlock &BB, const Instruction *From,
                              const Instruction *To, bool Forward) const = 0;
+  virtual bool isBarrier(const Instruction &I, bool Forward) const = 0;
 
 private:
   void cacheBarrierBB(const BasicBlock &BB, bool Forward) {
@@ -61,9 +68,14 @@ public:
   explicit MAIRBarrierAnalysis() : MAIRBarrierAnalysisCore() {}
 
 protected:
+  bool isBarrier(const Instruction &I, bool Forward) const override {
+    return Forward ? BarrierTrait::isForwardBarrier(I)
+                   : BarrierTrait::isBackwardBarrier(I);
+  }
+
   bool hasAnyBarrier(const BasicBlock &BB, bool Forward) const override {
-    return any_of(BB, Forward ? BarrierTrait::isForwardBarrier
-                              : BarrierTrait::isBackwardBarrier);
+    return any_of(BB,
+                  [&](const Instruction &I) { return isBarrier(I, Forward); });
   }
 
   bool hasAnyBarrier(const BasicBlock &BB, const Instruction *From,
@@ -77,9 +89,8 @@ protected:
 
     auto Begin = From ? std::next(From->getIterator()) : BB.begin();
     auto End = To ? To->getIterator() : BB.end();
-    return any_of(make_range(Begin, End), Forward
-                                             ? BarrierTrait::isForwardBarrier
-                                             : BarrierTrait::isBackwardBarrier);
+    return any_of(make_range(Begin, End),
+                  [&](const Instruction &I) { return isBarrier(I, Forward); });
   }
 };
 

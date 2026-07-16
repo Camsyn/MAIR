@@ -1,5 +1,6 @@
 #include "MAIR/Transforms/LoopInvariantObservationMotionPass.h"
 #include "MAIR/Analysis/LoopAnalysis.h"
+#include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
 
 #include "llvm/ADT/STLExtras.h"
@@ -9,6 +10,8 @@ using namespace llvm;
 
 #define DEBUG_TYPE "mair-loop-invariant-motion"
 
+STATISTIC(NumInputAccesses,
+          "Number of memory accesses entering loop-invariant motion");
 STATISTIC(NumMovedToPreheaders,
           "Number of invariant accesses moved to loop preheaders");
 STATISTIC(NumMovedToExits, "Number of invariant accesses moved to loop exits");
@@ -158,6 +161,9 @@ bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops,
 PreservedAnalyses
 LoopInvariantObservationMotionPass::run(MAIRGraph &G,
                                         MAIRGraphAnalysisManager &AM) {
+#if LLVM_ENABLE_STATS
+  NumInputAccesses += MAIRStat::compute(G).getNumMemoryAccesses();
+#endif
   bool Changed = false;
   MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
   while (moveOneInvariantAccess(G, Loops, MergeEquivalentAccesses))

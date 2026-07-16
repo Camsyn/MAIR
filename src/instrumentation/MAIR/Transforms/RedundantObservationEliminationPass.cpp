@@ -1,4 +1,5 @@
 #include "MAIR/Transforms/RedundantObservationEliminationPass.h"
+#include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/Analysis/RedundantObservationAnalysis.h"
 
 #include "llvm/ADT/DenseSet.h"
@@ -10,12 +11,18 @@ using namespace llvm;
 #define DEBUG_TYPE "mair-redundant-observation-elimination"
 
 STATISTIC(NumEliminatedAccesses, "Number of redundant accesses eliminated");
+STATISTIC(
+    NumInputAccesses,
+    "Number of memory accesses entering redundant observation elimination");
 
 namespace mair {
 
 PreservedAnalyses
 RedundantObservationEliminationPass::run(MAIRGraph &G,
                                          MAIRGraphAnalysisManager &AM) {
+#if LLVM_ENABLE_STATS
+  NumInputAccesses += MAIRStat::compute(G).getNumMemoryAccesses();
+#endif
   const RedundantObservationInfo &Info =
       AM.getResult<RedundantObservationAnalysis>(G);
   DenseSet<const MemoryAccess *> DeletedSources;

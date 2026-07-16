@@ -1,5 +1,6 @@
 #include "MAIR/Transforms/LoopPeriodicObservationCombinePass.h"
 #include "MAIR/Analysis/LoopAnalysis.h"
+#include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
 
 #include "llvm/ADT/STLExtras.h"
@@ -13,6 +14,8 @@ using namespace llvm;
 
 STATISTIC(NumAggregatedAccesses,
           "Number of accesses aggregated across loop iterations");
+STATISTIC(NumInputAccesses,
+          "Number of memory accesses entering loop periodic combination");
 STATISTIC(NumRangeAggregates,
           "Number of loop accesses aggregated into contiguous ranges");
 STATISTIC(NumPeriodicAggregates,
@@ -431,6 +434,9 @@ bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
 PreservedAnalyses
 LoopPeriodicObservationCombinePass::run(MAIRGraph &G,
                                         MAIRGraphAnalysisManager &AM) {
+#if LLVM_ENABLE_STATS
+  NumInputAccesses += MAIRStat::compute(G).getNumMemoryAccesses();
+#endif
   bool Changed = false;
   MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
   while (aggregateOneObservation(G, Loops, MergeEquivalentAccesses))

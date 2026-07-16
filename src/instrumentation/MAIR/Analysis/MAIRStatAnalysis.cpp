@@ -13,12 +13,16 @@ void MAIRStat::print(raw_ostream &OS) const {
   OS << "  memory-accesses: " << NumMemoryAccesses << "\n";
 }
 
-MAIRStat MAIRStatAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &) {
+MAIRStat MAIRStat::compute(const MAIRGraph &G) {
   unsigned NumMemoryAccesses = 0;
   for (const Observation &Obs : G)
     NumMemoryAccesses += Obs.size();
 
   return MAIRStat(G.size(), NumMemoryAccesses);
+}
+
+MAIRStat MAIRStatAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &) {
+  return MAIRStat::compute(G);
 }
 
 PreservedAnalyses MAIRStatPrinterPass::run(MAIRGraph &G,

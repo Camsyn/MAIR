@@ -1,4 +1,5 @@
 #include "MAIR/Transforms/SimplifyGraphPass.h"
+#include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
 
 #include "llvm/ADT/SmallVector.h"
@@ -8,6 +9,8 @@ using namespace llvm;
 
 #define DEBUG_TYPE "mair-simplifygraph"
 
+STATISTIC(NumInputObservations,
+          "Number of observations entering graph simplification");
 STATISTIC(NumMergedObservations,
           "Number of observations merged by graph simplification");
 
@@ -70,7 +73,11 @@ void mergeObservationInto(MAIRGraph &G, Observation &Into, Observation &From) {
 
 PreservedAnalyses SimplifyGraphPass::run(MAIRGraph &G,
                                          MAIRGraphAnalysisManager &AM) {
+#if LLVM_ENABLE_STATS
+  NumInputObservations += MAIRStat::compute(G).getNumObservations();
+#else
   (void)AM;
+#endif
   bool Changed = false;
 
   while (true) {

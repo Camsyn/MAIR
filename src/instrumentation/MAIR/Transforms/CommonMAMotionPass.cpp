@@ -1,4 +1,5 @@
 #include "MAIR/Transforms/CommonMAMotionPass.h"
+#include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
 
 #include "llvm/ADT/STLExtras.h"
@@ -13,6 +14,8 @@ using namespace llvm;
 #define DEBUG_TYPE "mair-commonmamotion"
 
 STATISTIC(NumHoistedAccesses, "Number of accesses hoisted by common MA motion");
+STATISTIC(NumInputAccesses,
+          "Number of memory accesses entering common MA motion");
 STATISTIC(NumSunkAccesses, "Number of accesses sunk by common MA motion");
 
 namespace mair {
@@ -254,7 +257,11 @@ bool moveCommonAccessesToFixedPoint(MAIRGraph &G, bool Sink,
 
 PreservedAnalyses CommonMAMotionPass::run(MAIRGraph &G,
                                           MAIRGraphAnalysisManager &AM) {
+#if LLVM_ENABLE_STATS
+  NumInputAccesses += MAIRStat::compute(G).getNumMemoryAccesses();
+#else
   (void)AM;
+#endif
   const Function *F = G.getFunction();
   assert(F && "CommonMAMotion requires a function-backed graph");
   DominatorTree DT(*const_cast<Function *>(F));

@@ -13,6 +13,8 @@ public:
   MAIRStat(unsigned Observations, unsigned MemoryAccesses)
       : NumObservations(Observations), NumMemoryAccesses(MemoryAccesses) {}
 
+  static MAIRStat compute(const MAIRGraph &G);
+
   unsigned getNumObservations() const { return NumObservations; }
   unsigned getNumMemoryAccesses() const { return NumMemoryAccesses; }
 

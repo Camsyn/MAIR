@@ -1,4 +1,5 @@
 #include "MAIR/Transforms/LocationMergePass.h"
+#include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -11,6 +12,8 @@ using namespace llvm;
 #define DEBUG_TYPE "mair-locationmerge"
 
 STATISTIC(NumMergedAccesses, "Number of accesses merged by location merging");
+STATISTIC(NumInputAccesses,
+          "Number of memory accesses entering location merging");
 
 namespace mair {
 
@@ -100,7 +103,11 @@ bool mergeLocations(Observation &Obs) {
 
 PreservedAnalyses LocationMergePass::run(MAIRGraph &G,
                                          MAIRGraphAnalysisManager &AM) {
+#if LLVM_ENABLE_STATS
+  NumInputAccesses += MAIRStat::compute(G).getNumMemoryAccesses();
+#else
   (void)AM;
+#endif
   bool Changed = false;
   for (Observation &Obs : G)
     Changed |= mergeLocations(Obs);

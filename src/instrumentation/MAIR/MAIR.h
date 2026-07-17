@@ -5,6 +5,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
@@ -53,9 +54,9 @@ struct MAIRScalarExprOwner;
 struct MAIRInstantiationResult;
 
 enum class AccessKind : uint8_t { Read = 1, Write = 2, ReadWrite = 3 };
-/// Orthogonal source semantics. Current transforms only optimize accesses with
-/// no properties; CallLike denotes a known access originating from CallBase,
-/// not an arbitrary call's unknown memory effects.
+/// Orthogonal source semantics. CallLike denotes an access that requires
+/// independent call-specific handling, currently a modeled memory intrinsic;
+/// it does not classify every access whose LLVM instruction is a CallBase.
 enum class AccessProperty : uint8_t {
   None = 0,
   Volatile = 1 << 0,
@@ -73,6 +74,43 @@ constexpr AccessProperty &operator|=(AccessProperty &LHS, AccessProperty RHS) {
   LHS = LHS | RHS;
   return LHS;
 }
+
+enum class AccessKindSemantics : uint8_t {
+  Exact,
+  Ignore,
+  WriteCoversRead,
+};
+
+enum class ObsEdgeKind : uint8_t;
+
+/// Sanitizer-specific legality rules shared by every MAIR optimization pass.
+/// Region geometry remains a property of MemoryAccess; this configuration
+/// controls which semantic distinctions an observer must preserve.
+class MAIROptimizationConfig {
+  AccessKindSemantics KindSemantics = AccessKindSemantics::Exact;
+  bool IgnoreAtomic = false;
+  bool DomCoverageOnly = false;
+  bool AllowRelocation = true;
+
+  explicit MAIROptimizationConfig(AccessKindSemantics Kinds, bool IgnoreAtomic,
+                                  bool DomCoverageOnly, bool AllowRelocation)
+      : KindSemantics(Kinds), IgnoreAtomic(IgnoreAtomic),
+        DomCoverageOnly(DomCoverageOnly), AllowRelocation(AllowRelocation) {}
+
+public:
+  MAIROptimizationConfig() = default;
+
+  static MAIROptimizationConfig generic();
+  static MAIROptimizationConfig forAddressSanitizer();
+  static MAIROptimizationConfig forThreadSanitizer();
+
+  bool canMove(const MemoryAccess &Access) const;
+  bool canMerge(const MemoryAccess &Into, const MemoryAccess &From) const;
+  bool canDelete(const MemoryAccess &Access) const;
+  bool allowsCoverageAlong(ObsEdgeKind Kind) const;
+  bool kindCovers(AccessKind Available, AccessKind Required) const;
+  AccessKind mergeKinds(AccessKind Into, AccessKind From) const;
+};
 
 enum class ObsEdgeKind : uint8_t { Dom, PostDom };
 
@@ -303,8 +341,43 @@ struct PeriodicRegion {
   void print(raw_ostream &OS) const;
 };
 
-/// A contiguous or explicitly periodic memory-access region.
-using MemoryRegion = std::variant<AbstractAccess, PeriodicRegion>;
+/// A fixed-width vector footprint whose active lanes are selected by a mask.
+/// Constant masks are normalized into bits; dynamic masks retain their SSA
+/// value and are comparable only when that identity is shared.
+class MaskedRegion {
+  AbstractAccess Bounds;
+  const Value *DynamicMask = nullptr;
+  SmallBitVector ConstantMask;
+  uint64_t ElementSize = 0;
+  bool IsConstant = false;
+  bool IsComparable = true;
+
+public:
+  MaskedRegion() = default;
+  MaskedRegion(AbstractAccess B, const Value &Mask, uint64_t ElementBytes,
+               bool Comparable = true);
+  MaskedRegion(AbstractAccess B, SmallBitVector Mask, uint64_t ElementBytes);
+
+  const Value *getBase() const { return Bounds.getBase(); }
+  const AbstractAccess &getBounds() const { return Bounds; }
+  const Value *getDynamicMask() const { return DynamicMask; }
+  const SmallBitVector &getConstantMask() const { return ConstantMask; }
+  uint64_t getElementSize() const { return ElementSize; }
+  unsigned getNumLanes() const;
+  bool isConstantMask() const { return IsConstant; }
+  bool isComparable() const { return IsComparable; }
+
+  bool contains(const MaskedRegion &Other) const;
+  static std::optional<MaskedRegion> merge(const MaskedRegion &A,
+                                           const MaskedRegion &B);
+
+  bool operator==(const MaskedRegion &Other) const;
+  bool operator!=(const MaskedRegion &Other) const { return !(*this == Other); }
+  void print(raw_ostream &OS) const;
+};
+
+/// A contiguous, masked, or explicitly periodic memory-access region.
+using MemoryRegion = std::variant<AbstractAccess, MaskedRegion, PeriodicRegion>;
 
 class ObservationEdge {
   Observation *Node = nullptr;
@@ -514,6 +587,9 @@ public:
   const PeriodicRegion *getPeriodicRegion() const {
     return std::get_if<PeriodicRegion>(&Region);
   }
+  const MaskedRegion *getMaskedRegion() const {
+    return std::get_if<MaskedRegion>(&Region);
+  }
   bool isContiguous() const {
     return std::holds_alternative<AbstractAccess>(Region);
   }
@@ -543,10 +619,11 @@ public:
   bool isAtomic() const { return hasProperty(AccessProperty::Atomic); }
   bool isCallLike() const { return hasProperty(AccessProperty::CallLike); }
   bool isMasked() const { return hasProperty(AccessProperty::Masked); }
-  bool isOptimizable() const { return Properties == AccessProperty::None; }
-  bool hasSameOptimizationShape(const MemoryAccess &Other) const;
 
-  bool mergeWith(const MemoryAccess &Other);
+  bool covers(const MemoryAccess &Other,
+              const MAIROptimizationConfig &Config) const;
+  bool mergeWith(const MemoryAccess &Other,
+                 const MAIROptimizationConfig &Config);
   void mergeKind(AccessKind Other);
 
   static MemoryAccess fromInstruction(const Instruction &I,
@@ -684,6 +761,7 @@ private:
   const Function *F = nullptr;
   Function *MutableF = nullptr;
   State GraphState = State::Live;
+  MAIROptimizationConfig OptimizationConfig;
   SpecificBumpPtrAllocator<Observation> GraphAllocator;
   SpecificBumpPtrAllocator<MemoryObject> MemoryObjectAllocator;
   std::unique_ptr<MAIRScalarExprOwner> ScalarExprOwner;
@@ -697,9 +775,13 @@ private:
   unsigned NextObservationID = 0;
 
 public:
-  MAIRGraph();
-  explicit MAIRGraph(const Function &Func);
-  explicit MAIRGraph(Function &Func);
+  explicit MAIRGraph(
+      MAIROptimizationConfig Config = MAIROptimizationConfig::generic());
+  explicit MAIRGraph(
+      const Function &Func,
+      MAIROptimizationConfig Config = MAIROptimizationConfig::generic());
+  explicit MAIRGraph(Function &Func, MAIROptimizationConfig Config =
+                                         MAIROptimizationConfig::generic());
   MAIRGraph(const MAIRGraph &) = delete;
   MAIRGraph &operator=(const MAIRGraph &) = delete;
   MAIRGraph(MAIRGraph &&Other) noexcept;
@@ -707,6 +789,9 @@ public:
   ~MAIRGraph();
 
   const Function *getFunction() const { return F; }
+  const MAIROptimizationConfig &getOptimizationConfig() const {
+    return OptimizationConfig;
+  }
   Function *getMutableFunction() { return MutableF; }
   bool isLive() const { return GraphState == State::Live; }
   bool isConsumed() const {
@@ -727,10 +812,12 @@ public:
   /// reusable LLVM analyses from FAM and then delegate to the explicit-analysis
   /// overload below. It intentionally does not construct DT/PDT itself.
   template <class BarrierTrait = DefaultBarrierTrait>
-  static MAIRGraph build(Function &F, FunctionAnalysisManager &FAM) {
+  static MAIRGraph
+  build(Function &F, FunctionAnalysisManager &FAM,
+        MAIROptimizationConfig Config = MAIROptimizationConfig::generic()) {
     auto &DT = FAM.getResult<DominatorTreeAnalysis>(F);
     auto &PDT = FAM.getResult<PostDominatorTreeAnalysis>(F);
-    return build<BarrierTrait>(F, DT, PDT);
+    return build<BarrierTrait>(F, DT, PDT, Config);
   }
 
   /// Build a MAIR graph for \p F using caller-provided dominance analyses.
@@ -739,10 +826,11 @@ public:
   /// construction stays in the private non-template overload so the heavy
   /// construction algorithm has one implementation.
   template <class BarrierTrait = DefaultBarrierTrait>
-  static MAIRGraph build(Function &F, const DominatorTree &DT,
-                         const PostDominatorTree &PDT) {
+  static MAIRGraph
+  build(Function &F, const DominatorTree &DT, const PostDominatorTree &PDT,
+        MAIROptimizationConfig Config = MAIROptimizationConfig::generic()) {
     MAIRBarrierAnalysis<BarrierTrait> BarrierAnalysis;
-    return build(F, DT, PDT, BarrierAnalysis);
+    return build(F, DT, PDT, BarrierAnalysis, Config);
   }
 
   iterator begin() {
@@ -834,7 +922,8 @@ private:
   /// BarrierAnalysis.
   static MAIRGraph build(Function &F, const DominatorTree &DT,
                          const PostDominatorTree &PDT,
-                         MAIRBarrierAnalysisCore &BarrierAnalysis);
+                         MAIRBarrierAnalysisCore &BarrierAnalysis,
+                         MAIROptimizationConfig Config);
 
   static ObservationListType MAIRGraph::*getSublistAccess(Observation *) {
     return &MAIRGraph::Observations;

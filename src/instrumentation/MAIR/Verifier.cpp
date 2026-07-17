@@ -308,6 +308,26 @@ void MAIRVerifier::verifyMemoryAccess(const Observation &Obs,
 
   if (const PeriodicRegion *Region = Access.getPeriodicRegion())
     verifyPeriodicRegion(*Region, Access, Obs);
+  if (const MaskedRegion *Region = Access.getMaskedRegion()) {
+    Check(Access.isMasked(), "masked region is missing masked property", Access,
+          Obs);
+    Check(Region->getElementSize() != 0,
+          "masked region has zero-sized elements", Access, Obs);
+    if (const Value *Mask = Region->getDynamicMask()) {
+      const auto *MaskType = dyn_cast<VectorType>(Mask->getType());
+      CheckFatal(MaskType && MaskType->getElementType()->isIntegerTy(1),
+                 "masked region mask is not an i1 vector", Access, Obs, Mask);
+      Check(MaskType->getElementCount().getKnownMinValue() ==
+                Region->getNumLanes(),
+            "masked region lane count does not match mask", Access, Obs, Mask);
+    } else {
+      Check(Region->isConstantMask(),
+            "masked region has neither dynamic nor constant mask", Access, Obs);
+    }
+  } else {
+    Check(!Access.isMasked(), "masked property has no masked region", Access,
+          Obs);
+  }
 }
 
 void MAIRVerifier::verifyScalarExpr(const MAIRScalarExpr &Expr,

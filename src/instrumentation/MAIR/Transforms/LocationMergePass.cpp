@@ -36,9 +36,11 @@ void eraseAccess(Observation &Obs, MemoryAccess &Access) {
 }
 
 bool mergeLocations(Observation &Obs) {
+  const MAIROptimizationConfig &Config =
+      Obs.getParent()->getOptimizationConfig();
   DenseMap<MemoryObject *, AccessGroup> Groups;
   for (MemoryAccess &Access : Obs)
-    if (Access.isContiguous())
+    if (!Access.isPeriodic())
       Groups[&Access.getMemoryObject()].push_back(&Access);
 
   bool Changed = false;
@@ -64,7 +66,7 @@ bool mergeLocations(Observation &Obs) {
     MemoryAccess *Current = Accesses.front();
     for (size_t I = 1; I < ConcreteEnd;) {
       MemoryAccess *Next = Accesses[I];
-      if (!Current->mergeWith(*Next)) {
+      if (!Current->mergeWith(*Next, Config)) {
         Current = Next;
         ++I;
         continue;
@@ -80,11 +82,7 @@ bool mergeLocations(Observation &Obs) {
       Current = Accesses[I];
       for (size_t J = I + 1; J < Accesses.size();) {
         MemoryAccess *Next = Accesses[J];
-        if (*Current->getContiguousRegion() != *Next->getContiguousRegion()) {
-          ++J;
-          continue;
-        }
-        bool Merged = Current->mergeWith(*Next);
+        bool Merged = Current->mergeWith(*Next, Config);
         if (!Merged) {
           ++J;
           continue;

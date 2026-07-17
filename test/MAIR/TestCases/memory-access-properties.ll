@@ -5,8 +5,8 @@ declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
 declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
 declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)
 declare void @llvm.memcpy.element.unordered.atomic.p0.p0.i64(ptr, ptr, i64, i32 immarg)
-declare <4 x i32> @llvm.masked.load.v4i32.p0(ptr, i32 immarg, <4 x i1>, <4 x i32>)
-declare void @llvm.masked.store.v4i32.p0(<4 x i32>, ptr, i32 immarg, <4 x i1>)
+declare <4 x i32> @llvm.masked.load.v4i32.p0(ptr, <4 x i1>, <4 x i32>)
+declare void @llvm.masked.store.v4i32.p0(<4 x i32>, ptr, <4 x i1>)
 
 define void @properties(ptr %p, ptr %q, i64 %size, <4 x i1> %mask,
                         <4 x i32> %values) {
@@ -21,9 +21,9 @@ entry:
   call void @llvm.memcpy.element.unordered.atomic.p0.p0.i64(
       ptr %p, ptr %q, i64 %size, i32 4)
   %masked_load = call <4 x i32> @llvm.masked.load.v4i32.p0(
-      ptr %p, i32 4, <4 x i1> %mask, <4 x i32> zeroinitializer)
+      ptr %p, <4 x i1> %mask, <4 x i32> zeroinitializer)
   call void @llvm.masked.store.v4i32.p0(
-      <4 x i32> %values, ptr %q, i32 4, <4 x i1> %mask)
+      <4 x i32> %values, ptr %q, <4 x i1> %mask)
   ret void
 }
 
@@ -47,7 +47,5 @@ entry:
 ; CHECK: ma8:
 ; CHECK-NEXT:   write atomic call ptr %p, %size
 ; CHECK-NEXT:   read atomic call ptr %q, %size
-; CHECK: ma9:
-; CHECK-NEXT:   read call masked ptr %p, 16
-; CHECK: ma10:
-; CHECK-NEXT:   write call masked ptr %q, 16
+; CHECK: read masked ptr %p, 16
+; CHECK: write masked ptr %q, 16

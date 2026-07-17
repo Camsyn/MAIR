@@ -42,8 +42,11 @@ struct MaterializedAccess {
   llvm::Value *AccessSize = nullptr;
   llvm::Value *Stride = nullptr;
   llvm::Value *TripCount = nullptr;
+  llvm::Value *Mask = nullptr;
+  uint64_t MaskElementSize = 0;
 
   bool isPeriodic() const { return Stride != nullptr; }
+  bool isMasked() const { return Mask != nullptr; }
 };
 
 struct MaterializedObservation {

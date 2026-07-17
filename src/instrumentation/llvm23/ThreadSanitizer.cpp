@@ -1145,8 +1145,10 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
     }
 
     if (!MAIRTargets.empty()) {
-      mair::MAOpt<TsanMAIRBarrierTrait> Opt(F, FAM, nullptr,
-                                            /*KeepFullDebug=*/true);
+      mair::MAOpt<TsanMAIRBarrierTrait> Opt(
+          F, FAM, nullptr,
+          /*KeepFullDebug=*/true,
+          mair::MAIROptimizationConfig::forThreadSanitizer());
       Opt.build();
       Opt.retainAccessesForInstructions(MAIRTargets);
       if (Error Err = Opt.optimize())

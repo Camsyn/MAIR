@@ -1312,9 +1312,9 @@ bool canOptimizeAsanOperandWithMAIR(InterestingMemoryOperand &Operand) {
     return false;
 
   Instruction *I = Operand.getInsn();
-  if (I->isAtomic() || Operand.MaybeMask || Operand.MaybeEVL ||
-      Operand.MaybeStride || Operand.MaybeByteOffset ||
-      Operand.OpType->isVectorTy() || Operand.TypeStoreSize.isScalable())
+  if (Operand.MaybeMask || Operand.MaybeEVL || Operand.MaybeStride ||
+      Operand.MaybeByteOffset || Operand.OpType->isVectorTy() ||
+      Operand.TypeStoreSize.isScalable())
     return false;
   if (auto *LI = dyn_cast<LoadInst>(I))
     return !LI->isVolatile();
@@ -4295,8 +4295,10 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
       MAIRTargets.insert(Operand.getInsn());
 
   if (!MAIRTargets.empty()) {
-    mair::MAOpt<AsanMAIRBarrierTrait> Opt(F, FAM, nullptr,
-                                          /*KeepFullDebug=*/true);
+    mair::MAOpt<AsanMAIRBarrierTrait> Opt(
+        F, FAM, nullptr,
+        /*KeepFullDebug=*/true,
+        mair::MAIROptimizationConfig::forAddressSanitizer());
     Opt.build();
     Opt.retainAccessesForInstructions(MAIRTargets);
     if (Error Err = Opt.optimize())

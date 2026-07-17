@@ -23,14 +23,16 @@ struct MergeCandidate {
   Observation *From = nullptr;
 };
 
-bool hasSpecialAccess(const Observation &Obs) {
+bool hasPinnedAccess(const Observation &Obs,
+                     const MAIROptimizationConfig &Config) {
   return llvm::any_of(
-      Obs, [](const MemoryAccess &Access) { return !Access.isOptimizable(); });
+      Obs, [&](const MemoryAccess &Access) { return !Config.canMove(Access); });
 }
 
 MergeCandidate findMergeCandidate(MAIRGraph &G) {
+  const MAIROptimizationConfig &Config = G.getOptimizationConfig();
   for (Observation &O1 : G) {
-    if (hasSpecialAccess(O1))
+    if (hasPinnedAccess(O1, Config))
       continue;
     for (const ObservationEdge &Edge : O1.children()) {
       if (!Edge.isDom())
@@ -39,7 +41,7 @@ MergeCandidate findMergeCandidate(MAIRGraph &G) {
       Observation &O2 = Edge.getNode();
       if (&O1 == &O2)
         continue;
-      if (hasSpecialAccess(O2))
+      if (hasPinnedAccess(O2, Config))
         continue;
       if (!O1.hasCompatibleMergeSemantics(O2))
         continue;

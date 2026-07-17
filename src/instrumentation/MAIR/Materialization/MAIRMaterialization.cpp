@@ -93,10 +93,10 @@ bool validateGuard(const Observation &Obs, const Instruction &Target,
 
 bool validateAccess(const MemoryAccess &Access, const Instruction &Target,
                     DominatorTree &DT, std::string &Failure) {
-  if (const AbstractAccess *Region = Access.getContiguousRegion()) {
-    const Value *Base = Region->getBase();
-    const AbstractValue &Offset = Region->getOffset();
-    const AbstractValue &Size = Region->getSize();
+  auto ValidateBounds = [&](const AbstractAccess &Region) {
+    const Value *Base = Region.getBase();
+    const AbstractValue &Offset = Region.getOffset();
+    const AbstractValue &Size = Region.getSize();
     bool OffsetIsCompletePointer =
         Offset.isSymbol() && Offset.getSymbol()->getType()->isPointerTy();
     bool OffsetHasMaterializableType =
@@ -107,11 +107,25 @@ bool validateAccess(const MemoryAccess &Access, const Instruction &Target,
     if (!Base || !Base->getType()->isPointerTy() ||
         (!OffsetIsCompletePointer && !valueAvailableAt(*Base, Target, DT)) ||
         !OffsetHasMaterializableType || !SizeHasMaterializableType ||
-        !abstractValueAvailableAt(Region->getOffset(), Target, DT) ||
-        !abstractValueAvailableAt(Region->getSize(), Target, DT)) {
+        !abstractValueAvailableAt(Region.getOffset(), Target, DT) ||
+        !abstractValueAvailableAt(Region.getSize(), Target, DT)) {
       Failure = "contiguous region has an unavailable or unknown value";
       return false;
     }
+    return true;
+  };
+
+  if (const AbstractAccess *Region = Access.getContiguousRegion())
+    return ValidateBounds(*Region);
+
+  if (const MaskedRegion *Region = Access.getMaskedRegion()) {
+    if (!ValidateBounds(Region->getBounds()))
+      return false;
+    if (const Value *Mask = Region->getDynamicMask())
+      if (!valueAvailableAt(*Mask, Target, DT)) {
+        Failure = "masked region has an unavailable mask";
+        return false;
+      }
     return true;
   }
 
@@ -413,6 +427,23 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
         Materialized.Address = lowerContiguous(*Contiguous, *BuilderPtr);
         Materialized.AccessSize =
             lowerAbstractValue(Contiguous->getSize(), *BuilderPtr);
+      } else if (const auto *Masked =
+                     std::get_if<MaskedRegion>(&Access.Region)) {
+        Materialized.Address =
+            lowerContiguous(Masked->getBounds(), *BuilderPtr);
+        Materialized.AccessSize =
+            lowerAbstractValue(Masked->getBounds().getSize(), *BuilderPtr);
+        Materialized.MaskElementSize = Masked->getElementSize();
+        if (Masked->isConstantMask()) {
+          SmallVector<Constant *, 8> Elements;
+          Type *I1 = Type::getInt1Ty(BuilderPtr->getContext());
+          for (unsigned Lane = 0; Lane < Masked->getNumLanes(); ++Lane)
+            Elements.push_back(
+                ConstantInt::get(I1, Masked->getConstantMask().test(Lane)));
+          Materialized.Mask = ConstantVector::get(Elements);
+        } else {
+          Materialized.Mask = const_cast<Value *>(Masked->getDynamicMask());
+        }
       } else {
         const PeriodicRegion &Periodic =
             std::get<PeriodicRegion>(Access.Region);

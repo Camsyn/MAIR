@@ -6,6 +6,7 @@
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -95,8 +96,9 @@ bool isInterestingMop(const Instruction &I) {
 // reachability edge is legal.
 MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
                            const PostDominatorTree &PDT,
-                           MAIRBarrierAnalysisCore &BA) {
-  MAIRGraph Graph(F);
+                           MAIRBarrierAnalysisCore &BA,
+                           MAIROptimizationConfig Config) {
+  MAIRGraph Graph(F, Config);
   DenseMap<const BasicBlock *, Observation *> BBEntryObs;
   DenseMap<const BasicBlock *, Observation *> BBExitObs;
   DenseMap<const BasicBlock *, SmallVector<Observation *, 4>> OrderedObs;
@@ -216,6 +218,24 @@ static AbstractValue getAccessSize(const Value &Value) {
   return AbstractValue::constant(Size->getZExtValue());
 }
 
+static std::optional<SmallBitVector> getConstantMask(const Value &Mask) {
+  const auto *MaskType = dyn_cast<FixedVectorType>(Mask.getType());
+  const auto *MaskConstant = dyn_cast<Constant>(&Mask);
+  if (!MaskType || !MaskConstant)
+    return std::nullopt;
+
+  SmallBitVector Bits(MaskType->getNumElements());
+  for (unsigned Lane = 0; Lane < MaskType->getNumElements(); ++Lane) {
+    Constant *Element = MaskConstant->getAggregateElement(Lane);
+    const auto *Bit = dyn_cast_or_null<ConstantInt>(Element);
+    if (!Bit)
+      return std::nullopt;
+    if (!Bit->isZero())
+      Bits.set(Lane);
+  }
+  return Bits;
+}
+
 static AccessProperty getInstructionProperties(const Instruction &I) {
   AccessProperty Properties = AccessProperty::None;
   if (I.isAtomic())
@@ -233,7 +253,7 @@ static AccessProperty getInstructionProperties(const Instruction &I) {
     if (MI->isAtomic())
       Properties |= AccessProperty::Atomic;
   } else if (isMaskedMemoryIntrinsic(I)) {
-    Properties |= AccessProperty::CallLike | AccessProperty::Masked;
+    Properties |= AccessProperty::Masked;
   }
   return Properties;
 }
@@ -626,6 +646,154 @@ void AbstractAccess::print(raw_ostream &OS) const {
   }
 }
 
+MaskedRegion::MaskedRegion(AbstractAccess B, const Value &Mask,
+                           uint64_t ElementBytes, bool Comparable)
+    : Bounds(std::move(B)), DynamicMask(&Mask), ElementSize(ElementBytes),
+      IsComparable(Comparable) {}
+
+MaskedRegion::MaskedRegion(AbstractAccess B, SmallBitVector Mask,
+                           uint64_t ElementBytes)
+    : Bounds(std::move(B)), ConstantMask(std::move(Mask)),
+      ElementSize(ElementBytes), IsConstant(true) {}
+
+unsigned MaskedRegion::getNumLanes() const {
+  if (IsConstant)
+    return ConstantMask.size();
+  const auto *MaskType = dyn_cast<VectorType>(DynamicMask->getType());
+  assert(MaskType && "masked region mask must be a vector");
+  return MaskType->getElementCount().getKnownMinValue();
+}
+
+bool MaskedRegion::contains(const MaskedRegion &Other) const {
+  if (!IsComparable || !Other.IsComparable)
+    return false;
+  if (Bounds != Other.Bounds || ElementSize != Other.ElementSize ||
+      getNumLanes() != Other.getNumLanes())
+    return false;
+  if (!IsConstant || !Other.IsConstant)
+    return !IsConstant && !Other.IsConstant && DynamicMask == Other.DynamicMask;
+  for (int Lane = Other.ConstantMask.find_first(); Lane >= 0;
+       Lane = Other.ConstantMask.find_next(Lane))
+    if (!ConstantMask.test(Lane))
+      return false;
+  return true;
+}
+
+std::optional<MaskedRegion> MaskedRegion::merge(const MaskedRegion &A,
+                                                const MaskedRegion &B) {
+  if (!A.IsComparable || !B.IsComparable)
+    return std::nullopt;
+  if (A.Bounds != B.Bounds || A.ElementSize != B.ElementSize ||
+      A.getNumLanes() != B.getNumLanes())
+    return std::nullopt;
+  if (!A.IsConstant || !B.IsConstant) {
+    if (!A.IsConstant && !B.IsConstant && A.DynamicMask == B.DynamicMask)
+      return A;
+    return std::nullopt;
+  }
+  SmallBitVector Combined = A.ConstantMask;
+  Combined |= B.ConstantMask;
+  return MaskedRegion(A.Bounds, std::move(Combined), A.ElementSize);
+}
+
+bool MaskedRegion::operator==(const MaskedRegion &Other) const {
+  if (Bounds != Other.Bounds || ElementSize != Other.ElementSize ||
+      IsConstant != Other.IsConstant || IsComparable != Other.IsComparable)
+    return false;
+  return IsConstant ? ConstantMask == Other.ConstantMask
+                    : DynamicMask == Other.DynamicMask;
+}
+
+void MaskedRegion::print(raw_ostream &OS) const {
+  OS << "ptr ";
+  Bounds.print(OS);
+  OS << ", ";
+  printAbstractValue(OS, Bounds.getSize());
+  OS << ", mask ";
+  if (!IsConstant) {
+    OS << getPrintedValueName(*DynamicMask);
+    return;
+  }
+  OS << "<";
+  for (unsigned Lane = 0; Lane < ConstantMask.size(); ++Lane) {
+    if (Lane)
+      OS << ",";
+    OS << (ConstantMask.test(Lane) ? '1' : '0');
+  }
+  OS << ">";
+}
+
+MAIROptimizationConfig MAIROptimizationConfig::generic() {
+  return MAIROptimizationConfig(AccessKindSemantics::Exact,
+                                /*IgnoreAtomic=*/false,
+                                /*DomCoverageOnly=*/false,
+                                /*AllowRelocation=*/true);
+}
+
+MAIROptimizationConfig MAIROptimizationConfig::forAddressSanitizer() {
+  return MAIROptimizationConfig(AccessKindSemantics::Ignore,
+                                /*IgnoreAtomic=*/true,
+                                /*DomCoverageOnly=*/true,
+                                /*AllowRelocation=*/false);
+}
+
+MAIROptimizationConfig MAIROptimizationConfig::forThreadSanitizer() {
+  return MAIROptimizationConfig(AccessKindSemantics::WriteCoversRead,
+                                /*IgnoreAtomic=*/false,
+                                /*DomCoverageOnly=*/false,
+                                /*AllowRelocation=*/true);
+}
+
+bool MAIROptimizationConfig::canMove(const MemoryAccess &Access) const {
+  return AllowRelocation && !Access.isVolatile() && !Access.isCallLike() &&
+         !Access.isAtomic();
+}
+
+bool MAIROptimizationConfig::canMerge(const MemoryAccess &Into,
+                                      const MemoryAccess &From) const {
+  if (Into.isVolatile() || From.isVolatile() || Into.isCallLike() ||
+      From.isCallLike())
+    return false;
+  if (!IgnoreAtomic && (Into.isAtomic() || From.isAtomic()))
+    return false;
+  if (Into.isMasked() != From.isMasked())
+    return false;
+  if (Into.isMasked() && (!Into.getMaskedRegion()->isComparable() ||
+                          !From.getMaskedRegion()->isComparable()))
+    return false;
+  if (KindSemantics != AccessKindSemantics::Ignore &&
+      Into.getKind() != From.getKind())
+    return false;
+  return true;
+}
+
+bool MAIROptimizationConfig::canDelete(const MemoryAccess &Access) const {
+  if (Access.isVolatile() || Access.isCallLike())
+    return false;
+  return IgnoreAtomic || !Access.isAtomic();
+}
+
+bool MAIROptimizationConfig::allowsCoverageAlong(ObsEdgeKind Kind) const {
+  return !DomCoverageOnly || Kind == ObsEdgeKind::Dom;
+}
+
+bool MAIROptimizationConfig::kindCovers(AccessKind Available,
+                                        AccessKind Required) const {
+  if (KindSemantics == AccessKindSemantics::Ignore)
+    return true;
+  if (Available == Required)
+    return true;
+  return KindSemantics == AccessKindSemantics::WriteCoversRead &&
+         Available == AccessKind::Write && Required == AccessKind::Read;
+}
+
+AccessKind MAIROptimizationConfig::mergeKinds(AccessKind Into,
+                                              AccessKind From) const {
+  assert((KindSemantics == AccessKindSemantics::Ignore || Into == From) &&
+         "incompatible access kinds cannot be merged");
+  return mergeKind(Into, From);
+}
+
 void MemoryAccess::mergeKind(AccessKind Other) {
   Kind = ::mair::mergeKind(Kind, Other);
 }
@@ -634,14 +802,35 @@ const Value *MemoryAccess::getBase() const {
   return std::visit([](const auto &R) { return R.getBase(); }, Region);
 }
 
-bool MemoryAccess::hasSameOptimizationShape(const MemoryAccess &Other) const {
-  return isOptimizable() && Other.isOptimizable() && Kind == Other.Kind;
+bool MemoryAccess::covers(const MemoryAccess &Other,
+                          const MAIROptimizationConfig &Config) const {
+  if (getBase() != Other.getBase() || !Config.canDelete(*this) ||
+      !Config.canDelete(Other) || !Config.kindCovers(Kind, Other.Kind))
+    return false;
+  if ((isAtomic() != Other.isAtomic()) && !Config.canMerge(*this, Other))
+    return false;
+
+  if (const auto *ThisAccess = getContiguousRegion()) {
+    if (const auto *OtherAccess = Other.getContiguousRegion())
+      return ThisAccess->contains(*OtherAccess);
+    if (const auto *OtherMasked = Other.getMaskedRegion())
+      return ThisAccess->contains(OtherMasked->getBounds());
+    return false;
+  }
+  if (const auto *ThisMasked = getMaskedRegion()) {
+    const auto *OtherMasked = Other.getMaskedRegion();
+    return OtherMasked && ThisMasked->contains(*OtherMasked);
+  }
+  const auto *ThisPeriodic = getPeriodicRegion();
+  const auto *OtherPeriodic = Other.getPeriodicRegion();
+  return ThisPeriodic && OtherPeriodic && *ThisPeriodic == *OtherPeriodic;
 }
 
-bool MemoryAccess::mergeWith(const MemoryAccess &Other) {
+bool MemoryAccess::mergeWith(const MemoryAccess &Other,
+                             const MAIROptimizationConfig &Config) {
   if (getBase() != Other.getBase())
     return false;
-  if (!hasSameOptimizationShape(Other))
+  if (!Config.canMerge(*this, Other))
     return false;
 
   if (const auto *ThisAccess = getContiguousRegion()) {
@@ -663,6 +852,25 @@ bool MemoryAccess::mergeWith(const MemoryAccess &Other) {
     } else {
       Insts.append(Other.Insts);
     }
+  } else if (const auto *ThisMasked = getMaskedRegion()) {
+    const auto *OtherMasked = Other.getMaskedRegion();
+    if (!OtherMasked)
+      return false;
+    const bool ThisContainsOther = ThisMasked->contains(*OtherMasked);
+    const bool OtherContainsThis = OtherMasked->contains(*ThisMasked);
+    std::optional<MaskedRegion> Merged =
+        MaskedRegion::merge(*ThisMasked, *OtherMasked);
+    if (!Merged)
+      return false;
+    Region = std::move(*Merged);
+    if (OtherContainsThis && !ThisContainsOther) {
+      SmallVector<Instruction *, 2> OrderedInsts;
+      OrderedInsts.append(Other.Insts.begin(), Other.Insts.end());
+      OrderedInsts.append(Insts.begin(), Insts.end());
+      Insts = std::move(OrderedInsts);
+    } else {
+      Insts.append(Other.Insts);
+    }
   } else {
     const auto *ThisPeriodic = getPeriodicRegion();
     const auto *OtherPeriodic = Other.getPeriodicRegion();
@@ -671,7 +879,8 @@ bool MemoryAccess::mergeWith(const MemoryAccess &Other) {
     Insts.append(Other.Insts);
   }
 
-  mergeKind(Other.Kind);
+  Kind = Config.mergeKinds(Kind, Other.Kind);
+  Properties |= Other.Properties;
   return true;
 }
 
@@ -713,15 +922,32 @@ MemoryAccess MemoryAccess::fromInstruction(const Instruction &I,
     Kind = AccessKind::Write;
   } else if (const auto *II = dyn_cast<IntrinsicInst>(&I);
              II && isMaskedMemoryIntrinsic(I)) {
-    // The full vector width is an upper bound. Masked pins the access so no
-    // transform interprets this as an exact contiguous footprint.
     bool IsWrite = II->getIntrinsicID() == Intrinsic::masked_store;
     unsigned PtrOperand = IsWrite ? 1 : 0;
+    unsigned MaskOperand = IsWrite ? 2 : 1;
     Type *AccessType =
         IsWrite ? II->getArgOperand(0)->getType() : II->getType();
     Ptr = II->getArgOperand(PtrOperand);
     Size = getStoreSize(*AccessType, DL);
     Kind = IsWrite ? AccessKind::Write : AccessKind::Read;
+    auto *VectorAccessType = cast<VectorType>(AccessType);
+    TypeSize ElementStoreSize =
+        DL.getTypeStoreSize(VectorAccessType->getElementType());
+    if (ElementStoreSize.isScalable())
+      report_fatal_error("masked access has scalable element size");
+    AbstractAccess Bounds = AbstractAccess::fromPointerAndSize(*Ptr, Size, DL);
+    const Value &Mask = *II->getArgOperand(MaskOperand);
+    std::optional<SmallBitVector> ConstantMask = getConstantMask(Mask);
+    MaskedRegion Region =
+        ConstantMask
+            ? MaskedRegion(Bounds, std::move(*ConstantMask),
+                           ElementStoreSize.getFixedValue())
+            : MaskedRegion(Bounds, Mask, ElementStoreSize.getFixedValue(),
+                           /*Comparable=*/!isa<Constant>(Mask));
+    Instruction *Inst = const_cast<Instruction *>(&I);
+    return MemoryAccess(ArrayRef<Instruction *>(&Inst, 1),
+                        MemoryRegion(std::move(Region)), Kind,
+                        getInstructionProperties(I));
   } else if (I.mayReadFromMemory() && I.mayWriteToMemory()) {
     Kind = AccessKind::ReadWrite;
   } else if (I.mayWriteToMemory()) {
@@ -752,6 +978,11 @@ void MemoryAccess::print(raw_ostream &OS, bool LLVM) const {
     Access->print(OS);
     OS << ", ";
     printAbstractValue(OS, Access->getSize());
+    return;
+  }
+  if (const MaskedRegion *Masked = getMaskedRegion()) {
+    OS << " ";
+    Masked->print(OS);
     return;
   }
   OS << " ";
@@ -896,23 +1127,26 @@ void Observation::print(raw_ostream &OS, bool LLVM) const {
   OS << "\n";
 }
 
-MAIRGraph::MAIRGraph()
-    : ScalarExprOwner(std::make_unique<MAIRScalarExprOwner>()) {}
+MAIRGraph::MAIRGraph(MAIROptimizationConfig Config)
+    : OptimizationConfig(Config),
+      ScalarExprOwner(std::make_unique<MAIRScalarExprOwner>()) {}
 
 void MAIRGraph::assertLive(StringRef Operation) const {
   if (!isLive())
     report_fatal_error(Twine("cannot ") + Operation + " a non-live MAIRGraph");
 }
 
-MAIRGraph::MAIRGraph(const Function &Func)
-    : F(&Func), ScalarExprOwner(std::make_unique<MAIRScalarExprOwner>()) {}
+MAIRGraph::MAIRGraph(const Function &Func, MAIROptimizationConfig Config)
+    : F(&Func), OptimizationConfig(Config),
+      ScalarExprOwner(std::make_unique<MAIRScalarExprOwner>()) {}
 
-MAIRGraph::MAIRGraph(Function &Func)
-    : F(&Func), MutableF(&Func),
+MAIRGraph::MAIRGraph(Function &Func, MAIROptimizationConfig Config)
+    : F(&Func), MutableF(&Func), OptimizationConfig(Config),
       ScalarExprOwner(std::make_unique<MAIRScalarExprOwner>()) {}
 
 MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
     : F(Other.F), MutableF(Other.MutableF), GraphState(Other.GraphState),
+      OptimizationConfig(Other.OptimizationConfig),
       GraphAllocator(std::move(Other.GraphAllocator)),
       MemoryObjectAllocator(std::move(Other.MemoryObjectAllocator)),
       ScalarExprOwner(std::move(Other.ScalarExprOwner)),
@@ -937,6 +1171,7 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   F = Other.F;
   MutableF = Other.MutableF;
   GraphState = Other.GraphState;
+  OptimizationConfig = Other.OptimizationConfig;
   GraphAllocator = std::move(Other.GraphAllocator);
   MemoryObjectAllocator = std::move(Other.MemoryObjectAllocator);
   ScalarExprOwner = std::move(Other.ScalarExprOwner);

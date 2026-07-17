@@ -31,8 +31,9 @@ public:
                      llvm::SmallVector<const MemoryAccess *, 4>>;
 
   MAOpt(llvm::Function &F, llvm::FunctionAnalysisManager &FAM,
-        llvm::PassInstrumentationCallbacks *PIC, bool KeepFullDebug)
-      : F(F), FAM(FAM), KeepFullDebug(KeepFullDebug) {
+        llvm::PassInstrumentationCallbacks *PIC, bool KeepFullDebug,
+        MAIROptimizationConfig Config = MAIROptimizationConfig::generic())
+      : F(F), FAM(FAM), KeepFullDebug(KeepFullDebug), Config(Config) {
     registerMAIRGraphAnalyses(GAM, PIC, &FAM);
   }
 
@@ -42,7 +43,7 @@ public:
   MAIRGraph &build() {
     assert(!Graph && "MAOpt graph has already been built");
     Graph = std::make_unique<MAIRGraph>(
-        MAIRGraph::template build<BarrierTrait>(F, FAM));
+        MAIRGraph::template build<BarrierTrait>(F, FAM, Config));
     rebuildObservationAccesses();
     return *Graph;
   }
@@ -143,6 +144,7 @@ private:
   llvm::Function &F;
   llvm::FunctionAnalysisManager &FAM;
   bool KeepFullDebug;
+  MAIROptimizationConfig Config;
   bool Optimized = false;
   std::unique_ptr<MAIRGraph> Graph;
   MAIRGraphAnalysisManager GAM;

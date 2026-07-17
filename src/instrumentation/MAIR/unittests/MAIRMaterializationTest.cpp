@@ -47,6 +47,7 @@ public:
   unsigned PreparedUnits = 0;
   unsigned EmittedObservations = 0;
   unsigned EmittedAccesses = 0;
+  unsigned EmittedMaskedAccesses = 0;
   bool SawCompletePlan = true;
   SmallVector<AccessProperty, 4> PlannedProperties;
   SmallVector<AccessProperty, 4> EmittedProperties;
@@ -82,6 +83,11 @@ public:
         Builder.CreateFreeze(Access.Stride, "mair.test.stride");
       if (Access.TripCount)
         Builder.CreateFreeze(Access.TripCount, "mair.test.trips");
+      if (Access.Mask) {
+        ++EmittedMaskedAccesses;
+        SawCompletePlan &= Access.MaskElementSize != 0;
+        Builder.CreateFreeze(Access.Mask, "mair.test.mask");
+      }
     }
   }
 };
@@ -115,6 +121,43 @@ entry:
   ASSERT_EQ(Backend.EmittedProperties.size(), 1u);
   EXPECT_EQ(Backend.PlannedProperties.front(), AccessProperty::Volatile);
   EXPECT_EQ(Backend.EmittedProperties.front(), AccessProperty::Volatile);
+}
+
+TEST(MAIRMaterialization, LowersMaskedAccessSemantics) {
+  LLVMContext Ctx;
+  auto M = parseMaterializationModule(R"IR(
+declare <4 x i32> @llvm.masked.load.v4i32.p0(ptr, <4 x i1>, <4 x i32>)
+declare void @llvm.masked.store.v4i32.p0(<4 x i32>, ptr, <4 x i1>)
+define void @f(ptr %p, <4 x i1> %mask, <4 x i32> %value) {
+entry:
+  %loaded = call <4 x i32> @llvm.masked.load.v4i32.p0(
+      ptr %p, <4 x i1> <i1 true, i1 false, i1 true, i1 false>,
+      <4 x i32> zeroinitializer)
+  call void @llvm.masked.store.v4i32.p0(
+      <4 x i32> %value, ptr %p, <4 x i1> %mask)
+  ret void
+}
+)IR",
+                                      Ctx);
+  ASSERT_TRUE(M);
+  Function &F = *M->getFunction("f");
+  MAIRGraph Graph = MAIRGraph::build(F, DominatorTree(F), PostDominatorTree(F));
+  ASSERT_TRUE(Graph.verify());
+
+  PassInstrumentationCallbacks PIC;
+  FunctionAnalysisManager FAM;
+  registerMaterializationAnalyses(FAM, PIC);
+  RecordingBackend Backend;
+  auto Result = Graph.instantiate(FAM, Backend);
+  if (!Result) {
+    ADD_FAILURE() << toString(Result.takeError());
+    return;
+  }
+
+  EXPECT_EQ(Backend.EmittedMaskedAccesses, 2u);
+  EXPECT_TRUE(Backend.SawCompletePlan);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+  EXPECT_NE(printModule(*M).find("mair.test.mask"), std::string::npos);
 }
 
 TEST(MAIRMaterialization, BackendRejectionLeavesModuleAndGraphLive) {

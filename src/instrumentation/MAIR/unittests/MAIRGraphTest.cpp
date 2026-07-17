@@ -5,6 +5,7 @@
 #include "MAIR/MAIRDump.h"
 #include "MAIR/MAOpt.h"
 #include "MAIR/Transforms/CommonMAMotionPass.h"
+#include "MAIR/Transforms/LocationMergePass.h"
 #include "MAIR/Transforms/LoopInvariantObservationMotionPass.h"
 #include "MAIR/Transforms/LoopPeriodicObservationCombinePass.h"
 #include "MAIR/Transforms/RedundantObservationEliminationPass.h"
@@ -909,8 +910,8 @@ declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
 declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
 declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1 immarg)
 declare void @llvm.memcpy.element.unordered.atomic.p0.p0.i64(ptr, ptr, i64, i32 immarg)
-declare <4 x i32> @llvm.masked.load.v4i32.p0(ptr, i32 immarg, <4 x i1>, <4 x i32>)
-declare void @llvm.masked.store.v4i32.p0(<4 x i32>, ptr, i32 immarg, <4 x i1>)
+declare <4 x i32> @llvm.masked.load.v4i32.p0(ptr, <4 x i1>, <4 x i32>)
+declare void @llvm.masked.store.v4i32.p0(<4 x i32>, ptr, <4 x i1>)
 
 define void @f(ptr %p, ptr %q, i64 %size, <4 x i1> %mask,
                <4 x i32> %values) {
@@ -925,9 +926,9 @@ entry:
   call void @llvm.memcpy.element.unordered.atomic.p0.p0.i64(
       ptr %p, ptr %q, i64 %size, i32 4)
   %masked_load = call <4 x i32> @llvm.masked.load.v4i32.p0(
-      ptr %p, i32 4, <4 x i1> %mask, <4 x i32> zeroinitializer)
+      ptr %p, <4 x i1> %mask, <4 x i32> zeroinitializer)
   call void @llvm.masked.store.v4i32.p0(
-      <4 x i32> %values, ptr %q, i32 4, <4 x i1> %mask)
+      <4 x i32> %values, ptr %q, <4 x i1> %mask)
   ret void
 }
 )IR",
@@ -964,7 +965,7 @@ entry:
   EXPECT_EQ(NumAccesses, 13u);
   EXPECT_EQ(NumAtomic, 5u);
   EXPECT_EQ(NumVolatile, 3u);
-  EXPECT_EQ(NumCallLike, 9u);
+  EXPECT_EQ(NumCallLike, 7u);
   EXPECT_EQ(NumMasked, 2u);
 
   ASSERT_NE(Memcpy, nullptr);
@@ -1872,7 +1873,8 @@ entry:
   Graph.addEdge(Read, Write, ObsEdgeKind::Dom);
 
   MemoryAccess Copy = MemoryAccess::fromInstruction(Load, M->getDataLayout());
-  EXPECT_FALSE(Copy.mergeWith(*Write.begin()));
+  EXPECT_FALSE(
+      Copy.mergeWith(*Write.begin(), MAIROptimizationConfig::generic()));
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
@@ -1911,7 +1913,8 @@ entry:
 
   MemoryAccess Copy =
       MemoryAccess::fromInstruction(PlainLoad, M->getDataLayout());
-  EXPECT_FALSE(Copy.mergeWith(*Atomic.begin()));
+  EXPECT_FALSE(
+      Copy.mergeWith(*Atomic.begin(), MAIROptimizationConfig::generic()));
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
@@ -2813,7 +2816,7 @@ entry:
       {BInst}, MemoryRegion(PeriodicRegion(&P, StartB, StrideB, SizeB, TripsB)),
       AccessKind::Write);
 
-  EXPECT_FALSE(A.mergeWith(B));
+  EXPECT_FALSE(A.mergeWith(B, MAIROptimizationConfig::generic()));
   EXPECT_EQ(A.getKind(), AccessKind::Read);
   EXPECT_EQ(A.getInstructions().size(), 1u);
 }
@@ -2848,7 +2851,8 @@ entry:
                                   AbstractValue::constant(4))),
       AccessKind::Read);
 
-  EXPECT_TRUE(WideAccess.mergeWith(NarrowAccess));
+  EXPECT_TRUE(
+      WideAccess.mergeWith(NarrowAccess, MAIROptimizationConfig::generic()));
   EXPECT_EQ(WideAccess.getInstructions().size(), 2u);
   EXPECT_EQ(WideAccess.getInstructions().front(), Wide);
   EXPECT_EQ(WideAccess.getInstructions().back(), Narrow);
@@ -2863,7 +2867,7 @@ entry:
       MemoryRegion(AbstractAccess(&P, AbstractValue::constant(0),
                                   AbstractValue::constant(8))),
       AccessKind::Read);
-  EXPECT_TRUE(Reversed.mergeWith(Covering));
+  EXPECT_TRUE(Reversed.mergeWith(Covering, MAIROptimizationConfig::generic()));
   EXPECT_EQ(Reversed.getInstructions().size(), 2u);
   EXPECT_EQ(Reversed.getInstructions().front(), Wide);
   EXPECT_EQ(Reversed.getInstructions().back(), Narrow);
@@ -2900,6 +2904,335 @@ exit:
   dumpLLVM(Graph, LLVMOS);
   LLVMOS.flush();
   EXPECT_NE(LLVMText.find("site=edge(%entry -> %exit)"), std::string::npos);
+}
+
+TEST(MAIROptimizationConfig, AddressSanitizerIgnoresKindAndAtomic) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %read = load atomic i32, ptr %p monotonic, align 4
+  store i32 %read, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::BasicBlock &BB = M->getFunction("f")->getEntryBlock();
+  llvm::Instruction &Read = BB.front();
+  llvm::Instruction &Write = *std::next(BB.begin());
+  MemoryAccess ReadAccess =
+      MemoryAccess::fromInstruction(Read, M->getDataLayout());
+  MemoryAccess WriteAccess =
+      MemoryAccess::fromInstruction(Write, M->getDataLayout());
+  const MAIROptimizationConfig Config =
+      MAIROptimizationConfig::forAddressSanitizer();
+
+  EXPECT_TRUE(ReadAccess.covers(WriteAccess, Config));
+  EXPECT_TRUE(WriteAccess.covers(ReadAccess, Config));
+  EXPECT_FALSE(Config.canMove(ReadAccess));
+  EXPECT_FALSE(Config.canMove(WriteAccess));
+  EXPECT_TRUE(Config.canDelete(ReadAccess));
+  EXPECT_TRUE(ReadAccess.mergeWith(WriteAccess, Config));
+  EXPECT_TRUE(ReadAccess.isReadWrite());
+}
+
+TEST(MAIROptimizationConfig, ThreadSanitizerWriteOnlyCoversRead) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %read = load i32, ptr %p, align 4
+  store i32 %read, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::BasicBlock &BB = M->getFunction("f")->getEntryBlock();
+  llvm::Instruction &Read = BB.front();
+  llvm::Instruction &Write = *std::next(BB.begin());
+  MemoryAccess ReadAccess =
+      MemoryAccess::fromInstruction(Read, M->getDataLayout());
+  MemoryAccess WriteAccess =
+      MemoryAccess::fromInstruction(Write, M->getDataLayout());
+  const MAIROptimizationConfig Config =
+      MAIROptimizationConfig::forThreadSanitizer();
+
+  EXPECT_TRUE(WriteAccess.covers(ReadAccess, Config));
+  EXPECT_FALSE(ReadAccess.covers(WriteAccess, Config));
+  EXPECT_FALSE(ReadAccess.mergeWith(WriteAccess, Config));
+}
+
+TEST(MAIROptimizationConfig, ThreadSanitizerPinsAtomicAccesses) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %first = load atomic i32, ptr %p monotonic, align 4
+  %second = load atomic i32, ptr %p monotonic, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  llvm::Instruction &First = BB.front();
+  llvm::Instruction &Second = *std::next(BB.begin());
+  const MAIROptimizationConfig Config =
+      MAIROptimizationConfig::forThreadSanitizer();
+  MAIRGraph Graph(F, Config);
+  Observation &Available = Graph.createInstObservation(BB, First);
+  Observation &Required = Graph.createInstObservation(BB, Second);
+  Graph.addEdge(Available, Required, ObsEdgeKind::Dom);
+
+  EXPECT_FALSE(Available.begin()->mergeWith(*Required.begin(), Config));
+  EXPECT_FALSE(Available.begin()->covers(*Required.begin(), Config));
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  RedundantObservationEliminationPass Pass;
+  EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
+  EXPECT_EQ(Required.size(), 1u);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIROptimizationConfig, RedundantEliminationUsesSanitizerCoverage) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @write_then_read(ptr %p) {
+entry:
+  store i32 0, ptr %p, align 4
+  %read = load i32, ptr %p, align 4
+  ret void
+}
+define void @read_then_write(ptr %p) {
+entry:
+  %read = load i32, ptr %p, align 4
+  store i32 %read, ptr %p, align 4
+  ret void
+}
+define void @asan_atomic(ptr %p) {
+entry:
+  %first = load atomic i32, ptr %p monotonic, align 4
+  %second = load atomic i32, ptr %p monotonic, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  auto Run = [&](llvm::StringRef Name, const MAIROptimizationConfig &Config) {
+    llvm::Function &F = *M->getFunction(Name);
+    llvm::BasicBlock &BB = F.getEntryBlock();
+    llvm::Instruction &First = BB.front();
+    llvm::Instruction &Second = *std::next(BB.begin());
+    MAIRGraph Graph(F, Config);
+    Observation &Available = Graph.createInstObservation(BB, First);
+    Observation &Required = Graph.createInstObservation(BB, Second);
+    Graph.addEdge(Available, Required, ObsEdgeKind::Dom);
+
+    llvm::PassInstrumentationCallbacks PIC;
+    MAIRGraphAnalysisManager AM;
+    registerMAIRGraphAnalyses(AM, &PIC);
+    RedundantObservationEliminationPass Pass;
+    Pass.run(Graph, AM);
+    EXPECT_TRUE(Graph.verify());
+    return Required.empty();
+  };
+
+  const MAIROptimizationConfig TSan =
+      MAIROptimizationConfig::forThreadSanitizer();
+  EXPECT_TRUE(Run("write_then_read", TSan));
+  EXPECT_FALSE(Run("read_then_write", TSan));
+  EXPECT_TRUE(
+      Run("asan_atomic", MAIROptimizationConfig::forAddressSanitizer()));
+}
+
+TEST(MAIROptimizationConfig, AddressSanitizerRejectsPostDomCoverage) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %first = load atomic i32, ptr %p monotonic, align 4
+  %second = load atomic i32, ptr %p monotonic, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  llvm::Instruction &First = BB.front();
+  llvm::Instruction &Second = *std::next(BB.begin());
+  MAIRGraph Graph(F, MAIROptimizationConfig::forAddressSanitizer());
+  Observation &Earlier = Graph.createInstObservation(BB, First);
+  Observation &Later = Graph.createInstObservation(BB, Second);
+  Graph.addEdge(Later, Earlier, ObsEdgeKind::PostDom);
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  RedundantObservationEliminationPass Pass;
+  EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
+  EXPECT_EQ(Earlier.size(), 1u);
+  EXPECT_EQ(Later.size(), 1u);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIROptimizationConfig, CallAccessesStayIndependent) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+define void @f(ptr %p) {
+entry:
+  call void @llvm.memset.p0.i64(ptr %p, i8 0, i64 4, i1 false)
+  call void @llvm.memset.p0.i64(ptr %p, i8 1, i64 4, i1 false)
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::BasicBlock &BB = M->getFunction("f")->getEntryBlock();
+  MemoryAccess First =
+      MemoryAccess::fromInstruction(BB.front(), M->getDataLayout());
+  MemoryAccess Second =
+      MemoryAccess::fromInstruction(*std::next(BB.begin()), M->getDataLayout());
+  EXPECT_TRUE(First.isCallLike());
+  EXPECT_TRUE(Second.isCallLike());
+  EXPECT_FALSE(
+      First.mergeWith(Second, MAIROptimizationConfig::forAddressSanitizer()));
+  EXPECT_FALSE(
+      First.mergeWith(Second, MAIROptimizationConfig::forThreadSanitizer()));
+}
+
+TEST(MAIROptimizationConfig, ConstantMaskedRegionsUseActiveLanes) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare <4 x i32> @llvm.masked.load.v4i32.p0(ptr, <4 x i1>, <4 x i32>)
+define void @f(ptr %p) {
+entry:
+  %wide = call <4 x i32> @llvm.masked.load.v4i32.p0(
+      ptr %p, <4 x i1> <i1 true, i1 false, i1 true, i1 false>,
+      <4 x i32> zeroinitializer)
+  %narrow = call <4 x i32> @llvm.masked.load.v4i32.p0(
+      ptr %p, <4 x i1> <i1 true, i1 false, i1 false, i1 false>,
+      <4 x i32> zeroinitializer)
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::BasicBlock &BB = M->getFunction("f")->getEntryBlock();
+  MemoryAccess Wide =
+      MemoryAccess::fromInstruction(BB.front(), M->getDataLayout());
+  MemoryAccess Narrow =
+      MemoryAccess::fromInstruction(*std::next(BB.begin()), M->getDataLayout());
+  const MAIROptimizationConfig Config =
+      MAIROptimizationConfig::forAddressSanitizer();
+
+  EXPECT_TRUE(Wide.isMasked());
+  EXPECT_FALSE(Wide.isCallLike());
+  ASSERT_NE(Wide.getMaskedRegion(), nullptr);
+  EXPECT_TRUE(Wide.covers(Narrow, Config));
+  EXPECT_FALSE(Narrow.covers(Wide, Config))
+      << "narrow=" << Narrow.toString() << " wide=" << Wide.toString();
+  EXPECT_TRUE(Narrow.mergeWith(Wide, Config));
+  EXPECT_TRUE(Narrow.covers(Wide, Config));
+}
+
+TEST(MAIROptimizationConfig, DynamicMasksRequireTheSameSSAValue) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare <4 x i32> @llvm.masked.load.v4i32.p0(ptr, <4 x i1>, <4 x i32>)
+define void @f(ptr %p, <4 x i1> %a, <4 x i1> %b) {
+entry:
+  %first = call <4 x i32> @llvm.masked.load.v4i32.p0(
+      ptr %p, <4 x i1> %a, <4 x i32> zeroinitializer)
+  %same = call <4 x i32> @llvm.masked.load.v4i32.p0(
+      ptr %p, <4 x i1> %a, <4 x i32> zeroinitializer)
+  %different = call <4 x i32> @llvm.masked.load.v4i32.p0(
+      ptr %p, <4 x i1> %b, <4 x i32> zeroinitializer)
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::BasicBlock &BB = M->getFunction("f")->getEntryBlock();
+  auto It = BB.begin();
+  MemoryAccess First = MemoryAccess::fromInstruction(*It++, M->getDataLayout());
+  MemoryAccess Same = MemoryAccess::fromInstruction(*It++, M->getDataLayout());
+  MemoryAccess Different =
+      MemoryAccess::fromInstruction(*It, M->getDataLayout());
+  const MAIROptimizationConfig Config =
+      MAIROptimizationConfig::forAddressSanitizer();
+
+  EXPECT_TRUE(First.covers(Same, Config));
+  EXPECT_FALSE(First.covers(Different, Config))
+      << "first=" << First.toString() << " different=" << Different.toString();
+  EXPECT_TRUE(First.mergeWith(Same, Config));
+  EXPECT_FALSE(First.mergeWith(Different, Config))
+      << "first=" << First.toString() << " different=" << Different.toString();
+}
+
+TEST(MAIROptimizationConfig, LocationMergeUnionsComparableMasksOnly) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare <4 x i32> @llvm.masked.load.v4i32.p0(ptr, <4 x i1>, <4 x i32>)
+define void @f(ptr %p) {
+entry:
+  %low = call <4 x i32> @llvm.masked.load.v4i32.p0(
+      ptr %p, <4 x i1> <i1 true, i1 false, i1 false, i1 false>,
+      <4 x i32> zeroinitializer)
+  %high = call <4 x i32> @llvm.masked.load.v4i32.p0(
+      ptr %p, <4 x i1> <i1 false, i1 false, i1 true, i1 false>,
+      <4 x i32> zeroinitializer)
+  %opaque = call <4 x i32> @llvm.masked.load.v4i32.p0(
+      ptr %p, <4 x i1> <i1 poison, i1 false, i1 false, i1 false>,
+      <4 x i32> zeroinitializer)
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  auto It = BB.begin();
+  llvm::Instruction &Low = *It++;
+  llvm::Instruction &High = *It++;
+  llvm::Instruction &Opaque = *It;
+  const MAIROptimizationConfig Config =
+      MAIROptimizationConfig::forAddressSanitizer();
+  MAIRGraph Graph(F, Config);
+  Observation &Obs = Graph.createInstObservation(BB, Low);
+  Obs.addAccess(MemoryAccess::fromInstruction(High, M->getDataLayout()));
+  Obs.addAccess(MemoryAccess::fromInstruction(Opaque, M->getDataLayout()));
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  LocationMergePass Pass;
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+  ASSERT_EQ(Obs.size(), 2u);
+  const MaskedRegion *Merged = Obs.begin()->getMaskedRegion();
+  ASSERT_NE(Merged, nullptr);
+  ASSERT_TRUE(Merged->isConstantMask());
+  EXPECT_TRUE(Merged->getConstantMask().test(0));
+  EXPECT_TRUE(Merged->getConstantMask().test(2));
+  const MaskedRegion *Unmerged = std::next(Obs.begin())->getMaskedRegion();
+  ASSERT_NE(Unmerged, nullptr);
+  EXPECT_FALSE(Unmerged->isComparable());
+  EXPECT_TRUE(Graph.verify());
 }
 
 TEST(MAIRGraphPass, SimplifyGraphPreservesGuardAndEdgeSiteBoundaries) {

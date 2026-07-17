@@ -8,31 +8,10 @@ namespace mair {
 
 AnalysisKey RedundantObservationAnalysis::Key;
 
-namespace {
-
-bool kindCovers(AccessKind Available, AccessKind Required) {
-  return (static_cast<unsigned>(Available) & static_cast<unsigned>(Required)) ==
-         static_cast<unsigned>(Required);
-}
-
-std::optional<AvailableAccess> extract(const MemoryAccess &Access) {
-  const AbstractAccess *Region = Access.getContiguousRegion();
-  if (!Region)
-    return std::nullopt;
-  return AvailableAccess{&Access, Access.getParent(), &Access.getMemoryObject(),
-                         *Region, Access.getKind()};
-}
-
-} // namespace
-
-bool AvailableAccess::covers(const MemoryAccess &Other) const {
-  const AbstractAccess *OtherRegion = Other.getContiguousRegion();
-  if (!OtherRegion)
-    return false;
+bool AvailableAccess::covers(const MemoryAccess &Other,
+                             const MAIROptimizationConfig &Config) const {
   return SourceObservation != Other.getParent() &&
-         Source->hasSameOptimizationShape(Other) &&
-         Object == &Other.getMemoryObject() && Access.contains(*OtherRegion) &&
-         kindCovers(Kind, Other.getKind());
+         Source->covers(Other, Config);
 }
 
 bool AvailableAccess::operator==(const AvailableAccess &Other) const {
@@ -55,17 +34,19 @@ bool AvailableAccessSet::unionWith(const AvailableAccessSet &Other) {
   return Changed;
 }
 
-bool AvailableAccessSet::covers(const MemoryAccess &Access) const {
+bool AvailableAccessSet::covers(const MemoryAccess &Access,
+                                const MAIROptimizationConfig &Config) const {
   DenseSet<const MemoryAccess *> ExcludedSources;
-  return covers(Access, ExcludedSources);
+  return covers(Access, ExcludedSources, Config);
 }
 
 bool AvailableAccessSet::covers(
     const MemoryAccess &Access,
-    const DenseSet<const MemoryAccess *> &ExcludedSources) const {
+    const DenseSet<const MemoryAccess *> &ExcludedSources,
+    const MAIROptimizationConfig &Config) const {
   return llvm::any_of(Accesses, [&](const AvailableAccess &Available) {
     return !ExcludedSources.contains(Available.Source) &&
-           Available.covers(Access);
+           Available.covers(Access, Config);
   });
 }
 
@@ -103,13 +84,13 @@ RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
     Changed = false;
     for (const Observation &Obs : G) {
       AvailableAccessSet In;
-      for (const Observation *Pred : G.predecessors(Obs))
-        In.unionWith(Result.OutSets.find(Pred)->second);
+      for (const ObservationEdge &Edge : G.parentEdges(Obs))
+        if (G.getOptimizationConfig().allowsCoverageAlong(Edge.getKind()))
+          In.unionWith(Result.OutSets.find(&Edge.getNode())->second);
 
       AvailableAccessSet Out = In;
       for (const MemoryAccess &Access : Obs)
-        if (std::optional<AvailableAccess> Available = extract(Access))
-          Out.insert(*Available);
+        Out.insert(AvailableAccess{&Access, Access.getParent()});
 
       AvailableAccessSet &OldIn = Result.InSets.find(&Obs)->second;
       AvailableAccessSet &OldOut = Result.OutSets.find(&Obs)->second;

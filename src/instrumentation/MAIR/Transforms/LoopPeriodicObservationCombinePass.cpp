@@ -244,19 +244,19 @@ void eraseAccess(MemoryAccess &Access) {
 }
 
 void addOrMergeAccess(Observation &Target, const MemoryAccess &Access,
-                      const MemoryRegion &Region,
-                      bool MergeEquivalentAccesses) {
+                      const MemoryRegion &Region, bool MergeEquivalentAccesses,
+                      const MAIROptimizationConfig &Config) {
   MemoryAccess NewAccess(Access.getInstructions(), Region, Access.getKind(),
                          Access.getProperties());
   if (MergeEquivalentAccesses) {
     for (MemoryAccess &Existing : Target) {
       if (&Existing.getMemoryObject() != &Access.getMemoryObject())
         continue;
-      if (Existing.getKind() != Access.getKind())
+      if (!Config.canMerge(Existing, NewAccess))
         continue;
       if (Existing.getRegion() != Region)
         continue;
-      bool Merged = Existing.mergeWith(NewAccess);
+      bool Merged = Existing.mergeWith(NewAccess, Config);
       if (Merged)
         return;
     }
@@ -336,8 +336,9 @@ bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
                              bool MergeEquivalentAccesses) {
   const AbstractAccess *Location = Access.getContiguousRegion();
   std::optional<uint64_t> AccessSize = getConstantAccessSize(Access);
-  if (!Access.isOptimizable() || !Location || !Location->getBase() ||
-      !AccessSize || *AccessSize == 0 || Access.getInstructions().empty())
+  if (!G.getOptimizationConfig().canMove(Access) || !Location ||
+      !Location->getBase() || !AccessSize || *AccessSize == 0 ||
+      Access.getInstructions().empty())
     return false;
 
   // First bind the access to the loop described by its pointer recurrence,
@@ -408,7 +409,8 @@ bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
   Observation *TargetEvent = Target->Event;
   if (!TargetEvent)
     TargetEvent = &G.createObservation(Target->Site);
-  addOrMergeAccess(*TargetEvent, Access, Aggregate, MergeEquivalentAccesses);
+  addOrMergeAccess(*TargetEvent, Access, Aggregate, MergeEquivalentAccesses,
+                   G.getOptimizationConfig());
   eraseAccess(Access);
   ++NumAggregatedAccesses;
   if (IsRangeAggregate)

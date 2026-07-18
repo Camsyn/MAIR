@@ -63,6 +63,7 @@ MAIRGraph pass names for -passes:
   locationmerge                 - Location Merge
   roe                           - Redundant Observation Elimination
   simplifygraph                 - Simplify Graph
+  print<stat>                   - Print MAIR Statistics
 )");
 
 int main(int argc, char **argv) {

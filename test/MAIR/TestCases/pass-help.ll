@@ -19,6 +19,7 @@
 ; HELP: locationmerge{{[[:space:]]+}}- Location Merge
 ; HELP: roe{{[[:space:]]+}}- Redundant Observation Elimination
 ; HELP: simplifygraph{{[[:space:]]+}}- Simplify Graph
+; HELP: print<stat>{{[[:space:]]+}}- Print MAIR Statistics
 ; HELP-NOT: commonmamotion
 ; HELP-NOT: loop-invariant-observation-motion
 ; HELP-NOT: loop-periodic-observation-combine

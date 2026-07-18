@@ -20,7 +20,8 @@ MAIR_GRAPH_PASS("loop-invariant-observation-motion",
                 LoopInvariantObservationMotionPass())
 MAIR_GRAPH_PASS("loop-periodic-observation-combine",
                 LoopPeriodicObservationCombinePass())
-MAIR_GRAPH_PASS("redundantobservationelimination", RedundantObservationEliminationPass())
+// RedundantObservationEliminationPass -> roe
+MAIR_GRAPH_PASS("roe", RedundantObservationEliminationPass())
 MAIR_GRAPH_PASS("simplifygraph", SimplifyGraphPass())
 MAIR_GRAPH_PASS("print<stat>", MAIRStatPrinterPass(errs()))
 

@@ -1,5 +1,5 @@
-; RUN: mair-opt -passes=redundantobservationelimination %s | FileCheck %s
-; RUN: mair-opt -passes=redundantobservationelimination --disable-output %s
+; RUN: mair-opt -passes=roe %s | FileCheck %s
+; RUN: mair-opt -passes=roe --disable-output %s
 
 define void @remove_covered_accesses(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @remove_covered_accesses {

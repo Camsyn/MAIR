@@ -8,7 +8,7 @@
 ; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=INVARIANT < %t.stats
 ; RUN: mair-opt -stats --disable-output -passes=loop-periodic-observation-combine %S/loop-range-aggregation.ll 2>%t.stats
 ; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=PERIODIC < %t.stats
-; RUN: mair-opt -stats --disable-output -passes=redundantobservationelimination %S/redundant-observation-elimination.ll 2>%t.stats
+; RUN: mair-opt -stats --disable-output -passes=roe %S/redundant-observation-elimination.ll 2>%t.stats
 ; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=REDUNDANT < %t.stats
 ; RUN: mair-opt -stats --disable-output -O1 %S/pass-stat.ll 2>%t.stats
 ; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=O1 < %t.stats

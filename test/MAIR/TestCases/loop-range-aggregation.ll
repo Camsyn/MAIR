@@ -1,7 +1,7 @@
-; RUN: mair-opt -passes=loop-periodic-observation-combine %s | FileCheck %s
-; RUN: mair-opt -passes=loop-periodic-observation-combine --disable-output %s
-; RUN: mair-opt -passes=loop-periodic-observation-combine %s > %t.once
-; RUN: mair-opt -passes=loop-periodic-observation-combine,loop-periodic-observation-combine %s > %t.twice
+; RUN: mair-opt -passes=lpoc %s | FileCheck %s
+; RUN: mair-opt -passes=lpoc --disable-output %s
+; RUN: mair-opt -passes=lpoc %s > %t.once
+; RUN: mair-opt -passes=lpoc,lpoc %s > %t.twice
 ; RUN: diff -u %t.once %t.twice
 
 define void @aggregate_fixed_range(ptr %p) {

@@ -1,5 +1,5 @@
-; RUN: mair-opt -passes=simplifygraph,commonmamotion %s | FileCheck %s
-; RUN: mair-opt -passes=simplifygraph,commonmamotion --disable-output %s
+; RUN: mair-opt -passes=simplifygraph,cmm %s | FileCheck %s
+; RUN: mair-opt -passes=simplifygraph,cmm --disable-output %s
 ; RUN: mair-opt -passes=simplifygraph %s | FileCheck %s --check-prefix=SIMPLIFY
 
 define void @hoist_diamond(ptr %p, ptr %q, i1 %cond) {

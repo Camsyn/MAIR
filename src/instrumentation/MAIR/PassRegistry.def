@@ -14,12 +14,13 @@
 
 MAIR_GRAPH_ANALYSIS("stat", MAIRStatAnalysis())
 MAIR_GRAPH_ANALYSIS("redundant-observation", RedundantObservationAnalysis())
-MAIR_GRAPH_PASS("commonmamotion", CommonMAMotionPass())
+// CommonMAMotionPass -> cmm
+MAIR_GRAPH_PASS("cmm", CommonMAMotionPass())
 MAIR_GRAPH_PASS("locationmerge", LocationMergePass())
-MAIR_GRAPH_PASS("loop-invariant-observation-motion",
-                LoopInvariantObservationMotionPass())
-MAIR_GRAPH_PASS("loop-periodic-observation-combine",
-                LoopPeriodicObservationCombinePass())
+// LoopInvariantObservationMotionPass -> liom
+MAIR_GRAPH_PASS("liom", LoopInvariantObservationMotionPass())
+// LoopPeriodicObservationCombinePass -> lpoc
+MAIR_GRAPH_PASS("lpoc", LoopPeriodicObservationCombinePass())
 // RedundantObservationEliminationPass -> roe
 MAIR_GRAPH_PASS("roe", RedundantObservationEliminationPass())
 MAIR_GRAPH_PASS("simplifygraph", SimplifyGraphPass())

@@ -1,7 +1,7 @@
-; RUN: mair-opt -passes=loop-invariant-observation-motion %s | FileCheck %s
-; RUN: mair-opt -passes=loop-invariant-observation-motion --disable-output %s
-; RUN: mair-opt -passes=loop-invariant-observation-motion %s > %t.once
-; RUN: mair-opt -passes=loop-invariant-observation-motion,loop-invariant-observation-motion %s > %t.twice
+; RUN: mair-opt -passes=liom %s | FileCheck %s
+; RUN: mair-opt -passes=liom --disable-output %s
+; RUN: mair-opt -passes=liom %s > %t.once
+; RUN: mair-opt -passes=liom,liom %s > %t.twice
 ; RUN: diff -u %t.once %t.twice
 
 define void @hoist_header_invariant(ptr %p, i32 %n) {

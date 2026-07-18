@@ -53,6 +53,15 @@ static cl::opt<bool>
 static cl::opt<std::string> PassPipeline("passes",
                                          cl::desc("MAIRGraph pass pipeline"),
                                          cl::value_desc("pipeline"));
+static cl::extrahelp MAIRGraphPassHelp(R"(
+MAIRGraph pass names for -passes:
+  cmm                           - Common MA Motion
+  liom                          - Loop Invariant Observation Motion
+  lpoc                          - Loop Periodic Observation Combine
+  locationmerge                 - Location Merge
+  roe                           - Redundant Observation Elimination
+  simplifygraph                 - Simplify Graph
+)");
 
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);

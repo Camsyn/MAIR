@@ -2,11 +2,11 @@
 ; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=SIMPLIFY < %t.stats
 ; RUN: mair-opt -stats --disable-output -passes=simplifygraph,locationmerge %S/locationmerge.ll 2>%t.stats
 ; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=LOCATION < %t.stats
-; RUN: mair-opt -stats --disable-output -passes=simplifygraph,commonmamotion %S/common-ma-motion.ll 2>%t.stats
+; RUN: mair-opt -stats --disable-output -passes=simplifygraph,cmm %S/common-ma-motion.ll 2>%t.stats
 ; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=COMMON < %t.stats
-; RUN: mair-opt -stats --disable-output -passes=loop-invariant-observation-motion %S/loop-invariant-observation-motion.ll 2>%t.stats
+; RUN: mair-opt -stats --disable-output -passes=liom %S/loop-invariant-observation-motion.ll 2>%t.stats
 ; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=INVARIANT < %t.stats
-; RUN: mair-opt -stats --disable-output -passes=loop-periodic-observation-combine %S/loop-range-aggregation.ll 2>%t.stats
+; RUN: mair-opt -stats --disable-output -passes=lpoc %S/loop-range-aggregation.ll 2>%t.stats
 ; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=PERIODIC < %t.stats
 ; RUN: mair-opt -stats --disable-output -passes=roe %S/redundant-observation-elimination.ll 2>%t.stats
 ; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=REDUNDANT < %t.stats

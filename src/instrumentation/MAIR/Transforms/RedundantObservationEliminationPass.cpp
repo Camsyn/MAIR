@@ -30,7 +30,7 @@ RedundantObservationEliminationPass::run(MAIRGraph &G,
   for (Observation &Obs : G) {
     const AvailableAccessSet &In = Info.getIn(Obs);
     for (MemoryAccess &Access : Obs) {
-      if (!In.covers(Access, DeletedSources, G.getOptimizationConfig()))
+      if (!In.covers(Access, DeletedSources))
         continue;
       DeletedSources.insert(&Access);
       Redundant.push_back(&Access);

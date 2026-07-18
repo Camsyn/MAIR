@@ -75,26 +75,24 @@ constexpr AccessProperty &operator|=(AccessProperty &LHS, AccessProperty RHS) {
   return LHS;
 }
 
-enum class AccessKindSemantics : uint8_t {
-  Exact,
-  Ignore,
-  WriteCoversRead,
-};
-
 enum class ObsEdgeKind : uint8_t;
 
 /// Sanitizer-specific legality rules shared by every MAIR optimization pass.
 /// Region geometry remains a property of MemoryAccess; this configuration
 /// controls which semantic distinctions an observer must preserve.
 class MAIROptimizationConfig {
-  AccessKindSemantics KindSemantics = AccessKindSemantics::Exact;
+  uint8_t ReadLevel = 1;
+  uint8_t WriteLevel = 2;
+  uint8_t ReadWriteLevel = 3;
   bool IgnoreAtomic = false;
   bool DomCoverageOnly = false;
   bool AllowRelocation = true;
 
-  explicit MAIROptimizationConfig(AccessKindSemantics Kinds, bool IgnoreAtomic,
+  explicit MAIROptimizationConfig(uint8_t ReadLevel, uint8_t WriteLevel,
+                                  uint8_t ReadWriteLevel, bool IgnoreAtomic,
                                   bool DomCoverageOnly, bool AllowRelocation)
-      : KindSemantics(Kinds), IgnoreAtomic(IgnoreAtomic),
+      : ReadLevel(ReadLevel), WriteLevel(WriteLevel),
+        ReadWriteLevel(ReadWriteLevel), IgnoreAtomic(IgnoreAtomic),
         DomCoverageOnly(DomCoverageOnly), AllowRelocation(AllowRelocation) {}
 
 public:
@@ -104,12 +102,9 @@ public:
   static MAIROptimizationConfig forAddressSanitizer();
   static MAIROptimizationConfig forThreadSanitizer();
 
-  bool canMove(const MemoryAccess &Access) const;
-  bool canMerge(const MemoryAccess &Into, const MemoryAccess &From) const;
-  bool canDelete(const MemoryAccess &Access) const;
   bool allowsCoverageAlong(ObsEdgeKind Kind) const;
-  bool kindCovers(AccessKind Available, AccessKind Required) const;
-  AccessKind mergeKinds(AccessKind Into, AccessKind From) const;
+  uint8_t getLevel(AccessKind Kind) const;
+  void initializeAccess(MemoryAccess &Access) const;
 };
 
 enum class ObsEdgeKind : uint8_t { Dom, PostDom };
@@ -558,6 +553,10 @@ class MemoryAccess final
   MemoryRegion Region;
   AccessKind Kind = AccessKind::Read;
   AccessProperty Properties = AccessProperty::None;
+  bool Mergeable = true;
+  bool Movable = true;
+  bool Deletable = true;
+  uint8_t Level = 1;
   /// Fixed base operand, analogous to a single llvm::User operand.
   MemoryUse BaseUse;
 
@@ -569,7 +568,9 @@ public:
   MemoryAccess(ArrayRef<Instruction *> I, MemoryRegion R, AccessKind K,
                AccessProperty P = AccessProperty::None)
       : Insts(I.begin(), I.end()), Region(std::move(R)), Kind(K), Properties(P),
-        BaseUse(*this) {}
+        BaseUse(*this) {
+    MAIROptimizationConfig::generic().initializeAccess(*this);
+  }
 
   MemoryAccess(const MemoryAccess &) = delete;
   MemoryAccess &operator=(const MemoryAccess &) = delete;
@@ -620,10 +621,13 @@ public:
   bool isCallLike() const { return hasProperty(AccessProperty::CallLike); }
   bool isMasked() const { return hasProperty(AccessProperty::Masked); }
 
-  bool covers(const MemoryAccess &Other,
-              const MAIROptimizationConfig &Config) const;
-  bool mergeWith(const MemoryAccess &Other,
-                 const MAIROptimizationConfig &Config);
+  bool isMergeable() const { return Mergeable; }
+  bool isMovable() const { return Movable; }
+  bool isDeletable() const { return Deletable; }
+  uint8_t getLevel() const { return Level; }
+
+  bool covers(const MemoryAccess &Other) const;
+  bool mergeWith(const MemoryAccess &Other);
   void mergeKind(AccessKind Other);
 
   static MemoryAccess fromInstruction(const Instruction &I,
@@ -634,8 +638,17 @@ public:
 
 private:
   friend class MAIRGraph;
+  friend class MAIROptimizationConfig;
   friend class Observation;
 
+  void setOptimizationProperties(bool CanMerge, bool CanMove, bool CanDelete,
+                                 uint8_t AccessLevel) {
+    Mergeable = CanMerge;
+    Movable = CanMove;
+    Deletable = CanDelete;
+    Level = AccessLevel;
+  }
+  void refreshOptimizationProperties();
   void setMemoryObject(MemoryObject *Object) { BaseUse.set(Object); }
   void clearMemoryObject() { BaseUse.set(nullptr); }
 };

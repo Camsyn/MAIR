@@ -33,9 +33,11 @@ entry:
 
 define void @keep_uncovered_accesses(ptr %p, ptr %q) {
 ; CHECK-LABEL: mair graph of fn @keep_uncovered_accesses {
-; CHECK:         read ptr %p, 4
+; CHECK-NOT:     read ptr %p, 4
 ; CHECK:         read ptr %p + 8, 4
+; CHECK-NOT:     read ptr %p, 4
 ; CHECK:         read ptr %q, 4
+; CHECK-NOT:     read ptr %p, 4
 ; CHECK:         write ptr %p, 4
 entry:
   %p0 = load i32, ptr %p, align 4

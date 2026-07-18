@@ -8,10 +8,8 @@ namespace mair {
 
 AnalysisKey RedundantObservationAnalysis::Key;
 
-bool AvailableAccess::covers(const MemoryAccess &Other,
-                             const MAIROptimizationConfig &Config) const {
-  return SourceObservation != Other.getParent() &&
-         Source->covers(Other, Config);
+bool AvailableAccess::covers(const MemoryAccess &Other) const {
+  return SourceObservation != Other.getParent() && Source->covers(Other);
 }
 
 bool AvailableAccess::operator==(const AvailableAccess &Other) const {
@@ -34,19 +32,17 @@ bool AvailableAccessSet::unionWith(const AvailableAccessSet &Other) {
   return Changed;
 }
 
-bool AvailableAccessSet::covers(const MemoryAccess &Access,
-                                const MAIROptimizationConfig &Config) const {
+bool AvailableAccessSet::covers(const MemoryAccess &Access) const {
   DenseSet<const MemoryAccess *> ExcludedSources;
-  return covers(Access, ExcludedSources, Config);
+  return covers(Access, ExcludedSources);
 }
 
 bool AvailableAccessSet::covers(
     const MemoryAccess &Access,
-    const DenseSet<const MemoryAccess *> &ExcludedSources,
-    const MAIROptimizationConfig &Config) const {
+    const DenseSet<const MemoryAccess *> &ExcludedSources) const {
   return llvm::any_of(Accesses, [&](const AvailableAccess &Available) {
     return !ExcludedSources.contains(Available.Source) &&
-           Available.covers(Access, Config);
+           Available.covers(Access);
   });
 }
 

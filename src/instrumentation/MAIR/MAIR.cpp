@@ -724,90 +724,81 @@ void MaskedRegion::print(raw_ostream &OS) const {
 }
 
 MAIROptimizationConfig MAIROptimizationConfig::generic() {
-  return MAIROptimizationConfig(AccessKindSemantics::Exact,
+  return MAIROptimizationConfig(/*ReadLevel=*/1, /*WriteLevel=*/2,
+                                /*ReadWriteLevel=*/3,
                                 /*IgnoreAtomic=*/false,
                                 /*DomCoverageOnly=*/false,
                                 /*AllowRelocation=*/true);
 }
 
 MAIROptimizationConfig MAIROptimizationConfig::forAddressSanitizer() {
-  return MAIROptimizationConfig(AccessKindSemantics::Ignore,
+  return MAIROptimizationConfig(/*ReadLevel=*/1, /*WriteLevel=*/1,
+                                /*ReadWriteLevel=*/1,
                                 /*IgnoreAtomic=*/true,
                                 /*DomCoverageOnly=*/true,
                                 /*AllowRelocation=*/false);
 }
 
 MAIROptimizationConfig MAIROptimizationConfig::forThreadSanitizer() {
-  return MAIROptimizationConfig(AccessKindSemantics::WriteCoversRead,
+  return MAIROptimizationConfig(/*ReadLevel=*/1, /*WriteLevel=*/2,
+                                /*ReadWriteLevel=*/3,
                                 /*IgnoreAtomic=*/false,
                                 /*DomCoverageOnly=*/false,
                                 /*AllowRelocation=*/true);
-}
-
-bool MAIROptimizationConfig::canMove(const MemoryAccess &Access) const {
-  return AllowRelocation && !Access.isVolatile() && !Access.isCallLike() &&
-         !Access.isAtomic();
-}
-
-bool MAIROptimizationConfig::canMerge(const MemoryAccess &Into,
-                                      const MemoryAccess &From) const {
-  if (Into.isVolatile() || From.isVolatile() || Into.isCallLike() ||
-      From.isCallLike())
-    return false;
-  if (!IgnoreAtomic && (Into.isAtomic() || From.isAtomic()))
-    return false;
-  if (Into.isMasked() != From.isMasked())
-    return false;
-  if (Into.isMasked() && (!Into.getMaskedRegion()->isComparable() ||
-                          !From.getMaskedRegion()->isComparable()))
-    return false;
-  if (KindSemantics != AccessKindSemantics::Ignore &&
-      Into.getKind() != From.getKind())
-    return false;
-  return true;
-}
-
-bool MAIROptimizationConfig::canDelete(const MemoryAccess &Access) const {
-  if (Access.isVolatile() || Access.isCallLike())
-    return false;
-  return IgnoreAtomic || !Access.isAtomic();
 }
 
 bool MAIROptimizationConfig::allowsCoverageAlong(ObsEdgeKind Kind) const {
   return !DomCoverageOnly || Kind == ObsEdgeKind::Dom;
 }
 
-bool MAIROptimizationConfig::kindCovers(AccessKind Available,
-                                        AccessKind Required) const {
-  if (KindSemantics == AccessKindSemantics::Ignore)
-    return true;
-  if (Available == Required)
-    return true;
-  return KindSemantics == AccessKindSemantics::WriteCoversRead &&
-         Available == AccessKind::Write && Required == AccessKind::Read;
+uint8_t MAIROptimizationConfig::getLevel(AccessKind Kind) const {
+  switch (Kind) {
+  case AccessKind::Read:
+    return ReadLevel;
+  case AccessKind::Write:
+    return WriteLevel;
+  case AccessKind::ReadWrite:
+    return ReadWriteLevel;
+  }
+  llvm_unreachable("unknown access kind");
 }
 
-AccessKind MAIROptimizationConfig::mergeKinds(AccessKind Into,
-                                              AccessKind From) const {
-  assert((KindSemantics == AccessKindSemantics::Ignore || Into == From) &&
-         "incompatible access kinds cannot be merged");
-  return mergeKind(Into, From);
+void MAIROptimizationConfig::initializeAccess(MemoryAccess &Access) const {
+  const bool IsComparableMasked =
+      !Access.isMasked() || Access.getMaskedRegion()->isComparable();
+  const bool CanMerge = !Access.isVolatile() && !Access.isCallLike() &&
+                        IsComparableMasked &&
+                        (IgnoreAtomic || !Access.isAtomic());
+  const bool CanMove = AllowRelocation && !Access.isVolatile() &&
+                       !Access.isCallLike() && !Access.isAtomic();
+  const bool CanDelete = !Access.isVolatile() && !Access.isCallLike() &&
+                         (IgnoreAtomic || !Access.isAtomic());
+  Access.setOptimizationProperties(CanMerge, CanMove, CanDelete,
+                                   getLevel(Access.getKind()));
+}
+
+void MemoryAccess::refreshOptimizationProperties() {
+  if (Observation *Obs = getParent())
+    if (MAIRGraph *Graph = Obs->getParent())
+      return Graph->getOptimizationConfig().initializeAccess(*this);
+  MAIROptimizationConfig::generic().initializeAccess(*this);
 }
 
 void MemoryAccess::mergeKind(AccessKind Other) {
   Kind = ::mair::mergeKind(Kind, Other);
+  refreshOptimizationProperties();
 }
 
 const Value *MemoryAccess::getBase() const {
   return std::visit([](const auto &R) { return R.getBase(); }, Region);
 }
 
-bool MemoryAccess::covers(const MemoryAccess &Other,
-                          const MAIROptimizationConfig &Config) const {
-  if (getBase() != Other.getBase() || !Config.canDelete(*this) ||
-      !Config.canDelete(Other) || !Config.kindCovers(Kind, Other.Kind))
+bool MemoryAccess::covers(const MemoryAccess &Other) const {
+  if (getBase() != Other.getBase() || !isDeletable() || !Other.isDeletable() ||
+      getLevel() < Other.getLevel())
     return false;
-  if ((isAtomic() != Other.isAtomic()) && !Config.canMerge(*this, Other))
+  if (isAtomic() != Other.isAtomic() &&
+      (!isMergeable() || !Other.isMergeable()))
     return false;
 
   if (const auto *ThisAccess = getContiguousRegion()) {
@@ -826,11 +817,12 @@ bool MemoryAccess::covers(const MemoryAccess &Other,
   return ThisPeriodic && OtherPeriodic && *ThisPeriodic == *OtherPeriodic;
 }
 
-bool MemoryAccess::mergeWith(const MemoryAccess &Other,
-                             const MAIROptimizationConfig &Config) {
+bool MemoryAccess::mergeWith(const MemoryAccess &Other) {
   if (getBase() != Other.getBase())
     return false;
-  if (!Config.canMerge(*this, Other))
+  if (!isMergeable() || !Other.isMergeable())
+    return false;
+  if (getLevel() != Other.getLevel())
     return false;
 
   if (const auto *ThisAccess = getContiguousRegion()) {
@@ -879,8 +871,9 @@ bool MemoryAccess::mergeWith(const MemoryAccess &Other,
     Insts.append(Other.Insts);
   }
 
-  Kind = Config.mergeKinds(Kind, Other.Kind);
+  Kind = ::mair::mergeKind(Kind, Other.Kind);
   Properties |= Other.Properties;
+  refreshOptimizationProperties();
   return true;
 }
 
@@ -1219,6 +1212,7 @@ MemoryObject &MAIRGraph::getOrCreateMemoryObject(const Value &Base) {
 void MAIRGraph::registerAccess(MemoryAccess &Access) {
   const Value *Base = Access.getBase();
   assert(Base && "cannot add a base-less memory access to a MAIRGraph");
+  OptimizationConfig.initializeAccess(Access);
   Access.setMemoryObject(&getOrCreateMemoryObject(*Base));
 }
 

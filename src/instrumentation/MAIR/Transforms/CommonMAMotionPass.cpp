@@ -22,10 +22,11 @@ namespace mair {
 
 namespace {
 
-bool isSameAccess(const MemoryAccess &LHS, const MemoryAccess &RHS,
-                  const MAIROptimizationConfig &Config) {
+bool isSameAccess(const MemoryAccess &LHS, const MemoryAccess &RHS) {
   return &LHS.getMemoryObject() == &RHS.getMemoryObject() &&
-         Config.canMerge(LHS, RHS) && LHS.getRegion() == RHS.getRegion();
+         LHS.isMergeable() && RHS.isMergeable() && LHS.isMovable() &&
+         RHS.isMovable() && LHS.getLevel() == RHS.getLevel() &&
+         LHS.getRegion() == RHS.getRegion();
 }
 
 bool isValueAvailableAt(const Value *Value, const Instruction &Anchor,
@@ -110,11 +111,10 @@ using ObservationGroup = SmallVector<Observation *, 8>;
 using SourceGroups = SmallVector<ObservationGroup, 4>;
 
 MemoryAccess *findMatchingAccess(ArrayRef<Observation *> Group,
-                                 const MemoryAccess &Needle,
-                                 const MAIROptimizationConfig &Config) {
+                                 const MemoryAccess &Needle) {
   for (Observation *Obs : Group)
     for (MemoryAccess &Access : *Obs)
-      if (isSameAccess(Access, Needle, Config))
+      if (isSameAccess(Access, Needle))
         return &Access;
   return nullptr;
 }
@@ -145,7 +145,6 @@ bool collectSourceGroups(MAIRGraph &G, Observation &ProofRoot,
 
 bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink,
                          DominatorTree &DT) {
-  const MAIROptimizationConfig &Config = G.getOptimizationConfig();
   // Resolve the logical entry/exit boundary after SimplifyGraph contraction,
   // then require the complete, de-duplicated CFG neighbor set. Self-edges and
   // fewer than two distinct neighbors are deliberately no-ops.
@@ -185,14 +184,14 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink,
   // then compute the exact object/location/kind intersection of all groups.
   for (Observation *Obs : Groups.front()) {
     for (MemoryAccess &Candidate : *Obs) {
-      if (!Config.canMove(Candidate))
+      if (!Candidate.isMovable())
         continue;
       if (!isAccessAvailableAt(Candidate, *Target, DT))
         continue;
       SmallVector<MemoryAccess *, 4> Matches = {&Candidate};
       bool Common = true;
       for (ArrayRef<Observation *> Group : drop_begin(Groups)) {
-        MemoryAccess *Match = findMatchingAccess(Group, Candidate, Config);
+        MemoryAccess *Match = findMatchingAccess(Group, Candidate);
         if (!Match) {
           Common = false;
           break;
@@ -207,7 +206,7 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink,
       // sources only after the complete match set has been collected.
       MemoryAccess *Accumulator = nullptr;
       for (MemoryAccess &Access : *Target)
-        if (isSameAccess(Access, Candidate, Config)) {
+        if (isSameAccess(Access, Candidate)) {
           Accumulator = &Access;
           break;
         }
@@ -218,7 +217,7 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink,
         MergeBegin = 1;
       }
       for (size_t I = MergeBegin; I < Matches.size(); ++I) {
-        bool Merged = Accumulator->mergeWith(*Matches[I], Config);
+        bool Merged = Accumulator->mergeWith(*Matches[I]);
         assert(Merged && "exact common accesses must be mergeable");
         (void)Merged;
       }

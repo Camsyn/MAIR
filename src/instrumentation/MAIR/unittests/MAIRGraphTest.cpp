@@ -1808,7 +1808,7 @@ entry:
   EXPECT_TRUE(Merge.empty());
 }
 
-TEST(MAIRGraphPass, RedundantReadWriteAccessDoesNotCoverDifferentKinds) {
+TEST(MAIRGraphPass, RedundantReadWriteAccessCoversLowerLevels) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(i32* %p) {
@@ -1833,6 +1833,8 @@ entry:
   ReadWrite.begin()->mergeKind(AccessKind::Write);
   auto &Read = Graph.createInstObservation(BB, SecondLoad);
   auto &Write = Graph.createInstObservation(BB, StoreInst);
+  EXPECT_GT(ReadWrite.begin()->getLevel(), Write.begin()->getLevel());
+  EXPECT_GT(Write.begin()->getLevel(), Read.begin()->getLevel());
   Graph.addEdge(ReadWrite, Read, ObsEdgeKind::Dom);
   Graph.addEdge(Read, Write, ObsEdgeKind::Dom);
 
@@ -1842,11 +1844,11 @@ entry:
   RedundantObservationEliminationPass Pass;
   llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
 
-  EXPECT_TRUE(PA.areAllPreserved());
+  EXPECT_FALSE(PA.areAllPreserved());
   ASSERT_TRUE(Graph.verify());
   EXPECT_EQ(ReadWrite.size(), 1u);
-  EXPECT_EQ(Read.size(), 1u);
-  EXPECT_EQ(Write.size(), 1u);
+  EXPECT_TRUE(Read.empty());
+  EXPECT_TRUE(Write.empty());
 }
 
 TEST(MAIRGraphPass, RedundantObservationKeepsMismatchedAccessKinds) {
@@ -1873,8 +1875,11 @@ entry:
   Graph.addEdge(Read, Write, ObsEdgeKind::Dom);
 
   MemoryAccess Copy = MemoryAccess::fromInstruction(Load, M->getDataLayout());
-  EXPECT_FALSE(
-      Copy.mergeWith(*Write.begin(), MAIROptimizationConfig::generic()));
+  EXPECT_FALSE(Copy.mergeWith(*Write.begin()));
+  EXPECT_EQ(Copy.getLevel(), 1u);
+  Copy.mergeKind(AccessKind::Write);
+  EXPECT_EQ(Copy.getKind(), AccessKind::ReadWrite);
+  EXPECT_EQ(Copy.getLevel(), 3u);
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
@@ -1913,8 +1918,7 @@ entry:
 
   MemoryAccess Copy =
       MemoryAccess::fromInstruction(PlainLoad, M->getDataLayout());
-  EXPECT_FALSE(
-      Copy.mergeWith(*Atomic.begin(), MAIROptimizationConfig::generic()));
+  EXPECT_FALSE(Copy.mergeWith(*Atomic.begin()));
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
@@ -2816,7 +2820,7 @@ entry:
       {BInst}, MemoryRegion(PeriodicRegion(&P, StartB, StrideB, SizeB, TripsB)),
       AccessKind::Write);
 
-  EXPECT_FALSE(A.mergeWith(B, MAIROptimizationConfig::generic()));
+  EXPECT_FALSE(A.mergeWith(B));
   EXPECT_EQ(A.getKind(), AccessKind::Read);
   EXPECT_EQ(A.getInstructions().size(), 1u);
 }
@@ -2851,8 +2855,7 @@ entry:
                                   AbstractValue::constant(4))),
       AccessKind::Read);
 
-  EXPECT_TRUE(
-      WideAccess.mergeWith(NarrowAccess, MAIROptimizationConfig::generic()));
+  EXPECT_TRUE(WideAccess.mergeWith(NarrowAccess));
   EXPECT_EQ(WideAccess.getInstructions().size(), 2u);
   EXPECT_EQ(WideAccess.getInstructions().front(), Wide);
   EXPECT_EQ(WideAccess.getInstructions().back(), Narrow);
@@ -2867,7 +2870,7 @@ entry:
       MemoryRegion(AbstractAccess(&P, AbstractValue::constant(0),
                                   AbstractValue::constant(8))),
       AccessKind::Read);
-  EXPECT_TRUE(Reversed.mergeWith(Covering, MAIROptimizationConfig::generic()));
+  EXPECT_TRUE(Reversed.mergeWith(Covering));
   EXPECT_EQ(Reversed.getInstructions().size(), 2u);
   EXPECT_EQ(Reversed.getInstructions().front(), Wide);
   EXPECT_EQ(Reversed.getInstructions().back(), Narrow);
@@ -2919,23 +2922,68 @@ entry:
                        Ctx);
   ASSERT_TRUE(M);
 
-  llvm::BasicBlock &BB = M->getFunction("f")->getEntryBlock();
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
   llvm::Instruction &Read = BB.front();
   llvm::Instruction &Write = *std::next(BB.begin());
-  MemoryAccess ReadAccess =
-      MemoryAccess::fromInstruction(Read, M->getDataLayout());
-  MemoryAccess WriteAccess =
-      MemoryAccess::fromInstruction(Write, M->getDataLayout());
   const MAIROptimizationConfig Config =
       MAIROptimizationConfig::forAddressSanitizer();
+  MAIRGraph Graph(F, Config);
+  MemoryAccess &ReadAccess = *Graph.createInstObservation(BB, Read).begin();
+  MemoryAccess &WriteAccess = *Graph.createInstObservation(BB, Write).begin();
 
-  EXPECT_TRUE(ReadAccess.covers(WriteAccess, Config));
-  EXPECT_TRUE(WriteAccess.covers(ReadAccess, Config));
-  EXPECT_FALSE(Config.canMove(ReadAccess));
-  EXPECT_FALSE(Config.canMove(WriteAccess));
-  EXPECT_TRUE(Config.canDelete(ReadAccess));
-  EXPECT_TRUE(ReadAccess.mergeWith(WriteAccess, Config));
+  EXPECT_EQ(ReadAccess.getLevel(), WriteAccess.getLevel());
+  EXPECT_TRUE(ReadAccess.isMergeable());
+  EXPECT_TRUE(WriteAccess.isMergeable());
+  EXPECT_TRUE(ReadAccess.covers(WriteAccess));
+  EXPECT_TRUE(WriteAccess.covers(ReadAccess));
+  EXPECT_FALSE(ReadAccess.isMovable());
+  EXPECT_FALSE(WriteAccess.isMovable());
+  EXPECT_TRUE(ReadAccess.isDeletable());
+  EXPECT_TRUE(ReadAccess.mergeWith(WriteAccess));
   EXPECT_TRUE(ReadAccess.isReadWrite());
+}
+
+TEST(MAIROptimizationConfig, GraphInitializationStoresAccessCapabilities) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+define void @f(ptr %p) {
+entry:
+  %normal = load i32, ptr %p, align 4
+  %atomic = load atomic i32, ptr %p monotonic, align 4
+  %volatile = load volatile i32, ptr %p, align 4
+  call void @llvm.memset.p0.i64(ptr %p, i8 0, i64 4, i1 false)
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  auto It = BB.begin();
+  MAIRGraph Graph(F);
+  MemoryAccess &Normal = *Graph.createInstObservation(BB, *It++).begin();
+  MemoryAccess &Atomic = *Graph.createInstObservation(BB, *It++).begin();
+  MemoryAccess &Volatile = *Graph.createInstObservation(BB, *It++).begin();
+  MemoryAccess &CallLike = *Graph.createInstObservation(BB, *It++).begin();
+
+  EXPECT_TRUE(Normal.isMergeable());
+  EXPECT_TRUE(Normal.isMovable());
+  EXPECT_TRUE(Normal.isDeletable());
+  EXPECT_EQ(Normal.getLevel(), 1u);
+
+  EXPECT_FALSE(Atomic.isMergeable());
+  EXPECT_FALSE(Atomic.isMovable());
+  EXPECT_FALSE(Atomic.isDeletable());
+  EXPECT_FALSE(Volatile.isMergeable());
+  EXPECT_FALSE(Volatile.isMovable());
+  EXPECT_FALSE(Volatile.isDeletable());
+  EXPECT_FALSE(CallLike.isMergeable());
+  EXPECT_FALSE(CallLike.isMovable());
+  EXPECT_FALSE(CallLike.isDeletable());
+  EXPECT_EQ(CallLike.getLevel(), 2u);
 }
 
 TEST(MAIROptimizationConfig, ThreadSanitizerWriteOnlyCoversRead) {
@@ -2951,19 +2999,22 @@ entry:
                        Ctx);
   ASSERT_TRUE(M);
 
-  llvm::BasicBlock &BB = M->getFunction("f")->getEntryBlock();
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
   llvm::Instruction &Read = BB.front();
   llvm::Instruction &Write = *std::next(BB.begin());
-  MemoryAccess ReadAccess =
-      MemoryAccess::fromInstruction(Read, M->getDataLayout());
-  MemoryAccess WriteAccess =
-      MemoryAccess::fromInstruction(Write, M->getDataLayout());
   const MAIROptimizationConfig Config =
       MAIROptimizationConfig::forThreadSanitizer();
+  MAIRGraph Graph(F, Config);
+  MemoryAccess &ReadAccess = *Graph.createInstObservation(BB, Read).begin();
+  MemoryAccess &WriteAccess = *Graph.createInstObservation(BB, Write).begin();
 
-  EXPECT_TRUE(WriteAccess.covers(ReadAccess, Config));
-  EXPECT_FALSE(ReadAccess.covers(WriteAccess, Config));
-  EXPECT_FALSE(ReadAccess.mergeWith(WriteAccess, Config));
+  EXPECT_GT(WriteAccess.getLevel(), ReadAccess.getLevel());
+  EXPECT_TRUE(ReadAccess.isMergeable());
+  EXPECT_TRUE(WriteAccess.isMergeable());
+  EXPECT_TRUE(WriteAccess.covers(ReadAccess));
+  EXPECT_FALSE(ReadAccess.covers(WriteAccess));
+  EXPECT_FALSE(ReadAccess.mergeWith(WriteAccess));
 }
 
 TEST(MAIROptimizationConfig, ThreadSanitizerPinsAtomicAccesses) {
@@ -2990,8 +3041,8 @@ entry:
   Observation &Required = Graph.createInstObservation(BB, Second);
   Graph.addEdge(Available, Required, ObsEdgeKind::Dom);
 
-  EXPECT_FALSE(Available.begin()->mergeWith(*Required.begin(), Config));
-  EXPECT_FALSE(Available.begin()->covers(*Required.begin(), Config));
+  EXPECT_FALSE(Available.begin()->mergeWith(*Required.begin()));
+  EXPECT_FALSE(Available.begin()->covers(*Required.begin()));
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
@@ -3100,17 +3151,21 @@ entry:
                        Ctx);
   ASSERT_TRUE(M);
 
-  llvm::BasicBlock &BB = M->getFunction("f")->getEntryBlock();
-  MemoryAccess First =
-      MemoryAccess::fromInstruction(BB.front(), M->getDataLayout());
-  MemoryAccess Second =
-      MemoryAccess::fromInstruction(*std::next(BB.begin()), M->getDataLayout());
-  EXPECT_TRUE(First.isCallLike());
-  EXPECT_TRUE(Second.isCallLike());
-  EXPECT_FALSE(
-      First.mergeWith(Second, MAIROptimizationConfig::forAddressSanitizer()));
-  EXPECT_FALSE(
-      First.mergeWith(Second, MAIROptimizationConfig::forThreadSanitizer()));
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  auto CheckConfig = [&](const MAIROptimizationConfig &Config) {
+    MAIRGraph Graph(F, Config);
+    MemoryAccess &First = *Graph.createInstObservation(BB, BB.front()).begin();
+    MemoryAccess &Second =
+        *Graph.createInstObservation(BB, *std::next(BB.begin())).begin();
+    EXPECT_TRUE(First.isCallLike());
+    EXPECT_TRUE(Second.isCallLike());
+    EXPECT_FALSE(First.isMergeable());
+    EXPECT_FALSE(Second.isMergeable());
+    EXPECT_FALSE(First.mergeWith(Second));
+  };
+  CheckConfig(MAIROptimizationConfig::forAddressSanitizer());
+  CheckConfig(MAIROptimizationConfig::forThreadSanitizer());
 }
 
 TEST(MAIROptimizationConfig, ConstantMaskedRegionsUseActiveLanes) {
@@ -3131,22 +3186,23 @@ entry:
                        Ctx);
   ASSERT_TRUE(M);
 
-  llvm::BasicBlock &BB = M->getFunction("f")->getEntryBlock();
-  MemoryAccess Wide =
-      MemoryAccess::fromInstruction(BB.front(), M->getDataLayout());
-  MemoryAccess Narrow =
-      MemoryAccess::fromInstruction(*std::next(BB.begin()), M->getDataLayout());
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
   const MAIROptimizationConfig Config =
       MAIROptimizationConfig::forAddressSanitizer();
+  MAIRGraph Graph(F, Config);
+  MemoryAccess &Wide = *Graph.createInstObservation(BB, BB.front()).begin();
+  MemoryAccess &Narrow =
+      *Graph.createInstObservation(BB, *std::next(BB.begin())).begin();
 
   EXPECT_TRUE(Wide.isMasked());
   EXPECT_FALSE(Wide.isCallLike());
   ASSERT_NE(Wide.getMaskedRegion(), nullptr);
-  EXPECT_TRUE(Wide.covers(Narrow, Config));
-  EXPECT_FALSE(Narrow.covers(Wide, Config))
+  EXPECT_TRUE(Wide.covers(Narrow));
+  EXPECT_FALSE(Narrow.covers(Wide))
       << "narrow=" << Narrow.toString() << " wide=" << Wide.toString();
-  EXPECT_TRUE(Narrow.mergeWith(Wide, Config));
-  EXPECT_TRUE(Narrow.covers(Wide, Config));
+  EXPECT_TRUE(Narrow.mergeWith(Wide));
+  EXPECT_TRUE(Narrow.covers(Wide));
 }
 
 TEST(MAIROptimizationConfig, DynamicMasksRequireTheSameSSAValue) {
@@ -3167,20 +3223,21 @@ entry:
                        Ctx);
   ASSERT_TRUE(M);
 
-  llvm::BasicBlock &BB = M->getFunction("f")->getEntryBlock();
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
   auto It = BB.begin();
-  MemoryAccess First = MemoryAccess::fromInstruction(*It++, M->getDataLayout());
-  MemoryAccess Same = MemoryAccess::fromInstruction(*It++, M->getDataLayout());
-  MemoryAccess Different =
-      MemoryAccess::fromInstruction(*It, M->getDataLayout());
   const MAIROptimizationConfig Config =
       MAIROptimizationConfig::forAddressSanitizer();
+  MAIRGraph Graph(F, Config);
+  MemoryAccess &First = *Graph.createInstObservation(BB, *It++).begin();
+  MemoryAccess &Same = *Graph.createInstObservation(BB, *It++).begin();
+  MemoryAccess &Different = *Graph.createInstObservation(BB, *It).begin();
 
-  EXPECT_TRUE(First.covers(Same, Config));
-  EXPECT_FALSE(First.covers(Different, Config))
+  EXPECT_TRUE(First.covers(Same));
+  EXPECT_FALSE(First.covers(Different))
       << "first=" << First.toString() << " different=" << Different.toString();
-  EXPECT_TRUE(First.mergeWith(Same, Config));
-  EXPECT_FALSE(First.mergeWith(Different, Config))
+  EXPECT_TRUE(First.mergeWith(Same));
+  EXPECT_FALSE(First.mergeWith(Different))
       << "first=" << First.toString() << " different=" << Different.toString();
 }
 

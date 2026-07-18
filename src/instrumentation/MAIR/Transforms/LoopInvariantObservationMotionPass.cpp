@@ -20,10 +20,11 @@ namespace mair {
 
 namespace {
 
-bool isSameAccess(const MemoryAccess &LHS, const MemoryAccess &RHS,
-                  const MAIROptimizationConfig &Config) {
+bool isSameAccess(const MemoryAccess &LHS, const MemoryAccess &RHS) {
   return &LHS.getMemoryObject() == &RHS.getMemoryObject() &&
-         Config.canMerge(LHS, RHS) && LHS.getRegion() == RHS.getRegion();
+         LHS.isMergeable() && RHS.isMergeable() && LHS.isMovable() &&
+         RHS.isMovable() && LHS.getLevel() == RHS.getLevel() &&
+         LHS.getRegion() == RHS.getRegion();
 }
 
 bool isAbstractValueAvailableAt(const AbstractValue &Value,
@@ -75,12 +76,11 @@ void eraseAccess(MemoryAccess &Access) {
 }
 
 void moveAccessTo(MemoryAccess &Access, Observation &Target,
-                  bool MergeEquivalentAccesses,
-                  const MAIROptimizationConfig &Config) {
+                  bool MergeEquivalentAccesses) {
   MemoryAccess *Accumulator = nullptr;
   if (MergeEquivalentAccesses) {
     for (MemoryAccess &Existing : Target)
-      if (isSameAccess(Existing, Access, Config)) {
+      if (isSameAccess(Existing, Access)) {
         Accumulator = &Existing;
         break;
       }
@@ -89,7 +89,7 @@ void moveAccessTo(MemoryAccess &Access, Observation &Target,
   if (!Accumulator) {
     Target.addAccess(Access);
   } else {
-    bool Merged = Accumulator->mergeWith(Access, Config);
+    bool Merged = Accumulator->mergeWith(Access);
     assert(Merged && "exactly matching accesses must be mergeable");
     (void)Merged;
   }
@@ -109,8 +109,7 @@ bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops,
       continue;
 
     for (MemoryAccess &Access : Obs) {
-      const MAIROptimizationConfig &Config = G.getOptimizationConfig();
-      if (!Config.canMove(Access))
+      if (!Access.isMovable())
         continue;
       const AbstractAccess *Region = Access.getContiguousRegion();
       if (!Region || !Loops.isLoopInvariant(Access, *L))
@@ -125,7 +124,7 @@ bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops,
         if (!Target || Target == &Obs ||
             !isRegionAvailableAt(*Region, Target->getSite(), Loops))
           continue;
-        moveAccessTo(Access, *Target, MergeEquivalentAccesses, Config);
+        moveAccessTo(Access, *Target, MergeEquivalentAccesses);
         ++NumMovedToPreheaders;
         return true;
       }
@@ -152,7 +151,7 @@ bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops,
       Observation *Target = findEvent(G, TargetSite, Guard);
       if (!Target)
         Target = &G.createObservation(TargetSite, Guard);
-      moveAccessTo(Access, *Target, MergeEquivalentAccesses, Config);
+      moveAccessTo(Access, *Target, MergeEquivalentAccesses);
       ++NumMovedToExits;
       return true;
     }

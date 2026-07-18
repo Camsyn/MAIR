@@ -12,8 +12,7 @@ struct AvailableAccess {
   const MemoryAccess *Source = nullptr;
   const Observation *SourceObservation = nullptr;
 
-  bool covers(const MemoryAccess &Other,
-              const MAIROptimizationConfig &Config) const;
+  bool covers(const MemoryAccess &Other) const;
   bool operator==(const AvailableAccess &Other) const;
 };
 
@@ -23,11 +22,10 @@ class AvailableAccessSet {
 public:
   bool insert(const AvailableAccess &Access);
   bool unionWith(const AvailableAccessSet &Other);
-  bool covers(const MemoryAccess &Access,
-              const MAIROptimizationConfig &Config) const;
-  bool covers(const MemoryAccess &Access,
-              const llvm::DenseSet<const MemoryAccess *> &ExcludedSources,
-              const MAIROptimizationConfig &Config) const;
+  bool covers(const MemoryAccess &Access) const;
+  bool
+  covers(const MemoryAccess &Access,
+         const llvm::DenseSet<const MemoryAccess *> &ExcludedSources) const;
   bool operator==(const AvailableAccessSet &Other) const;
   bool operator!=(const AvailableAccessSet &Other) const {
     return !(*this == Other);

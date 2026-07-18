@@ -2,6 +2,7 @@
 #include "MAIR/Analysis/LoopAnalysis.h"
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
+#include "MAIR/Transforms/TransformUtils.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
@@ -19,13 +20,6 @@ STATISTIC(NumMovedToExits, "Number of invariant accesses moved to loop exits");
 namespace mair {
 
 namespace {
-
-bool isSameAccess(const MemoryAccess &LHS, const MemoryAccess &RHS) {
-  return &LHS.getMemoryObject() == &RHS.getMemoryObject() &&
-         LHS.isMergeable() && RHS.isMergeable() && LHS.isMovable() &&
-         RHS.isMovable() && LHS.getLevel() == RHS.getLevel() &&
-         LHS.getRegion() == RHS.getRegion();
-}
 
 bool isAbstractValueAvailableAt(const AbstractValue &Value,
                                 const ObservationSite &Site,
@@ -71,7 +65,7 @@ void moveAccessTo(MemoryAccess &Access, Observation &Target,
   MemoryAccess *Accumulator = nullptr;
   if (MergeEquivalentAccesses) {
     for (MemoryAccess &Existing : Target)
-      if (isSameAccess(Existing, Access)) {
+      if (isEquivalentMovableAccess(Existing, Access)) {
         Accumulator = &Existing;
         break;
       }
@@ -87,10 +81,20 @@ void moveAccessTo(MemoryAccess &Access, Observation &Target,
   Access.getParent()->erase(Access);
 }
 
-bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops,
-                            bool MergeEquivalentAccesses) {
+enum class InvariantMotionKind { Preheader, Exit };
+
+struct InvariantMotionPlan {
+  MemoryAccess *Access = nullptr;
+  Observation *Target = nullptr;
+  std::optional<ObservationSite> NewTargetSite;
+  ObservationGuard Guard = AlwaysGuard{};
+  InvariantMotionKind Kind = InvariantMotionKind::Preheader;
+};
+
+std::optional<InvariantMotionPlan> findInvariantMotion(MAIRGraph &G,
+                                                       MAIRLoopInfo &Loops) {
   if (!Loops.isAvailable())
-    return false;
+    return std::nullopt;
 
   for (Observation &Obs : G) {
     if (!Obs.hasAlwaysGuard())
@@ -115,9 +119,8 @@ bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops,
         if (!Target || Target == &Obs ||
             !isRegionAvailableAt(*Region, Target->getSite(), Loops))
           continue;
-        moveAccessTo(Access, *Target, MergeEquivalentAccesses);
-        ++NumMovedToPreheaders;
-        return true;
+        return InvariantMotionPlan{&Access, Target, std::nullopt, AlwaysGuard{},
+                                   InvariantMotionKind::Preheader};
       }
 
       std::optional<MAIRLoopExit> Exit = Loops.describeUniqueExit(*Top);
@@ -140,14 +143,38 @@ bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops,
 
       ObservationGuard Guard = std::move(*ExecutionGuard);
       Observation *Target = findEvent(G, TargetSite, Guard);
+      std::optional<ObservationSite> NewTargetSite;
       if (!Target)
-        Target = &G.createObservation(TargetSite, Guard);
-      moveAccessTo(Access, *Target, MergeEquivalentAccesses);
-      ++NumMovedToExits;
-      return true;
+        NewTargetSite = TargetSite;
+      return InvariantMotionPlan{&Access, Target, NewTargetSite,
+                                 std::move(Guard), InvariantMotionKind::Exit};
     }
   }
-  return false;
+  return std::nullopt;
+}
+
+void commitInvariantMotion(MAIRGraph &G, InvariantMotionPlan Plan,
+                           bool MergeEquivalentAccesses) {
+  assert(Plan.Access && "invariant motion requires an access");
+  Observation *Target = Plan.Target;
+  if (!Target) {
+    assert(Plan.NewTargetSite && "new motion target requires a site");
+    Target = &G.createObservation(*Plan.NewTargetSite, Plan.Guard);
+  }
+  moveAccessTo(*Plan.Access, *Target, MergeEquivalentAccesses);
+  if (Plan.Kind == InvariantMotionKind::Preheader)
+    ++NumMovedToPreheaders;
+  else
+    ++NumMovedToExits;
+}
+
+bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops,
+                            bool MergeEquivalentAccesses) {
+  std::optional<InvariantMotionPlan> Plan = findInvariantMotion(G, Loops);
+  if (!Plan)
+    return false;
+  commitInvariantMotion(G, std::move(*Plan), MergeEquivalentAccesses);
+  return true;
 }
 
 } // namespace

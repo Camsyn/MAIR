@@ -1,6 +1,7 @@
 #pragma once
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Instruction.h"
 
@@ -8,7 +9,12 @@
 #include <iterator>
 
 namespace mair {
-using namespace llvm;
+
+using llvm::any_of;
+using llvm::BasicBlock;
+using llvm::DenseMap;
+using llvm::Instruction;
+using llvm::make_range;
 
 struct DefaultBarrierTrait {
   static bool isForwardBarrier(const Instruction &) { return false; }

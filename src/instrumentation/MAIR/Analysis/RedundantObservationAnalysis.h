@@ -4,21 +4,18 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/SetVector.h"
 
 namespace mair {
 
 struct AvailableAccess {
   const MemoryAccess *Source = nullptr;
-  const Observation *SourceObservation = nullptr;
 
   bool covers(const MemoryAccess &Other) const;
-  bool operator==(const AvailableAccess &Other) const;
 };
 
 class AvailableAccessSet {
-  llvm::SmallVector<AvailableAccess, 8> Accesses;
-  llvm::DenseSet<const MemoryAccess *> Sources;
+  llvm::SmallSetVector<const MemoryAccess *, 8> Sources;
 
 public:
   bool insert(const AvailableAccess &Access);

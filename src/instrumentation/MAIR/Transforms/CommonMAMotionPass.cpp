@@ -1,6 +1,7 @@
 #include "MAIR/Transforms/CommonMAMotionPass.h"
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
+#include "MAIR/Transforms/TransformUtils.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -22,13 +23,6 @@ STATISTIC(NumSunkAccesses, "Number of accesses sunk by common MA motion");
 namespace mair {
 
 namespace {
-
-bool isSameAccess(const MemoryAccess &LHS, const MemoryAccess &RHS) {
-  return &LHS.getMemoryObject() == &RHS.getMemoryObject() &&
-         LHS.isMergeable() && RHS.isMergeable() && LHS.isMovable() &&
-         RHS.isMovable() && LHS.getLevel() == RHS.getLevel() &&
-         LHS.getRegion() == RHS.getRegion();
-}
 
 bool isValueAvailableAt(const Value *Value, const Instruction &Anchor,
                         DominatorTree &DT) {
@@ -76,7 +70,13 @@ SmallPtrSet<Observation *, 16> collectReachableInBlock(Observation &Root,
   return Reachable;
 }
 
-bool collectCFGNeighbors(const BasicBlock &BB, bool Sink,
+enum class MotionDirection { Hoist, Sink };
+
+bool isSink(MotionDirection Direction) {
+  return Direction == MotionDirection::Sink;
+}
+
+bool collectCFGNeighbors(const BasicBlock &BB, MotionDirection Direction,
                          SmallVectorImpl<const BasicBlock *> &Neighbors) {
   SmallPtrSet<const BasicBlock *, 8> Seen;
   auto AddNeighbor = [&](const BasicBlock *Neighbor) {
@@ -87,7 +87,7 @@ bool collectCFGNeighbors(const BasicBlock &BB, bool Sink,
     return true;
   };
 
-  if (Sink) {
+  if (isSink(Direction)) {
     for (const BasicBlock *Pred : predecessors(&BB))
       if (!AddNeighbor(Pred))
         return false;
@@ -101,24 +101,39 @@ bool collectCFGNeighbors(const BasicBlock &BB, bool Sink,
 
 using ObservationGroup = SmallVector<Observation *, 8>;
 using SourceGroups = SmallVector<ObservationGroup, 4>;
-using ObservationsByBlock = DenseMap<const BasicBlock *, ObservationGroup>;
 
-ObservationsByBlock indexObservationsByBlock(MAIRGraph &G) {
-  ObservationsByBlock Index;
-  const Function *F = G.getFunction();
-  assert(F && "CommonMAMotion requires a function-backed graph");
-  for (const BasicBlock &BB : *F)
-    for (Observation &Obs : G)
-      if (Obs.representsBlock(BB))
-        Index[&BB].push_back(&Obs);
-  return Index;
-}
+class ObservationBlockIndex {
+  DenseMap<const BasicBlock *, ObservationGroup> Groups;
+  size_t GraphSize = 0;
+
+public:
+  explicit ObservationBlockIndex(MAIRGraph &G) : GraphSize(G.size()) {
+    const Function *F = G.getFunction();
+    assert(F && "CommonMAMotion requires a function-backed graph");
+    for (const BasicBlock &BB : *F)
+      for (Observation &Obs : G)
+        if (Obs.representsBlock(BB))
+          Groups[&BB].push_back(&Obs);
+  }
+
+  ArrayRef<Observation *> lookup(const BasicBlock &BB) const {
+    auto It = Groups.find(&BB);
+    if (It == Groups.end())
+      return {};
+    return It->second;
+  }
+
+  void assertTopologyUnchanged(const MAIRGraph &G) const {
+    assert(G.size() == GraphSize &&
+           "CommonMAMotion changed observation topology");
+  }
+};
 
 MemoryAccess *findMatchingAccess(ArrayRef<Observation *> Group,
                                  const MemoryAccess &Needle) {
   for (Observation *Obs : Group)
     for (MemoryAccess &Access : *Obs)
-      if (isSameAccess(Access, Needle))
+      if (isEquivalentMovableAccess(Access, Needle))
         return &Access;
   return nullptr;
 }
@@ -126,7 +141,7 @@ MemoryAccess *findMatchingAccess(ArrayRef<Observation *> Group,
 bool collectSourceGroups(MAIRGraph &G, Observation &ProofRoot,
                          ArrayRef<const BasicBlock *> Neighbors,
                          ObsEdgeKind Kind,
-                         const ObservationsByBlock &Observations,
+                         const ObservationBlockIndex &Observations,
                          SourceGroups &Groups) {
   bool SourceIsEntry = Kind == ObsEdgeKind::Dom;
   SmallPtrSet<Observation *, 8> SeenBoundaries;
@@ -142,33 +157,63 @@ bool collectSourceGroups(MAIRGraph &G, Observation &ProofRoot,
     SmallPtrSet<Observation *, 16> Reachable =
         collectReachableInBlock(*Boundary, Kind, *Neighbor);
     ObservationGroup &Group = Groups.emplace_back();
-    auto It = Observations.find(Neighbor);
-    if (It == Observations.end())
+    ArrayRef<Observation *> BlockObservations = Observations.lookup(*Neighbor);
+    if (BlockObservations.empty())
       return false;
-    for (Observation *Obs : It->second)
+    for (Observation *Obs : BlockObservations)
       if (Reachable.contains(Obs))
         Group.push_back(Obs);
   }
   return true;
 }
 
-bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink,
-                         DominatorTree &DT,
-                         const ObservationsByBlock &Observations) {
+void commitCommonMotion(Observation &Target, ArrayRef<MemoryAccess *> Matches,
+                        MotionDirection Direction) {
+  assert(!Matches.empty() && "common motion requires matching accesses");
+  MemoryAccess *Accumulator = nullptr;
+  for (MemoryAccess &Access : Target)
+    if (isEquivalentMovableAccess(Access, *Matches.front())) {
+      Accumulator = &Access;
+      break;
+    }
+
+  size_t MergeBegin = 0;
+  if (!Accumulator) {
+    Accumulator = &Target.addAccess(*Matches.front());
+    MergeBegin = 1;
+  }
+  for (size_t I = MergeBegin; I < Matches.size(); ++I) {
+    bool Merged = Accumulator->mergeWith(*Matches[I]);
+    assert(Merged && "exact common accesses must be mergeable");
+    (void)Merged;
+  }
+  for (MemoryAccess *Access : Matches)
+    Access->getParent()->erase(*Access);
+
+  if (isSink(Direction))
+    ++NumSunkAccesses;
+  else
+    ++NumHoistedAccesses;
+}
+
+bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB,
+                         MotionDirection Direction, DominatorTree &DT,
+                         const ObservationBlockIndex &Observations) {
   // Resolve the logical entry/exit boundary after SimplifyGraph contraction,
   // then require the complete, de-duplicated CFG neighbor set. Self-edges and
   // fewer than two distinct neighbors are deliberately no-ops.
-  Observation *Target =
-      Sink ? G.getBBEntryRepresentative(BB) : G.getBBExitRepresentative(BB);
+  Observation *Target = isSink(Direction) ? G.getBBEntryRepresentative(BB)
+                                          : G.getBBExitRepresentative(BB);
   if (!Target)
     return false;
   SmallVector<const BasicBlock *, 4> Neighbors;
-  if (!collectCFGNeighbors(BB, Sink, Neighbors))
+  if (!collectCFGNeighbors(BB, Direction, Neighbors))
     return false;
 
-  ObsEdgeKind Kind = Sink ? ObsEdgeKind::PostDom : ObsEdgeKind::Dom;
+  ObsEdgeKind Kind =
+      isSink(Direction) ? ObsEdgeKind::PostDom : ObsEdgeKind::Dom;
   Observation *ProofRoot = Target;
-  if (!Sink) {
+  if (!isSink(Direction)) {
     // Inter-block Dom proofs originate at the entry representative. When the
     // entry and exit have not contracted, the intra-block path also proves
     // that hoisting to the exit does not cross a forward barrier.
@@ -212,33 +257,7 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink,
       if (!Common)
         continue;
 
-      // Reuse an existing target access when possible. Otherwise clone the
-      // first match, merge all source instruction provenance, and erase the
-      // sources only after the complete match set has been collected.
-      MemoryAccess *Accumulator = nullptr;
-      for (MemoryAccess &Access : *Target)
-        if (isSameAccess(Access, Candidate)) {
-          Accumulator = &Access;
-          break;
-        }
-
-      size_t MergeBegin = 0;
-      if (!Accumulator) {
-        Accumulator = &Target->addAccess(*Matches.front());
-        MergeBegin = 1;
-      }
-      for (size_t I = MergeBegin; I < Matches.size(); ++I) {
-        bool Merged = Accumulator->mergeWith(*Matches[I]);
-        assert(Merged && "exact common accesses must be mergeable");
-        (void)Merged;
-      }
-      for (MemoryAccess *Access : Matches)
-        Access->getParent()->erase(*Access);
-
-      if (Sink)
-        ++NumSunkAccesses;
-      else
-        ++NumHoistedAccesses;
+      commitCommonMotion(*Target, Matches, Direction);
 
       // Move one common access per call; the outer fixed-point loop restarts
       // the scan with fresh iterators and exposes cascaded opportunities.
@@ -248,15 +267,16 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink,
   return false;
 }
 
-bool moveCommonAccessesToFixedPoint(MAIRGraph &G, bool Sink, DominatorTree &DT,
-                                    const ObservationsByBlock &Observations) {
+bool moveCommonAccessesToFixedPoint(MAIRGraph &G, MotionDirection Direction,
+                                    DominatorTree &DT,
+                                    const ObservationBlockIndex &Observations) {
   bool Changed = false;
   const Function *F = G.getFunction();
   assert(F && "CommonMAMotion requires a function-backed graph");
   while (true) {
     bool Moved = false;
     for (const BasicBlock &BB : *F) {
-      if (!moveOneCommonAccess(G, BB, Sink, DT, Observations))
+      if (!moveOneCommonAccess(G, BB, Direction, DT, Observations))
         continue;
       Moved = true;
       Changed = true;
@@ -281,10 +301,13 @@ PreservedAnalyses CommonMAMotionPass::run(MAIRGraph &G,
   DominatorTree DT(*const_cast<Function *>(F));
   // Common motion only transfers accesses; its observation topology is stable.
   // Index represented blocks once and reuse the index across both fixed points.
-  ObservationsByBlock Observations = indexObservationsByBlock(G);
-  bool Changed =
-      moveCommonAccessesToFixedPoint(G, /*Sink=*/false, DT, Observations);
-  Changed |= moveCommonAccessesToFixedPoint(G, /*Sink=*/true, DT, Observations);
+  ObservationBlockIndex Observations(G);
+  bool Changed = moveCommonAccessesToFixedPoint(G, MotionDirection::Hoist, DT,
+                                                Observations);
+  Observations.assertTopologyUnchanged(G);
+  Changed |= moveCommonAccessesToFixedPoint(G, MotionDirection::Sink, DT,
+                                            Observations);
+  Observations.assertTopologyUnchanged(G);
 
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

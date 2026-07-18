@@ -2308,6 +2308,40 @@ entry:
   EXPECT_TRUE(Graph.hasEdge(Later, External, ObsEdgeKind::PostDom));
 }
 
+TEST(MAIRGraph, TypedEdgeQueriesAndRemovalPreserveOtherKind) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %v = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->begin();
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  MAIRGraph Graph(F);
+  Observation &Source = Graph.createInstObservation(BB, BB.front());
+  Observation &Target = Graph.createBBObservation(BB, false);
+  Graph.addEdge(Source, Target, ObsEdgeKind::Dom);
+  Graph.addEdge(Source, Target, ObsEdgeKind::PostDom);
+
+  EXPECT_TRUE(Source.hasChild(Target, ObsEdgeKind::Dom));
+  EXPECT_TRUE(Source.hasChild(Target, ObsEdgeKind::PostDom));
+  EXPECT_TRUE(Target.hasParent(Source, ObsEdgeKind::Dom));
+  EXPECT_TRUE(Target.hasParent(Source, ObsEdgeKind::PostDom));
+
+  Graph.removeEdge(Source, Target, ObsEdgeKind::Dom);
+  EXPECT_FALSE(Source.hasChild(Target, ObsEdgeKind::Dom));
+  EXPECT_TRUE(Source.hasChild(Target, ObsEdgeKind::PostDom));
+  EXPECT_FALSE(Target.hasParent(Source, ObsEdgeKind::Dom));
+  EXPECT_TRUE(Target.hasParent(Source, ObsEdgeKind::PostDom));
+  EXPECT_EQ(Graph.hasEdge(Source, Target), true);
+  EXPECT_TRUE(Graph.verify());
+}
+
 TEST(MAIRGraphPass, SimplifyGraphKeepsCrossBlockBoundaryRepresentatives) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(

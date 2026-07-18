@@ -51,33 +51,6 @@ MergeCandidate findMergeCandidate(MAIRGraph &G) {
   return {};
 }
 
-void mergeObservationInto(MAIRGraph &G, Observation &Into, Observation &From) {
-  const std::optional<ObsEdgeKind> IntoToFrom = Into.hasChild(From);
-  const std::optional<ObsEdgeKind> FromToInto = From.hasChild(Into);
-  assert(IntoToFrom.has_value() && FromToInto.has_value() &&
-         "merged observations must be mutual children");
-
-  Into.prependAccessesFrom(From);
-
-  SmallVector<ObservationEdge, 8> Incoming = G.parentEdges(From);
-  SmallVector<ObservationEdge, 8> Outgoing = G.childEdges(From);
-
-  for (const ObservationEdge &Edge : Incoming) {
-    Observation &Pred = Edge.getNode();
-    if (&Pred != &Into)
-      G.addEdge(Pred, Into, Edge.getKind());
-  }
-
-  for (const ObservationEdge &Edge : Outgoing) {
-    Observation &Succ = Edge.getNode();
-    if (&Succ != &Into)
-      G.addEdge(Into, Succ, Edge.getKind());
-  }
-
-  G.replaceObservation(From, Into);
-  G.erase(From);
-}
-
 } // namespace
 
 PreservedAnalyses SimplifyGraphPass::run(MAIRGraph &G,
@@ -96,7 +69,7 @@ PreservedAnalyses SimplifyGraphPass::run(MAIRGraph &G,
     MergeCandidate Candidate = findMergeCandidate(G);
     if (!Candidate.Into)
       break;
-    mergeObservationInto(G, *Candidate.Into, *Candidate.From);
+    G.contractObservation(*Candidate.Into, *Candidate.From);
     ++NumMergedObservations;
     Changed = true;
   }

@@ -98,6 +98,14 @@ struct MAIRVerifierSupport {
     if (OS)
       WriteTs(V1, Vs...);
   }
+
+  template <typename... Ts>
+  bool CheckRequired(bool Condition, const Twine &Message, const Ts &...Vs) {
+    if (Condition)
+      return true;
+    CheckFailed(Message, Vs...);
+    return false;
+  }
 };
 
 } // namespace
@@ -106,14 +114,6 @@ struct MAIRVerifierSupport {
   do {                                                                         \
     if (!(C)) {                                                                \
       CheckFailed(__VA_ARGS__);                                                \
-    }                                                                          \
-  } while (false)
-
-#define CheckFatal(C, ...)                                                     \
-  do {                                                                         \
-    if (!(C)) {                                                                \
-      CheckFailed(__VA_ARGS__);                                                \
-      return;                                                                  \
     }                                                                          \
   } while (false)
 
@@ -157,6 +157,9 @@ private:
   void verifyParentEdge(const Observation &To, const ObservationEdge &Edge);
   void verifyCounters();
   void verifyBoundaryRepresentatives();
+  void verifyBoundaryRepresentative(const BasicBlock *BB,
+                                    const Observation *Representative,
+                                    bool IsEntry);
   void buildEdgeIndex();
 
   unsigned countChildEdge(const Observation &From, const Observation &To,
@@ -192,53 +195,52 @@ void MAIRVerifier::buildEdgeIndex() {
 }
 
 void MAIRVerifier::verifyBoundaryRepresentatives() {
-  for (const auto &Entry : Graph->BBEntryRepresentatives) {
-    const BasicBlock *BB = Entry.first;
-    const Observation *Representative = Entry.second;
-    CheckFatal(BB && Representative, "invalid BB-entry representative");
-    CheckFatal(LiveObservations.contains(Representative),
-               "BB-entry representative is not live", Representative, BB);
-    Check(Representative->getParent() == Graph,
-          "BB-entry representative does not belong to graph", Representative,
-          BB);
-    Check(Representative->representsBlock(*BB),
-          "BB-entry representative does not represent its block",
-          Representative, BB);
-    Check(!Representative->isEdgeSite(),
-          "BB-entry representative is an edge site", Representative, BB);
-    Check(Representative->isBasicBlockEntrySite(),
-          "BB-entry representative is not a BB-entry site", Representative, BB);
-  }
-  for (const auto &Entry : Graph->BBExitRepresentatives) {
-    const BasicBlock *BB = Entry.first;
-    const Observation *Representative = Entry.second;
-    CheckFatal(BB && Representative, "invalid BB-exit representative");
-    CheckFatal(LiveObservations.contains(Representative),
-               "BB-exit representative is not live", Representative, BB);
-    Check(Representative->getParent() == Graph,
-          "BB-exit representative does not belong to graph", Representative,
-          BB);
-    Check(Representative->representsBlock(*BB),
-          "BB-exit representative does not represent its block", Representative,
-          BB);
-    Check(!Representative->isEdgeSite(),
-          "BB-exit representative is an edge site", Representative, BB);
-    Check(Representative->isBasicBlockExitSite(),
-          "BB-exit representative is not a BB-exit site", Representative, BB);
-  }
+  for (const auto &Entry : Graph->BBEntryRepresentatives)
+    verifyBoundaryRepresentative(Entry.first, Entry.second, true);
+  for (const auto &Entry : Graph->BBExitRepresentatives)
+    verifyBoundaryRepresentative(Entry.first, Entry.second, false);
+}
+
+void MAIRVerifier::verifyBoundaryRepresentative(
+    const BasicBlock *BB, const Observation *Representative, bool IsEntry) {
+  const char *Kind = IsEntry ? "entry" : "exit";
+  if (!CheckRequired(BB && Representative,
+                     Twine("invalid BB-") + Kind + " representative"))
+    return;
+  if (!CheckRequired(LiveObservations.contains(Representative),
+                     Twine("BB-") + Kind + " representative is not live",
+                     Representative, BB))
+    return;
+  Check(Representative->getParent() == Graph,
+        Twine("BB-") + Kind + " representative does not belong to graph",
+        Representative, BB);
+  Check(Representative->representsBlock(*BB),
+        Twine("BB-") + Kind + " representative does not represent its block",
+        Representative, BB);
+  Check(!Representative->isEdgeSite(),
+        Twine("BB-") + Kind + " representative is an edge site", Representative,
+        BB);
+  const bool HasExpectedSite = IsEntry ? Representative->isBasicBlockEntrySite()
+                                       : Representative->isBasicBlockExitSite();
+  Check(HasExpectedSite,
+        Twine("BB-") + Kind + " representative is not a BB-" + Kind + " site",
+        Representative, BB);
 }
 
 void MAIRVerifier::verifyObservation(const Observation &Obs) {
-  CheckFatal(Obs.getParent() == Graph,
-             "observation parent does not match graph", Obs);
+  if (!CheckRequired(Obs.getParent() == Graph,
+                     "observation parent does not match graph", Obs))
+    return;
 
   if (Obs.isEdgeSite()) {
     const BasicBlock *From = Obs.getEdgeFrom();
     const BasicBlock *To = Obs.getEdgeTo();
-    CheckFatal(From && To, "edge site has a null endpoint", Obs);
+    if (!CheckRequired(From && To, "edge site has a null endpoint", Obs))
+      return;
     Check(From != To, "edge site is a self edge", Obs, From, To);
-    CheckFatal(From->getParent() && To->getParent(),
-               "edge site endpoint has no function", Obs, From, To);
+    if (!CheckRequired(From->getParent() && To->getParent(),
+                       "edge site endpoint has no function", Obs, From, To))
+      return;
     Check(From->getParent() == To->getParent(), "edge site crosses functions",
           Obs, From, To);
     Check(From->getParent() == Graph->getFunction(),
@@ -247,14 +249,18 @@ void MAIRVerifier::verifyObservation(const Observation &Obs) {
           "edge site is not a current CFG edge", Obs, From, To);
   } else {
     const BasicBlock *BB = Obs.getBasicBlock();
-    CheckFatal(BB, "observation has no basic block", Obs);
+    if (!CheckRequired(BB, "observation has no basic block", Obs))
+      return;
     Check(BB->getParent() == Graph->getFunction(),
           "observation block is outside graph function", Obs, BB);
 
     const Instruction *Anchor = Obs.getAnchor();
-    CheckFatal(Anchor, "observation has no anchor", Obs);
-    CheckFatal(Anchor->getParent() == BB,
-               "observation anchor is outside its block", Obs, Anchor, BB);
+    if (!CheckRequired(Anchor, "observation has no anchor", Obs))
+      return;
+    if (!CheckRequired(Anchor->getParent() == BB,
+                       "observation anchor is outside its block", Obs, Anchor,
+                       BB))
+      return;
 
     if (Obs.isBasicBlockEntrySite()) {
       Check(Anchor == &*BB->getFirstNonPHIIt(),
@@ -289,7 +295,8 @@ void MAIRVerifier::verifyGuard(const Observation &Obs) {
   Check(!Provenance.empty(), "execution guard has empty provenance", Obs);
   SmallPtrSet<const Instruction *, 8> Seen;
   for (const Instruction *I : Provenance) {
-    CheckFatal(I, "execution guard has null provenance", Obs);
+    if (!CheckRequired(I, "execution guard has null provenance", Obs))
+      return;
     Check(I->getFunction() == Graph->getFunction(),
           "execution guard provenance is outside graph function", Obs, I);
     Check(Seen.insert(I).second,
@@ -305,25 +312,31 @@ void MAIRVerifier::verifyMemoryAccess(const Observation &Obs,
 
   if (Obs.isMemoryInstSite()) {
     const Instruction *AccessI = Access.getInstruction();
-    CheckFatal(AccessI, "memory observation has access without instruction",
-               Access, Obs);
+    if (!CheckRequired(AccessI,
+                       "memory observation has access without instruction",
+                       Access, Obs))
+      return;
     Check(AccessI->getFunction() == Obs.getAnchor()->getFunction(),
           "memory access instruction is outside observation function", Access,
           Obs, AccessI, Obs.getAnchor());
   }
 
   for (const Instruction *AccessI : Access.getInstructions()) {
-    CheckFatal(AccessI, "memory access has null provenance", Access, Obs);
+    if (!CheckRequired(AccessI, "memory access has null provenance", Access,
+                       Obs))
+      return;
     Check(AccessI->getFunction() == Graph->getFunction(),
           "memory access provenance is outside graph function", Access, Obs,
           AccessI);
   }
 
   const Value *Base = Access.getBase();
-  CheckFatal(Base, "memory access has no base", Access, Obs);
-  CheckFatal(Access.getBaseUse().get(),
-             "memory access is not linked to a memory object", Access, Obs,
-             Base);
+  if (!CheckRequired(Base, "memory access has no base", Access, Obs))
+    return;
+  if (!CheckRequired(Access.getBaseUse().get(),
+                     "memory access is not linked to a memory object", Access,
+                     Obs, Base))
+    return;
   const MemoryObject &Object = Access.getMemoryObject();
   Check(Object.getBase() == Base,
         "memory access is linked to an object for a different base", Access,
@@ -349,8 +362,10 @@ void MAIRVerifier::verifyMemoryAccess(const Observation &Obs,
           "masked region has zero-sized elements", Access, Obs);
     if (const Value *Mask = Region->getDynamicMask()) {
       const auto *MaskType = dyn_cast<VectorType>(Mask->getType());
-      CheckFatal(MaskType && MaskType->getElementType()->isIntegerTy(1),
-                 "masked region mask is not an i1 vector", Access, Obs, Mask);
+      if (!CheckRequired(MaskType && MaskType->getElementType()->isIntegerTy(1),
+                         "masked region mask is not an i1 vector", Access, Obs,
+                         Mask))
+        return;
       Check(MaskType->getElementCount().getKnownMinValue() ==
                 Region->getNumLanes(),
             "masked region lane count does not match mask", Access, Obs, Mask);
@@ -367,11 +382,13 @@ void MAIRVerifier::verifyMemoryAccess(const Observation &Obs,
 void MAIRVerifier::verifyScalarExpr(const MAIRScalarExpr &Expr,
                                     const MemoryAccess &Access,
                                     const Observation &Obs) {
-  CheckFatal(Expr.isValid(), "invalid scalar expression", Access, Obs);
+  if (!CheckRequired(Expr.isValid(), "invalid scalar expression", Access, Obs))
+    return;
   Check(Graph->ownsScalarExpr(Expr),
         "scalar expression belongs to another graph", Access, Obs);
   Type *Ty = Expr.getType();
-  CheckFatal(Ty, "scalar expression has no type", Access, Obs);
+  if (!CheckRequired(Ty, "scalar expression has no type", Access, Obs))
+    return;
 
   ArrayRef<MAIRScalarExpr> Operands = Expr.operands();
   using Kind = MAIRScalarExpr::Kind;
@@ -390,7 +407,8 @@ void MAIRVerifier::verifyScalarExpr(const MAIRScalarExpr &Expr,
     Check(Operands.empty(), "LLVM-value scalar expression has operands", Access,
           Obs);
     const Value *V = Expr.getLLVMValue();
-    CheckFatal(V, "LLVM-value scalar expression is null", Access, Obs);
+    if (!CheckRequired(V, "LLVM-value scalar expression is null", Access, Obs))
+      return;
     Check(V->getType() == Ty,
           "LLVM-value scalar expression type does not match value", Access, Obs,
           V);
@@ -465,7 +483,9 @@ void MAIRVerifier::verifyScalarExpr(const MAIRScalarExpr &Expr,
 void MAIRVerifier::verifyPeriodicRegion(const PeriodicRegion &Region,
                                         const MemoryAccess &Access,
                                         const Observation &Obs) {
-  CheckFatal(Region.getBase(), "periodic region has no base", Access, Obs);
+  if (!CheckRequired(Region.getBase(), "periodic region has no base", Access,
+                     Obs))
+    return;
   verifyScalarExpr(Region.getStart(), Access, Obs);
   verifyScalarExpr(Region.getStride(), Access, Obs);
   verifyScalarExpr(Region.getAccessSize(), Access, Obs);
@@ -493,9 +513,10 @@ void MAIRVerifier::verifyPeriodicRegion(const PeriodicRegion &Region,
 void MAIRVerifier::verifyChildEdge(const Observation &From,
                                    const ObservationEdge &Edge) {
   const Observation &To = Edge.getNode();
-  CheckFatal(To.getParent() == Graph,
-             "child edge destination observation does not belong to graph",
-             From);
+  if (!CheckRequired(
+          To.getParent() == Graph,
+          "child edge destination observation does not belong to graph", From))
+    return;
   Check(countChildEdge(From, To, Edge.getKind()) == 1,
         "child edge appears more than once", From);
   Check(countParentEdge(To, From, Edge.getKind()) == 1,
@@ -505,8 +526,10 @@ void MAIRVerifier::verifyChildEdge(const Observation &From,
 void MAIRVerifier::verifyParentEdge(const Observation &To,
                                     const ObservationEdge &Edge) {
   const Observation &From = Edge.getNode();
-  CheckFatal(From.getParent() == Graph,
-             "parent edge source observation does not belong to graph", To);
+  if (!CheckRequired(From.getParent() == Graph,
+                     "parent edge source observation does not belong to graph",
+                     To))
+    return;
   Check(countParentEdge(To, From, Edge.getKind()) == 1,
         "parent edge appears more than once", To);
   Check(countChildEdge(From, To, Edge.getKind()) == 1,
@@ -568,4 +591,3 @@ bool MAIRGraph::verify(raw_ostream *OS) const {
 } // namespace mair
 
 #undef Check
-#undef CheckFatal

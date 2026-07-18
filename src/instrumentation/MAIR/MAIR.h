@@ -3,6 +3,7 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallBitVector.h"
@@ -39,11 +40,44 @@
 #include <variant>
 
 namespace mair {
-using namespace llvm;
+
+using llvm::APInt;
+using llvm::ArrayRef;
+using llvm::BasicBlock;
+using llvm::cast;
+using llvm::DataLayout;
+using llvm::DenseMap;
+using llvm::DenseSet;
+using llvm::DominatorTree;
+using llvm::DominatorTreeAnalysis;
+using llvm::Error;
+using llvm::Expected;
+using llvm::Function;
+using llvm::FunctionAnalysisManager;
+using llvm::ilist_node_with_parent;
+using llvm::ilist_parent;
+using llvm::Instruction;
+using llvm::iterator_range;
+using llvm::make_range;
+using llvm::mapped_iterator;
+using llvm::PassManager;
+using llvm::PostDominatorTree;
+using llvm::PostDominatorTreeAnalysis;
+using llvm::raw_ostream;
+using llvm::raw_string_ostream;
+using llvm::simple_ilist;
+using llvm::SmallBitVector;
+using llvm::SmallPtrSet;
+using llvm::SmallVector;
+using llvm::SpecificBumpPtrAllocator;
+using llvm::StringRef;
+using llvm::Type;
+using llvm::Value;
 
 class MAIRGraph;
 class MAIRVerifier;
 class MAIRObservationBackend;
+class SimplifyGraphPass;
 class MemoryAccess;
 class MemoryObject;
 class MemoryUse;
@@ -727,6 +761,8 @@ public:
   unsigned size() const { return NumAccesses; }
   std::optional<ObsEdgeKind> hasChild(const Observation &Obs);
   std::optional<ObsEdgeKind> hasParent(const Observation &Obs);
+  bool hasChild(const Observation &Obs, ObsEdgeKind Kind) const;
+  bool hasParent(const Observation &Obs, ObsEdgeKind Kind) const;
   /// Merging preserves execution semantics only for equal guards and equal
   /// anchored kinds, or for observations on the exact same CFG edge.
   bool hasCompatibleMergeSemantics(const Observation &Other) const;
@@ -759,6 +795,7 @@ private:
 class MAIRGraph final {
   friend class MAIRVerifier;
   friend class Observation;
+  friend class SimplifyGraphPass;
 
 public:
   using ObservationListType =
@@ -897,6 +934,7 @@ public:
 
   void addEdge(Observation &From, Observation &To, ObsEdgeKind Kind);
   void removeEdge(Observation &From, Observation &To);
+  void removeEdge(Observation &From, Observation &To, ObsEdgeKind Kind);
   bool hasEdge(const Observation &From, const Observation &To) const;
   bool hasEdge(const Observation &From, const Observation &To,
                ObsEdgeKind Kind) const;
@@ -935,6 +973,7 @@ private:
   MemoryObject &getOrCreateMemoryObject(const Value &Base);
   void registerAccess(MemoryAccess &Access);
   void unregisterAccess(MemoryAccess &Access);
+  void contractObservation(Observation &Into, Observation &From);
 
   /// Construct the raw MAIR graph once dominance and barrier analyses are
   /// fixed.

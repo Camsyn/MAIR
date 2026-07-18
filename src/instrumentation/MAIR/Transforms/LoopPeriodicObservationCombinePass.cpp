@@ -305,6 +305,12 @@ struct AggregateTarget {
   Observation *Event = nullptr;
 };
 
+struct AggregatePlan {
+  AggregateTarget Target;
+  MemoryRegion Region;
+  bool IsRange = false;
+};
+
 std::optional<AggregateTarget>
 getAggregateTarget(MAIRGraph &G, const MAIRLoopInfo &Loops, const Loop &L) {
   std::optional<MAIRLoopExit> Exit = Loops.describeUniqueExit(L);
@@ -324,15 +330,15 @@ getAggregateTarget(MAIRGraph &G, const MAIRLoopInfo &Loops, const Loop &L) {
   return AggregateTarget{Site, nullptr};
 }
 
-bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
-                             Observation &Obs, MemoryAccess &Access,
-                             bool MergeEquivalentAccesses,
-                             Observation *&ChangedTarget) {
+std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
+                                                MAIRLoopInfo &Loops,
+                                                Observation &Obs,
+                                                MemoryAccess &Access) {
   const AbstractAccess *Location = Access.getContiguousRegion();
   std::optional<uint64_t> AccessSize = getConstantAccessSize(Access);
   if (!Access.isMovable() || !Location || !Location->getBase() || !AccessSize ||
       *AccessSize == 0 || Access.getInstructions().empty())
-    return false;
+    return std::nullopt;
 
   // First bind the access to the loop described by its pointer recurrence,
   // then prove that this MAIR event executes exactly once in that loop.
@@ -341,29 +347,29 @@ bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
   for (Instruction *I : Access.getInstructions()) {
     const Value *Pointer = I ? getPointerOperand(*I) : nullptr;
     if (!Pointer)
-      return false;
+      return std::nullopt;
     const auto *Candidate =
         dyn_cast<SCEVAddRecExpr>(SE.getSCEV(const_cast<Value *>(Pointer)));
     if (!Candidate || !Candidate->isAffine() ||
         (Recurrence && Recurrence != Candidate))
-      return false;
+      return std::nullopt;
     Recurrence = Candidate;
   }
   if (!Recurrence || !Recurrence->getLoop())
-    return false;
+    return std::nullopt;
 
   const Loop &RelevantLoop = *Recurrence->getLoop();
   if (!Loops.isSimpleLoop(RelevantLoop) ||
       !Loops.executesOncePerRelevantIteration(Obs, RelevantLoop))
-    return false;
+    return std::nullopt;
   const SCEV *ExecutionCount =
       Loops.getExactExecutionCountSCEV(Obs, RelevantLoop);
   if (!ExecutionCount)
-    return false;
+    return std::nullopt;
   std::optional<AggregateTarget> Target =
       getAggregateTarget(G, Loops, RelevantLoop);
   if (!Target || !Loops.isValueAvailableAt(*Location->getBase(), Target->Site))
-    return false;
+    return std::nullopt;
 
   MemoryRegion Aggregate;
   // A constant recurrence that fits the contiguous MAIR abstraction keeps the
@@ -379,15 +385,15 @@ bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
     const SCEV *Stride = Recurrence->getStepRecurrence(SE);
     if (!Start->getType()->isPointerTy() || !Stride->getType()->isIntegerTy() ||
         !ExecutionCount->getType()->isIntegerTy())
-      return false;
+      return std::nullopt;
     if (const auto *ConstantStride = dyn_cast<SCEVConstant>(Stride))
       if (ConstantStride->getAPInt().isZero())
-        return false;
+        return std::nullopt;
 
     SCEVExprConverter Converter(G, Loops, Target->Site);
     if (!Converter.canConvert(Start) || !Converter.canConvert(Stride) ||
         !Converter.canConvert(ExecutionCount))
-      return false;
+      return std::nullopt;
 
     MAIRScalarExpr StartExpr = Converter.convert(Start);
     MAIRScalarExpr StrideExpr = Converter.convert(Stride);
@@ -399,17 +405,35 @@ bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
                                SizeExpr, CountExpr);
   }
 
-  Observation *TargetEvent = Target->Event;
+  return AggregatePlan{std::move(*Target), std::move(Aggregate),
+                       IsRangeAggregate};
+}
+
+void commitAggregate(MAIRGraph &G, MemoryAccess &Access, AggregatePlan Plan,
+                     bool MergeEquivalentAccesses,
+                     Observation *&ChangedTarget) {
+  Observation *TargetEvent = Plan.Target.Event;
   if (!TargetEvent)
-    TargetEvent = &G.createObservation(Target->Site);
-  addOrMergeAccess(*TargetEvent, Access, Aggregate, MergeEquivalentAccesses);
+    TargetEvent = &G.createObservation(Plan.Target.Site);
+  addOrMergeAccess(*TargetEvent, Access, Plan.Region, MergeEquivalentAccesses);
   Access.getParent()->erase(Access);
   ChangedTarget = TargetEvent;
   ++NumAggregatedAccesses;
-  if (IsRangeAggregate)
+  if (Plan.IsRange)
     ++NumRangeAggregates;
   else
     ++NumPeriodicAggregates;
+}
+
+bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
+                             Observation &Obs, MemoryAccess &Access,
+                             bool MergeEquivalentAccesses,
+                             Observation *&ChangedTarget) {
+  std::optional<AggregatePlan> Plan = buildAggregatePlan(G, Loops, Obs, Access);
+  if (!Plan)
+    return false;
+  commitAggregate(G, Access, std::move(*Plan), MergeEquivalentAccesses,
+                  ChangedTarget);
   return true;
 }
 

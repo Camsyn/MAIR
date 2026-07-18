@@ -46,24 +46,6 @@ const Instruction *getBarrierRangeEnd(const Observation &Obs) {
   return Obs.isBasicBlockExitSite() ? nullptr : Obs.getAnchor();
 }
 
-SmallVector<BasicBlock *, 16> collectReachableBlocks(Function &F) {
-  SmallVector<BasicBlock *, 16> Blocks;
-  SmallVector<BasicBlock *, 16> Worklist;
-  SmallPtrSet<BasicBlock *, 16> Seen;
-
-  Worklist.push_back(&F.getEntryBlock());
-  while (!Worklist.empty()) {
-    BasicBlock *BB = Worklist.pop_back_val();
-    if (!Seen.insert(BB).second)
-      continue;
-    Blocks.push_back(BB);
-    const Instruction *Term = BB->getTerminator();
-    for (unsigned I = 0, E = Term->getNumSuccessors(); I != E; ++I)
-      Worklist.push_back(Term->getSuccessor(I));
-  }
-  return Blocks;
-}
-
 bool isMaskedMemoryIntrinsic(const Instruction &I) {
   const auto *II = dyn_cast<IntrinsicInst>(&I);
   if (!II)
@@ -1038,6 +1020,18 @@ std::optional<ObsEdgeKind> Observation::hasParent(const Observation &Obs) {
   return Observation::hasEdgeTo(parents(), Obs);
 }
 
+bool Observation::hasChild(const Observation &Obs, ObsEdgeKind Kind) const {
+  return llvm::any_of(children(), [&](const ObservationEdge &Edge) {
+    return &Edge.getNode() == &Obs && Edge.getKind() == Kind;
+  });
+}
+
+bool Observation::hasParent(const Observation &Obs, ObsEdgeKind Kind) const {
+  return llvm::any_of(parents(), [&](const ObservationEdge &Edge) {
+    return &Edge.getNode() == &Obs && Edge.getKind() == Kind;
+  });
+}
+
 bool Observation::hasCompatibleMergeSemantics(const Observation &Other) const {
   if (Guard != Other.Guard)
     return false;
@@ -1453,6 +1447,34 @@ void MAIRGraph::replaceObservation(Observation &From, Observation &Into) {
       Entry.second = &Into;
 }
 
+void MAIRGraph::contractObservation(Observation &Into, Observation &From) {
+  assertLive("contract observations in");
+  assert(Into.getParent() == this && From.getParent() == this &&
+         "contracted observations must belong to this graph");
+  assert(Into.hasCompatibleMergeSemantics(From) &&
+         "contracted observations have incompatible semantics");
+  assert(Into.hasChild(From, ObsEdgeKind::PostDom) &&
+         From.hasChild(Into, ObsEdgeKind::Dom) &&
+         "contraction requires mutual Dom/PostDom edges");
+
+  Into.prependAccessesFrom(From);
+  ObservationEdgeListType Incoming = parentEdges(From);
+  ObservationEdgeListType Outgoing = childEdges(From);
+  for (const ObservationEdge &Edge : Incoming) {
+    Observation &Pred = Edge.getNode();
+    if (&Pred != &Into)
+      addEdge(Pred, Into, Edge.getKind());
+  }
+  for (const ObservationEdge &Edge : Outgoing) {
+    Observation &Succ = Edge.getNode();
+    if (&Succ != &Into)
+      addEdge(Into, Succ, Edge.getKind());
+  }
+
+  replaceObservation(From, Into);
+  erase(From);
+}
+
 void MAIRGraph::addEdge(Observation &From, Observation &To, ObsEdgeKind Kind) {
   assertLive("add an edge to");
   assert(From.getParent() == this && To.getParent() == this &&
@@ -1465,24 +1487,28 @@ void MAIRGraph::addEdge(Observation &From, Observation &To, ObsEdgeKind Kind) {
 }
 
 void MAIRGraph::removeEdge(Observation &From, Observation &To) {
+  removeEdge(From, To, ObsEdgeKind::Dom);
+  removeEdge(From, To, ObsEdgeKind::PostDom);
+}
+
+void MAIRGraph::removeEdge(Observation &From, Observation &To,
+                           ObsEdgeKind Kind) {
   assertLive("remove an edge from");
   assert(From.getParent() == this && To.getParent() == this &&
          "MAIRGraph edge endpoints must belong to this graph");
-  auto OldChildSize = From.Children.size();
-  From.Children.erase(std::remove_if(From.Children.begin(), From.Children.end(),
-                                     [&To](const ObservationEdge &Edge) {
-                                       return &Edge.getNode() == &To;
-                                     }),
-                      From.Children.end());
-  auto Removed = OldChildSize - From.Children.size();
-  if (Removed == 0)
+  auto ChildIt = llvm::find_if(From.Children, [&](const ObservationEdge &Edge) {
+    return &Edge.getNode() == &To && Edge.getKind() == Kind;
+  });
+  if (ChildIt == From.Children.end())
     return;
-  To.Parents.erase(std::remove_if(To.Parents.begin(), To.Parents.end(),
-                                  [&From](const ObservationEdge &Edge) {
-                                    return &Edge.getNode() == &From;
-                                  }),
-                   To.Parents.end());
-  NumEdges -= Removed;
+  From.Children.erase(ChildIt);
+
+  auto ParentIt = llvm::find_if(To.Parents, [&](const ObservationEdge &Edge) {
+    return &Edge.getNode() == &From && Edge.getKind() == Kind;
+  });
+  assert(ParentIt != To.Parents.end() && "MAIR edge lists are not symmetric");
+  To.Parents.erase(ParentIt);
+  --NumEdges;
 }
 
 bool MAIRGraph::hasEdge(const Observation &From, const Observation &To) const {

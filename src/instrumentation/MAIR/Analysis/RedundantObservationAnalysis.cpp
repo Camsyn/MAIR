@@ -9,40 +9,36 @@ namespace mair {
 AnalysisKey RedundantObservationAnalysis::Key;
 
 bool AvailableAccess::covers(const MemoryAccess &Other) const {
-  return SourceObservation != Other.getParent() && Source->covers(Other);
-}
-
-bool AvailableAccess::operator==(const AvailableAccess &Other) const {
-  return Source == Other.Source;
+  assert(Source && "available access must have a source");
+  return Source->getParent() != Other.getParent() && Source->covers(Other);
 }
 
 bool AvailableAccessSet::insert(const AvailableAccess &Access) {
   assert(Access.Source && "available access must have a source");
-  if (!Sources.insert(Access.Source).second)
+  if (!Sources.insert(Access.Source))
     return false;
-  Accesses.push_back(Access);
   return true;
 }
 
 bool AvailableAccessSet::unionWith(const AvailableAccessSet &Other) {
   bool Changed = false;
-  for (const AvailableAccess &Access : Other.Accesses)
-    Changed |= insert(Access);
+  for (const MemoryAccess *Source : Other.Sources)
+    Changed |= insert(AvailableAccess{Source});
   return Changed;
 }
 
 bool AvailableAccessSet::covers(const MemoryAccess &Access) const {
-  return llvm::any_of(Accesses, [&](const AvailableAccess &Available) {
-    return Available.covers(Access);
+  return llvm::any_of(Sources, [&](const MemoryAccess *Source) {
+    return AvailableAccess{Source}.covers(Access);
   });
 }
 
 bool AvailableAccessSet::covers(
     const MemoryAccess &Access,
     const DenseSet<const MemoryAccess *> &ExcludedSources) const {
-  return llvm::any_of(Accesses, [&](const AvailableAccess &Available) {
-    return !ExcludedSources.contains(Available.Source) &&
-           Available.covers(Access);
+  return llvm::any_of(Sources, [&](const MemoryAccess *Source) {
+    return !ExcludedSources.contains(Source) &&
+           AvailableAccess{Source}.covers(Access);
   });
 }
 
@@ -63,6 +59,27 @@ const AvailableAccessSet &
 RedundantObservationInfo::getOut(const Observation &Obs) const {
   return OutSets.find(&Obs)->second;
 }
+
+namespace {
+
+AvailableAccessSet
+computeInSet(const MAIRGraph &G, const Observation &Obs,
+             const DenseMap<const Observation *, AvailableAccessSet> &OutSets) {
+  AvailableAccessSet In;
+  for (const ObservationEdge &Edge : Obs.parents())
+    if (G.getOptimizationConfig().allowsCoverageAlong(Edge.getKind()))
+      In.unionWith(OutSets.find(&Edge.getNode())->second);
+  return In;
+}
+
+AvailableAccessSet computeOutSet(const Observation &Obs,
+                                 AvailableAccessSet In) {
+  for (const MemoryAccess &Access : Obs)
+    In.insert(AvailableAccess{&Access});
+  return In;
+}
+
+} // namespace
 
 RedundantObservationInfo
 RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
@@ -88,14 +105,8 @@ RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
     const Observation &Obs = *Worklist.pop_back_val();
     Queued.erase(&Obs);
 
-    AvailableAccessSet In;
-    for (const ObservationEdge &Edge : Obs.parents())
-      if (G.getOptimizationConfig().allowsCoverageAlong(Edge.getKind()))
-        In.unionWith(Result.OutSets.find(&Edge.getNode())->second);
-
-    AvailableAccessSet Out = In;
-    for (const MemoryAccess &Access : Obs)
-      Out.insert(AvailableAccess{&Access, Access.getParent()});
+    AvailableAccessSet In = computeInSet(G, Obs, Result.OutSets);
+    AvailableAccessSet Out = computeOutSet(Obs, In);
 
     AvailableAccessSet &OldIn = Result.InSets.find(&Obs)->second;
     AvailableAccessSet &OldOut = Result.OutSets.find(&Obs)->second;

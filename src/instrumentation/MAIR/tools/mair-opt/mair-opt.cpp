@@ -27,32 +27,34 @@
 using namespace llvm;
 using namespace mair;
 
-static cl::opt<std::string> InputFilename(cl::Positional,
-                                          cl::desc("<input LLVM IR>"),
-                                          cl::init("-"),
-                                          cl::value_desc("filename"));
+static cl::OptionCategory MAIROptions("MAIR Options");
+
+static cl::opt<std::string>
+    InputFilename(cl::Positional, cl::desc("<input LLVM IR>"), cl::init("-"),
+                  cl::value_desc("filename"), cl::cat(MAIROptions));
 static cl::opt<std::string> OutputFilename("o",
                                            cl::desc("Write output to <file>"),
                                            cl::value_desc("filename"),
-                                           cl::init("-"));
+                                           cl::init("-"), cl::cat(MAIROptions));
 static cl::opt<bool> EmitLLVM("emit-llvm",
                               cl::desc("Print LLVM IR annotated with MAIR"),
-                              cl::init(false));
+                              cl::init(false), cl::cat(MAIROptions));
 static cl::opt<bool> EmitDOT("emit-dot",
                              cl::desc("Print MAIR graph as Graphviz DOT"),
-                             cl::init(false));
+                             cl::init(false), cl::cat(MAIROptions));
 static cl::opt<bool> DisableOutput("disable-output",
                                    cl::desc("Do not emit MAIR or LLVM output"),
-                                   cl::init(false));
+                                   cl::init(false), cl::cat(MAIROptions));
 static cl::opt<bool>
     Og("Og", cl::desc("Run the standard MAIR Og optimization pipeline"),
-       cl::init(false));
+       cl::init(false), cl::cat(MAIROptions));
 static cl::opt<bool>
     O1("O1", cl::desc("Run the standard MAIR O1 optimization pipeline"),
-       cl::init(false));
+       cl::init(false), cl::cat(MAIROptions));
 static cl::opt<std::string> PassPipeline("passes",
                                          cl::desc("MAIRGraph pass pipeline"),
-                                         cl::value_desc("pipeline"));
+                                         cl::value_desc("pipeline"),
+                                         cl::cat(MAIROptions));
 static cl::extrahelp MAIRGraphPassHelp(R"(
 MAIRGraph pass names for -passes:
   cmm                           - Common MA Motion
@@ -65,6 +67,7 @@ MAIRGraph pass names for -passes:
 
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
+  cl::HideUnrelatedOptions(MAIROptions);
   cl::ParseCommandLineOptions(argc, argv, "MAIR optimizer utility\n");
   if (EmitLLVM && EmitDOT) {
     errs() << "-emit-llvm and -emit-dot cannot be used together\n";

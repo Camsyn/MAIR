@@ -1732,7 +1732,7 @@ entry:
   EXPECT_EQ(Load.size(), 1u);
 }
 
-TEST(MAIRGraphPass, RedundantObservationDoesNotEliminateWithinObservation) {
+TEST(MAIRGraphPass, RedundantObservationEliminatesWithinObservation) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(i32* %p) {
@@ -1757,6 +1757,88 @@ entry:
   Obs.addAccess(Second);
   Graph.addEdge(Obs, Obs, ObsEdgeKind::Dom);
 
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  RedundantObservationEliminationPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_FALSE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  EXPECT_EQ(Obs.size(), 1u);
+}
+
+TEST(MAIRGraphPass, RedundantObservationUsesNonAdjacentLocalWitness) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %wide = load i128, ptr %p, align 16
+  %p4 = getelementptr i8, ptr %p, i64 4
+  %atomic = load atomic i32, ptr %p4 monotonic, align 4
+  %p8 = getelementptr i8, ptr %p, i64 8
+  %narrow = load i32, ptr %p8, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  const llvm::Function &F = *M->begin();
+  const llvm::BasicBlock &BB = *F.begin();
+  auto InstIt = BB.begin();
+  const llvm::Instruction &WideLoad = *InstIt++;
+  ++InstIt;
+  const llvm::Instruction &AtomicLoad = *InstIt++;
+  ++InstIt;
+  const llvm::Instruction &NarrowLoad = *InstIt++;
+  MAIRGraph Graph(F);
+  auto &Obs = Graph.createInstObservation(BB, WideLoad);
+  MemoryAccess Atomic =
+      MemoryAccess::fromInstruction(AtomicLoad, M->getDataLayout());
+  MemoryAccess Narrow =
+      MemoryAccess::fromInstruction(NarrowLoad, M->getDataLayout());
+  Obs.addAccess(Atomic);
+  Obs.addAccess(Narrow);
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  RedundantObservationEliminationPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_FALSE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  ASSERT_EQ(Obs.size(), 2u);
+  EXPECT_FALSE(Obs.begin()->isAtomic());
+  EXPECT_TRUE(std::next(Obs.begin())->isAtomic());
+}
+
+TEST(MAIRGraphPass, RedundantObservationLocalCoverageRespectsLevelDirection) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %wide = load i64, ptr %p, align 8
+  store i32 0, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  const llvm::Function &F = *M->begin();
+  const llvm::BasicBlock &BB = *F.begin();
+  auto InstIt = BB.begin();
+  const llvm::Instruction &WideLoad = *InstIt++;
+  const llvm::Instruction &NarrowStore = *InstIt++;
+  MAIRGraph Graph(F);
+  auto &Obs = Graph.createInstObservation(BB, WideLoad);
+  MemoryAccess Store =
+      MemoryAccess::fromInstruction(NarrowStore, M->getDataLayout());
+  Obs.addAccess(Store);
+
+  EXPECT_LT(Obs.begin()->getLevel(), std::next(Obs.begin())->getLevel());
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC);

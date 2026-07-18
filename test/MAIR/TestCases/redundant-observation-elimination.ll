@@ -1,5 +1,6 @@
 ; RUN: mair-opt -passes=roe %s | FileCheck %s
 ; RUN: mair-opt -passes=roe --disable-output %s
+; RUN: mair-opt -passes="simplifygraph,roe" %s | FileCheck %s --check-prefix=INTRA
 
 define void @remove_covered_accesses(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @remove_covered_accesses {
@@ -39,6 +40,12 @@ define void @keep_uncovered_accesses(ptr %p, ptr %q) {
 ; CHECK:         read ptr %q, 4
 ; CHECK-NOT:     read ptr %p, 4
 ; CHECK:         write ptr %p, 4
+; INTRA-LABEL: mair graph of fn @keep_uncovered_accesses {
+; INTRA:         ma4: preds=
+; INTRA-NOT:       read ptr %p, 4
+; INTRA:           read ptr %p + 8, 4
+; INTRA-NEXT:      read ptr %q, 4
+; INTRA-NEXT:      write ptr %p, 4
 entry:
   %p0 = load i32, ptr %p, align 4
   %p8 = getelementptr i8, ptr %p, i64 8

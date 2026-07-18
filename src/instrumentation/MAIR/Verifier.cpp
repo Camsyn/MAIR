@@ -1,5 +1,7 @@
 #include "MAIR/MAIR.h"
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
@@ -7,6 +9,8 @@
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include <utility>
 
 using namespace llvm;
 
@@ -114,7 +118,27 @@ struct MAIRVerifierSupport {
   } while (false)
 
 class MAIRVerifier : public MAIRVerifierSupport {
+  struct EdgeCounts {
+    unsigned Dom = 0;
+    unsigned PostDom = 0;
+
+    void add(ObsEdgeKind Kind) {
+      if (Kind == ObsEdgeKind::Dom)
+        ++Dom;
+      else
+        ++PostDom;
+    }
+    unsigned get(ObsEdgeKind Kind) const {
+      return Kind == ObsEdgeKind::Dom ? Dom : PostDom;
+    }
+  };
+
+  using EdgeKey = std::pair<const Observation *, const Observation *>;
+
   const MAIRGraph *Graph = nullptr;
+  DenseSet<const Observation *> LiveObservations;
+  DenseMap<EdgeKey, EdgeCounts> ChildEdgeCounts;
+  DenseMap<EdgeKey, EdgeCounts> ParentEdgeCounts;
 
 public:
   explicit MAIRVerifier(raw_ostream *OS) : MAIRVerifierSupport(OS) {}
@@ -133,6 +157,7 @@ private:
   void verifyParentEdge(const Observation &To, const ObservationEdge &Edge);
   void verifyCounters();
   void verifyBoundaryRepresentatives();
+  void buildEdgeIndex();
 
   unsigned countChildEdge(const Observation &From, const Observation &To,
                           ObsEdgeKind Kind) const;
@@ -143,6 +168,7 @@ private:
 bool MAIRVerifier::verify(const MAIRGraph &G) {
   Graph = &G;
   Broken = false;
+  buildEdgeIndex();
 
   for (const Observation &Obs : G.Observations)
     verifyObservation(Obs);
@@ -152,18 +178,26 @@ bool MAIRVerifier::verify(const MAIRGraph &G) {
   return !Broken;
 }
 
+void MAIRVerifier::buildEdgeIndex() {
+  LiveObservations.clear();
+  ChildEdgeCounts.clear();
+  ParentEdgeCounts.clear();
+  for (const Observation &Obs : Graph->Observations) {
+    LiveObservations.insert(&Obs);
+    for (const ObservationEdge &Edge : Obs.Children)
+      ChildEdgeCounts[{&Obs, &Edge.getNode()}].add(Edge.getKind());
+    for (const ObservationEdge &Edge : Obs.Parents)
+      ParentEdgeCounts[{&Edge.getNode(), &Obs}].add(Edge.getKind());
+  }
+}
+
 void MAIRVerifier::verifyBoundaryRepresentatives() {
-  auto IsLive = [&](const Observation *Representative) {
-    return llvm::any_of(Graph->Observations, [&](const Observation &Obs) {
-      return &Obs == Representative;
-    });
-  };
   for (const auto &Entry : Graph->BBEntryRepresentatives) {
     const BasicBlock *BB = Entry.first;
     const Observation *Representative = Entry.second;
     CheckFatal(BB && Representative, "invalid BB-entry representative");
-    CheckFatal(IsLive(Representative), "BB-entry representative is not live",
-               Representative, BB);
+    CheckFatal(LiveObservations.contains(Representative),
+               "BB-entry representative is not live", Representative, BB);
     Check(Representative->getParent() == Graph,
           "BB-entry representative does not belong to graph", Representative,
           BB);
@@ -179,8 +213,8 @@ void MAIRVerifier::verifyBoundaryRepresentatives() {
     const BasicBlock *BB = Entry.first;
     const Observation *Representative = Entry.second;
     CheckFatal(BB && Representative, "invalid BB-exit representative");
-    CheckFatal(IsLive(Representative), "BB-exit representative is not live",
-               Representative, BB);
+    CheckFatal(LiveObservations.contains(Representative),
+               "BB-exit representative is not live", Representative, BB);
     Check(Representative->getParent() == Graph,
           "BB-exit representative does not belong to graph", Representative,
           BB);
@@ -508,17 +542,15 @@ void MAIRVerifier::verifyCounters() {
 unsigned MAIRVerifier::countChildEdge(const Observation &From,
                                       const Observation &To,
                                       ObsEdgeKind Kind) const {
-  return llvm::count_if(From.children(), [&To, Kind](const auto &Edge) {
-    return &Edge.getNode() == &To && Edge.getKind() == Kind;
-  });
+  auto It = ChildEdgeCounts.find({&From, &To});
+  return It == ChildEdgeCounts.end() ? 0 : It->second.get(Kind);
 }
 
 unsigned MAIRVerifier::countParentEdge(const Observation &To,
                                        const Observation &From,
                                        ObsEdgeKind Kind) const {
-  return llvm::count_if(To.parents(), [&From, Kind](const auto &Edge) {
-    return &Edge.getNode() == &From && Edge.getKind() == Kind;
-  });
+  auto It = ParentEdgeCounts.find({&From, &To});
+  return It == ParentEdgeCounts.end() ? 0 : It->second.get(Kind);
 }
 
 bool MAIRGraph::verify(raw_ostream *OS) const {

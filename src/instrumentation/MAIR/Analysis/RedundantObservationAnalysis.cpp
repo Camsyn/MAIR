@@ -17,9 +17,8 @@ bool AvailableAccess::operator==(const AvailableAccess &Other) const {
 }
 
 bool AvailableAccessSet::insert(const AvailableAccess &Access) {
-  if (llvm::any_of(Accesses, [&](const AvailableAccess &Existing) {
-        return Existing == Access;
-      }))
+  assert(Access.Source && "available access must have a source");
+  if (!Sources.insert(Access.Source).second)
     return false;
   Accesses.push_back(Access);
   return true;
@@ -33,8 +32,9 @@ bool AvailableAccessSet::unionWith(const AvailableAccessSet &Other) {
 }
 
 bool AvailableAccessSet::covers(const MemoryAccess &Access) const {
-  DenseSet<const MemoryAccess *> ExcludedSources;
-  return covers(Access, ExcludedSources);
+  return llvm::any_of(Accesses, [&](const AvailableAccess &Available) {
+    return Available.covers(Access);
+  });
 }
 
 bool AvailableAccessSet::covers(
@@ -47,12 +47,10 @@ bool AvailableAccessSet::covers(
 }
 
 bool AvailableAccessSet::operator==(const AvailableAccessSet &Other) const {
-  if (Accesses.size() != Other.Accesses.size())
+  if (Sources.size() != Other.Sources.size())
     return false;
-  return llvm::all_of(Accesses, [&](const AvailableAccess &Access) {
-    return llvm::any_of(Other.Accesses, [&](const AvailableAccess &Candidate) {
-      return Candidate == Access;
-    });
+  return llvm::all_of(Sources, [&](const MemoryAccess *Source) {
+    return Other.Sources.contains(Source);
   });
 }
 
@@ -75,28 +73,42 @@ RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
     Result.OutSets.try_emplace(&Obs);
   }
 
-  bool Changed;
-  do {
-    Changed = false;
-    for (const Observation &Obs : G) {
-      AvailableAccessSet In;
-      for (const ObservationEdge &Edge : G.parentEdges(Obs))
-        if (G.getOptimizationConfig().allowsCoverageAlong(Edge.getKind()))
-          In.unionWith(Result.OutSets.find(&Edge.getNode())->second);
+  SmallVector<const Observation *, 16> Worklist;
+  DenseSet<const Observation *> Queued;
+  auto Enqueue = [&](const Observation &Obs) {
+    if (Queued.insert(&Obs).second)
+      Worklist.push_back(&Obs);
+  };
+  for (const Observation &Obs : G)
+    Enqueue(Obs);
 
-      AvailableAccessSet Out = In;
-      for (const MemoryAccess &Access : Obs)
-        Out.insert(AvailableAccess{&Access, Access.getParent()});
+  // Facts only grow. Recompute a node when a predecessor's OUT set changes,
+  // then propagate only when this node's OUT set changes in turn.
+  while (!Worklist.empty()) {
+    const Observation &Obs = *Worklist.pop_back_val();
+    Queued.erase(&Obs);
 
-      AvailableAccessSet &OldIn = Result.InSets.find(&Obs)->second;
-      AvailableAccessSet &OldOut = Result.OutSets.find(&Obs)->second;
-      if (OldIn != In || OldOut != Out) {
-        OldIn = std::move(In);
-        OldOut = std::move(Out);
-        Changed = true;
-      }
-    }
-  } while (Changed);
+    AvailableAccessSet In;
+    for (const ObservationEdge &Edge : Obs.parents())
+      if (G.getOptimizationConfig().allowsCoverageAlong(Edge.getKind()))
+        In.unionWith(Result.OutSets.find(&Edge.getNode())->second);
+
+    AvailableAccessSet Out = In;
+    for (const MemoryAccess &Access : Obs)
+      Out.insert(AvailableAccess{&Access, Access.getParent()});
+
+    AvailableAccessSet &OldIn = Result.InSets.find(&Obs)->second;
+    AvailableAccessSet &OldOut = Result.OutSets.find(&Obs)->second;
+    const bool OutChanged = OldOut != Out;
+    OldIn = std::move(In);
+    if (!OutChanged)
+      continue;
+    OldOut = std::move(Out);
+
+    for (const ObservationEdge &Edge : Obs.children())
+      if (G.getOptimizationConfig().allowsCoverageAlong(Edge.getKind()))
+        Enqueue(Edge.getNode());
+  }
 
   return Result;
 }

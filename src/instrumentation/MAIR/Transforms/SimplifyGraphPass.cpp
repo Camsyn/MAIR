@@ -89,6 +89,9 @@ PreservedAnalyses SimplifyGraphPass::run(MAIRGraph &G,
 #endif
   bool Changed = false;
 
+  // Contract one mutual Dom/PostDom pair at a time. Rewiring can expose a new
+  // pair outside the previous neighborhood, so each contraction starts a fresh
+  // topology scan and preserves deterministic list-order selection.
   while (true) {
     MergeCandidate Candidate = findMergeCandidate(G);
     if (!Candidate.Into)

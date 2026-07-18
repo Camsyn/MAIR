@@ -2,6 +2,7 @@
 
 #include "MAIR/MAIRPasses.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/ScalarEvolution.h"
@@ -23,6 +24,7 @@ class MAIRLoopInfo {
   llvm::LoopInfo *LI = nullptr;
   llvm::DominatorTree *DT = nullptr;
   llvm::PostDominatorTree *PDT = nullptr;
+  mutable llvm::DenseMap<const llvm::Loop *, bool> SimpleLoopCache;
 
 public:
   MAIRLoopInfo() = default;
@@ -52,6 +54,7 @@ public:
   llvm::ScalarEvolution &getSE() const;
 
 private:
+  bool computeIsSimpleLoop(const llvm::Loop &L) const;
   bool isLoopInvariant(const llvm::Value *V, const llvm::Loop &L) const;
   bool isLoopInvariant(const AbstractValue &Value, const llvm::Loop &L) const;
 };

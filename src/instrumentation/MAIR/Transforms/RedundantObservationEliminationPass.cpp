@@ -145,14 +145,8 @@ RedundantObservationEliminationPass::run(MAIRGraph &G,
     }
   }
 
-  for (MemoryAccess *Access : Redundant) {
-    Observation *Parent = Access->getParent();
-    auto It = llvm::find_if(Parent->accesses(), [&](MemoryAccess &Candidate) {
-      return &Candidate == Access;
-    });
-    assert(It != Parent->end() && "redundant access must belong to parent");
-    Parent->erase(It);
-  }
+  for (MemoryAccess *Access : Redundant)
+    Access->getParent()->erase(*Access);
   NumEliminatedAccesses += Redundant.size();
   return Redundant.empty() ? PreservedAnalyses::all()
                            : PreservedAnalyses::none();

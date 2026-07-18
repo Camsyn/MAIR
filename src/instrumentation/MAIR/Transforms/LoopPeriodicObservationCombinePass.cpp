@@ -3,6 +3,7 @@
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
@@ -234,15 +235,6 @@ public:
   }
 };
 
-void eraseAccess(MemoryAccess &Access) {
-  Observation &Parent = *Access.getParent();
-  auto It = llvm::find_if(Parent.accesses(), [&](MemoryAccess &Candidate) {
-    return &Candidate == &Access;
-  });
-  assert(It != Parent.end() && "memory access must belong to its parent");
-  Parent.erase(It);
-}
-
 void addOrMergeAccess(Observation &Target, const MemoryAccess &Access,
                       const MemoryRegion &Region,
                       bool MergeEquivalentAccesses) {
@@ -334,7 +326,8 @@ getAggregateTarget(MAIRGraph &G, const MAIRLoopInfo &Loops, const Loop &L) {
 
 bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
                              Observation &Obs, MemoryAccess &Access,
-                             bool MergeEquivalentAccesses) {
+                             bool MergeEquivalentAccesses,
+                             Observation *&ChangedTarget) {
   const AbstractAccess *Location = Access.getContiguousRegion();
   std::optional<uint64_t> AccessSize = getConstantAccessSize(Access);
   if (!Access.isMovable() || !Location || !Location->getBase() || !AccessSize ||
@@ -410,7 +403,8 @@ bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
   if (!TargetEvent)
     TargetEvent = &G.createObservation(Target->Site);
   addOrMergeAccess(*TargetEvent, Access, Aggregate, MergeEquivalentAccesses);
-  eraseAccess(Access);
+  Access.getParent()->erase(Access);
+  ChangedTarget = TargetEvent;
   ++NumAggregatedAccesses;
   if (IsRangeAggregate)
     ++NumRangeAggregates;
@@ -419,16 +413,39 @@ bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
   return true;
 }
 
-bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
-                             bool MergeEquivalentAccesses) {
+bool aggregateObservations(MAIRGraph &G, MAIRLoopInfo &Loops,
+                           bool MergeEquivalentAccesses) {
   if (!Loops.isAvailable())
     return false;
+
+  SmallVector<Observation *, 16> Worklist;
+  DenseSet<Observation *> Queued;
+  auto Enqueue = [&](Observation &Obs) {
+    if (Queued.insert(&Obs).second)
+      Worklist.push_back(&Obs);
+  };
   for (Observation &Obs : G)
-    for (MemoryAccess &Access : Obs)
-      if (aggregateOneObservation(G, Loops, Obs, Access,
-                                  MergeEquivalentAccesses))
-        return true;
-  return false;
+    Enqueue(Obs);
+
+  bool Changed = false;
+  // A successful aggregation only changes its source and destination events.
+  // Process the remaining source accesses in place and revisit the destination
+  // so nested-loop aggregation can still reach the same fixed point.
+  while (!Worklist.empty()) {
+    Observation &Obs = *Worklist.pop_back_val();
+    Queued.erase(&Obs);
+    for (auto It = Obs.begin(); It != Obs.end();) {
+      MemoryAccess &Access = *It++;
+      Observation *ChangedTarget = nullptr;
+      if (!aggregateOneObservation(G, Loops, Obs, Access,
+                                   MergeEquivalentAccesses, ChangedTarget))
+        continue;
+      Changed = true;
+      assert(ChangedTarget && "successful aggregation must have a target");
+      Enqueue(*ChangedTarget);
+    }
+  }
+  return Changed;
 }
 
 } // namespace
@@ -439,10 +456,8 @@ LoopPeriodicObservationCombinePass::run(MAIRGraph &G,
 #if LLVM_ENABLE_STATS
   NumInputAccesses += MAIRStat::compute(G).getNumMemoryAccesses();
 #endif
-  bool Changed = false;
   MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
-  while (aggregateOneObservation(G, Loops, MergeEquivalentAccesses))
-    Changed = true;
+  bool Changed = aggregateObservations(G, Loops, MergeEquivalentAccesses);
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 

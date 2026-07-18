@@ -18,6 +18,7 @@ struct AvailableAccess {
 
 class AvailableAccessSet {
   llvm::SmallVector<AvailableAccess, 8> Accesses;
+  llvm::DenseSet<const MemoryAccess *> Sources;
 
 public:
   bool insert(const AvailableAccess &Access);

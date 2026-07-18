@@ -28,6 +28,14 @@ Loop *MAIRLoopInfo::getLoopFor(const Observation &Obs) const {
 }
 
 bool MAIRLoopInfo::isSimpleLoop(const Loop &L) const {
+  if (auto It = SimpleLoopCache.find(&L); It != SimpleLoopCache.end())
+    return It->second;
+  bool Result = computeIsSimpleLoop(L);
+  SimpleLoopCache[&L] = Result;
+  return Result;
+}
+
+bool MAIRLoopInfo::computeIsSimpleLoop(const Loop &L) const {
   if (!L.getHeader() || !L.getLoopPreheader() || !L.getLoopLatch() ||
       !L.getUniqueExitBlock() || !L.getExitingBlock())
     return false;
@@ -42,6 +50,11 @@ bool MAIRLoopInfo::isSimpleLoop(const Loop &L) const {
     return false;
 
   for (const BasicBlock *BB : L.getBlocks()) {
+    // Loop transforms relocate or aggregate observations across iterations.
+    // Any sanitizer-specific barrier in the loop cuts that proof, even when
+    // the LLVM call itself is readonly and would otherwise pass alias checks.
+    if (Graph->hasFwdBarrier(*BB) || Graph->hasBwdBarrier(*BB))
+      return false;
     for (const Instruction &I : *BB) {
       if (isa<DbgInfoIntrinsic>(I))
         continue;

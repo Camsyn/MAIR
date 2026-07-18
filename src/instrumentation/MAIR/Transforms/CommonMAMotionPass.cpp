@@ -2,6 +2,7 @@
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -53,15 +54,6 @@ bool isAccessAvailableAt(const MemoryAccess &Access, const Observation &Target,
          isValueAvailableAt(Location->getSize().getSymbol(), *Anchor, DT);
 }
 
-void eraseAccess(MemoryAccess &Access) {
-  Observation &Parent = *Access.getParent();
-  auto It = llvm::find_if(Parent.accesses(), [&](MemoryAccess &Candidate) {
-    return &Candidate == &Access;
-  });
-  assert(It != Parent.end() && "memory access must belong to its parent");
-  Parent.erase(It);
-}
-
 SmallPtrSet<Observation *, 16> collectReachableInBlock(Observation &Root,
                                                        ObsEdgeKind Kind,
                                                        const BasicBlock &BB) {
@@ -109,6 +101,18 @@ bool collectCFGNeighbors(const BasicBlock &BB, bool Sink,
 
 using ObservationGroup = SmallVector<Observation *, 8>;
 using SourceGroups = SmallVector<ObservationGroup, 4>;
+using ObservationsByBlock = DenseMap<const BasicBlock *, ObservationGroup>;
+
+ObservationsByBlock indexObservationsByBlock(MAIRGraph &G) {
+  ObservationsByBlock Index;
+  const Function *F = G.getFunction();
+  assert(F && "CommonMAMotion requires a function-backed graph");
+  for (const BasicBlock &BB : *F)
+    for (Observation &Obs : G)
+      if (Obs.representsBlock(BB))
+        Index[&BB].push_back(&Obs);
+  return Index;
+}
 
 MemoryAccess *findMatchingAccess(ArrayRef<Observation *> Group,
                                  const MemoryAccess &Needle) {
@@ -121,7 +125,9 @@ MemoryAccess *findMatchingAccess(ArrayRef<Observation *> Group,
 
 bool collectSourceGroups(MAIRGraph &G, Observation &ProofRoot,
                          ArrayRef<const BasicBlock *> Neighbors,
-                         ObsEdgeKind Kind, SourceGroups &Groups) {
+                         ObsEdgeKind Kind,
+                         const ObservationsByBlock &Observations,
+                         SourceGroups &Groups) {
   bool SourceIsEntry = Kind == ObsEdgeKind::Dom;
   SmallPtrSet<Observation *, 8> SeenBoundaries;
   for (const BasicBlock *Neighbor : Neighbors) {
@@ -136,15 +142,19 @@ bool collectSourceGroups(MAIRGraph &G, Observation &ProofRoot,
     SmallPtrSet<Observation *, 16> Reachable =
         collectReachableInBlock(*Boundary, Kind, *Neighbor);
     ObservationGroup &Group = Groups.emplace_back();
-    for (Observation &Obs : G)
-      if (Obs.representsBlock(*Neighbor) && Reachable.contains(&Obs))
-        Group.push_back(&Obs);
+    auto It = Observations.find(Neighbor);
+    if (It == Observations.end())
+      return false;
+    for (Observation *Obs : It->second)
+      if (Reachable.contains(Obs))
+        Group.push_back(Obs);
   }
   return true;
 }
 
 bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink,
-                         DominatorTree &DT) {
+                         DominatorTree &DT,
+                         const ObservationsByBlock &Observations) {
   // Resolve the logical entry/exit boundary after SimplifyGraph contraction,
   // then require the complete, de-duplicated CFG neighbor set. Self-edges and
   // fewer than two distinct neighbors are deliberately no-ops.
@@ -177,7 +187,8 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink,
   // From that quotient boundary, expand only through proof edges that still
   // represent the same neighbor block.
   SourceGroups Groups;
-  if (!collectSourceGroups(G, *ProofRoot, Neighbors, Kind, Groups))
+  if (!collectSourceGroups(G, *ProofRoot, Neighbors, Kind, Observations,
+                           Groups))
     return false;
 
   // Seed from the first group, reject values unavailable at the target anchor,
@@ -222,7 +233,7 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink,
         (void)Merged;
       }
       for (MemoryAccess *Access : Matches)
-        eraseAccess(*Access);
+        Access->getParent()->erase(*Access);
 
       if (Sink)
         ++NumSunkAccesses;
@@ -237,15 +248,15 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB, bool Sink,
   return false;
 }
 
-bool moveCommonAccessesToFixedPoint(MAIRGraph &G, bool Sink,
-                                    DominatorTree &DT) {
+bool moveCommonAccessesToFixedPoint(MAIRGraph &G, bool Sink, DominatorTree &DT,
+                                    const ObservationsByBlock &Observations) {
   bool Changed = false;
   const Function *F = G.getFunction();
   assert(F && "CommonMAMotion requires a function-backed graph");
   while (true) {
     bool Moved = false;
     for (const BasicBlock &BB : *F) {
-      if (!moveOneCommonAccess(G, BB, Sink, DT))
+      if (!moveOneCommonAccess(G, BB, Sink, DT, Observations))
         continue;
       Moved = true;
       Changed = true;
@@ -268,8 +279,12 @@ PreservedAnalyses CommonMAMotionPass::run(MAIRGraph &G,
   const Function *F = G.getFunction();
   assert(F && "CommonMAMotion requires a function-backed graph");
   DominatorTree DT(*const_cast<Function *>(F));
-  bool Changed = moveCommonAccessesToFixedPoint(G, /*Sink=*/false, DT);
-  Changed |= moveCommonAccessesToFixedPoint(G, /*Sink=*/true, DT);
+  // Common motion only transfers accesses; its observation topology is stable.
+  // Index represented blocks once and reuse the index across both fixed points.
+  ObservationsByBlock Observations = indexObservationsByBlock(G);
+  bool Changed =
+      moveCommonAccessesToFixedPoint(G, /*Sink=*/false, DT, Observations);
+  Changed |= moveCommonAccessesToFixedPoint(G, /*Sink=*/true, DT, Observations);
 
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

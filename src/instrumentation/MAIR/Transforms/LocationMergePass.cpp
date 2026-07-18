@@ -27,15 +27,10 @@ bool hasConcreteRange(const MemoryAccess &Access) {
          Location->getSize().isConstant();
 }
 
-void eraseAccess(Observation &Obs, MemoryAccess &Access) {
-  auto It = llvm::find_if(Obs.accesses(), [&](MemoryAccess &Candidate) {
-    return &Candidate == &Access;
-  });
-  assert(It != Obs.end() && "memory access does not belong to observation");
-  Obs.erase(It);
-}
-
 bool mergeLocations(Observation &Obs) {
+  // Concrete ranges are sorted so adjacent/overlapping regions merge in one
+  // sweep. Symbolic and masked regions lack that ordering and use pairwise
+  // comparison only after the concrete prefix has converged.
   DenseMap<MemoryObject *, AccessGroup> Groups;
   for (MemoryAccess &Access : Obs)
     if (!Access.isPeriodic())
@@ -69,7 +64,7 @@ bool mergeLocations(Observation &Obs) {
         ++I;
         continue;
       }
-      eraseAccess(Obs, *Next);
+      Obs.erase(*Next);
       Accesses.erase(Accesses.begin() + I);
       --ConcreteEnd;
       Changed = true;
@@ -85,7 +80,7 @@ bool mergeLocations(Observation &Obs) {
           ++J;
           continue;
         }
-        eraseAccess(Obs, *Next);
+        Obs.erase(*Next);
         Accesses.erase(Accesses.begin() + J);
         Changed = true;
         ++NumMergedAccesses;

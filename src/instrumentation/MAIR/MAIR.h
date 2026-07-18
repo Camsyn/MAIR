@@ -733,6 +733,7 @@ public:
 
   MemoryAccess &addAccess(const MemoryAccess &A);
   iterator erase(iterator It);
+  iterator erase(MemoryAccess &Access);
   void mergeAccessesFrom(const Observation &Other);
   void prependAccessesFrom(const Observation &Other);
 
@@ -782,6 +783,8 @@ private:
   DenseMap<const Value *, MemoryObject *> MemoryObjects;
   DenseMap<const BasicBlock *, Observation *> BBEntryRepresentatives;
   DenseMap<const BasicBlock *, Observation *> BBExitRepresentatives;
+  DenseSet<const BasicBlock *> FwdBarrierBlocks;
+  DenseSet<const BasicBlock *> BwdBarrierBlocks;
   ObservationListType Observations;
   unsigned NumObservations = 0;
   unsigned NumEdges = 0;
@@ -905,6 +908,12 @@ public:
   ObservationEdgeListType parentEdges(const Observation &Obs) const;
   MemoryObject *getMemoryObject(const Value &Base);
   const MemoryObject *getMemoryObject(const Value &Base) const;
+  bool hasFwdBarrier(const BasicBlock &BB) const {
+    return FwdBarrierBlocks.contains(&BB);
+  }
+  bool hasBwdBarrier(const BasicBlock &BB) const {
+    return BwdBarrierBlocks.contains(&BB);
+  }
 
   bool verify(raw_ostream *OS = nullptr) const;
   std::string toString(bool LLVM = false) const;

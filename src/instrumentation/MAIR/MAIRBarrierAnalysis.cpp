@@ -11,11 +11,11 @@ namespace mair {
 
 bool MAIRBarrierAnalysisCore::isBarrierBlock(const BasicBlock &BB,
                                              bool Forward) {
-  if (isInBarrierMemo(BB, Forward))
-    return true;
+  auto &Memo = Forward ? FwdBarrierBBMemo : BwdBarrierBBMemo;
+  if (auto It = Memo.find(&BB); It != Memo.end())
+    return It->second;
   const bool Result = hasAnyBarrier(BB, Forward);
-  if (Result)
-    cacheBarrierBB(BB, Forward);
+  Memo[&BB] = Result;
   return Result;
 }
 
@@ -55,7 +55,7 @@ bool MAIRBarrierAnalysisCore::hasBarrierBetween(const BasicBlock &BB,
     return false;
   bool Result = hasAnyBarrier(BB, ComesBefore, ComesAfter, Forward);
   if (Result)
-    cacheBarrierBB(BB, Forward);
+    (Forward ? FwdBarrierBBMemo : BwdBarrierBBMemo)[&BB] = true;
   return Result;
 }
 

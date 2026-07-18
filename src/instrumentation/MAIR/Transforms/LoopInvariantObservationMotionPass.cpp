@@ -66,15 +66,6 @@ Observation *findEvent(MAIRGraph &G, const ObservationSite &Site,
   return nullptr;
 }
 
-void eraseAccess(MemoryAccess &Access) {
-  Observation &Parent = *Access.getParent();
-  auto It = llvm::find_if(Parent.accesses(), [&](MemoryAccess &Candidate) {
-    return &Candidate == &Access;
-  });
-  assert(It != Parent.end() && "memory access must belong to its parent");
-  Parent.erase(It);
-}
-
 void moveAccessTo(MemoryAccess &Access, Observation &Target,
                   bool MergeEquivalentAccesses) {
   MemoryAccess *Accumulator = nullptr;
@@ -93,7 +84,7 @@ void moveAccessTo(MemoryAccess &Access, Observation &Target,
     assert(Merged && "exactly matching accesses must be mergeable");
     (void)Merged;
   }
-  eraseAccess(Access);
+  Access.getParent()->erase(Access);
 }
 
 bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops,

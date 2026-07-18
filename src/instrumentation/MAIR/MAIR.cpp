@@ -107,6 +107,11 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
   // 1. Create observations for each MA and BB
   // ===========================================================
   for (BasicBlock &BB : F) {
+    if (BA.hasFwdBarrier(BB))
+      Graph.FwdBarrierBlocks.insert(&BB);
+    if (BA.hasBwdBarrier(BB))
+      Graph.BwdBarrierBlocks.insert(&BB);
+
     auto &ObsInOneBB = OrderedObs[&BB];
     auto &Start = Graph.createBBObservation(BB, true);
     BBEntryObs[&BB] = &Start;
@@ -1052,6 +1057,12 @@ Observation::iterator Observation::erase(iterator It) {
   return Next;
 }
 
+Observation::iterator Observation::erase(MemoryAccess &Access) {
+  assert(Access.getParent() == this &&
+         "memory access does not belong to this observation");
+  return erase(Access.getIterator());
+}
+
 void Observation::mergeAccessesFrom(const Observation &Other) {
   assert(hasCompatibleMergeSemantics(Other) &&
          "cannot merge observations with incompatible site or guard semantics");
@@ -1147,6 +1158,8 @@ MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
       MemoryObjects(std::move(Other.MemoryObjects)),
       BBEntryRepresentatives(std::move(Other.BBEntryRepresentatives)),
       BBExitRepresentatives(std::move(Other.BBExitRepresentatives)),
+      FwdBarrierBlocks(std::move(Other.FwdBarrierBlocks)),
+      BwdBarrierBlocks(std::move(Other.BwdBarrierBlocks)),
       Observations(std::move(Other.Observations)),
       NumObservations(Other.NumObservations), NumEdges(Other.NumEdges),
       NextObservationID(Other.NextObservationID) {
@@ -1172,6 +1185,8 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   MemoryObjects = std::move(Other.MemoryObjects);
   BBEntryRepresentatives = std::move(Other.BBEntryRepresentatives);
   BBExitRepresentatives = std::move(Other.BBExitRepresentatives);
+  FwdBarrierBlocks = std::move(Other.FwdBarrierBlocks);
+  BwdBarrierBlocks = std::move(Other.BwdBarrierBlocks);
   Observations = std::move(Other.Observations);
   NumObservations = Other.NumObservations;
   NumEdges = Other.NumEdges;
@@ -1314,11 +1329,41 @@ bool MAIRGraph::ownsScalarExpr(MAIRScalarExpr Expr) const {
 
 MAIRGraph::iterator MAIRGraph::erase(Observation &Obs) {
   assertLive("erase from");
-  auto It = llvm::find_if(Observations, [&Obs](Observation &Candidate) {
-    return &Candidate == &Obs;
-  });
-  assert(It != Observations.end() &&
+  assert(Obs.getParent() == this &&
          "Observation does not belong to this MAIRGraph");
+  auto It = Obs.getIterator();
+  unsigned SelfEdges = 0;
+  for (const ObservationEdge &Edge : Obs.Children)
+    SelfEdges += &Edge.getNode() == &Obs;
+
+  // Detach both adjacency lists in one pass. The old implementation called
+  // removeEdge once per neighbor, repeatedly rescanning Obs's vectors during
+  // graph contraction. Each mirror edge is removed directly from its peer;
+  // self-edges are present in both lists but count only once.
+  auto RemoveMirror = [](auto &Edges, const Observation &Neighbor,
+                         ObsEdgeKind Kind) {
+    auto EdgeIt = llvm::find_if(Edges, [&](const ObservationEdge &Edge) {
+      return &Edge.getNode() == &Neighbor && Edge.getKind() == Kind;
+    });
+    assert(EdgeIt != Edges.end() && "MAIR edge lists are not symmetric");
+    Edges.erase(EdgeIt);
+  };
+  for (const ObservationEdge &Edge : Obs.Children) {
+    Observation &To = Edge.getNode();
+    if (&To != &Obs)
+      RemoveMirror(To.Parents, Obs, Edge.getKind());
+  }
+  for (const ObservationEdge &Edge : Obs.Parents) {
+    Observation &From = Edge.getNode();
+    if (&From != &Obs)
+      RemoveMirror(From.Children, Obs, Edge.getKind());
+  }
+  const unsigned IncidentEdges =
+      Obs.Children.size() + Obs.Parents.size() - SelfEdges;
+  Obs.Children.clear();
+  Obs.Parents.clear();
+  NumEdges -= IncidentEdges;
+
   SmallVector<const BasicBlock *, 4> EntryKeys;
   SmallVector<const BasicBlock *, 4> ExitKeys;
   for (const auto &Entry : BBEntryRepresentatives)
@@ -1331,12 +1376,6 @@ MAIRGraph::iterator MAIRGraph::erase(Observation &Obs) {
     BBEntryRepresentatives.erase(BB);
   for (const BasicBlock *BB : ExitKeys)
     BBExitRepresentatives.erase(BB);
-  SmallVector<Observation *, 4> Succs = successors(Obs);
-  SmallVector<Observation *, 4> Preds = predecessors(Obs);
-  for (Observation *Succ : Succs)
-    removeEdge(Obs, *Succ);
-  for (Observation *Pred : Preds)
-    removeEdge(*Pred, Obs);
   for (MemoryAccess &Access : Obs.Accesses)
     unregisterAccess(Access);
   auto Next = Observations.erase(It);
@@ -1352,6 +1391,8 @@ void MAIRGraph::clearStorage() {
   MemoryObjects.clear();
   BBEntryRepresentatives.clear();
   BBExitRepresentatives.clear();
+  FwdBarrierBlocks.clear();
+  BwdBarrierBlocks.clear();
   NumObservations = 0;
   NumEdges = 0;
   NextObservationID = 0;

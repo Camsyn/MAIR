@@ -1,6 +1,6 @@
 #pragma once
 
-#include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Instruction.h"
 
@@ -31,6 +31,12 @@ public:
   bool hasBwdBarrierBetween(const Instruction *From, const Instruction *To);
   bool hasFwdBarrierPath(const BasicBlock &From, const BasicBlock &To);
   bool hasBwdBarrierPath(const BasicBlock &From, const BasicBlock &To);
+  bool hasFwdBarrier(const BasicBlock &BB) {
+    return isBarrierBlock(BB, /*Forward=*/true);
+  }
+  bool hasBwdBarrier(const BasicBlock &BB) {
+    return isBarrierBlock(BB, /*Forward=*/false);
+  }
   bool isFwdBarrier(const Instruction &I) const {
     return isBarrier(I, /*Forward=*/true);
   }
@@ -39,8 +45,8 @@ public:
   }
 
 private:
-  SmallSetVector<const BasicBlock *, 16> FwdBarrierBBMemo;
-  SmallSetVector<const BasicBlock *, 16> BwdBarrierBBMemo;
+  DenseMap<const BasicBlock *, bool> FwdBarrierBBMemo;
+  DenseMap<const BasicBlock *, bool> BwdBarrierBBMemo;
 
 protected:
   virtual bool hasAnyBarrier(const BasicBlock &BB, bool Forward) const = 0;
@@ -49,13 +55,7 @@ protected:
   virtual bool isBarrier(const Instruction &I, bool Forward) const = 0;
 
 private:
-  void cacheBarrierBB(const BasicBlock &BB, bool Forward) {
-    (Forward ? FwdBarrierBBMemo : BwdBarrierBBMemo).insert(&BB);
-  }
-  bool isInBarrierMemo(const BasicBlock &BB, bool Forward) const {
-    return (Forward ? FwdBarrierBBMemo : BwdBarrierBBMemo).contains(&BB);
-  }
-  bool isBarrierBlock(const BasicBlock &BB, bool Foward);
+  bool isBarrierBlock(const BasicBlock &BB, bool Forward);
   bool hasBarrierBetween(const BasicBlock &BB, const Instruction *From,
                          const Instruction *To, bool Forward);
   bool hasBarrierPath(const BasicBlock &From, const BasicBlock &To,

@@ -146,16 +146,16 @@ bool collectSourceGroups(MAIRGraph &G, Observation &ProofRoot,
   bool SourceIsEntry = Kind == ObsEdgeKind::Dom;
   SmallPtrSet<Observation *, 8> SeenBoundaries;
   for (const BasicBlock *Neighbor : Neighbors) {
-    Observation *Boundary = SourceIsEntry
+    Observation &Boundary = SourceIsEntry
                                 ? G.getBBEntryRepresentative(*Neighbor)
                                 : G.getBBExitRepresentative(*Neighbor);
-    if (!Boundary || Boundary == &ProofRoot ||
-        !SeenBoundaries.insert(Boundary).second ||
-        !G.hasEdge(ProofRoot, *Boundary, Kind))
+    if (&Boundary == &ProofRoot ||
+        !SeenBoundaries.insert(&Boundary).second ||
+        !G.hasEdge(ProofRoot, Boundary, Kind))
       return false;
 
     SmallPtrSet<Observation *, 16> Reachable =
-        collectReachableInBlock(*Boundary, Kind, *Neighbor);
+        collectReachableInBlock(Boundary, Kind, *Neighbor);
     ObservationGroup &Group = Groups.emplace_back();
     ArrayRef<Observation *> BlockObservations = Observations.lookup(*Neighbor);
     if (BlockObservations.empty())
@@ -202,28 +202,24 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB,
   // Resolve the logical entry/exit boundary after SimplifyGraph contraction,
   // then require the complete, de-duplicated CFG neighbor set. Self-edges and
   // fewer than two distinct neighbors are deliberately no-ops.
-  Observation *Target = isSink(Direction) ? G.getBBEntryRepresentative(BB)
+  Observation &Target = isSink(Direction) ? G.getBBEntryRepresentative(BB)
                                           : G.getBBExitRepresentative(BB);
-  if (!Target)
-    return false;
   SmallVector<const BasicBlock *, 4> Neighbors;
   if (!collectCFGNeighbors(BB, Direction, Neighbors))
     return false;
 
   ObsEdgeKind Kind =
       isSink(Direction) ? ObsEdgeKind::PostDom : ObsEdgeKind::Dom;
-  Observation *ProofRoot = Target;
+  Observation &ProofRoot =
+      isSink(Direction) ? Target : G.getBBEntryRepresentative(BB);
   if (!isSink(Direction)) {
     // Inter-block Dom proofs originate at the entry representative. When the
     // entry and exit have not contracted, the intra-block path also proves
     // that hoisting to the exit does not cross a forward barrier.
-    ProofRoot = G.getBBEntryRepresentative(BB);
-    if (!ProofRoot)
-      return false;
-    if (ProofRoot != Target) {
+    if (&ProofRoot != &Target) {
       SmallPtrSet<Observation *, 16> TargetReachable =
-          collectReachableInBlock(*ProofRoot, ObsEdgeKind::Dom, BB);
-      if (!TargetReachable.contains(Target))
+          collectReachableInBlock(ProofRoot, ObsEdgeKind::Dom, BB);
+      if (!TargetReachable.contains(&Target))
         return false;
     }
   }
@@ -232,7 +228,7 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB,
   // From that quotient boundary, expand only through proof edges that still
   // represent the same neighbor block.
   SourceGroups Groups;
-  if (!collectSourceGroups(G, *ProofRoot, Neighbors, Kind, Observations,
+  if (!collectSourceGroups(G, ProofRoot, Neighbors, Kind, Observations,
                            Groups))
     return false;
 
@@ -242,7 +238,7 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB,
     for (MemoryAccess &Candidate : *Obs) {
       if (!Candidate.isMovable())
         continue;
-      if (!isAccessAvailableAt(Candidate, *Target, DT))
+      if (!isAccessAvailableAt(Candidate, Target, DT))
         continue;
       SmallVector<MemoryAccess *, 4> Matches = {&Candidate};
       bool Common = true;
@@ -257,7 +253,7 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB,
       if (!Common)
         continue;
 
-      commitCommonMotion(*Target, Matches, Direction);
+      commitCommonMotion(Target, Matches, Direction);
 
       // Move one common access per call; the outer fixed-point loop restarts
       // the scan with fresh iterators and exposes cascaded opportunities.

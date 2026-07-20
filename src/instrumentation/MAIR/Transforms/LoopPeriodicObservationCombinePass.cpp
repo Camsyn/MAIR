@@ -317,10 +317,10 @@ getAggregateTarget(MAIRGraph &G, const MAIRLoopInfo &Loops, const Loop &L) {
   if (!Exit)
     return std::nullopt;
   if (Exit->IsDedicated) {
-    Observation *Event = G.getBBEntryRepresentative(*Exit->Exit);
-    if (!Event || !Event->hasAlwaysGuard())
+    Observation &Event = G.getBBEntryRepresentative(*Exit->Exit);
+    if (!Event.hasAlwaysGuard())
       return std::nullopt;
-    return AggregateTarget{Event->getSite(), Event};
+    return AggregateTarget{Event.getSite(), &Event};
   }
 
   ObservationSite Site = ObservationSite::edge(*Exit->Exiting, *Exit->Exit);

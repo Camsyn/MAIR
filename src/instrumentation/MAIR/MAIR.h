@@ -926,10 +926,10 @@ public:
 
   Observation *find(StringRef Name);
   const Observation *find(StringRef Name) const;
-  Observation *getBBEntryRepresentative(const BasicBlock &BB);
-  const Observation *getBBEntryRepresentative(const BasicBlock &BB) const;
-  Observation *getBBExitRepresentative(const BasicBlock &BB);
-  const Observation *getBBExitRepresentative(const BasicBlock &BB) const;
+  Observation &getBBEntryRepresentative(const BasicBlock &BB);
+  const Observation &getBBEntryRepresentative(const BasicBlock &BB) const;
+  Observation &getBBExitRepresentative(const BasicBlock &BB);
+  const Observation &getBBExitRepresentative(const BasicBlock &BB) const;
   void replaceObservation(Observation &From, Observation &Into);
 
   void addEdge(Observation &From, Observation &To, ObsEdgeKind Kind);

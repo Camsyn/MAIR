@@ -131,10 +131,8 @@ std::optional<InvariantMotionPlan> findInvariantMotion(MAIRGraph &G,
 
       ObservationSite TargetSite;
       if (Exit->IsDedicated) {
-        Observation *ExitEntry = G.getBBEntryRepresentative(*Exit->Exit);
-        if (!ExitEntry)
-          continue;
-        TargetSite = ExitEntry->getSite();
+        Observation &ExitEntry = G.getBBEntryRepresentative(*Exit->Exit);
+        TargetSite = ExitEntry.getSite();
       } else {
         TargetSite = ObservationSite::edge(*Exit->Exiting, *Exit->Exit);
       }

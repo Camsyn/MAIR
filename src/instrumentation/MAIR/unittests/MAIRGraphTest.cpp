@@ -1412,14 +1412,13 @@ exit:
     if (BB.getName() == "latch")
       Latch = &BB;
   ASSERT_NE(Latch, nullptr);
-  const Observation *LatchEntry = Graph.getBBEntryRepresentative(*Latch);
-  ASSERT_NE(LatchEntry, nullptr);
-  llvm::Loop *L = Loops.getLoopFor(*LatchEntry);
+  const Observation &LatchEntry = Graph.getBBEntryRepresentative(*Latch);
+  llvm::Loop *L = Loops.getLoopFor(LatchEntry);
   ASSERT_NE(L, nullptr);
 
   EXPECT_FALSE(Loops.isSimpleLoop(*L));
-  EXPECT_FALSE(Loops.executesOncePerRelevantIteration(*LatchEntry, *L));
-  EXPECT_EQ(Loops.getExactExecutionCountSCEV(*LatchEntry, *L), nullptr);
+  EXPECT_FALSE(Loops.executesOncePerRelevantIteration(LatchEntry, *L));
+  EXPECT_EQ(Loops.getExactExecutionCountSCEV(LatchEntry, *L), nullptr);
 }
 
 TEST(MAIRLoopAnalysis, WidensMaximumBackedgeCountWithoutWrapping) {
@@ -1552,12 +1551,11 @@ merge:
   ASSERT_NE(Merge, nullptr);
   ASSERT_NE(LeftValue, nullptr);
   ASSERT_NE(MergedValue, nullptr);
-  const Observation *MergeEntry = Graph.getBBEntryRepresentative(*Merge);
-  ASSERT_NE(MergeEntry, nullptr);
+  const Observation &MergeEntry = Graph.getBBEntryRepresentative(*Merge);
 
-  EXPECT_TRUE(Loops.isValueAvailableAt(*F.getArg(0), MergeEntry->getSite()));
-  EXPECT_TRUE(Loops.isValueAvailableAt(*MergedValue, MergeEntry->getSite()));
-  EXPECT_FALSE(Loops.isValueAvailableAt(*LeftValue, MergeEntry->getSite()));
+  EXPECT_TRUE(Loops.isValueAvailableAt(*F.getArg(0), MergeEntry.getSite()));
+  EXPECT_TRUE(Loops.isValueAvailableAt(*MergedValue, MergeEntry.getSite()));
+  EXPECT_FALSE(Loops.isValueAvailableAt(*LeftValue, MergeEntry.getSite()));
   EXPECT_TRUE(Loops.isValueAvailableAt(*LeftValue,
                                        ObservationSite::edge(*Left, *Merge)));
   EXPECT_FALSE(Loops.isValueAvailableAt(*LeftValue,
@@ -2367,14 +2365,12 @@ right:
 
   ASSERT_TRUE(Graph.verify());
   for (const llvm::BasicBlock &BB : F) {
-    const Observation *Entry = Graph.getBBEntryRepresentative(BB);
-    const Observation *Exit = Graph.getBBExitRepresentative(BB);
-    ASSERT_NE(Entry, nullptr);
-    ASSERT_NE(Exit, nullptr);
-    EXPECT_TRUE(Entry->isBasicBlockEntrySite());
-    EXPECT_TRUE(Exit->isBasicBlockExitSite());
-    EXPECT_TRUE(Entry->representsBlock(BB));
-    EXPECT_TRUE(Exit->representsBlock(BB));
+    const Observation &Entry = Graph.getBBEntryRepresentative(BB);
+    const Observation &Exit = Graph.getBBExitRepresentative(BB);
+    EXPECT_TRUE(Entry.isBasicBlockEntrySite());
+    EXPECT_TRUE(Exit.isBasicBlockExitSite());
+    EXPECT_TRUE(Entry.representsBlock(BB));
+    EXPECT_TRUE(Exit.representsBlock(BB));
   }
 }
 
@@ -2393,12 +2389,24 @@ entry:
   llvm::BasicBlock &BB = F.getEntryBlock();
   MAIRGraph Graph(F);
   Observation &Entry = Graph.createBBObservation(BB, true);
-  Graph.createBBObservation(BB, false);
-  ASSERT_EQ(Graph.getBBEntryRepresentative(BB), &Entry);
+  Observation &Exit = Graph.createBBObservation(BB, false);
+  ASSERT_EQ(&Graph.getBBEntryRepresentative(BB), &Entry);
+  ASSERT_EQ(&Graph.getBBExitRepresentative(BB), &Exit);
+  const MAIRGraph &ConstGraph = Graph;
+  ASSERT_EQ(&ConstGraph.getBBEntryRepresentative(BB), &Entry);
+  ASSERT_EQ(&ConstGraph.getBBExitRepresentative(BB), &Exit);
 
   Graph.erase(Entry);
 
-  EXPECT_EQ(Graph.getBBEntryRepresentative(BB), nullptr);
+  EXPECT_DEATH_IF_SUPPORTED((void)Graph.getBBEntryRepresentative(BB),
+                            "Seems the MAIRGraph is broken.");
+  EXPECT_DEATH_IF_SUPPORTED((void)ConstGraph.getBBEntryRepresentative(BB),
+                            "Seems the MAIRGraph is broken.");
+  Graph.erase(Exit);
+  EXPECT_DEATH_IF_SUPPORTED((void)Graph.getBBExitRepresentative(BB),
+                            "Seems the MAIRGraph is broken.");
+  EXPECT_DEATH_IF_SUPPORTED((void)ConstGraph.getBBExitRepresentative(BB),
+                            "Seems the MAIRGraph is broken.");
   ASSERT_TRUE(Graph.verify());
 }
 
@@ -2655,8 +2663,8 @@ exit:
   EXPECT_EQ(Edge.getEdgeFrom(), &Entry);
   EXPECT_EQ(Edge.getEdgeTo(), &Exit);
   EXPECT_TRUE(Edge.hasExecutionGuard());
-  EXPECT_EQ(Graph.getBBEntryRepresentative(Entry), &EntryRep);
-  EXPECT_EQ(Graph.getBBEntryRepresentative(Exit), &ExitRep);
+  EXPECT_EQ(&Graph.getBBEntryRepresentative(Entry), &EntryRep);
+  EXPECT_EQ(&Graph.getBBEntryRepresentative(Exit), &ExitRep);
 }
 
 TEST(MAIRSchema, VerifierRejectsCrossFunctionAndNonCFGEdgeSites) {
@@ -2780,7 +2788,7 @@ entry:
   ASSERT_TRUE(Graph.verify());
   EXPECT_EQ(Guarded.getSite(), Representative.getSite());
   EXPECT_NE(Guarded.getGuard(), Representative.getGuard());
-  EXPECT_EQ(Graph.getBBEntryRepresentative(BB), &Representative);
+  EXPECT_EQ(&Graph.getBBEntryRepresentative(BB), &Representative);
 }
 
 TEST(MAIRSchema, PeriodicRegionAcceptsZeroTripAndSurvivesGraphMove) {
@@ -3611,10 +3619,10 @@ entry:
   SimplifyGraphPass Pass;
   MAIRGraphAnalysisManager AM;
   EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(Graph.getBBEntryRepresentative(BB), &Entry);
-  EXPECT_EQ(Graph.getBBExitRepresentative(BB), &Exit);
-  EXPECT_TRUE(Graph.getBBEntryRepresentative(BB)->isBasicBlockEntrySite());
-  EXPECT_TRUE(Graph.getBBExitRepresentative(BB)->isBasicBlockExitSite());
+  EXPECT_EQ(&Graph.getBBEntryRepresentative(BB), &Entry);
+  EXPECT_EQ(&Graph.getBBExitRepresentative(BB), &Exit);
+  EXPECT_TRUE(Graph.getBBEntryRepresentative(BB).isBasicBlockEntrySite());
+  EXPECT_TRUE(Graph.getBBExitRepresentative(BB).isBasicBlockExitSite());
   EXPECT_EQ(Graph.size(), 3u);
   EXPECT_TRUE(Graph.verify());
 }

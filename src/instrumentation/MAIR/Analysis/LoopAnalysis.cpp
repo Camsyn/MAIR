@@ -200,7 +200,7 @@ Observation *MAIRLoopInfo::getPreheaderExit(const Loop &L) const {
   if (!Graph)
     return nullptr;
   BasicBlock *Preheader = L.getLoopPreheader();
-  return Preheader ? Graph->getBBExitRepresentative(*Preheader) : nullptr;
+  return Preheader ? &Graph->getBBExitRepresentative(*Preheader) : nullptr;
 }
 
 bool MAIRLoopInfo::hasDedicatedExit(const Loop &L) const {
@@ -221,7 +221,7 @@ Observation *MAIRLoopInfo::getUniqueExitEntry(const Loop &L) const {
   if (!Graph)
     return nullptr;
   BasicBlock *Exit = L.getUniqueExitBlock();
-  return Exit ? Graph->getBBEntryRepresentative(*Exit) : nullptr;
+  return Exit ? &Graph->getBBEntryRepresentative(*Exit) : nullptr;
 }
 
 ScalarEvolution &MAIRLoopInfo::getSE() const {

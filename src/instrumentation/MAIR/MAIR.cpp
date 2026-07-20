@@ -1410,26 +1410,34 @@ const Observation *MAIRGraph::find(StringRef Name) const {
   return nullptr;
 }
 
-Observation *MAIRGraph::getBBEntryRepresentative(const BasicBlock &BB) {
+Observation &MAIRGraph::getBBEntryRepresentative(const BasicBlock &BB) {
   assertLive("query");
-  return BBEntryRepresentatives.lookup(&BB);
+  Observation *Representative = BBEntryRepresentatives.lookup(&BB);
+  assert(Representative && "Seems the MAIRGraph is broken.");
+  return *Representative;
 }
 
-const Observation *
+const Observation &
 MAIRGraph::getBBEntryRepresentative(const BasicBlock &BB) const {
   assertLive("query");
-  return BBEntryRepresentatives.lookup(&BB);
+  const Observation *Representative = BBEntryRepresentatives.lookup(&BB);
+  assert(Representative && "Seems the MAIRGraph is broken.");
+  return *Representative;
 }
 
-Observation *MAIRGraph::getBBExitRepresentative(const BasicBlock &BB) {
+Observation &MAIRGraph::getBBExitRepresentative(const BasicBlock &BB) {
   assertLive("query");
-  return BBExitRepresentatives.lookup(&BB);
+  Observation *Representative = BBExitRepresentatives.lookup(&BB);
+  assert(Representative && "Seems the MAIRGraph is broken.");
+  return *Representative;
 }
 
-const Observation *
+const Observation &
 MAIRGraph::getBBExitRepresentative(const BasicBlock &BB) const {
   assertLive("query");
-  return BBExitRepresentatives.lookup(&BB);
+  const Observation *Representative = BBExitRepresentatives.lookup(&BB);
+  assert(Representative && "Seems the MAIRGraph is broken.");
+  return *Representative;
 }
 
 void MAIRGraph::replaceObservation(Observation &From, Observation &Into) {

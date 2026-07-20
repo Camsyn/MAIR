@@ -76,29 +76,6 @@ bool isSink(MotionDirection Direction) {
   return Direction == MotionDirection::Sink;
 }
 
-bool collectCFGNeighbors(const BasicBlock &BB, MotionDirection Direction,
-                         SmallVectorImpl<const BasicBlock *> &Neighbors) {
-  SmallPtrSet<const BasicBlock *, 8> Seen;
-  auto AddNeighbor = [&](const BasicBlock *Neighbor) {
-    if (Neighbor == &BB)
-      return false;
-    if (Seen.insert(Neighbor).second)
-      Neighbors.push_back(Neighbor);
-    return true;
-  };
-
-  if (isSink(Direction)) {
-    for (const BasicBlock *Pred : predecessors(&BB))
-      if (!AddNeighbor(Pred))
-        return false;
-  } else {
-    for (const BasicBlock *Succ : successors(&BB))
-      if (!AddNeighbor(Succ))
-        return false;
-  }
-  return Neighbors.size() >= 2;
-}
-
 using ObservationGroup = SmallVector<Observation *, 8>;
 using SourceGroups = SmallVector<ObservationGroup, 4>;
 
@@ -204,8 +181,13 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB,
   // fewer than two distinct neighbors are deliberately no-ops.
   Observation &Target = isSink(Direction) ? G.getBBEntryRepresentative(BB)
                                           : G.getBBExitRepresentative(BB);
-  SmallVector<const BasicBlock *, 4> Neighbors;
-  if (!collectCFGNeighbors(BB, Direction, Neighbors))
+
+  // Collect the neighbors according to the direction.
+  auto Neighbors =
+      isSink(Direction)
+          ? SmallSetVector<const BasicBlock *, 4>(from_range, predecessors(&BB))
+          : SmallSetVector<const BasicBlock *, 4>(from_range, successors(&BB));
+  if (Neighbors.size() < 2 || Neighbors.contains(&BB))
     return false;
 
   ObsEdgeKind Kind =

@@ -3156,6 +3156,7 @@ entry:
   EXPECT_FALSE(ReadAccess.isMovable());
   EXPECT_FALSE(WriteAccess.isMovable());
   EXPECT_TRUE(ReadAccess.isDeletable());
+  EXPECT_TRUE(WriteAccess.isDeletable());
   EXPECT_TRUE(ReadAccess.mergeWith(WriteAccess));
   EXPECT_TRUE(ReadAccess.isReadWrite());
 }
@@ -3230,6 +3231,8 @@ entry:
   EXPECT_TRUE(WriteAccess.isMergeable());
   EXPECT_TRUE(WriteAccess.covers(ReadAccess));
   EXPECT_FALSE(ReadAccess.covers(WriteAccess));
+  EXPECT_TRUE(ReadAccess.isDeletable());
+  EXPECT_TRUE(WriteAccess.isDeletable());
   EXPECT_FALSE(ReadAccess.mergeWith(WriteAccess));
 }
 
@@ -3259,6 +3262,10 @@ entry:
 
   EXPECT_FALSE(Available.begin()->mergeWith(*Required.begin()));
   EXPECT_FALSE(Available.begin()->covers(*Required.begin()));
+  EXPECT_FALSE(Available.begin()->isMergeable());
+  EXPECT_FALSE(Available.begin()->isDeletable());
+  EXPECT_FALSE(Required.begin()->isMergeable());
+  EXPECT_FALSE(Required.begin()->isDeletable());
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
@@ -3378,6 +3385,8 @@ entry:
     EXPECT_TRUE(Second.isCallLike());
     EXPECT_FALSE(First.isMergeable());
     EXPECT_FALSE(Second.isMergeable());
+    EXPECT_FALSE(First.isDeletable());
+    EXPECT_FALSE(Second.isDeletable());
     EXPECT_FALSE(First.mergeWith(Second));
   };
   CheckConfig(MAIROptimizationConfig::forAddressSanitizer());

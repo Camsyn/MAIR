@@ -222,6 +222,22 @@ struct CallBarrierTrait {
   }
 };
 
+struct ForwardCallBarrierTrait {
+  static bool isForwardBarrier(const llvm::Instruction &I) {
+    return llvm::isa<llvm::CallBase>(I);
+  }
+
+  static bool isBackwardBarrier(const llvm::Instruction &) { return false; }
+};
+
+struct BackwardCallBarrierTrait {
+  static bool isForwardBarrier(const llvm::Instruction &) { return false; }
+
+  static bool isBackwardBarrier(const llvm::Instruction &I) {
+    return llvm::isa<llvm::CallBase>(I);
+  }
+};
+
 struct UnmatchedBarrierTrait {
   static bool isForwardBarrier(const llvm::Instruction &I) {
     return llvm::isa<llvm::FenceInst>(I);
@@ -772,7 +788,7 @@ entry:
   EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Exit));
 }
 
-TEST(MAIRGraph, CreateFromUsesDominatorAndPostDominatorEntries) {
+TEST(MAIRGraph, CreateFromUsesClosestDominatorAndPostDominatorBoundaries) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(i1 %c, i32* %p) {
@@ -804,25 +820,116 @@ merge:
   const Observation *Then = findBlockEntry(Graph, "then");
   const Observation *Else = findBlockEntry(Graph, "else");
   const Observation *Merge = findBlockEntry(Graph, "merge");
+  const Observation *EntryExit = findBlockExit(Graph, "entry");
+  const Observation *ThenExit = findBlockExit(Graph, "then");
+  const Observation *ElseExit = findBlockExit(Graph, "else");
+  const Observation *MergeExit = findBlockExit(Graph, "merge");
   ASSERT_NE(Entry, nullptr);
   ASSERT_NE(Then, nullptr);
   ASSERT_NE(Else, nullptr);
   ASSERT_NE(Merge, nullptr);
-  EXPECT_TRUE(hasSuccessor(Graph, *Entry, *Then));
-  EXPECT_TRUE(hasSuccessor(Graph, *Entry, *Else));
-  auto FindExit = [&Graph](llvm::StringRef BBName) -> const Observation * {
-    for (const Observation &Obs : Graph)
-      if (Obs.isBasicBlockExitSite() && Obs.getBasicBlock() &&
-          Obs.getBasicBlock()->getName() == BBName)
-        return &Obs;
-    return nullptr;
-  };
-  const Observation *ThenExit = FindExit("then");
-  const Observation *ElseExit = FindExit("else");
+  ASSERT_NE(EntryExit, nullptr);
   ASSERT_NE(ThenExit, nullptr);
   ASSERT_NE(ElseExit, nullptr);
+  ASSERT_NE(MergeExit, nullptr);
+
+  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Then, ObsEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Else, ObsEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Merge, ObsEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Then, ObsEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Else, ObsEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Merge, ObsEdgeKind::Dom));
+
   EXPECT_TRUE(hasSuccessor(Graph, *Merge, *ThenExit, ObsEdgeKind::PostDom));
   EXPECT_TRUE(hasSuccessor(Graph, *Merge, *ElseExit, ObsEdgeKind::PostDom));
+  EXPECT_TRUE(hasSuccessor(Graph, *Merge, *EntryExit, ObsEdgeKind::PostDom));
+  EXPECT_FALSE(
+      hasSuccessor(Graph, *MergeExit, *ThenExit, ObsEdgeKind::PostDom));
+  EXPECT_FALSE(
+      hasSuccessor(Graph, *MergeExit, *ElseExit, ObsEdgeKind::PostDom));
+}
+
+TEST(MAIRGraph, CreateFromBlocksForwardBarrierTerminatorAtDominatorExit) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare i32 @__gxx_personality_v0(...)
+declare void @barrier()
+
+define void @f() personality ptr @__gxx_personality_v0 {
+entry:
+  invoke void @barrier() to label %normal unwind label %unwind
+normal:
+  br label %merge
+unwind:
+  %lp = landingpad { ptr, i32 } cleanup
+  br label %merge
+merge:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses<ForwardCallBarrierTrait>(F);
+  const Observation *Entry = findBlockEntry(Graph, "entry");
+  const Observation *EntryExit = findBlockExit(Graph, "entry");
+  const Observation *Normal = findBlockEntry(Graph, "normal");
+  const Observation *Unwind = findBlockEntry(Graph, "unwind");
+  const Observation *Merge = findBlockEntry(Graph, "merge");
+  ASSERT_NE(Entry, nullptr);
+  ASSERT_NE(EntryExit, nullptr);
+  ASSERT_NE(Normal, nullptr);
+  ASSERT_NE(Unwind, nullptr);
+  ASSERT_NE(Merge, nullptr);
+
+  EXPECT_TRUE(hasSuccessor(Graph, *Entry, *EntryExit, ObsEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Normal, ObsEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Unwind, ObsEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Merge, ObsEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *EntryExit, *Normal, ObsEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *EntryExit, *Unwind, ObsEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *EntryExit, *Merge, ObsEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *Merge, *EntryExit, ObsEdgeKind::PostDom));
+}
+
+TEST(MAIRGraph, CreateFromBlocksBackwardBarrierTerminatorAtPostDominatorExit) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(i32 %x) {
+entry:
+  callbr void asm "", "r,!i"(i32 %x)
+      to label %left [label %right]
+left:
+  br label %merge
+right:
+  br label %merge
+merge:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph =
+      createGraphWithExplicitAnalyses<BackwardCallBarrierTrait>(F);
+  const Observation *Entry = findBlockEntry(Graph, "entry");
+  const Observation *EntryExit = findBlockExit(Graph, "entry");
+  const Observation *Left = findBlockEntry(Graph, "left");
+  const Observation *Right = findBlockEntry(Graph, "right");
+  const Observation *Merge = findBlockEntry(Graph, "merge");
+  ASSERT_NE(Entry, nullptr);
+  ASSERT_NE(EntryExit, nullptr);
+  ASSERT_NE(Left, nullptr);
+  ASSERT_NE(Right, nullptr);
+  ASSERT_NE(Merge, nullptr);
+
+  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Entry, ObsEdgeKind::PostDom));
+  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Left, ObsEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Right, ObsEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Merge, ObsEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *Merge, *EntryExit, ObsEdgeKind::PostDom));
 }
 
 TEST(MAIRGraph, CreateFromHonorsBarrierTraitInsideBlock) {
@@ -2569,7 +2676,7 @@ merge:
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(MAIRGraphPass, CommonMAMotionRespectsForwardBarrierInTarget) {
+TEST(MAIRGraphPass, CommonMAMotionHoistsAfterForwardBarrierInTarget) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 declare void @barrier()
@@ -2578,6 +2685,37 @@ entry:
   call void @barrier()
   br i1 %cond, label %left, label %right
 left:
+  %a = load i32, ptr %p, align 4
+  ret void
+right:
+  %b = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *std::next(M->begin());
+  MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
+  MAIRGraphAnalysisManager AM;
+  CommonMAMotionPass Pass;
+
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  const Observation *Target = findBlockExit(Graph, "entry");
+  ASSERT_NE(Target, nullptr);
+  EXPECT_EQ(Target->size(), 1u);
+}
+
+TEST(MAIRGraphPass, CommonMAMotionRespectsForwardBarrierInSource) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @barrier()
+define void @f(ptr %p, i1 %cond) {
+entry:
+  br i1 %cond, label %left, label %right
+left:
+  call void @barrier()
   %a = load i32, ptr %p, align 4
   ret void
 right:
@@ -2606,8 +2744,11 @@ TEST(MAIRGraphPass, CommonMAMotionRespectsBackwardBarrierInPredecessor) {
 declare void @barrier()
 define void @f(ptr %p, i1 %cond) {
 entry:
-  call void @barrier()
-  br i1 %cond, label %left, label %right
+  br i1 %cond, label %left.path, label %right.path
+left.path:
+  br label %left
+right.path:
+  br label %right
 left:
   %a = load i32, ptr %p, align 4
   call void @barrier()

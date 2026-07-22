@@ -43,7 +43,7 @@ const Instruction *getBarrierRangeStart(const Observation &Obs) {
 }
 
 const Instruction *getBarrierRangeEnd(const Observation &Obs) {
-  return Obs.isBasicBlockExitSite() ? nullptr : Obs.getAnchor();
+  return Obs.getAnchor();
 }
 
 bool isMaskedMemoryIntrinsic(const Instruction &I) {
@@ -145,15 +145,17 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
     Observation *ExitObs = BBExitObs.lookup(&BB);
     assert(EntryObs && ExitObs);
     if (const BasicBlock *IDom = GetIDom(DT, BB)) {
-      Observation *Pred = BBEntryObs.lookup(IDom);
+      Observation *Pred = BBExitObs.lookup(IDom);
       assert(Pred);
-      if (!BA.hasFwdBarrierPath(*IDom, BB))
+      if (!BA.isFwdBarrier(*IDom->getTerminator()) &&
+          !BA.hasFwdBarrierPath(*IDom, BB))
         Graph.addEdge(*Pred, *EntryObs, ObsEdgeKind::Dom);
     }
     if (const BasicBlock *IPDom = GetIDom(PDT, BB)) {
       Observation *Succ = BBEntryObs.lookup(IPDom);
       assert(Succ);
-      if (!BA.hasBwdBarrierPath(BB, *IPDom))
+      if (!BA.isBwdBarrier(*BB.getTerminator()) &&
+          !BA.hasBwdBarrierPath(BB, *IPDom))
         Graph.addEdge(*Succ, *ExitObs, ObsEdgeKind::PostDom);
     }
   }

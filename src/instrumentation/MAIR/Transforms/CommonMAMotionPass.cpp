@@ -5,9 +5,12 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/STLForwardCompat.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Dominators.h"
 
@@ -126,8 +129,7 @@ bool collectSourceGroups(MAIRGraph &G, Observation &ProofRoot,
     Observation &Boundary = SourceIsEntry
                                 ? G.getBBEntryRepresentative(*Neighbor)
                                 : G.getBBExitRepresentative(*Neighbor);
-    if (&Boundary == &ProofRoot ||
-        !SeenBoundaries.insert(&Boundary).second ||
+    if (&Boundary == &ProofRoot || !SeenBoundaries.insert(&Boundary).second ||
         !G.hasEdge(ProofRoot, Boundary, Kind))
       return false;
 
@@ -192,26 +194,13 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB,
 
   ObsEdgeKind Kind =
       isSink(Direction) ? ObsEdgeKind::PostDom : ObsEdgeKind::Dom;
-  Observation &ProofRoot =
-      isSink(Direction) ? Target : G.getBBEntryRepresentative(BB);
-  if (!isSink(Direction)) {
-    // Inter-block Dom proofs originate at the entry representative. When the
-    // entry and exit have not contracted, the intra-block path also proves
-    // that hoisting to the exit does not cross a forward barrier.
-    if (&ProofRoot != &Target) {
-      SmallPtrSet<Observation *, 16> TargetReachable =
-          collectReachableInBlock(ProofRoot, ObsEdgeKind::Dom, BB);
-      if (!TargetReachable.contains(&Target))
-        return false;
-    }
-  }
 
-  // Each CFG neighbor must have a direct same-kind proof edge from ProofRoot.
+  // Each CFG neighbor must have a direct same-kind proof edge from Target.
   // From that quotient boundary, expand only through proof edges that still
   // represent the same neighbor block.
   SourceGroups Groups;
-  if (!collectSourceGroups(G, ProofRoot, Neighbors, Kind, Observations,
-                           Groups))
+  if (!collectSourceGroups(G, Target, Neighbors.getArrayRef(), Kind,
+                           Observations, Groups))
     return false;
 
   // Seed from the first group, reject values unavailable at the target anchor,

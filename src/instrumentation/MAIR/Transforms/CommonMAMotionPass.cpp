@@ -3,7 +3,6 @@
 #include "MAIR/MAIR.h"
 #include "MAIR/Transforms/TransformUtils.h"
 
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/STLForwardCompat.h"
 #include "llvm/ADT/SetVector.h"
@@ -28,7 +27,7 @@ namespace mair {
 namespace {
 
 bool isValueAvailableAt(const Value *Value, const Instruction &Anchor,
-                        DominatorTree &DT) {
+                        const DominatorTree &DT) {
   const auto *Def = dyn_cast_or_null<Instruction>(Value);
   if (!Def)
     return true;
@@ -36,7 +35,7 @@ bool isValueAvailableAt(const Value *Value, const Instruction &Anchor,
 }
 
 bool isAccessAvailableAt(const MemoryAccess &Access, const Observation &Target,
-                         DominatorTree &DT) {
+                         const DominatorTree &DT) {
   const Instruction *Anchor = Target.getAnchor();
   assert(Anchor && "motion target must have an anchor");
   const AbstractAccess *Location = Access.getContiguousRegion();
@@ -51,103 +50,64 @@ bool isAccessAvailableAt(const MemoryAccess &Access, const Observation &Target,
          isValueAvailableAt(Location->getSize().getSymbol(), *Anchor, DT);
 }
 
-SmallPtrSet<Observation *, 16> collectReachableInBlock(Observation &Root,
-                                                       ObsEdgeKind Kind,
-                                                       const BasicBlock &BB) {
-  SmallPtrSet<Observation *, 16> Reachable;
-  SmallVector<Observation *, 16> Worklist;
-  Reachable.insert(&Root);
-  Worklist.push_back(&Root);
-  while (!Worklist.empty()) {
-    Observation *Current = Worklist.pop_back_val();
-    for (const ObservationEdge &Edge : Current->children()) {
-      if (Edge.getKind() != Kind)
-        continue;
-      Observation *Next = &Edge.getNode();
-      if (!Next->representsBlock(BB))
-        continue;
-      if (Reachable.insert(Next).second)
-        Worklist.push_back(Next);
-    }
-  }
-  return Reachable;
-}
-
 enum class MotionDirection { Hoist, Sink };
 
 bool isSink(MotionDirection Direction) {
   return Direction == MotionDirection::Sink;
 }
 
-using ObservationGroup = SmallVector<Observation *, 8>;
-using SourceGroups = SmallVector<ObservationGroup, 4>;
+using NeighborBlocks = SmallSetVector<const BasicBlock *, 4>;
+using NeighborObservations = SmallVector<Observation *, 4>;
 
-class ObservationBlockIndex {
-  DenseMap<const BasicBlock *, ObservationGroup> Groups;
-  size_t GraphSize = 0;
-
-public:
-  explicit ObservationBlockIndex(MAIRGraph &G) : GraphSize(G.size()) {
-    const Function *F = G.getFunction();
-    assert(F && "CommonMAMotion requires a function-backed graph");
-    for (const BasicBlock &BB : *F)
-      for (Observation &Obs : G)
-        if (Obs.representsBlock(BB))
-          Groups[&BB].push_back(&Obs);
-  }
-
-  ArrayRef<Observation *> lookup(const BasicBlock &BB) const {
-    auto It = Groups.find(&BB);
-    if (It == Groups.end())
-      return {};
-    return It->second;
-  }
-
-  void assertTopologyUnchanged(const MAIRGraph &G) const {
-    assert(G.size() == GraphSize &&
-           "CommonMAMotion changed observation topology");
-  }
-};
-
-MemoryAccess *findMatchingAccess(ArrayRef<Observation *> Group,
-                                 const MemoryAccess &Needle) {
-  for (Observation *Obs : Group)
-    for (MemoryAccess &Access : *Obs)
-      if (isEquivalentMovableAccess(Access, Needle))
-        return &Access;
+MemoryAccess *findMatchingAccess(Observation &Obs, const MemoryAccess &Needle) {
+  for (MemoryAccess &Access : Obs)
+    if (isEquivalentMovableAccess(Access, Needle))
+      return &Access;
   return nullptr;
 }
 
-bool collectSourceGroups(MAIRGraph &G, Observation &ProofRoot,
-                         ArrayRef<const BasicBlock *> Neighbors,
-                         ObsEdgeKind Kind,
-                         const ObservationBlockIndex &Observations,
-                         SourceGroups &Groups) {
-  bool SourceIsEntry = Kind == ObsEdgeKind::Dom;
-  SmallPtrSet<Observation *, 8> SeenBoundaries;
-  for (const BasicBlock *Neighbor : Neighbors) {
-    Observation &Boundary = SourceIsEntry
-                                ? G.getBBEntryRepresentative(*Neighbor)
-                                : G.getBBExitRepresentative(*Neighbor);
-    if (&Boundary == &ProofRoot || !SeenBoundaries.insert(&Boundary).second ||
-        !G.hasEdge(ProofRoot, Boundary, Kind))
-      return false;
-
-    SmallPtrSet<Observation *, 16> Reachable =
-        collectReachableInBlock(Boundary, Kind, *Neighbor);
-    ObservationGroup &Group = Groups.emplace_back();
-    ArrayRef<Observation *> BlockObservations = Observations.lookup(*Neighbor);
-    if (BlockObservations.empty())
-      return false;
-    for (Observation *Obs : BlockObservations)
-      if (Reachable.contains(Obs))
-        Group.push_back(Obs);
-  }
-  return true;
+bool collectNeighborBlocks(const BasicBlock &BB, MotionDirection Direction,
+                           NeighborBlocks &Neighbors) {
+  if (isSink(Direction))
+    Neighbors.insert_range(predecessors(&BB));
+  else
+    Neighbors.insert_range(successors(&BB));
+  return Neighbors.size() >= 2 && !Neighbors.contains(&BB);
 }
 
-void commitCommonMotion(Observation &Target, ArrayRef<MemoryAccess *> Matches,
-                        MotionDirection Direction) {
+bool findCommonAccesses(ArrayRef<Observation *> NeighborObs,
+                        Observation &Target, const DominatorTree *DebugDT,
+                        SmallVectorImpl<MemoryAccess *> &Matches) {
+  assert(!NeighborObs.empty() &&
+         "common motion requires neighbor observations");
+  for (MemoryAccess &Candidate : *NeighborObs.front()) {
+    if (!Candidate.isMovable() || !Candidate.isContiguous())
+      continue;
+
+    Matches.clear();
+    Matches.push_back(&Candidate);
+    bool Common = true;
+    for (Observation *Neighbor : drop_begin(NeighborObs)) {
+      MemoryAccess *Match = findMatchingAccess(*Neighbor, Candidate);
+      if (!Match) {
+        Common = false;
+        break;
+      }
+      Matches.push_back(Match);
+    }
+    if (!Common)
+      continue;
+    // All copies are shared by every neighbor, so their SSA operands must be
+    // visible at the common target in a valid, materializable graph.
+    assert(DebugDT && isAccessAvailableAt(Candidate, Target, *DebugDT) &&
+           "common access operands must be available at target");
+    return true;
+  }
+  return false;
+}
+
+void moveAccessesToTarget(Observation &Target, ArrayRef<MemoryAccess *> Matches,
+                          MotionDirection Direction) {
   assert(!Matches.empty() && "common motion requires matching accesses");
   MemoryAccess *Accumulator = nullptr;
   for (MemoryAccess &Access : Target)
@@ -176,74 +136,51 @@ void commitCommonMotion(Observation &Target, ArrayRef<MemoryAccess *> Matches,
 }
 
 bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB,
-                         MotionDirection Direction, DominatorTree &DT,
-                         const ObservationBlockIndex &Observations) {
-  // Resolve the logical entry/exit boundary after SimplifyGraph contraction,
-  // then require the complete, de-duplicated CFG neighbor set. Self-edges and
-  // fewer than two distinct neighbors are deliberately no-ops.
-  Observation &Target = isSink(Direction) ? G.getBBEntryRepresentative(BB)
-                                          : G.getBBExitRepresentative(BB);
-
-  // Collect the neighbors according to the direction.
-  auto Neighbors =
-      isSink(Direction)
-          ? SmallSetVector<const BasicBlock *, 4>(from_range, predecessors(&BB))
-          : SmallSetVector<const BasicBlock *, 4>(from_range, successors(&BB));
-  if (Neighbors.size() < 2 || Neighbors.contains(&BB))
+                         MotionDirection Direction,
+                         const DominatorTree *DebugDT) {
+  // 1. Collect the complete, de-duplicated CFG neighbor set.
+  NeighborBlocks NeighborBBs;
+  if (!collectNeighborBlocks(BB, Direction, NeighborBBs))
     return false;
 
   ObsEdgeKind Kind =
       isSink(Direction) ? ObsEdgeKind::PostDom : ObsEdgeKind::Dom;
 
-  // Each CFG neighbor must have a direct same-kind proof edge from Target.
-  // From that quotient boundary, expand only through proof edges that still
-  // represent the same neighbor block.
-  SourceGroups Groups;
-  if (!collectSourceGroups(G, Target, Neighbors.getArrayRef(), Kind,
-                           Observations, Groups))
+  // 2. Resolve exactly one boundary representative per neighbor block.
+  const bool SourceIsEntry = Kind == ObsEdgeKind::Dom;
+  NeighborObservations NeighborObs(
+      map_range(NeighborBBs, [&](const BasicBlock *NeighborBB) {
+        return SourceIsEntry ? &G.getBBEntryRepresentative(*NeighborBB)
+                             : &G.getBBExitRepresentative(*NeighborBB);
+      }));
+
+  // 3. Require every neighbor boundary to share the typed parent Target.
+  Observation &Target = isSink(Direction) ? G.getBBEntryRepresentative(BB)
+                                          : G.getBBExitRepresentative(BB);
+  if (!all_of(NeighborObs, [&](Observation *Neighbor) {
+        return Neighbor != &Target && Neighbor->hasParent(Target, Kind);
+      }))
     return false;
 
-  // Seed from the first group, reject values unavailable at the target anchor,
-  // then compute the exact object/location/kind intersection of all groups.
-  for (Observation *Obs : Groups.front()) {
-    for (MemoryAccess &Candidate : *Obs) {
-      if (!Candidate.isMovable())
-        continue;
-      if (!isAccessAvailableAt(Candidate, Target, DT))
-        continue;
-      SmallVector<MemoryAccess *, 4> Matches = {&Candidate};
-      bool Common = true;
-      for (ArrayRef<Observation *> Group : drop_begin(Groups)) {
-        MemoryAccess *Match = findMatchingAccess(Group, Candidate);
-        if (!Match) {
-          Common = false;
-          break;
-        }
-        Matches.push_back(Match);
-      }
-      if (!Common)
-        continue;
+  // 4. Find one MA common to every neighbor observation.
+  SmallVector<MemoryAccess *, 4> Matches;
+  if (!findCommonAccesses(NeighborObs, Target, DebugDT, Matches))
+    return false;
 
-      commitCommonMotion(Target, Matches, Direction);
-
-      // Move one common access per call; the outer fixed-point loop restarts
-      // the scan with fresh iterators and exposes cascaded opportunities.
-      return true;
-    }
-  }
-  return false;
+  // 5. Move the common MAs to Target. The fixed-point loop restarts the scan.
+  moveAccessesToTarget(Target, Matches, Direction);
+  return true;
 }
 
 bool moveCommonAccessesToFixedPoint(MAIRGraph &G, MotionDirection Direction,
-                                    DominatorTree &DT,
-                                    const ObservationBlockIndex &Observations) {
+                                    const DominatorTree *DebugDT) {
   bool Changed = false;
   const Function *F = G.getFunction();
   assert(F && "CommonMAMotion requires a function-backed graph");
   while (true) {
     bool Moved = false;
     for (const BasicBlock &BB : *F) {
-      if (!moveOneCommonAccess(G, BB, Direction, DT, Observations))
+      if (!moveOneCommonAccess(G, BB, Direction, DebugDT))
         continue;
       Moved = true;
       Changed = true;
@@ -263,18 +200,13 @@ PreservedAnalyses CommonMAMotionPass::run(MAIRGraph &G,
 #else
   (void)AM;
 #endif
-  const Function *F = G.getFunction();
-  assert(F && "CommonMAMotion requires a function-backed graph");
-  DominatorTree DT(*const_cast<Function *>(F));
-  // Common motion only transfers accesses; its observation topology is stable.
-  // Index represented blocks once and reuse the index across both fixed points.
-  ObservationBlockIndex Observations(G);
-  bool Changed = moveCommonAccessesToFixedPoint(G, MotionDirection::Hoist, DT,
-                                                Observations);
-  Observations.assertTopologyUnchanged(G);
-  Changed |= moveCommonAccessesToFixedPoint(G, MotionDirection::Sink, DT,
-                                            Observations);
-  Observations.assertTopologyUnchanged(G);
+  const DominatorTree *DebugDT = nullptr;
+#ifndef NDEBUG
+  DebugDT = &G.getDominatorTree();
+#endif
+  bool Changed =
+      moveCommonAccessesToFixedPoint(G, MotionDirection::Hoist, DebugDT);
+  Changed |= moveCommonAccessesToFixedPoint(G, MotionDirection::Sink, DebugDT);
 
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

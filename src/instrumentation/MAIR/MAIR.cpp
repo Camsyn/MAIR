@@ -81,6 +81,8 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
                            MAIRBarrierAnalysisCore &BA,
                            MAIROptimizationConfig Config) {
   MAIRGraph Graph(F, Config);
+  Graph.DT = &DT;
+  Graph.PDT = &PDT;
   DenseMap<const BasicBlock *, Observation *> BBEntryObs;
   DenseMap<const BasicBlock *, Observation *> BBExitObs;
   DenseMap<const BasicBlock *, SmallVector<Observation *, 4>> OrderedObs;
@@ -1151,6 +1153,8 @@ MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
       MemoryObjectAllocator(std::move(Other.MemoryObjectAllocator)),
       ScalarExprOwner(std::move(Other.ScalarExprOwner)),
       ScalarExprAllocator(std::move(Other.ScalarExprAllocator)),
+      OwnedDT(std::move(Other.OwnedDT)), OwnedPDT(std::move(Other.OwnedPDT)),
+      DT(Other.DT), PDT(Other.PDT),
       MemoryObjects(std::move(Other.MemoryObjects)),
       BBEntryRepresentatives(std::move(Other.BBEntryRepresentatives)),
       BBExitRepresentatives(std::move(Other.BBExitRepresentatives)),
@@ -1163,6 +1167,8 @@ MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
     Obs.setParent(this);
   Other.F = nullptr;
   Other.MutableF = nullptr;
+  Other.DT = nullptr;
+  Other.PDT = nullptr;
   Other.GraphState = State::MovedFrom;
 }
 
@@ -1178,6 +1184,10 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   MemoryObjectAllocator = std::move(Other.MemoryObjectAllocator);
   ScalarExprOwner = std::move(Other.ScalarExprOwner);
   ScalarExprAllocator = std::move(Other.ScalarExprAllocator);
+  OwnedDT = std::move(Other.OwnedDT);
+  OwnedPDT = std::move(Other.OwnedPDT);
+  DT = Other.DT;
+  PDT = Other.PDT;
   MemoryObjects = std::move(Other.MemoryObjects);
   BBEntryRepresentatives = std::move(Other.BBEntryRepresentatives);
   BBExitRepresentatives = std::move(Other.BBExitRepresentatives);
@@ -1191,6 +1201,8 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
     Obs.setParent(this);
   Other.F = nullptr;
   Other.MutableF = nullptr;
+  Other.DT = nullptr;
+  Other.PDT = nullptr;
   Other.GraphState = State::MovedFrom;
   return *this;
 }

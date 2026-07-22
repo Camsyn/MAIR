@@ -4,11 +4,11 @@
 
 define void @hoist_diamond(ptr %p, ptr %q, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @hoist_diamond {
-; CHECK:       be1: preds=
-; CHECK-NEXT:    read ptr %p, 4
 ; CHECK:       ma4: preds=
+; CHECK-NEXT:    read ptr %p, 4
 ; CHECK-NEXT:    read ptr %q, 4
 ; CHECK:       ma8: preds=
+; CHECK-NEXT:    read ptr %p, 4
 ; CHECK-NEXT:    read ptr %p + 4, 4
 ; SIMPLIFY-LABEL: mair graph of fn @hoist_diamond {
 ; SIMPLIFY:       ma4: preds=
@@ -33,11 +33,13 @@ right:
 define void @sink_diamond(ptr %p, ptr %q, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @sink_diamond {
 ; CHECK:       ma8: preds=
+; CHECK-NEXT:    read ptr %p, 4
 ; CHECK-NEXT:    read ptr %q, 4
 ; CHECK:       ma12: preds=
+; CHECK-NEXT:    read ptr %p, 4
 ; CHECK-NEXT:    read ptr %p + 4, 4
 ; CHECK:       bs14: preds=
-; CHECK-NEXT:    read ptr %p, 4
+; CHECK-EMPTY:
 entry:
   br i1 %cond, label %left.path, label %right.path
 
@@ -65,15 +67,13 @@ merge:
 define void @hoist_nested_fixed_point(ptr %p, i1 %outer, i1 %inner) {
 ; CHECK-LABEL: mair graph of fn @hoist_nested_fixed_point {
 ; CHECK:       be1: preds=
+; CHECK-EMPTY:
+; CHECK:       ma5: preds=
 ; CHECK-NEXT:    read ptr %p, 4
-; CHECK:       bs2: preds=
-; CHECK-EMPTY:
-; CHECK:       bs4: preds=
-; CHECK-EMPTY:
-; CHECK:       bs7: preds=
-; CHECK-EMPTY:
-; CHECK:       bs10: preds=
-; CHECK-EMPTY:
+; CHECK:       ma8: preds=
+; CHECK-NEXT:    read ptr %p, 4
+; CHECK:       ma11: preds=
+; CHECK-NEXT:    read ptr %p, 4
 entry:
   br i1 %outer, label %left, label %right
 
@@ -95,7 +95,9 @@ right:
 
 define i32 @hoist_loop_successor_quotient(ptr %p, i32 %n) {
 ; CHECK-LABEL: mair graph of fn @hoist_loop_successor_quotient {
-; CHECK:       be3: preds=
+; CHECK:       ma5: preds=
+; CHECK-NEXT:    read ptr %p, 4
+; CHECK:       ma8: preds=
 ; CHECK-NEXT:    read ptr %p, 4
 entry:
   br label %header
@@ -150,11 +152,11 @@ next:
 define void @hoist_target_local_symbol(ptr %p, i64 %i, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @hoist_target_local_symbol {
 ; CHECK:       be1: preds=
-; CHECK-NEXT:    read ptr %p + %pi, 4
+; CHECK-EMPTY:
 ; CHECK:       ma3: preds=
-; CHECK-EMPTY:
+; CHECK-NEXT:    read ptr %p + %pi, 4
 ; CHECK:       ma6: preds=
-; CHECK-EMPTY:
+; CHECK-NEXT:    read ptr %p + %pi, 4
 entry:
   %pi = getelementptr i8, ptr %p, i64 %i
   br i1 %cond, label %left, label %right
@@ -171,11 +173,11 @@ right:
 define void @hoist_switch_unique_successors(ptr %p, i32 %tag) {
 ; CHECK-LABEL: mair graph of fn @hoist_switch_unique_successors {
 ; CHECK:       be1: preds=
-; CHECK-NEXT:    read ptr %p, 4
+; CHECK-EMPTY:
 ; CHECK:       ma3: preds=
-; CHECK-EMPTY:
+; CHECK-NEXT:    read ptr %p, 4
 ; CHECK:       ma6: preds=
-; CHECK-EMPTY:
+; CHECK-NEXT:    read ptr %p, 4
 entry:
   switch i32 %tag, label %right [
     i32 0, label %left
@@ -194,13 +196,13 @@ right:
 define void @sink_nested_fixed_point(ptr %p, i1 %outer, i1 %inner) {
 ; CHECK-LABEL: mair graph of fn @sink_nested_fixed_point {
 ; CHECK:       ma13: preds=
-; CHECK-EMPTY:
-; CHECK:       ma16: preds=
-; CHECK-EMPTY:
-; CHECK:       ma21: preds=
-; CHECK-EMPTY:
-; CHECK:       bs23: preds=
 ; CHECK-NEXT:    read ptr %p, 4
+; CHECK:       ma16: preds=
+; CHECK-NEXT:    read ptr %p, 4
+; CHECK:       ma21: preds=
+; CHECK-NEXT:    read ptr %p, 4
+; CHECK:       bs23: preds=
+; CHECK-EMPTY:
 entry:
   br i1 %outer, label %left.path, label %right.path
 

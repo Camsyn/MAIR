@@ -37,6 +37,7 @@
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <variant>
 
 namespace mair {
@@ -817,6 +818,10 @@ private:
   SpecificBumpPtrAllocator<MemoryObject> MemoryObjectAllocator;
   std::unique_ptr<MAIRScalarExprOwner> ScalarExprOwner;
   SpecificBumpPtrAllocator<MAIRScalarExprNode> ScalarExprAllocator;
+  std::unique_ptr<DominatorTree> OwnedDT;
+  std::unique_ptr<PostDominatorTree> OwnedPDT;
+  const DominatorTree *DT = nullptr;
+  const PostDominatorTree *PDT = nullptr;
   DenseMap<const Value *, MemoryObject *> MemoryObjects;
   DenseMap<const BasicBlock *, Observation *> BBEntryRepresentatives;
   DenseMap<const BasicBlock *, Observation *> BBExitRepresentatives;
@@ -846,6 +851,16 @@ public:
     return OptimizationConfig;
   }
   Function *getMutableFunction() { return MutableF; }
+  const DominatorTree &getDominatorTree() const {
+    assertLive("query dominance analysis");
+    assert(DT && "MAIRGraph was constructed without a dominator tree");
+    return *DT;
+  }
+  const PostDominatorTree &getPostDominatorTree() const {
+    assertLive("query post-dominance analysis");
+    assert(PDT && "MAIRGraph was constructed without a post-dominator tree");
+    return *PDT;
+  }
   bool isLive() const { return GraphState == State::Live; }
   bool isConsumed() const {
     return GraphState == State::ConsumedByInstantiation;
@@ -862,28 +877,33 @@ public:
   /// Build a MAIR graph for \p F using DT/PDT results owned by \p FAM.
   ///
   /// This overload is the pass-pipeline entry point: it must only fetch
-  /// reusable LLVM analyses from FAM and then delegate to the explicit-analysis
-  /// overload below. It intentionally does not construct DT/PDT itself.
+  /// reusable LLVM analyses from FAM and bind them to the graph. It
+  /// intentionally does not construct DT/PDT itself.
   template <class BarrierTrait = DefaultBarrierTrait>
   static MAIRGraph
   build(Function &F, FunctionAnalysisManager &FAM,
         MAIROptimizationConfig Config = MAIROptimizationConfig::generic()) {
     auto &DT = FAM.getResult<DominatorTreeAnalysis>(F);
     auto &PDT = FAM.getResult<PostDominatorTreeAnalysis>(F);
-    return build<BarrierTrait>(F, DT, PDT, Config);
-  }
-
-  /// Build a MAIR graph for \p F using caller-provided dominance analyses.
-  ///
-  /// This overload owns the BarrierTrait-to-analysis binding. The actual graph
-  /// construction stays in the private non-template overload so the heavy
-  /// construction algorithm has one implementation.
-  template <class BarrierTrait = DefaultBarrierTrait>
-  static MAIRGraph
-  build(Function &F, const DominatorTree &DT, const PostDominatorTree &PDT,
-        MAIROptimizationConfig Config = MAIROptimizationConfig::generic()) {
     MAIRBarrierAnalysis<BarrierTrait> BarrierAnalysis;
     return build(F, DT, PDT, BarrierAnalysis, Config);
+  }
+
+  /// Build a MAIR graph that takes ownership of caller-provided analyses.
+  ///
+  /// Passing analyses by rvalue makes the graph lifetime explicit. Callers
+  /// that retain analysis ownership should use the FAM overload above.
+  template <class BarrierTrait = DefaultBarrierTrait>
+  static MAIRGraph
+  build(Function &F, DominatorTree &&DT, PostDominatorTree &&PDT,
+        MAIROptimizationConfig Config = MAIROptimizationConfig::generic()) {
+    MAIRBarrierAnalysis<BarrierTrait> BarrierAnalysis;
+    MAIRGraph Graph = build(F, DT, PDT, BarrierAnalysis, Config);
+    Graph.OwnedDT = std::make_unique<DominatorTree>(std::move(DT));
+    Graph.OwnedPDT = std::make_unique<PostDominatorTree>(std::move(PDT));
+    Graph.DT = Graph.OwnedDT.get();
+    Graph.PDT = Graph.OwnedPDT.get();
+    return Graph;
   }
 
   iterator begin() {

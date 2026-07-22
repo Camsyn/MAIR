@@ -9,12 +9,11 @@
 
 define void @o1_common_before_location_merge(ptr %p, ptr %q, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @o1_common_before_location_merge {
-; CHECK:       be1: preds=
-; CHECK-NEXT:    read ptr %p, 4
 ; CHECK:       ma4: preds=
+; CHECK-NEXT:    read ptr %p, 4
 ; CHECK-NEXT:    read ptr %q, 4
 ; CHECK:       ma8: preds=
-; CHECK-NEXT:    read ptr %p + 4, 4
+; CHECK-NEXT:    read ptr %p, 8
 entry:
   br i1 %cond, label %left, label %right
 

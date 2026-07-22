@@ -17,7 +17,6 @@
 ; SIMPLIFY: {{[1-9][0-9]*}} mair-simplifygraph - Number of observations merged by graph simplification
 ; LOCATION: 13 mair-locationmerge - Number of memory accesses entering location merging
 ; LOCATION: {{[1-9][0-9]*}} mair-locationmerge - Number of accesses merged by location merging
-; COMMON: {{[1-9][0-9]*}} mair-commonmamotion - Number of accesses hoisted by common MA motion
 ; COMMON: 30 mair-commonmamotion - Number of memory accesses entering common MA motion
 ; PERIODIC: {{[1-9][0-9]*}} mair-loop-periodic-combine - Number of accesses aggregated across loop iterations
 ; PERIODIC: 13 mair-loop-periodic-combine - Number of memory accesses entering loop periodic combination

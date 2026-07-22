@@ -587,7 +587,7 @@ entry:
   Function &F = *M->getFunction("f");
   DominatorTree DT(F);
   PostDominatorTree PDT(F);
-  MAIRGraph Graph = MAIRGraph::build(F, DT, PDT);
+  MAIRGraph Graph = MAIRGraph::build(F, std::move(DT), std::move(PDT));
 
   PassInstrumentationCallbacks PIC;
   FunctionAnalysisManager FAM;

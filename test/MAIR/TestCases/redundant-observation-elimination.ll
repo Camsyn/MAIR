@@ -43,9 +43,9 @@ define void @keep_uncovered_accesses(ptr %p, ptr %q) {
 ; INTRA-LABEL: mair graph of fn @keep_uncovered_accesses {
 ; INTRA:         ma4: preds=
 ; INTRA-NOT:       read ptr %p, 4
-; INTRA:           read ptr %p + 8, 4
-; INTRA-NEXT:      read ptr %q, 4
-; INTRA-NEXT:      write ptr %p, 4
+; INTRA-DAG:       read ptr %p + 8, 4
+; INTRA-DAG:       read ptr %q, 4
+; INTRA-DAG:       write ptr %p, 4
 entry:
   %p0 = load i32, ptr %p, align 4
   %p8 = getelementptr i8, ptr %p, i64 8

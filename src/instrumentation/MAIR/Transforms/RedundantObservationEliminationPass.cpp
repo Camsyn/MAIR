@@ -61,6 +61,8 @@ void updateWitness(WitnessesByLevel &Witnesses,
 void findIntraObservationRedundancy(
     Observation &Obs, DenseSet<const MemoryAccess *> &DeletedSources,
     SmallVectorImpl<MemoryAccess *> &Redundant) {
+  Obs.sort(MemoryAccess::compareByLocation);
+
   DenseMap<const Value *, SmallVector<ConcreteAccess, 8>> Groups;
   // Other region forms need their own coverage index; this sweep is exact only
   // for concrete contiguous half-open intervals.
@@ -79,17 +81,6 @@ void findIntraObservationRedundancy(
 
   for (auto &Entry : Groups) {
     SmallVectorImpl<ConcreteAccess> &Accesses = Entry.second;
-    // Earlier starts dominate later starts.  For equal starts, wider and then
-    // higher-level accesses must become witnesses before their targets.
-    llvm::stable_sort(Accesses,
-                      [](const ConcreteAccess &LHS, const ConcreteAccess &RHS) {
-                        if (LHS.Begin != RHS.Begin)
-                          return LHS.Begin < RHS.Begin;
-                        if (LHS.End != RHS.End)
-                          return LHS.End > RHS.End;
-                        return LHS.Access->getLevel() > RHS.Access->getLevel();
-                      });
-
     WitnessesByAtomicity AllWitnesses{};
     WitnessesByAtomicity MergeableWitnesses{};
     // Equal atomicity is directly comparable.  Cross-atomic coverage requires

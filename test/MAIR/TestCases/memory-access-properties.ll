@@ -42,8 +42,8 @@ entry:
 ; CHECK-NEXT:   write volatile call ptr %p, %size
 ; CHECK-NEXT:   read volatile call ptr %q, %size
 ; CHECK: ma7:
-; CHECK-NEXT:   write call ptr %q, %size
-; CHECK-NEXT:   read call ptr %p, %size
+; CHECK-DAG:    read call ptr %p, %size
+; CHECK-DAG:    write call ptr %q, %size
 ; CHECK: ma8:
 ; CHECK-NEXT:   write atomic call ptr %p, %size
 ; CHECK-NEXT:   read atomic call ptr %q, %size

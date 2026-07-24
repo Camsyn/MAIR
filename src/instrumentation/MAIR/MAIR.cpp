@@ -14,6 +14,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/ErrorHandling.h"
+#include <functional>
 #include <optional>
 
 using namespace llvm;
@@ -66,6 +67,7 @@ bool isInterestingMop(const Instruction &I) {
              AnyMemIntrinsic>(I) ||
          isMaskedMemoryIntrinsic(I);
 }
+
 } // namespace
 
 // Build the initial, unoptimized MAIR graph for one LLVM function.
@@ -181,9 +183,7 @@ static std::string getPrintedValueName(const Value &V) {
 }
 
 static std::optional<uint64_t> getNonNegativeU64(const APInt &Value) {
-  if (Value.isNegative())
-    return std::nullopt;
-  if (Value.getActiveBits() > 64)
+  if (Value.isNegative() || Value.getActiveBits() > 64)
     return std::nullopt;
   return Value.getZExtValue();
 }
@@ -557,14 +557,18 @@ AbstractAccess AbstractAccess::fromPointerAndSize(const Value &Ptr,
                                                   AbstractValue Size,
                                                   const DataLayout &DL) {
   APInt Offset(DL.getIndexTypeSizeInBits(Ptr.getType()), 0);
-  const Value *Base = Ptr.stripAndAccumulateConstantOffsets(
+  const Value *Stripped = Ptr.stripAndAccumulateConstantOffsets(
       DL, Offset, /*AllowNonInbounds=*/true);
   const Value *Underlying = getUnderlyingObject(&Ptr);
-  std::optional<uint64_t> ConcreteOffset = getNonNegativeU64(Offset);
-  if (Base && ConcreteOffset && (Base != &Ptr || Underlying == &Ptr))
-    return AbstractAccess(Base, AbstractValue::constant(*ConcreteOffset), Size);
+  if (!Underlying)
+    Underlying = &Ptr;
 
-  if (Underlying && Underlying != &Ptr)
+  std::optional<uint64_t> ConcreteOffset = getNonNegativeU64(Offset);
+  if (Stripped == Underlying && ConcreteOffset)
+    return AbstractAccess(Underlying, AbstractValue::constant(*ConcreteOffset),
+                          Size);
+
+  if (Underlying != &Ptr)
     return AbstractAccess(Underlying, AbstractValue::symbol(Ptr), Size);
 
   return AbstractAccess(&Ptr, AbstractValue::constant(0), Size);
@@ -590,7 +594,8 @@ bool AbstractAccess::contains(const AbstractAccess &Other) const {
 }
 
 std::optional<AbstractAccess> AbstractAccess::merge(const AbstractAccess &A,
-                                                    const AbstractAccess &B) {
+                                                    const AbstractAccess &B,
+                                                    const DataLayout *DL) {
   if (A == B)
     return A;
   if (A.Base != B.Base)
@@ -599,9 +604,39 @@ std::optional<AbstractAccess> AbstractAccess::merge(const AbstractAccess &A,
     return A;
   if (B.contains(A))
     return B;
-  if (!A.Offset.isConstant() || !A.Size.isConstant() ||
-      !B.Offset.isConstant() || !B.Size.isConstant())
+  if (!A.Size.isConstant() || !B.Size.isConstant())
     return std::nullopt;
+
+  if (!A.Offset.isConstant() || !B.Offset.isConstant()) {
+    if (!DL || !A.Offset.isSymbol() || !B.Offset.isSymbol())
+      return std::nullopt;
+    const Value *AStart = A.Offset.getSymbol();
+    const Value *BStart = B.Offset.getSymbol();
+    if (!AStart->getType()->isPointerTy() || !BStart->getType()->isPointerTy())
+      return std::nullopt;
+
+    std::optional<int64_t> PointerDelta =
+        BStart->getPointerOffsetFrom(AStart, *DL);
+    if (!PointerDelta)
+      return std::nullopt;
+
+    APInt BBegin(128, static_cast<uint64_t>(*PointerDelta), true);
+    APInt AEnd(128, A.Size.getConstant());
+    APInt BEnd = BBegin + APInt(128, B.Size.getConstant());
+    APInt Zero(128, 0);
+    if (AEnd.slt(BBegin) || BEnd.slt(Zero))
+      return std::nullopt;
+
+    const APInt &Begin = BBegin.slt(Zero) ? BBegin : Zero;
+    const APInt &End = AEnd.sgt(BEnd) ? AEnd : BEnd;
+    APInt MergedSize = End - Begin;
+    if (MergedSize.getActiveBits() > 64)
+      return std::nullopt;
+
+    const AbstractAccess &First = BBegin.slt(Zero) ? B : A;
+    return AbstractAccess(First.Base, First.Offset,
+                          AbstractValue::constant(MergedSize.getZExtValue()));
+  }
 
   uint64_t ABegin = A.Offset.getConstant();
   std::optional<uint64_t> AEnd = checkedEnd(ABegin, A.Size.getConstant());
@@ -778,10 +813,85 @@ void MemoryAccess::refreshOptimizationProperties() {
 void MemoryAccess::mergeKind(AccessKind Other) {
   Kind = ::mair::mergeKind(Kind, Other);
   refreshOptimizationProperties();
+  if (Observation *Obs = getParent())
+    Obs->invalidateSort();
 }
 
 const Value *MemoryAccess::getBase() const {
   return std::visit([](const auto &R) { return R.getBase(); }, Region);
+}
+
+namespace {
+
+const AbstractAccess *getLocationBounds(const MemoryAccess &Access) {
+  if (const AbstractAccess *Region = Access.getContiguousRegion())
+    return Region;
+  if (const MaskedRegion *Region = Access.getMaskedRegion())
+    return &Region->getBounds();
+  return nullptr;
+}
+
+bool compareMemoryObjectKey(const MemoryAccess &LHS, const MemoryAccess &RHS) {
+  const MemoryObject *LObject = LHS.getBaseUse().get();
+  const MemoryObject *RObject = RHS.getBaseUse().get();
+  return std::less<const MemoryObject *>()(LObject, RObject);
+}
+
+bool hasSameMemoryObjectKey(const MemoryAccess &LHS, const MemoryAccess &RHS) {
+  return LHS.getBaseUse().get() == RHS.getBaseUse().get();
+}
+
+bool compareAbstractValue(const AbstractValue &LHS, const AbstractValue &RHS) {
+  if (LHS.isConstant() != RHS.isConstant())
+    return LHS.isConstant();
+  if (LHS.isConstant())
+    return LHS.getConstant() < RHS.getConstant();
+  if (LHS.isSymbol() != RHS.isSymbol())
+    return LHS.isSymbol();
+  if (LHS.isSymbol())
+    return std::less<const Value *>()(LHS.getSymbol(), RHS.getSymbol());
+  return false;
+}
+
+bool compareAbstractSize(const AbstractValue &LHS, const AbstractValue &RHS) {
+  if (LHS.isConstant() != RHS.isConstant())
+    return LHS.isConstant();
+  if (LHS.isConstant())
+    return LHS.getConstant() > RHS.getConstant();
+  return compareAbstractValue(LHS, RHS);
+}
+
+} // namespace
+
+bool MemoryAccess::hasConcreteRange() const {
+  const AbstractAccess *Location = getContiguousRegion();
+  return Location && Location->getOffset().isConstant() &&
+         Location->getSize().isConstant();
+}
+
+bool MemoryAccess::compareByLocation(const MemoryAccess &LHS,
+                                     const MemoryAccess &RHS) {
+  if (!hasSameMemoryObjectKey(LHS, RHS))
+    return compareMemoryObjectKey(LHS, RHS);
+
+  if (LHS.isPeriodic() != RHS.isPeriodic())
+    return !LHS.isPeriodic();
+
+  const bool LConcrete = LHS.hasConcreteRange();
+  const bool RConcrete = RHS.hasConcreteRange();
+  if (LConcrete != RConcrete)
+    return LConcrete;
+
+  const AbstractAccess *LBounds = getLocationBounds(LHS);
+  const AbstractAccess *RBounds = getLocationBounds(RHS);
+  if (LBounds && RBounds) {
+    if (LBounds->getOffset() != RBounds->getOffset())
+      return compareAbstractValue(LBounds->getOffset(), RBounds->getOffset());
+    if (LBounds->getSize() != RBounds->getSize())
+      return compareAbstractSize(LBounds->getSize(), RBounds->getSize());
+    return LHS.getLevel() > RHS.getLevel();
+  }
+  return false;
 }
 
 bool MemoryAccess::covers(const MemoryAccess &Other) const {
@@ -820,12 +930,15 @@ bool MemoryAccess::mergeWith(const MemoryAccess &Other) {
     const auto *OtherAccess = Other.getContiguousRegion();
     if (!OtherAccess)
       return false;
-    const bool ThisContainsOther = ThisAccess->contains(*OtherAccess);
-    const bool OtherContainsThis = OtherAccess->contains(*ThisAccess);
+    const Instruction *Provenance = getInstruction();
+    const DataLayout *DL =
+        Provenance ? &Provenance->getModule()->getDataLayout() : nullptr;
     std::optional<AbstractAccess> Merged =
-        AbstractAccess::merge(*ThisAccess, *OtherAccess);
+        AbstractAccess::merge(*ThisAccess, *OtherAccess, DL);
     if (!Merged)
       return false;
+    const bool ThisContainsOther = *Merged == *ThisAccess;
+    const bool OtherContainsThis = *Merged == *OtherAccess;
     Region = *Merged;
     if (OtherContainsThis && !ThisContainsOther) {
       SmallVector<Instruction *, 2> OrderedInsts;
@@ -865,6 +978,8 @@ bool MemoryAccess::mergeWith(const MemoryAccess &Other) {
   Kind = ::mair::mergeKind(Kind, Other.Kind);
   Properties |= Other.Properties;
   refreshOptimizationProperties();
+  if (Observation *Obs = getParent())
+    Obs->invalidateSort();
   return true;
 }
 
@@ -1003,6 +1118,7 @@ MemoryAccess &Observation::addAccess(const MemoryAccess &A) {
   if (MAIRGraph *Graph = getParent())
     Graph->registerAccess(Node);
   ++NumAccesses;
+  Sorted = false;
   return Node;
 }
 
@@ -1044,6 +1160,14 @@ bool Observation::hasCompatibleMergeSemantics(const Observation &Other) const {
   return isEdgeSite() && Other.isEdgeSite() && Site == Other.Site;
 }
 
+void Observation::sort(AccessComparator Compare) {
+  if (Sorted && SortedWith == Compare)
+    return;
+  Accesses.sort(Compare);
+  Sorted = true;
+  SortedWith = Compare;
+}
+
 Observation::iterator Observation::erase(iterator It) {
   assert(It != Accesses.end() && "Cannot erase end iterator");
   if (MAIRGraph *Graph = getParent())
@@ -1079,6 +1203,7 @@ void Observation::prependAccessesFrom(const Observation &Other) {
     if (MAIRGraph *Graph = getParent())
       Graph->registerAccess(Node);
     ++NumAccesses;
+    Sorted = false;
   }
 }
 

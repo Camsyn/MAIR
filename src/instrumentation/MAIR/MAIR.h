@@ -203,7 +203,8 @@ public:
   static AbstractAccess fromPointerAndSize(const Value &Ptr, AbstractValue Size,
                                            const DataLayout &DL);
   static std::optional<AbstractAccess> merge(const AbstractAccess &A,
-                                             const AbstractAccess &B);
+                                             const AbstractAccess &B,
+                                             const DataLayout *DL = nullptr);
 
   bool operator==(const AbstractAccess &Other) const {
     return Base == Other.Base && Offset == Other.Offset && Size == Other.Size;
@@ -665,6 +666,9 @@ public:
   bool mergeWith(const MemoryAccess &Other);
   void mergeKind(AccessKind Other);
 
+  bool hasConcreteRange() const;
+  static bool compareByLocation(const MemoryAccess &LHS,
+                                const MemoryAccess &RHS);
   static MemoryAccess fromInstruction(const Instruction &I,
                                       const DataLayout &DL);
 
@@ -696,9 +700,12 @@ public:
   using AccessListType = simple_ilist<MemoryAccess, ilist_parent<Observation>>;
   using iterator = AccessListType::iterator;
   using const_iterator = AccessListType::const_iterator;
+  using AccessComparator = bool (*)(const MemoryAccess &, const MemoryAccess &);
   using EdgeListType = SmallVector<ObservationEdge, 4>;
 
 private:
+  friend class MemoryAccess;
+
   std::string Name;
   ObservationSite Site;
   ObservationGuard Guard = AlwaysGuard{};
@@ -708,6 +715,10 @@ private:
   EdgeListType Parents;
   SmallPtrSet<const BasicBlock *, 2> RepresentedBlocks;
   unsigned NumAccesses = 0;
+  bool Sorted = true;
+  AccessComparator SortedWith = nullptr;
+
+  void invalidateSort() { Sorted = false; }
 
 public:
   Observation() = default;
@@ -769,6 +780,7 @@ public:
   bool hasCompatibleMergeSemantics(const Observation &Other) const;
 
   MemoryAccess &addAccess(const MemoryAccess &A);
+  void sort(AccessComparator Compare = MemoryAccess::compareByLocation);
   iterator erase(iterator It);
   iterator erase(MemoryAccess &Access);
   void mergeAccessesFrom(const Observation &Other);

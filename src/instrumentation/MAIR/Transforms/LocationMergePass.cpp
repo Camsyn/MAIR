@@ -2,10 +2,9 @@
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
 
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+
+#include <iterator>
 
 using namespace llvm;
 
@@ -19,73 +18,75 @@ namespace mair {
 
 namespace {
 
-using AccessGroup = SmallVector<MemoryAccess *, 8>;
+using AccessIterator = Observation::iterator;
 
-bool hasConcreteRange(const MemoryAccess &Access) {
-  const AbstractAccess *Location = Access.getContiguousRegion();
-  return Location && Location->getOffset().isConstant() &&
-         Location->getSize().isConstant();
+bool hasSameMemoryObject(const MemoryAccess &LHS, const MemoryAccess &RHS) {
+  return &LHS.getMemoryObject() == &RHS.getMemoryObject();
 }
 
-bool mergeLocations(Observation &Obs) {
-  // Concrete ranges are sorted so adjacent/overlapping regions merge in one
-  // sweep. Symbolic and masked regions lack that ordering and use pairwise
-  // comparison only after the concrete prefix has converged.
-  DenseMap<MemoryObject *, AccessGroup> Groups;
-  for (MemoryAccess &Access : Obs)
-    if (!Access.isPeriodic())
-      Groups[&Access.getMemoryObject()].push_back(&Access);
-
+bool mergeConcreteRange(Observation &Obs, AccessIterator Begin,
+                        AccessIterator End) {
   bool Changed = false;
-  for (auto &Entry : Groups) {
-    AccessGroup &Accesses = Entry.second;
-    llvm::stable_sort(
-        Accesses, [](const MemoryAccess *LHS, const MemoryAccess *RHS) {
-          bool LConcrete = hasConcreteRange(*LHS);
-          bool RConcrete = hasConcreteRange(*RHS);
-          if (LConcrete != RConcrete)
-            return LConcrete;
-          if (!LConcrete)
-            return false;
-          return LHS->getContiguousRegion()->getOffset().getConstant() <
-                 RHS->getContiguousRegion()->getOffset().getConstant();
-        });
+  if (Begin == End)
+    return false;
 
-    size_t ConcreteEnd = llvm::find_if(Accesses,
-                                       [](const MemoryAccess *Access) {
-                                         return !hasConcreteRange(*Access);
-                                       }) -
-                         Accesses.begin();
-    MemoryAccess *Current = Accesses.front();
-    for (size_t I = 1; I < ConcreteEnd;) {
-      MemoryAccess *Next = Accesses[I];
+  AccessIterator Current = Begin;
+  AccessIterator Next = std::next(Current);
+  while (Next != End) {
+    if (!Current->mergeWith(*Next)) {
+      Current = Next;
+      Next = std::next(Current);
+      continue;
+    }
+    Next = Obs.erase(Next);
+    Changed = true;
+    ++NumMergedAccesses;
+  }
+  return Changed;
+}
+
+bool mergeNonConcreteRange(Observation &Obs, AccessIterator Begin,
+                           AccessIterator End) {
+  bool Changed = false;
+
+  for (AccessIterator Current = Begin; Current != End; ++Current) {
+    for (AccessIterator Next = std::next(Current); Next != End;) {
       if (!Current->mergeWith(*Next)) {
-        Current = Next;
-        ++I;
+        ++Next;
         continue;
       }
-      Obs.erase(*Next);
-      Accesses.erase(Accesses.begin() + I);
-      --ConcreteEnd;
+      Obs.erase(Next);
+      Next = std::next(Current);
       Changed = true;
       ++NumMergedAccesses;
     }
+  }
+  return Changed;
+}
 
-    for (size_t I = ConcreteEnd; I < Accesses.size(); ++I) {
-      Current = Accesses[I];
-      for (size_t J = I + 1; J < Accesses.size();) {
-        MemoryAccess *Next = Accesses[J];
-        bool Merged = Current->mergeWith(*Next);
-        if (!Merged) {
-          ++J;
-          continue;
-        }
-        Obs.erase(*Next);
-        Accesses.erase(Accesses.begin() + J);
-        Changed = true;
-        ++NumMergedAccesses;
-      }
-    }
+bool mergeLocations(Observation &Obs) {
+  Obs.sort(MemoryAccess::compareByLocation);
+
+  bool Changed = false;
+  for (AccessIterator ObjectBegin = Obs.begin(); ObjectBegin != Obs.end();) {
+    AccessIterator ObjectEnd = std::next(ObjectBegin);
+    while (ObjectEnd != Obs.end() &&
+           hasSameMemoryObject(*ObjectBegin, *ObjectEnd))
+      ++ObjectEnd;
+
+    AccessIterator ConcreteEnd = ObjectBegin;
+    while (ConcreteEnd != ObjectEnd && !ConcreteEnd->isPeriodic() &&
+           ConcreteEnd->hasConcreteRange())
+      ++ConcreteEnd;
+
+    Changed |= mergeConcreteRange(Obs, ObjectBegin, ConcreteEnd);
+
+    AccessIterator NonConcreteEnd = ConcreteEnd;
+    while (NonConcreteEnd != ObjectEnd && !NonConcreteEnd->isPeriodic())
+      ++NonConcreteEnd;
+    Changed |= mergeNonConcreteRange(Obs, ConcreteEnd, NonConcreteEnd);
+
+    ObjectBegin = ObjectEnd;
   }
   return Changed;
 }

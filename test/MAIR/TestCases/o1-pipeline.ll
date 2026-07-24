@@ -32,9 +32,9 @@ right:
 define void @o1_location_merge_after_motion(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @o1_location_merge_after_motion {
 ; CHECK:       ma3: preds=
-; CHECK-NEXT:    read ptr %p + 8, 4
 ; CHECK-NEXT:    read ptr %p, 4
 ; CHECK-NEXT:    write ptr %p + 4, 4
+; CHECK-NEXT:    read ptr %p + 8, 4
 entry:
   %p8 = getelementptr i8, ptr %p, i64 8
   %v8 = load i32, ptr %p8, align 4

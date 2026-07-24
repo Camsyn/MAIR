@@ -2004,6 +2004,78 @@ entry:
   EXPECT_EQ(Obs.size(), 1u);
 }
 
+TEST(MAIRGraphPass, RedundantObservationUsesLocationOrderForCoverageWitness) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %narrow = load i32, ptr %p, align 4
+  %wide = load i64, ptr %p, align 8
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  const llvm::Function &F = *M->begin();
+  const llvm::BasicBlock &BB = *F.begin();
+  auto InstIt = BB.begin();
+  const llvm::Instruction &NarrowLoad = *InstIt++;
+  const llvm::Instruction &WideLoad = *InstIt++;
+  MAIRGraph Graph(F);
+  Observation &Obs = Graph.createInstObservation(BB, NarrowLoad);
+  Obs.addAccess(MemoryAccess::fromInstruction(WideLoad, M->getDataLayout()));
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  RedundantObservationEliminationPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_FALSE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  ASSERT_EQ(Obs.size(), 1u);
+  const AbstractAccess *Region = Obs.begin()->getContiguousRegion();
+  ASSERT_NE(Region, nullptr);
+  ASSERT_TRUE(Region->getSize().isConstant());
+  EXPECT_EQ(Region->getSize().getConstant(), 8u);
+}
+
+TEST(MAIRGraphPass, RedundantObservationOrdersEqualLocationsByCoverageLevel) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %read = load i32, ptr %p, align 4
+  store i32 0, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  const llvm::Function &F = *M->begin();
+  const llvm::BasicBlock &BB = *F.begin();
+  auto InstIt = BB.begin();
+  const llvm::Instruction &Read = *InstIt++;
+  const llvm::Instruction &Write = *InstIt++;
+  MAIRGraph Graph(F);
+  Observation &Obs = Graph.createInstObservation(BB, Read);
+  Obs.addAccess(MemoryAccess::fromInstruction(Write, M->getDataLayout()));
+  ASSERT_LT(Obs.begin()->getLevel(), std::next(Obs.begin())->getLevel());
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  RedundantObservationEliminationPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_FALSE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  ASSERT_EQ(Obs.size(), 1u);
+  EXPECT_TRUE(Obs.begin()->isWrite());
+}
+
 TEST(MAIRGraphPass, RedundantObservationUsesNonAdjacentLocalWitness) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
@@ -3164,6 +3236,149 @@ entry:
   EXPECT_EQ(&Graph.getBBEntryRepresentative(BB), &Representative);
 }
 
+TEST(MAIRSchema, ObservationSortCacheInvalidatesWhenAccessIsAdded) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %v = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  llvm::Instruction &Load = BB.front();
+  llvm::Argument &P = *F.arg_begin();
+  MAIRGraph Graph(F);
+  Observation &Obs = Graph.createBBObservation(BB, true);
+
+  auto MakeAccess = [&](uint64_t Offset) {
+    return MemoryAccess(
+        {&Load},
+        MemoryRegion(AbstractAccess(&P, AbstractValue::constant(Offset),
+                                    AbstractValue::constant(4))),
+        AccessKind::Read);
+  };
+  auto CollectOffsets = [&]() {
+    llvm::SmallVector<uint64_t, 4> Offsets;
+    for (const MemoryAccess &Access : Obs) {
+      const AbstractAccess *Region = Access.getContiguousRegion();
+      assert(Region && Region->getOffset().isConstant());
+      Offsets.push_back(Region->getOffset().getConstant());
+    }
+    return Offsets;
+  };
+
+  Obs.addAccess(MakeAccess(8));
+  Obs.addAccess(MakeAccess(0));
+  Obs.sort();
+
+  llvm::SmallVector<uint64_t, 4> Offsets = CollectOffsets();
+  ASSERT_EQ(Offsets.size(), 2u);
+  EXPECT_EQ(Offsets[0], 0u);
+  EXPECT_EQ(Offsets[1], 8u);
+
+  Obs.sort();
+  Obs.addAccess(MakeAccess(4));
+  Obs.sort();
+
+  Offsets = CollectOffsets();
+  ASSERT_EQ(Offsets.size(), 3u);
+  EXPECT_EQ(Offsets[0], 0u);
+  EXPECT_EQ(Offsets[1], 4u);
+  EXPECT_EQ(Offsets[2], 8u);
+
+  auto ReverseCompare = [](const MemoryAccess &LHS, const MemoryAccess &RHS) {
+    return MemoryAccess::compareByLocation(RHS, LHS);
+  };
+  Obs.sort(ReverseCompare);
+  Offsets = CollectOffsets();
+  EXPECT_EQ(Offsets[0], 8u);
+  EXPECT_EQ(Offsets[1], 4u);
+  EXPECT_EQ(Offsets[2], 0u);
+  Obs.sort();
+  Offsets = CollectOffsets();
+  EXPECT_EQ(Offsets[0], 0u);
+  EXPECT_EQ(Offsets[1], 4u);
+  EXPECT_EQ(Offsets[2], 8u);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRSchema, ObservationSortCacheInvalidatesWhenAccessKeyChanges) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %v = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  llvm::Instruction &Load = BB.front();
+  llvm::Argument &P = *F.arg_begin();
+  MAIRGraph Graph(F);
+  Observation &Obs = Graph.createBBObservation(BB, true);
+
+  auto MakeAccess = [&](uint64_t Offset, uint64_t Size) {
+    return MemoryAccess(
+        {&Load},
+        MemoryRegion(AbstractAccess(&P, AbstractValue::constant(Offset),
+                                    AbstractValue::constant(Size))),
+        AccessKind::Read);
+  };
+
+  MemoryAccess &Left = Obs.addAccess(MakeAccess(0, 4));
+  MemoryAccess &Right = Obs.addAccess(MakeAccess(4, 4));
+  Obs.sort();
+  ASSERT_EQ(&*Obs.begin(), &Left);
+  ASSERT_TRUE(Right.mergeWith(Left));
+
+  Obs.sort();
+  EXPECT_EQ(&*Obs.begin(), &Right);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRSchema, ObservationSortCacheInvalidatesWhenAccessLevelChanges) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %v = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  llvm::Instruction &Load = BB.front();
+  llvm::Argument &P = *F.arg_begin();
+  MAIRGraph Graph(F);
+  Observation &Obs = Graph.createBBObservation(BB, true);
+  AbstractAccess Region(&P, AbstractValue::constant(0),
+                        AbstractValue::constant(4));
+
+  MemoryAccess &Read =
+      Obs.addAccess(MemoryAccess({&Load}, Region, AccessKind::Read));
+  MemoryAccess &Write =
+      Obs.addAccess(MemoryAccess({&Load}, Region, AccessKind::Write));
+  Obs.sort();
+  ASSERT_EQ(&*Obs.begin(), &Write);
+
+  Read.mergeKind(AccessKind::Write);
+  Obs.sort();
+  EXPECT_EQ(&*Obs.begin(), &Read);
+  EXPECT_TRUE(Graph.verify());
+}
+
 TEST(MAIRSchema, PeriodicRegionAcceptsZeroTripAndSurvivesGraphMove) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
@@ -3845,6 +4060,209 @@ entry:
   EXPECT_TRUE(First.mergeWith(Same));
   EXPECT_FALSE(First.mergeWith(Different))
       << "first=" << First.toString() << " different=" << Different.toString();
+}
+
+TEST(MAIROptimizationConfig, LocationMergeJoinsEquivalentNonConcreteLocations) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %v = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  llvm::Instruction &Load = BB.front();
+  llvm::Argument &P = *F.arg_begin();
+  MAIRGraph Graph(F);
+  Observation &Obs = Graph.createBBObservation(BB, true);
+
+  auto MakeAccess = [&](uint64_t Offset) {
+    return MemoryAccess(
+        {&Load},
+        MemoryRegion(AbstractAccess(&P, AbstractValue::constant(Offset),
+                                    AbstractValue::unknown())),
+        AccessKind::Read);
+  };
+
+  Obs.addAccess(MakeAccess(8));
+  Obs.addAccess(MakeAccess(0));
+  Obs.addAccess(MakeAccess(8));
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  LocationMergePass Pass;
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+  ASSERT_EQ(Obs.size(), 2u);
+
+  auto It = Obs.begin();
+  ASSERT_NE(It->getContiguousRegion(), nullptr);
+  EXPECT_EQ(It->getContiguousRegion()->getOffset(), AbstractValue::constant(0));
+  ++It;
+  ASSERT_NE(It->getContiguousRegion(), nullptr);
+  EXPECT_EQ(It->getContiguousRegion()->getOffset(), AbstractValue::constant(8));
+  EXPECT_EQ(It->getInstructions().size(), 2u);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIROptimizationConfig, MergeWithJoinsAdjacentSymbolicLocations) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i64 %x) {
+entry:
+  %px = getelementptr i8, ptr %p, i64 %x
+  store i32 0, ptr %px, align 4
+  %px4 = getelementptr i8, ptr %px, i64 4
+  store i32 1, ptr %px4, align 4
+  %px12 = getelementptr i8, ptr %px, i64 12
+  store i32 2, ptr %px12, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::Argument &P = *F.arg_begin();
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  auto It = BB.begin();
+  llvm::Instruction &PX = *It++;
+  llvm::Instruction &LowerStore = *It++;
+  ++It;
+  llvm::Instruction &UpperStore = *It++;
+  ++It;
+  llvm::Instruction &GappedStore = *It;
+
+  MemoryAccess Lower =
+      MemoryAccess::fromInstruction(LowerStore, M->getDataLayout());
+  MemoryAccess Upper =
+      MemoryAccess::fromInstruction(UpperStore, M->getDataLayout());
+
+  ASSERT_EQ(Lower.getBase(), &P);
+  ASSERT_EQ(Upper.getBase(), &P);
+  ASSERT_TRUE(Lower.mergeWith(Upper));
+  const AbstractAccess *Merged = Lower.getContiguousRegion();
+  ASSERT_NE(Merged, nullptr);
+  EXPECT_EQ(Merged->getOffset(), AbstractValue::symbol(PX));
+  EXPECT_EQ(Merged->getSize(), AbstractValue::constant(8));
+  EXPECT_TRUE(Lower.isWrite());
+
+  MemoryAccess ReversedUpper =
+      MemoryAccess::fromInstruction(UpperStore, M->getDataLayout());
+  MemoryAccess ReversedLower =
+      MemoryAccess::fromInstruction(LowerStore, M->getDataLayout());
+  ASSERT_TRUE(ReversedUpper.mergeWith(ReversedLower));
+  Merged = ReversedUpper.getContiguousRegion();
+  ASSERT_NE(Merged, nullptr);
+  EXPECT_EQ(Merged->getOffset(), AbstractValue::symbol(PX));
+  EXPECT_EQ(Merged->getSize(), AbstractValue::constant(8));
+
+  MemoryAccess GappedLower =
+      MemoryAccess::fromInstruction(LowerStore, M->getDataLayout());
+  MemoryAccess GappedUpper =
+      MemoryAccess::fromInstruction(GappedStore, M->getDataLayout());
+  EXPECT_FALSE(GappedLower.mergeWith(GappedUpper));
+}
+
+TEST(MAIROptimizationConfig,
+     LocationMergeJoinsAdjacentSymbolicLocationsWithoutExternalKey) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i64 %x) {
+entry:
+  %px = getelementptr i8, ptr %p, i64 %x
+  store i32 0, ptr %px, align 4
+  %px4 = getelementptr i8, ptr %px, i64 4
+  store i32 1, ptr %px4, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  auto It = BB.begin();
+  ++It;
+  llvm::Instruction &LowerStore = *It++;
+  ++It;
+  llvm::Instruction &UpperStore = *It;
+  MAIRGraph Graph(F);
+  Observation &Obs = Graph.createBBObservation(BB, true);
+  Obs.addAccess(MemoryAccess::fromInstruction(LowerStore, M->getDataLayout()));
+  Obs.addAccess(MemoryAccess::fromInstruction(UpperStore, M->getDataLayout()));
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  LocationMergePass Pass;
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+  ASSERT_EQ(Obs.size(), 1u);
+
+  const AbstractAccess *Merged = Obs.begin()->getContiguousRegion();
+  ASSERT_NE(Merged, nullptr);
+  EXPECT_EQ(Merged->getBase(), F.arg_begin());
+  EXPECT_EQ(Merged->getSize(), AbstractValue::constant(8));
+  EXPECT_TRUE(Obs.begin()->isWrite());
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIROptimizationConfig, LocationMergeKeepsConcreteRangesInLinearSweep) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %v = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  llvm::Instruction &Load = BB.front();
+  llvm::Argument &P = *F.arg_begin();
+  MAIRGraph Graph(F);
+  Observation &Obs = Graph.createBBObservation(BB, true);
+
+  Obs.addAccess(
+      MemoryAccess({&Load},
+                   MemoryRegion(AbstractAccess(&P, AbstractValue::constant(0),
+                                               AbstractValue::constant(8))),
+                   AccessKind::Read));
+  Obs.addAccess(
+      MemoryAccess({&Load},
+                   MemoryRegion(AbstractAccess(&P, AbstractValue::constant(4),
+                                               AbstractValue::unknown())),
+                   AccessKind::Read));
+  Obs.addAccess(
+      MemoryAccess({&Load},
+                   MemoryRegion(AbstractAccess(&P, AbstractValue::constant(8),
+                                               AbstractValue::constant(4))),
+                   AccessKind::Read));
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  LocationMergePass Pass;
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+  ASSERT_EQ(Obs.size(), 2u);
+
+  auto It = Obs.begin();
+  ASSERT_NE(It->getContiguousRegion(), nullptr);
+  EXPECT_EQ(It->getContiguousRegion()->getOffset(), AbstractValue::constant(0));
+  EXPECT_EQ(It->getContiguousRegion()->getSize(), AbstractValue::constant(12));
+  ++It;
+  ASSERT_NE(It->getContiguousRegion(), nullptr);
+  EXPECT_EQ(It->getContiguousRegion()->getOffset(), AbstractValue::constant(4));
+  EXPECT_TRUE(It->getContiguousRegion()->getSize().isUnknown());
+  EXPECT_TRUE(Graph.verify());
 }
 
 TEST(MAIROptimizationConfig, LocationMergeUnionsComparableMasksOnly) {

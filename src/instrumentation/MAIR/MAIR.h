@@ -667,8 +667,6 @@ public:
   void mergeKind(AccessKind Other);
 
   bool hasConcreteRange() const;
-  static bool compareByLocation(const MemoryAccess &LHS,
-                                const MemoryAccess &RHS);
   static MemoryAccess fromInstruction(const Instruction &I,
                                       const DataLayout &DL);
 
@@ -780,7 +778,7 @@ public:
   bool hasCompatibleMergeSemantics(const Observation &Other) const;
 
   MemoryAccess &addAccess(const MemoryAccess &A);
-  void sort(AccessComparator Compare = MemoryAccess::compareByLocation);
+  void sort(AccessComparator Compare);
   iterator erase(iterator It);
   iterator erase(MemoryAccess &Access);
   void mergeAccessesFrom(const Observation &Other);

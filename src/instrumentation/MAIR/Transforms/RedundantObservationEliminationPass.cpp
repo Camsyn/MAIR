@@ -2,13 +2,15 @@
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/Analysis/RedundantObservationAnalysis.h"
 
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 
 #include <array>
+#include <functional>
+#include <iterator>
 #include <limits>
+#include <optional>
 
 using namespace llvm;
 
@@ -23,6 +25,11 @@ namespace mair {
 
 namespace {
 
+struct ConcreteRange {
+  uint64_t Begin = 0;
+  uint64_t End = 0;
+};
+
 struct ConcreteAccess {
   MemoryAccess *Access = nullptr;
   uint64_t Begin = 0;
@@ -36,6 +43,36 @@ struct CoveringWitness {
 
 using WitnessesByLevel = std::array<CoveringWitness, 256>;
 using WitnessesByAtomicity = std::array<WitnessesByLevel, 2>;
+
+std::optional<ConcreteRange> getConcreteRange(const MemoryAccess &Access) {
+  const AbstractAccess *Region = Access.getContiguousRegion();
+  if (!Region || !Region->getOffset().isConstant() ||
+      !Region->getSize().isConstant())
+    return std::nullopt;
+
+  uint64_t Begin = Region->getOffset().getConstant();
+  uint64_t Size = Region->getSize().getConstant();
+  if (Size > std::numeric_limits<uint64_t>::max() - Begin)
+    return std::nullopt;
+  return ConcreteRange{Begin, Begin + Size};
+}
+
+bool compareForCoverage(const MemoryAccess &LHS, const MemoryAccess &RHS) {
+  if (LHS.getBase() != RHS.getBase())
+    return std::less<const Value *>()(LHS.getBase(), RHS.getBase());
+
+  std::optional<ConcreteRange> LRange = getConcreteRange(LHS);
+  std::optional<ConcreteRange> RRange = getConcreteRange(RHS);
+  if (LRange.has_value() != RRange.has_value())
+    return LRange.has_value();
+  if (!LRange)
+    return false;
+  if (LRange->Begin != RRange->Begin)
+    return LRange->Begin < RRange->Begin;
+  if (LRange->End != RRange->End)
+    return LRange->End > RRange->End;
+  return LHS.getLevel() > RHS.getLevel();
+}
 
 bool hasCoveringWitness(const WitnessesByLevel &Witnesses,
                         const ConcreteAccess &Target) {
@@ -61,32 +98,31 @@ void updateWitness(WitnessesByLevel &Witnesses,
 void findIntraObservationRedundancy(
     Observation &Obs, DenseSet<const MemoryAccess *> &DeletedSources,
     SmallVectorImpl<MemoryAccess *> &Redundant) {
-  Obs.sort(MemoryAccess::compareByLocation);
+  Obs.sort(compareForCoverage);
 
-  DenseMap<const Value *, SmallVector<ConcreteAccess, 8>> Groups;
   // Other region forms need their own coverage index; this sweep is exact only
   // for concrete contiguous half-open intervals.
-  for (MemoryAccess &Access : Obs) {
-    const AbstractAccess *Region = Access.getContiguousRegion();
-    if (!Region || !Region->getOffset().isConstant() ||
-        !Region->getSize().isConstant())
+  for (auto Begin = Obs.begin(); Begin != Obs.end();) {
+    std::optional<ConcreteRange> FirstRange = getConcreteRange(*Begin);
+    if (!FirstRange) {
+      ++Begin;
       continue;
+    }
 
-    const uint64_t Begin = Region->getOffset().getConstant();
-    const uint64_t Size = Region->getSize().getConstant();
-    if (Size > std::numeric_limits<uint64_t>::max() - Begin)
-      continue;
-    Groups[Access.getBase()].push_back({&Access, Begin, Begin + Size});
-  }
+    auto End = std::next(Begin);
+    while (End != Obs.end() && End->getBase() == Begin->getBase() &&
+           getConcreteRange(*End))
+      ++End;
 
-  for (auto &Entry : Groups) {
-    SmallVectorImpl<ConcreteAccess> &Accesses = Entry.second;
     WitnessesByAtomicity AllWitnesses{};
     WitnessesByAtomicity MergeableWitnesses{};
     // Equal atomicity is directly comparable.  Cross-atomic coverage requires
     // both accesses to be mergeable, hence the second witness table.
-    for (const ConcreteAccess &Candidate : Accesses) {
-      MemoryAccess &Access = *Candidate.Access;
+    for (auto It = Begin; It != End; ++It) {
+      std::optional<ConcreteRange> Range = getConcreteRange(*It);
+      assert(Range && "concrete coverage run contains a non-concrete access");
+      ConcreteAccess Candidate{&*It, Range->Begin, Range->End};
+      MemoryAccess &Access = *It;
       const unsigned Atomicity = Access.isAtomic();
       bool Covered = hasCoveringWitness(AllWitnesses[Atomicity], Candidate);
       if (!Covered && Access.isMergeable())
@@ -104,6 +140,7 @@ void findIntraObservationRedundancy(
       if (Access.isMergeable())
         updateWitness(MergeableWitnesses[Atomicity], Candidate);
     }
+    Begin = End;
   }
 }
 

@@ -52,6 +52,20 @@ MAIRGraph createGraphWithExplicitAnalyses(Function &F) {
   return MAIRGraph::build<BarrierTrait>(F, std::move(DT), std::move(PDT));
 }
 
+bool compareTestAccesses(const MemoryAccess &LHS, const MemoryAccess &RHS) {
+  const AbstractAccess *LRegion = LHS.getContiguousRegion();
+  const AbstractAccess *RRegion = RHS.getContiguousRegion();
+  assert(LRegion && RRegion && LRegion->getOffset().isConstant() &&
+         RRegion->getOffset().isConstant() && LRegion->getSize().isConstant() &&
+         RRegion->getSize().isConstant());
+  if (LRegion->getOffset() != RRegion->getOffset())
+    return LRegion->getOffset().getConstant() <
+           RRegion->getOffset().getConstant();
+  if (LRegion->getSize() != RRegion->getSize())
+    return LRegion->getSize().getConstant() > RRegion->getSize().getConstant();
+  return LHS.getLevel() > RHS.getLevel();
+}
+
 TEST(MAOpt, BuildsOptimizesAndExposesObservationAccesses) {
   llvm::LLVMContext Ctx;
   std::unique_ptr<llvm::Module> M = parseModule(R"(
@@ -2004,7 +2018,7 @@ entry:
   EXPECT_EQ(Obs.size(), 1u);
 }
 
-TEST(MAIRGraphPass, RedundantObservationUsesLocationOrderForCoverageWitness) {
+TEST(MAIRGraphPass, RedundantObservationUsesCoverageOrderForWitness) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -3274,16 +3288,16 @@ entry:
 
   Obs.addAccess(MakeAccess(8));
   Obs.addAccess(MakeAccess(0));
-  Obs.sort();
+  Obs.sort(compareTestAccesses);
 
   llvm::SmallVector<uint64_t, 4> Offsets = CollectOffsets();
   ASSERT_EQ(Offsets.size(), 2u);
   EXPECT_EQ(Offsets[0], 0u);
   EXPECT_EQ(Offsets[1], 8u);
 
-  Obs.sort();
+  Obs.sort(compareTestAccesses);
   Obs.addAccess(MakeAccess(4));
-  Obs.sort();
+  Obs.sort(compareTestAccesses);
 
   Offsets = CollectOffsets();
   ASSERT_EQ(Offsets.size(), 3u);
@@ -3292,14 +3306,14 @@ entry:
   EXPECT_EQ(Offsets[2], 8u);
 
   auto ReverseCompare = [](const MemoryAccess &LHS, const MemoryAccess &RHS) {
-    return MemoryAccess::compareByLocation(RHS, LHS);
+    return compareTestAccesses(RHS, LHS);
   };
   Obs.sort(ReverseCompare);
   Offsets = CollectOffsets();
   EXPECT_EQ(Offsets[0], 8u);
   EXPECT_EQ(Offsets[1], 4u);
   EXPECT_EQ(Offsets[2], 0u);
-  Obs.sort();
+  Obs.sort(compareTestAccesses);
   Offsets = CollectOffsets();
   EXPECT_EQ(Offsets[0], 0u);
   EXPECT_EQ(Offsets[1], 4u);
@@ -3336,11 +3350,11 @@ entry:
 
   MemoryAccess &Left = Obs.addAccess(MakeAccess(0, 4));
   MemoryAccess &Right = Obs.addAccess(MakeAccess(4, 4));
-  Obs.sort();
+  Obs.sort(compareTestAccesses);
   ASSERT_EQ(&*Obs.begin(), &Left);
   ASSERT_TRUE(Right.mergeWith(Left));
 
-  Obs.sort();
+  Obs.sort(compareTestAccesses);
   EXPECT_EQ(&*Obs.begin(), &Right);
   EXPECT_TRUE(Graph.verify());
 }
@@ -3370,11 +3384,11 @@ entry:
       Obs.addAccess(MemoryAccess({&Load}, Region, AccessKind::Read));
   MemoryAccess &Write =
       Obs.addAccess(MemoryAccess({&Load}, Region, AccessKind::Write));
-  Obs.sort();
+  Obs.sort(compareTestAccesses);
   ASSERT_EQ(&*Obs.begin(), &Write);
 
   Read.mergeKind(AccessKind::Write);
-  Obs.sort();
+  Obs.sort(compareTestAccesses);
   EXPECT_EQ(&*Obs.begin(), &Read);
   EXPECT_TRUE(Graph.verify());
 }

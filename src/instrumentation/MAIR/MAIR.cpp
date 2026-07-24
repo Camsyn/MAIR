@@ -14,7 +14,6 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/ErrorHandling.h"
-#include <functional>
 #include <optional>
 
 using namespace llvm;
@@ -821,77 +820,10 @@ const Value *MemoryAccess::getBase() const {
   return std::visit([](const auto &R) { return R.getBase(); }, Region);
 }
 
-namespace {
-
-const AbstractAccess *getLocationBounds(const MemoryAccess &Access) {
-  if (const AbstractAccess *Region = Access.getContiguousRegion())
-    return Region;
-  if (const MaskedRegion *Region = Access.getMaskedRegion())
-    return &Region->getBounds();
-  return nullptr;
-}
-
-bool compareMemoryObjectKey(const MemoryAccess &LHS, const MemoryAccess &RHS) {
-  const MemoryObject *LObject = LHS.getBaseUse().get();
-  const MemoryObject *RObject = RHS.getBaseUse().get();
-  return std::less<const MemoryObject *>()(LObject, RObject);
-}
-
-bool hasSameMemoryObjectKey(const MemoryAccess &LHS, const MemoryAccess &RHS) {
-  return LHS.getBaseUse().get() == RHS.getBaseUse().get();
-}
-
-bool compareAbstractValue(const AbstractValue &LHS, const AbstractValue &RHS) {
-  if (LHS.isConstant() != RHS.isConstant())
-    return LHS.isConstant();
-  if (LHS.isConstant())
-    return LHS.getConstant() < RHS.getConstant();
-  if (LHS.isSymbol() != RHS.isSymbol())
-    return LHS.isSymbol();
-  if (LHS.isSymbol())
-    return std::less<const Value *>()(LHS.getSymbol(), RHS.getSymbol());
-  return false;
-}
-
-bool compareAbstractSize(const AbstractValue &LHS, const AbstractValue &RHS) {
-  if (LHS.isConstant() != RHS.isConstant())
-    return LHS.isConstant();
-  if (LHS.isConstant())
-    return LHS.getConstant() > RHS.getConstant();
-  return compareAbstractValue(LHS, RHS);
-}
-
-} // namespace
-
 bool MemoryAccess::hasConcreteRange() const {
   const AbstractAccess *Location = getContiguousRegion();
   return Location && Location->getOffset().isConstant() &&
          Location->getSize().isConstant();
-}
-
-bool MemoryAccess::compareByLocation(const MemoryAccess &LHS,
-                                     const MemoryAccess &RHS) {
-  if (!hasSameMemoryObjectKey(LHS, RHS))
-    return compareMemoryObjectKey(LHS, RHS);
-
-  if (LHS.isPeriodic() != RHS.isPeriodic())
-    return !LHS.isPeriodic();
-
-  const bool LConcrete = LHS.hasConcreteRange();
-  const bool RConcrete = RHS.hasConcreteRange();
-  if (LConcrete != RConcrete)
-    return LConcrete;
-
-  const AbstractAccess *LBounds = getLocationBounds(LHS);
-  const AbstractAccess *RBounds = getLocationBounds(RHS);
-  if (LBounds && RBounds) {
-    if (LBounds->getOffset() != RBounds->getOffset())
-      return compareAbstractValue(LBounds->getOffset(), RBounds->getOffset());
-    if (LBounds->getSize() != RBounds->getSize())
-      return compareAbstractSize(LBounds->getSize(), RBounds->getSize());
-    return LHS.getLevel() > RHS.getLevel();
-  }
-  return false;
 }
 
 bool MemoryAccess::covers(const MemoryAccess &Other) const {

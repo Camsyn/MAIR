@@ -4,6 +4,7 @@
 
 #include "llvm/ADT/Statistic.h"
 
+#include <functional>
 #include <iterator>
 
 using namespace llvm;
@@ -20,8 +21,76 @@ namespace {
 
 using AccessIterator = Observation::iterator;
 
-bool hasSameMemoryObject(const MemoryAccess &LHS, const MemoryAccess &RHS) {
-  return &LHS.getMemoryObject() == &RHS.getMemoryObject();
+enum class MergeClass : uint8_t {
+  ConcreteContiguous,
+  NonConcreteContiguous,
+  Masked,
+  Periodic,
+};
+
+MergeClass getMergeClass(const MemoryAccess &Access) {
+  if (Access.hasConcreteRange())
+    return MergeClass::ConcreteContiguous;
+  if (Access.isContiguous())
+    return MergeClass::NonConcreteContiguous;
+  if (Access.getMaskedRegion())
+    return MergeClass::Masked;
+  return MergeClass::Periodic;
+}
+
+const AbstractAccess *getLocationBounds(const MemoryAccess &Access) {
+  if (const AbstractAccess *Region = Access.getContiguousRegion())
+    return Region;
+  if (const MaskedRegion *Region = Access.getMaskedRegion())
+    return &Region->getBounds();
+  return nullptr;
+}
+
+bool compareAbstractValue(const AbstractValue &LHS, const AbstractValue &RHS) {
+  if (LHS.isConstant() != RHS.isConstant())
+    return LHS.isConstant();
+  if (LHS.isConstant())
+    return LHS.getConstant() < RHS.getConstant();
+  if (LHS.isSymbol() != RHS.isSymbol())
+    return LHS.isSymbol();
+  if (LHS.isSymbol())
+    return std::less<const Value *>()(LHS.getSymbol(), RHS.getSymbol());
+  return false;
+}
+
+bool compareForLocationMerge(const MemoryAccess &LHS, const MemoryAccess &RHS) {
+  const MemoryObject *LObject = LHS.getBaseUse().get();
+  const MemoryObject *RObject = RHS.getBaseUse().get();
+  if (LObject != RObject)
+    return std::less<const MemoryObject *>()(LObject, RObject);
+  if (LHS.isMergeable() != RHS.isMergeable())
+    return LHS.isMergeable();
+  if (LHS.getLevel() != RHS.getLevel())
+    return LHS.getLevel() < RHS.getLevel();
+
+  MergeClass LClass = getMergeClass(LHS);
+  MergeClass RClass = getMergeClass(RHS);
+  if (LClass != RClass)
+    return LClass < RClass;
+
+  const AbstractAccess *LBounds = getLocationBounds(LHS);
+  const AbstractAccess *RBounds = getLocationBounds(RHS);
+  if (!LBounds || !RBounds)
+    return false;
+  if (LBounds->getOffset() != RBounds->getOffset())
+    return compareAbstractValue(LBounds->getOffset(), RBounds->getOffset());
+  if (LBounds->getSize() == RBounds->getSize())
+    return false;
+  if (LBounds->getSize().isConstant() && RBounds->getSize().isConstant())
+    return LBounds->getSize().getConstant() > RBounds->getSize().getConstant();
+  return compareAbstractValue(LBounds->getSize(), RBounds->getSize());
+}
+
+bool hasSameMergeClass(const MemoryAccess &LHS, const MemoryAccess &RHS) {
+  return LHS.getBaseUse().get() == RHS.getBaseUse().get() &&
+         LHS.isMergeable() && RHS.isMergeable() &&
+         LHS.getLevel() == RHS.getLevel() &&
+         getMergeClass(LHS) == getMergeClass(RHS);
 }
 
 bool mergeConcreteRange(Observation &Obs, AccessIterator Begin,
@@ -65,28 +134,24 @@ bool mergeNonConcreteRange(Observation &Obs, AccessIterator Begin,
 }
 
 bool mergeLocations(Observation &Obs) {
-  Obs.sort(MemoryAccess::compareByLocation);
+  Obs.sort(compareForLocationMerge);
 
   bool Changed = false;
-  for (AccessIterator ObjectBegin = Obs.begin(); ObjectBegin != Obs.end();) {
-    AccessIterator ObjectEnd = std::next(ObjectBegin);
-    while (ObjectEnd != Obs.end() &&
-           hasSameMemoryObject(*ObjectBegin, *ObjectEnd))
-      ++ObjectEnd;
+  for (AccessIterator Begin = Obs.begin(); Begin != Obs.end();) {
+    if (!Begin->isMergeable() || Begin->isPeriodic()) {
+      ++Begin;
+      continue;
+    }
 
-    AccessIterator ConcreteEnd = ObjectBegin;
-    while (ConcreteEnd != ObjectEnd && !ConcreteEnd->isPeriodic() &&
-           ConcreteEnd->hasConcreteRange())
-      ++ConcreteEnd;
+    AccessIterator End = std::next(Begin);
+    while (End != Obs.end() && hasSameMergeClass(*Begin, *End))
+      ++End;
 
-    Changed |= mergeConcreteRange(Obs, ObjectBegin, ConcreteEnd);
-
-    AccessIterator NonConcreteEnd = ConcreteEnd;
-    while (NonConcreteEnd != ObjectEnd && !NonConcreteEnd->isPeriodic())
-      ++NonConcreteEnd;
-    Changed |= mergeNonConcreteRange(Obs, ConcreteEnd, NonConcreteEnd);
-
-    ObjectBegin = ObjectEnd;
+    if (Begin->hasConcreteRange())
+      Changed |= mergeConcreteRange(Obs, Begin, End);
+    else
+      Changed |= mergeNonConcreteRange(Obs, Begin, End);
+    Begin = End;
   }
   return Changed;
 }

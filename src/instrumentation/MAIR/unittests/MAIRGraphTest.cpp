@@ -4265,6 +4265,106 @@ entry:
   EXPECT_TRUE(Graph.verify());
 }
 
+TEST(MAIROptimizationConfig,
+     LocationMergeDoesNotLetAnotherLevelBlockConcreteMerge) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %left = load i32, ptr %p, align 4
+  %p4 = getelementptr i8, ptr %p, i64 4
+  store i32 0, ptr %p4, align 4
+  %right = load i32, ptr %p4, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  auto It = BB.begin();
+  llvm::Instruction &Left = *It++;
+  ++It;
+  llvm::Instruction &Barrier = *It++;
+  llvm::Instruction &Right = *It;
+  MAIRGraph Graph(F);
+  Observation &Obs = Graph.createBBObservation(BB, true);
+  Obs.addAccess(MemoryAccess::fromInstruction(Left, M->getDataLayout()));
+  Obs.addAccess(MemoryAccess::fromInstruction(Barrier, M->getDataLayout()));
+  Obs.addAccess(MemoryAccess::fromInstruction(Right, M->getDataLayout()));
+
+  ASSERT_EQ(Obs.begin()->getLevel(), std::prev(Obs.end())->getLevel());
+  ASSERT_NE(Obs.begin()->getLevel(), std::next(Obs.begin())->getLevel());
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  LocationMergePass Pass;
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+  ASSERT_EQ(Obs.size(), 2u);
+
+  const MemoryAccess &Merged = *Obs.begin();
+  ASSERT_NE(Merged.getContiguousRegion(), nullptr);
+  EXPECT_EQ(Merged.getLevel(), 1u);
+  EXPECT_EQ(Merged.getContiguousRegion()->getOffset(),
+            AbstractValue::constant(0));
+  EXPECT_EQ(Merged.getContiguousRegion()->getSize(),
+            AbstractValue::constant(8));
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIROptimizationConfig,
+     LocationMergeDoesNotLetUnmergeableAccessBlockConcreteMerge) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %left = load i32, ptr %p, align 4
+  %p4 = getelementptr i8, ptr %p, i64 4
+  %barrier = load atomic i32, ptr %p4 monotonic, align 4
+  %right = load i32, ptr %p4, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  auto It = BB.begin();
+  llvm::Instruction &Left = *It++;
+  ++It;
+  llvm::Instruction &Barrier = *It++;
+  llvm::Instruction &Right = *It;
+  MAIRGraph Graph(F);
+  Observation &Obs = Graph.createBBObservation(BB, true);
+  Obs.addAccess(MemoryAccess::fromInstruction(Left, M->getDataLayout()));
+  Obs.addAccess(MemoryAccess::fromInstruction(Barrier, M->getDataLayout()));
+  Obs.addAccess(MemoryAccess::fromInstruction(Right, M->getDataLayout()));
+
+  ASSERT_TRUE(Obs.begin()->isMergeable());
+  ASSERT_FALSE(std::next(Obs.begin())->isMergeable());
+  ASSERT_TRUE(std::prev(Obs.end())->isMergeable());
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  LocationMergePass Pass;
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+  ASSERT_EQ(Obs.size(), 2u);
+
+  auto Merged = llvm::find_if(
+      Obs, [](const MemoryAccess &Access) { return Access.isMergeable(); });
+  ASSERT_NE(Merged, Obs.end());
+  ASSERT_NE(Merged->getContiguousRegion(), nullptr);
+  EXPECT_EQ(Merged->getContiguousRegion()->getOffset(),
+            AbstractValue::constant(0));
+  EXPECT_EQ(Merged->getContiguousRegion()->getSize(),
+            AbstractValue::constant(8));
+  EXPECT_TRUE(Graph.verify());
+}
+
 TEST(MAIROptimizationConfig, LocationMergeUnionsComparableMasksOnly) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(

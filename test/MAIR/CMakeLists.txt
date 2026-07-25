@@ -11,6 +11,7 @@ add_lit_testsuite(check-mair
   ${CMAKE_CURRENT_BINARY_DIR}
   DEPENDS mair-opt
 )
+add_dependencies(check-mair check-mair-unit)
 
 if(NOT TARGET check-all)
   add_custom_target(check-all)

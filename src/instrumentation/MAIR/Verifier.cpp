@@ -359,8 +359,6 @@ void MAIRVerifier::verifyMemoryAccess(const Observation &Obs,
   if (const PeriodicRegion *Region = Access.getPeriodicRegion())
     verifyPeriodicRegion(*Region, Access, Obs);
   if (const MaskedRegion *Region = Access.getMaskedRegion()) {
-    Check(Access.isMasked(), "masked region is missing masked property", Access,
-          Obs);
     Check(Region->getElementSize() != 0,
           "masked region has zero-sized elements", Access, Obs);
     if (const Value *Mask = Region->getDynamicMask()) {
@@ -376,9 +374,6 @@ void MAIRVerifier::verifyMemoryAccess(const Observation &Obs,
       Check(Region->isConstantMask(),
             "masked region has neither dynamic nor constant mask", Access, Obs);
     }
-  } else {
-    Check(!Access.isMasked(), "masked property has no masked region", Access,
-          Obs);
   }
 }
 

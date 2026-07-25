@@ -187,10 +187,7 @@ Expected<MAIRMaterializationPlan> buildPlan(const MAIRGraph &Graph, Function &F,
       if (!validateAccess(Access, *Target, DT, Failure))
         return materializationError(Failure);
 
-    MaterializationUnit Unit;
-    Unit.Source = &Obs;
-    Unit.Site = Obs.getSite();
-    Unit.Guard = Obs.getGuard();
+    MaterializationUnit Unit{&Obs, Obs.getSite(), Obs.getGuard(), {}};
     for (const MemoryAccess &Access : Obs)
       Unit.Accesses.push_back({&Access, Access.getKind(),
                                Access.getProperties(), Access.getRegion()});

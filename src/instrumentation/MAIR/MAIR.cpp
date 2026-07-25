@@ -242,8 +242,6 @@ static AccessProperty getInstructionProperties(const Instruction &I) {
       Properties |= AccessProperty::Volatile;
     if (MI->isAtomic())
       Properties |= AccessProperty::Atomic;
-  } else if (isMaskedMemoryIntrinsic(I)) {
-    Properties |= AccessProperty::Masked;
   }
   return Properties;
 }
@@ -785,8 +783,8 @@ uint8_t MAIROptimizationConfig::getLevel(AccessKind Kind) const {
 }
 
 void MAIROptimizationConfig::initializeAccess(MemoryAccess &Access) const {
-  const bool IsComparableMasked =
-      !Access.isMasked() || Access.getMaskedRegion()->isComparable();
+  const MaskedRegion *Masked = Access.getMaskedRegion();
+  const bool IsComparableMasked = !Masked || Masked->isComparable();
   const bool CanMerge = !Access.isVolatile() && !Access.isCallLike() &&
                         IsComparableMasked &&
                         (IgnoreAtomic || !Access.isAtomic());
@@ -1052,24 +1050,6 @@ MemoryAccess &Observation::addAccess(const MemoryAccess &A) {
   ++NumAccesses;
   Sorted = false;
   return Node;
-}
-
-std::optional<ObsEdgeKind>
-Observation::hasEdgeTo(ArrayRef<ObservationEdge> Edges,
-                       const Observation &Obs) {
-  const auto *It = llvm::find_if(Edges, [&](const ObservationEdge &Edge) {
-    return &Edge.getNode() == &Obs;
-  });
-  if (It != Edges.end())
-    return (*It).getKind();
-  return std::nullopt;
-}
-
-std::optional<ObsEdgeKind> Observation::hasChild(const Observation &Obs) {
-  return Observation::hasEdgeTo(children(), Obs);
-}
-std::optional<ObsEdgeKind> Observation::hasParent(const Observation &Obs) {
-  return Observation::hasEdgeTo(parents(), Obs);
 }
 
 bool Observation::hasChild(const Observation &Obs, ObsEdgeKind Kind) const {

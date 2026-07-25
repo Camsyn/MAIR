@@ -37,3 +37,10 @@ target_include_directories(MAIRGraphTest BEFORE PRIVATE
   ${MAIR_GTEST_DIR}/include
   ${MAIR_GTEST_DIR}
 )
+
+add_custom_target(check-mair-unit
+  COMMAND $<TARGET_FILE:MAIRGraphTest> --gtest_brief=1
+  DEPENDS MAIRGraphTest
+  USES_TERMINAL
+)
+set_target_properties(check-mair-unit PROPERTIES FOLDER "Compiler-RT/Tests")

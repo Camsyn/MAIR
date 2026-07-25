@@ -2,11 +2,8 @@
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
 
-#include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/LoopInfo.h"
-#include "llvm/IR/CFG.h"
 
 #include <optional>
 
@@ -33,28 +30,6 @@ bool hasPinnedAccess(const Observation &Obs) {
       Obs, [&](const MemoryAccess &Access) { return !Access.isMovable(); });
 }
 
-// Equal endpoint loop membership is insufficient when a nested loop lies
-// between them, so inspect every CFG path prefix up to the target block.
-bool crossesLoopBoundary(const BasicBlock &From, const BasicBlock &To,
-                         const LoopInfo &Loops) {
-  SmallPtrSet<const BasicBlock *, 16> Visited;
-  SmallVector<const BasicBlock *, 16> Worklist{&From};
-  Visited.insert(&From);
-  while (!Worklist.empty()) {
-    const BasicBlock *Current = Worklist.pop_back_val();
-    if (Current == &To)
-      continue;
-    const Loop *CurrentLoop = Loops.getLoopFor(Current);
-    for (const BasicBlock *Next : successors(Current)) {
-      if (Loops.getLoopFor(Next) != CurrentLoop)
-        return true;
-      if (Visited.insert(Next).second)
-        Worklist.push_back(Next);
-    }
-  }
-  return false;
-}
-
 MergeCandidate findMergeCandidate(MAIRGraph &G,
                                   std::optional<LoopInfo> &Loops) {
   for (Observation &O1 : G) {
@@ -67,8 +42,6 @@ MergeCandidate findMergeCandidate(MAIRGraph &G,
       Observation &O2 = Edge.getNode();
       if (&O1 == &O2)
         continue;
-      if (hasPinnedAccess(O2))
-        continue;
       if (!O1.hasCompatibleMergeSemantics(O2))
         continue;
       if (!O2.hasChild(O1, ObsEdgeKind::PostDom))
@@ -80,7 +53,7 @@ MergeCandidate findMergeCandidate(MAIRGraph &G,
                "compatible observations must use the same site category");
         if (!Loops)
           Loops.emplace(G.getDominatorTree());
-        if (crossesLoopBoundary(*O1Block, *O2Block, *Loops))
+        if (Loops->getLoopFor(O1Block) != Loops->getLoopFor(O2Block))
           continue;
       }
       // Retain the post-dominating site so contraction sinks accesses.

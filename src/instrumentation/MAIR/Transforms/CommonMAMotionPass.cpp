@@ -4,9 +4,7 @@
 #include "MAIR/Transforms/TransformUtils.h"
 
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/STLForwardCompat.h"
 #include "llvm/ADT/SetVector.h"
-#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/BasicBlock.h"
@@ -75,7 +73,7 @@ bool collectNeighborBlocks(const BasicBlock &BB, MotionDirection Direction,
 }
 
 bool findCommonAccesses(ArrayRef<Observation *> NeighborObs,
-                        Observation &Target, const DominatorTree *DebugDT,
+                        Observation &Target,
                         SmallVectorImpl<MemoryAccess *> &Matches) {
   assert(!NeighborObs.empty() &&
          "common motion requires neighbor observations");
@@ -98,7 +96,8 @@ bool findCommonAccesses(ArrayRef<Observation *> NeighborObs,
       continue;
     // All copies are shared by every neighbor, so their SSA operands must be
     // visible at the common target in a valid, materializable graph.
-    assert(DebugDT && isAccessAvailableAt(Candidate, Target, *DebugDT) &&
+    assert(isAccessAvailableAt(Candidate, Target,
+                               Target.getParent()->getDominatorTree()) &&
            "common access operands must be available at target");
     return true;
   }
@@ -108,12 +107,7 @@ bool findCommonAccesses(ArrayRef<Observation *> NeighborObs,
 void moveAccessesToTarget(Observation &Target, ArrayRef<MemoryAccess *> Matches,
                           MotionDirection Direction) {
   assert(!Matches.empty() && "common motion requires matching accesses");
-  MemoryAccess *Accumulator = nullptr;
-  for (MemoryAccess &Access : Target)
-    if (isEquivalentMovableAccess(Access, *Matches.front())) {
-      Accumulator = &Access;
-      break;
-    }
+  MemoryAccess *Accumulator = findMatchingAccess(Target, *Matches.front());
 
   size_t MergeBegin = 0;
   if (!Accumulator) {
@@ -135,8 +129,7 @@ void moveAccessesToTarget(Observation &Target, ArrayRef<MemoryAccess *> Matches,
 }
 
 bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB,
-                         MotionDirection Direction,
-                         const DominatorTree *DebugDT) {
+                         MotionDirection Direction) {
   // 1. Collect the complete, de-duplicated CFG neighbor set.
   NeighborBlocks NeighborBBs;
   if (!collectNeighborBlocks(BB, Direction, NeighborBBs))
@@ -163,7 +156,7 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB,
 
   // 4. Find one MA common to every neighbor observation.
   SmallVector<MemoryAccess *, 4> Matches;
-  if (!findCommonAccesses(NeighborObs, Target, DebugDT, Matches))
+  if (!findCommonAccesses(NeighborObs, Target, Matches))
     return false;
 
   // 5. Move the common MAs to Target. The fixed-point loop restarts the scan.
@@ -171,15 +164,14 @@ bool moveOneCommonAccess(MAIRGraph &G, const BasicBlock &BB,
   return true;
 }
 
-bool moveCommonAccessesToFixedPoint(MAIRGraph &G, MotionDirection Direction,
-                                    const DominatorTree *DebugDT) {
+bool moveCommonAccessesToFixedPoint(MAIRGraph &G, MotionDirection Direction) {
   bool Changed = false;
   const Function *F = G.getFunction();
   assert(F && "CommonMAMotion requires a function-backed graph");
   while (true) {
     bool Moved = false;
     for (const BasicBlock &BB : *F) {
-      if (!moveOneCommonAccess(G, BB, Direction, DebugDT))
+      if (!moveOneCommonAccess(G, BB, Direction))
         continue;
       Moved = true;
       Changed = true;
@@ -199,13 +191,8 @@ PreservedAnalyses CommonMAMotionPass::run(MAIRGraph &G,
 #else
   (void)AM;
 #endif
-  const DominatorTree *DebugDT = nullptr;
-#ifndef NDEBUG
-  DebugDT = &G.getDominatorTree();
-#endif
-  bool Changed =
-      moveCommonAccessesToFixedPoint(G, MotionDirection::Hoist, DebugDT);
-  Changed |= moveCommonAccessesToFixedPoint(G, MotionDirection::Sink, DebugDT);
+  bool Changed = moveCommonAccessesToFixedPoint(G, MotionDirection::Hoist);
+  Changed |= moveCommonAccessesToFixedPoint(G, MotionDirection::Sink);
 
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

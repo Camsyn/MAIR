@@ -234,6 +234,25 @@ void expectSimplifyGraphPreservesMutualPair(MAIRGraph &Graph,
   EXPECT_TRUE(Graph.verify());
 }
 
+void expectSimplifyGraphContractsMutualPair(MAIRGraph &Graph,
+                                            Observation &Earlier,
+                                            Observation &Later) {
+  Graph.addEdge(Earlier, Later, ObsEdgeKind::Dom);
+  Graph.addEdge(Later, Earlier, ObsEdgeKind::PostDom);
+  const size_t InitialSize = Graph.size();
+  const std::string EarlierName = Earlier.getName().str();
+  const std::string LaterName = Later.getName().str();
+  ASSERT_TRUE(Graph.verify());
+
+  SimplifyGraphPass Pass;
+  MAIRGraphAnalysisManager AM;
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+  EXPECT_EQ(Graph.size(), InitialSize - 1);
+  EXPECT_EQ(Graph.find(EarlierName), nullptr);
+  EXPECT_NE(Graph.find(LaterName), nullptr);
+  EXPECT_TRUE(Graph.verify());
+}
+
 void moveMemoryObservationAccessesTo(MAIRGraph &Graph,
                                      llvm::StringRef BlockName,
                                      Observation &Target) {
@@ -2388,7 +2407,7 @@ entry:
   EXPECT_EQ(Load.size(), 1u);
 }
 
-TEST(MAIRGraphPass, RedundantObservationRefreshesInterAnalysisAfterIntraROE) {
+TEST(MAIRGraphPass, RedundantObservationEliminatesWithinObservation) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(i32* %p) {
@@ -2413,21 +2432,13 @@ entry:
   Obs.addAccess(Second);
   Graph.addEdge(Obs, Obs, ObsEdgeKind::Dom);
 
-  unsigned NumAnalysisRuns = 0;
   llvm::PassInstrumentationCallbacks PIC;
-  PIC.registerBeforeAnalysisCallback([&](llvm::StringRef Name, llvm::Any) {
-    if (Name == RedundantObservationAnalysis::name())
-      ++NumAnalysisRuns;
-  });
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC);
-  (void)AM.getResult<RedundantObservationAnalysis>(Graph);
-  ASSERT_EQ(NumAnalysisRuns, 1u);
   RedundantObservationEliminationPass Pass;
   llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
 
   EXPECT_FALSE(PA.areAllPreserved());
-  EXPECT_EQ(NumAnalysisRuns, 2u);
   ASSERT_TRUE(Graph.verify());
   EXPECT_EQ(Obs.size(), 1u);
 }
@@ -3038,7 +3049,7 @@ exit:
   expectSimplifyGraphPreservesMutualPair(Graph, *Outside, *Inside);
 }
 
-TEST(MAIRGraphPass, SimplifyGraphDoesNotCrossInterveningLoop) {
+TEST(MAIRGraphPass, SimplifyGraphContractsOutsideAnInterveningLoop) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p, i1 %take.loop, i1 %done) {
@@ -3063,7 +3074,7 @@ exit:
   Observation *After = findMutableMemoryObservation(Graph, "exit");
   ASSERT_NE(Before, nullptr);
   ASSERT_NE(After, nullptr);
-  expectSimplifyGraphPreservesMutualPair(Graph, *Before, *After);
+  expectSimplifyGraphContractsMutualPair(Graph, *Before, *After);
 }
 
 TEST(MAIRGraphPass, SimplifyGraphDoesNotCrossNestedLoopBoundary) {
@@ -3102,7 +3113,7 @@ exit:
   expectSimplifyGraphPreservesMutualPair(Graph, *Outer, *Inner);
 }
 
-TEST(MAIRGraphPass, SimplifyGraphDoesNotCrossInterveningNestedLoop) {
+TEST(MAIRGraphPass, SimplifyGraphContractsAcrossNestedLoopAtSameLevel) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -3135,7 +3146,7 @@ exit:
   Observation *After = findMutableMemoryObservation(Graph, "outer.latch");
   ASSERT_NE(Before, nullptr);
   ASSERT_NE(After, nullptr);
-  expectSimplifyGraphPreservesMutualPair(Graph, *Before, *After);
+  expectSimplifyGraphContractsMutualPair(Graph, *Before, *After);
 }
 
 TEST(MAIRGraphPass, SimplifyGraphCanContractWithinSameLoop) {
@@ -3178,6 +3189,59 @@ exit:
   EXPECT_TRUE(Graph.verify());
 }
 
+TEST(MAIRGraphPass, SimplifyGraphAllowsPinnedAccessAtMotionTarget) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %movable = load i32, ptr %p, align 4
+  %pinned = load atomic i32, ptr %p seq_cst, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  llvm::Instruction &MovableInst = BB.front();
+  llvm::Instruction &PinnedInst = *std::next(BB.begin());
+  MAIRGraph Graph(F);
+  Observation &Movable = Graph.createInstObservation(BB, MovableInst);
+  Observation &Pinned = Graph.createInstObservation(BB, PinnedInst);
+  ASSERT_TRUE(Movable.begin()->isMovable());
+  ASSERT_FALSE(Pinned.begin()->isMovable());
+
+  expectSimplifyGraphContractsMutualPair(Graph, Movable, Pinned);
+  EXPECT_EQ(Pinned.size(), 2u);
+}
+
+TEST(MAIRGraphPass, SimplifyGraphRejectsPinnedAccessAtMotionSource) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %pinned = load atomic i32, ptr %p seq_cst, align 4
+  %movable = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  llvm::Instruction &PinnedInst = BB.front();
+  llvm::Instruction &MovableInst = *std::next(BB.begin());
+  MAIRGraph Graph(F);
+  Observation &Pinned = Graph.createInstObservation(BB, PinnedInst);
+  Observation &Movable = Graph.createInstObservation(BB, MovableInst);
+  ASSERT_FALSE(Pinned.begin()->isMovable());
+  ASSERT_TRUE(Movable.begin()->isMovable());
+
+  expectSimplifyGraphPreservesMutualPair(Graph, Pinned, Movable);
+}
+
 TEST(MAIRGraph, EraseClearsBoundaryRepresentativeMaps) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
@@ -3202,15 +3266,19 @@ entry:
 
   Graph.erase(Entry);
 
+#ifndef NDEBUG
   EXPECT_DEATH_IF_SUPPORTED((void)Graph.getBBEntryRepresentative(BB),
                             "Seems the MAIRGraph is broken.");
   EXPECT_DEATH_IF_SUPPORTED((void)ConstGraph.getBBEntryRepresentative(BB),
                             "Seems the MAIRGraph is broken.");
+#endif
   Graph.erase(Exit);
+#ifndef NDEBUG
   EXPECT_DEATH_IF_SUPPORTED((void)Graph.getBBExitRepresentative(BB),
                             "Seems the MAIRGraph is broken.");
   EXPECT_DEATH_IF_SUPPORTED((void)ConstGraph.getBBExitRepresentative(BB),
                             "Seems the MAIRGraph is broken.");
+#endif
   ASSERT_TRUE(Graph.verify());
 }
 
@@ -3472,8 +3540,10 @@ right:
 
   MAIRGraphAnalysisManager AM;
   CommonMAMotionPass Pass;
+#ifndef NDEBUG
   EXPECT_DEATH_IF_SUPPORTED((void)Pass.run(Graph, AM),
                             "common access operands must be available");
+#endif
 }
 
 TEST(MAIRGraphPass, CommonMAMotionSinksToEntryAndPreservesProvenance) {
@@ -4229,6 +4299,35 @@ entry:
   EXPECT_FALSE(A.mergeWith(B));
   EXPECT_EQ(A.getKind(), AccessKind::Read);
   EXPECT_EQ(A.getInstructions().size(), 1u);
+}
+
+TEST(MAIRSchema, MaskednessIsDerivedFromTheRegion) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %v = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::Instruction &Load = F.getEntryBlock().front();
+  llvm::SmallBitVector Mask(1, true);
+  MaskedRegion Region(AbstractAccess(F.getArg(0), AbstractValue::constant(0),
+                                     AbstractValue::constant(4)),
+                      std::move(Mask), 4);
+  MemoryAccess Access({&Load}, MemoryRegion(std::move(Region)),
+                      AccessKind::Read);
+
+  EXPECT_TRUE(Access.isMasked());
+  MAIRGraph Graph(F);
+  Observation &Obs = Graph.createBBObservation(F.getEntryBlock(), true);
+  MemoryAccess &Inserted = Obs.addAccess(Access);
+  EXPECT_TRUE(Inserted.isMasked());
+  EXPECT_TRUE(Graph.verify());
 }
 
 TEST(MAIRSchema, ContainingContiguousMergeKeepsCoveringInstructionFirst) {

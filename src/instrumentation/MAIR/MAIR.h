@@ -97,7 +97,6 @@ enum class AccessProperty : uint8_t {
   Volatile = 1 << 0,
   Atomic = 1 << 1,
   CallLike = 1 << 2,
-  Masked = 1 << 3,
 };
 
 constexpr AccessProperty operator|(AccessProperty LHS, AccessProperty RHS) {
@@ -652,7 +651,7 @@ public:
   bool isVolatile() const { return hasProperty(AccessProperty::Volatile); }
   bool isAtomic() const { return hasProperty(AccessProperty::Atomic); }
   bool isCallLike() const { return hasProperty(AccessProperty::CallLike); }
-  bool isMasked() const { return hasProperty(AccessProperty::Masked); }
+  bool isMasked() const { return getMaskedRegion() != nullptr; }
 
   bool isMergeable() const { return Mergeable; }
   bool isMovable() const { return Movable; }
@@ -757,7 +756,6 @@ public:
   }
 
   const AccessListType &accesses() const { return Accesses; }
-  AccessListType &accesses() { return Accesses; }
   ArrayRef<ObservationEdge> children() const { return Children; }
   ArrayRef<ObservationEdge> parents() const { return Parents; }
   iterator begin() { return Accesses.begin(); }
@@ -766,8 +764,6 @@ public:
   const_iterator end() const { return Accesses.end(); }
   bool empty() const { return NumAccesses == 0; }
   unsigned size() const { return NumAccesses; }
-  std::optional<ObsEdgeKind> hasChild(const Observation &Obs);
-  std::optional<ObsEdgeKind> hasParent(const Observation &Obs);
   bool hasChild(const Observation &Obs, ObsEdgeKind Kind) const;
   bool hasParent(const Observation &Obs, ObsEdgeKind Kind) const;
   /// Merging preserves execution semantics only for equal guards and equal
@@ -787,9 +783,6 @@ public:
 private:
   friend class MAIRGraph;
   friend class MAIRVerifier;
-
-  static std::optional<ObsEdgeKind> hasEdgeTo(ArrayRef<ObservationEdge> Edges,
-                                              const Observation &Obs);
 
   static AccessListType Observation::*getSublistAccess(MemoryAccess *) {
     return &Observation::Accesses;

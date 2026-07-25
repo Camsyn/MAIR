@@ -1,21 +1,15 @@
-; RUN: mair-opt -stats --disable-output -passes=simplifygraph %S/simplifygraph.ll 2>%t.stats
-; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=SIMPLIFY < %t.stats
-; RUN: mair-opt -stats --disable-output -passes=simplifygraph,locationmerge %S/locationmerge.ll 2>%t.stats
-; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=LOCATION < %t.stats
-; RUN: mair-opt -stats --disable-output -passes=simplifygraph,cmm %S/common-ma-motion.ll 2>%t.stats
-; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=COMMON < %t.stats
-; RUN: mair-opt -stats --disable-output -passes=liom %S/loop-invariant-observation-motion.ll 2>%t.stats
-; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=INVARIANT < %t.stats
-; RUN: mair-opt -stats --disable-output -passes=lpoc %S/loop-range-aggregation.ll 2>%t.stats
-; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=PERIODIC < %t.stats
-; RUN: mair-opt -stats --disable-output -passes=simplifygraph,roe %S/redundant-observation-elimination.ll 2>%t.stats
-; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=REDUNDANT < %t.stats
-; RUN: mair-opt -stats --disable-output -O1 %S/pass-stat.ll 2>%t.stats
-; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=O1 < %t.stats
+; REQUIRES: mair_stats
+; RUN: mair-opt -stats --disable-output -passes=simplifygraph %S/simplifygraph.ll 2>&1 | FileCheck %s --check-prefix=SIMPLIFY
+; RUN: mair-opt -stats --disable-output -passes=simplifygraph,locationmerge %S/locationmerge.ll 2>&1 | FileCheck %s --check-prefix=LOCATION
+; RUN: mair-opt -stats --disable-output -passes=simplifygraph,cmm %S/common-ma-motion.ll 2>&1 | FileCheck %s --check-prefix=COMMON
+; RUN: mair-opt -stats --disable-output -passes=liom %S/loop-invariant-observation-motion.ll 2>&1 | FileCheck %s --check-prefix=INVARIANT
+; RUN: mair-opt -stats --disable-output -passes=lpoc %S/loop-range-aggregation.ll 2>&1 | FileCheck %s --check-prefix=PERIODIC
+; RUN: mair-opt -stats --disable-output -passes=simplifygraph,roe %S/redundant-observation-elimination.ll 2>&1 | FileCheck %s --check-prefix=REDUNDANT
+; RUN: mair-opt -stats --disable-output -O1 %S/pass-stat.ll 2>&1 | FileCheck %s --check-prefix=O1
 
 ; SIMPLIFY: 8 mair-simplifygraph - Number of observations entering graph simplification
 ; SIMPLIFY: {{[1-9][0-9]*}} mair-simplifygraph - Number of observations merged by graph simplification
-; LOCATION: 13 mair-locationmerge - Number of memory accesses entering location merging
+; LOCATION: 15 mair-locationmerge - Number of memory accesses entering location merging
 ; LOCATION: {{[1-9][0-9]*}} mair-locationmerge - Number of accesses merged by location merging
 ; COMMON: 30 mair-commonmamotion - Number of memory accesses entering common MA motion
 ; PERIODIC: {{[1-9][0-9]*}} mair-loop-periodic-combine - Number of accesses aggregated across loop iterations

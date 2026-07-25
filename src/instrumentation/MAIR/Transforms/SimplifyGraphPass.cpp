@@ -3,10 +3,6 @@
 #include "MAIR/MAIR.h"
 
 #include "llvm/ADT/Statistic.h"
-#include "llvm/Analysis/LoopInfo.h"
-
-#include <optional>
-
 using namespace llvm;
 
 #define DEBUG_TYPE "mair-simplifygraph"
@@ -30,8 +26,7 @@ bool hasPinnedAccess(const Observation &Obs) {
       Obs, [&](const MemoryAccess &Access) { return !Access.isMovable(); });
 }
 
-MergeCandidate findMergeCandidate(MAIRGraph &G,
-                                  std::optional<LoopInfo> &Loops) {
+MergeCandidate findMergeCandidate(MAIRGraph &G) {
   for (Observation &O1 : G) {
     if (hasPinnedAccess(O1))
       continue;
@@ -51,9 +46,8 @@ MergeCandidate findMergeCandidate(MAIRGraph &G,
       if (O1Block != O2Block) {
         assert(O1Block && O2Block &&
                "compatible observations must use the same site category");
-        if (!Loops)
-          Loops.emplace(G.getDominatorTree());
-        if (Loops->getLoopFor(O1Block) != Loops->getLoopFor(O2Block))
+        const LoopInfo &Loops = G.getLoopInfo();
+        if (Loops.getLoopFor(O1Block) != Loops.getLoopFor(O2Block))
           continue;
       }
       // Retain the post-dominating site so contraction sinks accesses.
@@ -73,13 +67,12 @@ PreservedAnalyses SimplifyGraphPass::run(MAIRGraph &G,
   (void)AM;
 #endif
   bool Changed = false;
-  std::optional<LoopInfo> Loops;
 
   // Contract one mutual Dom/PostDom pair at a time. Rewiring can expose a new
   // pair outside the previous neighborhood, so each contraction starts a fresh
   // topology scan and preserves deterministic list-order selection.
   while (true) {
-    MergeCandidate Candidate = findMergeCandidate(G, Loops);
+    MergeCandidate Candidate = findMergeCandidate(G);
     if (!Candidate.Into)
       break;
     G.contractObservation(*Candidate.Into, *Candidate.From);

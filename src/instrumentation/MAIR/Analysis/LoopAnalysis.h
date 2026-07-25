@@ -19,8 +19,8 @@ class MAIRLoopInfo {
   MAIRGraph *Graph = nullptr;
   llvm::FunctionAnalysisManager *FAM = nullptr;
   llvm::Function *Func = nullptr;
-  llvm::LoopInfo *LI = nullptr;
-  llvm::DominatorTree *DT = nullptr;
+  const llvm::LoopInfo *LI = nullptr;
+  const llvm::DominatorTree *DT = nullptr;
 
 public:
   MAIRLoopInfo() = default;

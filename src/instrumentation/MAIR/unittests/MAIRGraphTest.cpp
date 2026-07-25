@@ -51,7 +51,9 @@ template <class BarrierTrait = DefaultBarrierTrait>
 MAIRGraph createGraphWithExplicitAnalyses(Function &F) {
   llvm::DominatorTree DT(F);
   llvm::PostDominatorTree PDT(F);
-  return MAIRGraph::build<BarrierTrait>(F, std::move(DT), std::move(PDT));
+  llvm::LoopInfo LI(DT);
+  return MAIRGraph::build<BarrierTrait>(F, std::move(DT), std::move(PDT),
+                                        std::move(LI));
 }
 
 bool compareTestAccesses(const MemoryAccess &LHS, const MemoryAccess &RHS) {
@@ -1388,9 +1390,11 @@ merge:
   FAM.registerPass([&] { return llvm::PassInstrumentationAnalysis(&PIC); });
   FAM.registerPass([] { return llvm::DominatorTreeAnalysis(); });
   FAM.registerPass([] { return llvm::PostDominatorTreeAnalysis(); });
+  FAM.registerPass([] { return llvm::LoopAnalysis(); });
   const llvm::DominatorTree &DT = FAM.getResult<llvm::DominatorTreeAnalysis>(F);
   const llvm::PostDominatorTree &PDT =
       FAM.getResult<llvm::PostDominatorTreeAnalysis>(F);
+  const llvm::LoopInfo &LI = FAM.getResult<llvm::LoopAnalysis>(F);
   MAIRGraph FromFAM = MAIRGraph::build(F, FAM);
 
   ASSERT_TRUE(Explicit.verify());
@@ -1398,19 +1402,24 @@ merge:
   EXPECT_EQ(FromFAM.toString(), Explicit.toString());
   EXPECT_EQ(&FromFAM.getDominatorTree(), &DT);
   EXPECT_EQ(&FromFAM.getPostDominatorTree(), &PDT);
+  EXPECT_EQ(&FromFAM.getLoopInfo(), &LI);
   EXPECT_NE(Explicit.getDominatorTree().getNode(&F.getEntryBlock()), nullptr);
   EXPECT_NE(Explicit.getPostDominatorTree().getNode(&F.getEntryBlock()),
             nullptr);
+  EXPECT_EQ(Explicit.getLoopInfo().getLoopDepth(&F.getEntryBlock()), 0u);
 
   const llvm::DominatorTree *OwnedDT = &Explicit.getDominatorTree();
   const llvm::PostDominatorTree *OwnedPDT = &Explicit.getPostDominatorTree();
+  const llvm::LoopInfo *OwnedLI = &Explicit.getLoopInfo();
   MAIRGraph Moved(std::move(Explicit));
   EXPECT_EQ(&Moved.getDominatorTree(), OwnedDT);
   EXPECT_EQ(&Moved.getPostDominatorTree(), OwnedPDT);
+  EXPECT_EQ(&Moved.getLoopInfo(), OwnedLI);
   MAIRGraph Assigned;
   Assigned = std::move(Moved);
   EXPECT_EQ(&Assigned.getDominatorTree(), OwnedDT);
   EXPECT_EQ(&Assigned.getPostDominatorTree(), OwnedPDT);
+  EXPECT_EQ(&Assigned.getLoopInfo(), OwnedLI);
 }
 
 TEST(MAIRLoopAnalysis, MapsObservationsToLoopsAndRepresentatives) {
@@ -1456,6 +1465,28 @@ exit:
   EXPECT_EQ(Loops.getPreheaderExit(*L), findBlockExit(Graph, "entry"));
   EXPECT_TRUE(Loops.hasDedicatedExit(*L));
   EXPECT_EQ(Loops.getUniqueExitEntry(*L), findBlockEntry(Graph, "exit"));
+}
+
+TEST(MAIRLoopAnalysis, RejectsScalarEvolutionFromDifferentLoopInfo) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %v = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->begin();
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopTestAnalyses(FAM, PIC);
+  MAIRLoopInfo Loops(Graph, FAM);
+
+  EXPECT_DEATH_IF_SUPPORTED((void)Loops.getSE(), "share LoopInfo");
 }
 
 TEST(MAIRLoopAnalysis, RejectsBranchOnlyAccessAsEveryIteration) {
@@ -1638,10 +1669,10 @@ exit:
   ASSERT_TRUE(M);
 
   llvm::Function &F = *M->getFunction("f");
-  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraph Graph = MAIRGraph::build(F, FAM);
   MAIRLoopInfo Loops(Graph, FAM);
   const Observation *Header = findMemoryObservation(Graph, "header");
   const Observation *Body = findMemoryObservation(Graph, "body");
@@ -1686,10 +1717,10 @@ exit:
   ASSERT_TRUE(M);
 
   llvm::Function &F = *M->getFunction("f");
-  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraph Graph = MAIRGraph::build(F, FAM);
   MAIRLoopInfo Loops(Graph, FAM);
   const llvm::BasicBlock *Latch = nullptr;
   for (const llvm::BasicBlock &BB : F)
@@ -1725,10 +1756,10 @@ exit:
   ASSERT_TRUE(M);
 
   llvm::Function &F = *M->getFunction("f");
-  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraph Graph = MAIRGraph::build(F, FAM);
   MAIRLoopInfo Loops(Graph, FAM);
   const Observation *Header = findMemoryObservation(Graph, "header");
   ASSERT_NE(Header, nullptr);
@@ -1767,10 +1798,10 @@ exit:
   ASSERT_TRUE(M);
 
   auto Check = [&](llvm::Function &F, bool ExpectedDedicated) {
-    MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
     llvm::PassInstrumentationCallbacks PIC;
     llvm::FunctionAnalysisManager FAM;
     registerLoopTestAnalyses(FAM, PIC);
+    MAIRGraph Graph = MAIRGraph::build(F, FAM);
     MAIRLoopInfo Loops(Graph, FAM);
     const Observation *Header = findBlockEntry(Graph, "header");
     ASSERT_NE(Header, nullptr);
@@ -1807,10 +1838,10 @@ merge:
   ASSERT_TRUE(M);
 
   llvm::Function &F = *M->getFunction("f");
-  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraph Graph = MAIRGraph::build(F, FAM);
   MAIRLoopInfo Loops(Graph, FAM);
 
   llvm::BasicBlock *Left = nullptr;
@@ -1868,11 +1899,14 @@ exit:
   ASSERT_TRUE(M);
 
   llvm::Function &F = *M->getFunction("f");
-  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
   Observation *Source = nullptr;
   Observation *OtherSource = nullptr;
   llvm::Instruction *PLoad = nullptr;
   llvm::Instruction *QLoad = nullptr;
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraph Graph = MAIRGraph::build(F, FAM);
   for (Observation &Obs : Graph) {
     if (!Obs.isMemoryInstSite() || Obs.getBasicBlock()->getName() != "header")
       continue;
@@ -1901,9 +1935,6 @@ exit:
       AccessKind::Read);
   Source->addAccess(Combined);
 
-  llvm::PassInstrumentationCallbacks PIC;
-  llvm::FunctionAnalysisManager FAM;
-  registerLoopTestAnalyses(FAM, PIC);
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
   LoopPeriodicObservationCombinePass Pass;
@@ -1939,10 +1970,10 @@ exit:
   ASSERT_TRUE(M);
 
   llvm::Function &F = *M->getFunction("f");
-  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraph Graph = MAIRGraph::build(F, FAM);
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
 
@@ -1977,7 +2008,10 @@ exit:
   llvm::Function &F = *M->getFunction("f");
   llvm::BasicBlock &Header = *std::next(F.begin());
   llvm::BasicBlock &Exit = *std::next(F.begin(), 2);
-  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraph Graph = MAIRGraph::build(F, FAM);
   Observation *Source = findMutableMemoryObservation(Graph, "header");
   Observation &Preheader = Graph.getBBExitRepresentative(F.getEntryBlock());
   ASSERT_NE(Source, nullptr);
@@ -1989,9 +2023,6 @@ exit:
   Graph.addEdge(Preheader, Edge, ObsEdgeKind::Dom);
   Graph.addEdge(Edge, Preheader, ObsEdgeKind::PostDom);
 
-  llvm::PassInstrumentationCallbacks PIC;
-  llvm::FunctionAnalysisManager FAM;
-  registerLoopTestAnalyses(FAM, PIC);
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
 
@@ -2025,10 +2056,10 @@ exit:
   ASSERT_TRUE(M);
 
   llvm::Function &F = *M->getFunction("f");
-  MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraph Graph = MAIRGraph::build<CallBarrierTrait>(F, FAM);
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
 
@@ -2067,8 +2098,10 @@ exit:
   ASSERT_TRUE(M);
 
   llvm::Function &F = *M->getFunction("f");
-  MAIRGraph Graph =
-      createGraphWithExplicitAnalyses<BackwardCallBarrierTrait>(F);
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraph Graph = MAIRGraph::build<BackwardCallBarrierTrait>(F, FAM);
   const Observation *Source = findMemoryObservation(Graph, "header");
   const Observation *Preheader = findBlockExit(Graph, "entry");
   const Observation *ExitEntry = findBlockEntry(Graph, "exit");
@@ -2079,9 +2112,6 @@ exit:
   EXPECT_FALSE(Graph.isAncestor(*Source, *Preheader, ObsEdgeKind::PostDom));
   EXPECT_TRUE(Graph.isAncestor(*ExitEntry, *Source, ObsEdgeKind::PostDom));
 
-  llvm::PassInstrumentationCallbacks PIC;
-  llvm::FunctionAnalysisManager FAM;
-  registerLoopTestAnalyses(FAM, PIC);
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
 
@@ -2127,10 +2157,10 @@ exit:
   ASSERT_TRUE(M);
 
   llvm::Function &F = *M->getFunction("f");
-  MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraph Graph = MAIRGraph::build<CallBarrierTrait>(F, FAM);
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
 
@@ -2169,10 +2199,10 @@ exit:
   ASSERT_TRUE(M);
 
   llvm::Function &F = *M->getFunction("f");
-  MAIRGraph Graph = createGraphWithExplicitAnalyses<ForwardCallBarrierTrait>(F);
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraph Graph = MAIRGraph::build<ForwardCallBarrierTrait>(F, FAM);
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
 
@@ -2228,10 +2258,10 @@ exit:
   ASSERT_TRUE(M);
 
   llvm::Function &F = *M->getFunction("f");
-  MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraph Graph = MAIRGraph::build<CallBarrierTrait>(F, FAM);
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
 
@@ -2272,10 +2302,10 @@ exit:
   ASSERT_TRUE(M);
 
   llvm::Function &F = *M->getFunction("f");
-  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraph Graph = MAIRGraph::build(F, FAM);
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
 
@@ -2315,10 +2345,10 @@ exit:
   ASSERT_TRUE(M);
 
   llvm::Function &F = *M->getFunction("f");
-  MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraph Graph = MAIRGraph::build<CallBarrierTrait>(F, FAM);
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
 
@@ -2358,10 +2388,10 @@ exit:
   ASSERT_TRUE(M);
 
   llvm::Function &F = *M->getFunction("f");
-  MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraph Graph = MAIRGraph::build<CallBarrierTrait>(F, FAM);
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
 

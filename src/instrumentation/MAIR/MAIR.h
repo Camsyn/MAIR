@@ -15,6 +15,7 @@
 #include "llvm/ADT/iterator.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/ADT/simple_ilist.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DataLayout.h"
@@ -59,6 +60,7 @@ using llvm::ilist_node_with_parent;
 using llvm::ilist_parent;
 using llvm::Instruction;
 using llvm::iterator_range;
+using llvm::LoopInfo;
 using llvm::make_range;
 using llvm::mapped_iterator;
 using llvm::PassManager;
@@ -820,8 +822,10 @@ private:
   SpecificBumpPtrAllocator<MAIRScalarExprNode> ScalarExprAllocator;
   std::unique_ptr<DominatorTree> OwnedDT;
   std::unique_ptr<PostDominatorTree> OwnedPDT;
+  std::unique_ptr<LoopInfo> OwnedLI;
   const DominatorTree *DT = nullptr;
   const PostDominatorTree *PDT = nullptr;
+  const LoopInfo *LI = nullptr;
   DenseMap<const Value *, MemoryObject *> MemoryObjects;
   DenseMap<const BasicBlock *, Observation *> BBEntryRepresentatives;
   DenseMap<const BasicBlock *, Observation *> BBExitRepresentatives;
@@ -861,6 +865,11 @@ public:
     assert(PDT && "MAIRGraph was constructed without a post-dominator tree");
     return *PDT;
   }
+  const LoopInfo &getLoopInfo() const {
+    assertLive("query loop analysis");
+    assert(LI && "MAIRGraph was constructed without loop information");
+    return *LI;
+  }
   bool isLive() const { return GraphState == State::Live; }
   bool isConsumed() const {
     return GraphState == State::ConsumedByInstantiation;
@@ -874,19 +883,20 @@ public:
     return NumObservations;
   }
 
-  /// Build a MAIR graph for \p F using DT/PDT results owned by \p FAM.
+  /// Build a MAIR graph for \p F using DT/PDT/LI results owned by \p FAM.
   ///
   /// This overload is the pass-pipeline entry point: it must only fetch
   /// reusable LLVM analyses from FAM and bind them to the graph. It
-  /// intentionally does not construct DT/PDT itself.
+  /// intentionally does not construct function analyses itself.
   template <class BarrierTrait = DefaultBarrierTrait>
   static MAIRGraph
   build(Function &F, FunctionAnalysisManager &FAM,
         MAIROptimizationConfig Config = MAIROptimizationConfig::generic()) {
     auto &DT = FAM.getResult<DominatorTreeAnalysis>(F);
     auto &PDT = FAM.getResult<PostDominatorTreeAnalysis>(F);
+    auto &LI = FAM.getResult<llvm::LoopAnalysis>(F);
     MAIRBarrierAnalysis<BarrierTrait> BarrierAnalysis;
-    return build(F, DT, PDT, BarrierAnalysis, Config);
+    return build(F, DT, PDT, LI, BarrierAnalysis, Config);
   }
 
   /// Build a MAIR graph that takes ownership of caller-provided analyses.
@@ -895,14 +905,16 @@ public:
   /// that retain analysis ownership should use the FAM overload above.
   template <class BarrierTrait = DefaultBarrierTrait>
   static MAIRGraph
-  build(Function &F, DominatorTree &&DT, PostDominatorTree &&PDT,
+  build(Function &F, DominatorTree &&DT, PostDominatorTree &&PDT, LoopInfo &&LI,
         MAIROptimizationConfig Config = MAIROptimizationConfig::generic()) {
     MAIRBarrierAnalysis<BarrierTrait> BarrierAnalysis;
-    MAIRGraph Graph = build(F, DT, PDT, BarrierAnalysis, Config);
+    MAIRGraph Graph = build(F, DT, PDT, LI, BarrierAnalysis, Config);
     Graph.OwnedDT = std::make_unique<DominatorTree>(std::move(DT));
     Graph.OwnedPDT = std::make_unique<PostDominatorTree>(std::move(PDT));
+    Graph.OwnedLI = std::make_unique<LoopInfo>(std::move(LI));
     Graph.DT = Graph.OwnedDT.get();
     Graph.PDT = Graph.OwnedPDT.get();
+    Graph.LI = Graph.OwnedLI.get();
     return Graph;
   }
 
@@ -1006,7 +1018,7 @@ private:
   /// intra-block and dominance/post-dominance edges gated by \p
   /// BarrierAnalysis.
   static MAIRGraph build(Function &F, const DominatorTree &DT,
-                         const PostDominatorTree &PDT,
+                         const PostDominatorTree &PDT, const LoopInfo &LI,
                          MAIRBarrierAnalysisCore &BarrierAnalysis,
                          MAIROptimizationConfig Config);
 

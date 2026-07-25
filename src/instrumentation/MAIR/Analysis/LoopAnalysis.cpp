@@ -14,8 +14,8 @@ MAIRLoopInfo::MAIRLoopInfo(MAIRGraph &G, FunctionAnalysisManager &Manager)
     : Graph(&G), FAM(&Manager), Func(G.getMutableFunction()) {
   if (!Func)
     return;
-  LI = &FAM->getResult<llvm::LoopAnalysis>(*Func);
-  DT = &FAM->getResult<DominatorTreeAnalysis>(*Func);
+  LI = &G.getLoopInfo();
+  DT = &G.getDominatorTree();
 }
 
 Loop *MAIRLoopInfo::getLoopFor(const Observation &Obs) const {
@@ -166,6 +166,10 @@ Observation *MAIRLoopInfo::getUniqueExitEntry(const Loop &L) const {
 ScalarEvolution &MAIRLoopInfo::getSE() const {
   if (!FAM || !Func)
     report_fatal_error("MAIR LoopAnalysis requires a FunctionAnalysisManager");
+  if (&FAM->getResult<llvm::LoopAnalysis>(*Func) != LI)
+    report_fatal_error(
+        "MAIR LoopAnalysis requires the MAIRGraph and ScalarEvolution to "
+        "share LoopInfo");
   return FAM->getResult<ScalarEvolutionAnalysis>(*Func);
 }
 

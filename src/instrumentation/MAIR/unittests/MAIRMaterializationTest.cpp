@@ -33,6 +33,13 @@ std::string printModule(const Module &M) {
   return OS.str();
 }
 
+MAIRGraph buildMaterializationGraph(Function &F) {
+  DominatorTree DT(F);
+  PostDominatorTree PDT(F);
+  LoopInfo LI(DT);
+  return MAIRGraph::build(F, std::move(DT), std::move(PDT), std::move(LI));
+}
+
 void registerMaterializationAnalyses(FunctionAnalysisManager &FAM,
                                      PassInstrumentationCallbacks &PIC) {
   FAM.registerPass([&] { return PassInstrumentationAnalysis(&PIC); });
@@ -104,7 +111,7 @@ entry:
                                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
-  MAIRGraph Graph = MAIRGraph::build(F, DominatorTree(F), PostDominatorTree(F));
+  MAIRGraph Graph = buildMaterializationGraph(F);
   ASSERT_TRUE(Graph.verify());
 
   PassInstrumentationCallbacks PIC;
@@ -141,7 +148,7 @@ entry:
                                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
-  MAIRGraph Graph = MAIRGraph::build(F, DominatorTree(F), PostDominatorTree(F));
+  MAIRGraph Graph = buildMaterializationGraph(F);
   ASSERT_TRUE(Graph.verify());
 
   PassInstrumentationCallbacks PIC;
@@ -172,7 +179,7 @@ entry:
                                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
-  MAIRGraph Graph = MAIRGraph::build(F, DominatorTree(F), PostDominatorTree(F));
+  MAIRGraph Graph = buildMaterializationGraph(F);
   ASSERT_TRUE(Graph.verify());
 
   PassInstrumentationCallbacks PIC;
@@ -587,7 +594,9 @@ entry:
   Function &F = *M->getFunction("f");
   DominatorTree DT(F);
   PostDominatorTree PDT(F);
-  MAIRGraph Graph = MAIRGraph::build(F, std::move(DT), std::move(PDT));
+  LoopInfo LI(DT);
+  MAIRGraph Graph =
+      MAIRGraph::build(F, std::move(DT), std::move(PDT), std::move(LI));
 
   PassInstrumentationCallbacks PIC;
   FunctionAnalysisManager FAM;

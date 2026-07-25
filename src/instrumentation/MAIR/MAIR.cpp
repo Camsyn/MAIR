@@ -39,11 +39,11 @@ struct MAIRScalarExprNode {
 
 namespace {
 const Instruction *getBarrierRangeStart(const Observation &Obs) {
-  return Obs.isBasicBlockEntrySite() ? nullptr : Obs.getAnchor();
+  return Obs.isBasicBlockEntrySite() ? nullptr : &Obs.getAnchor();
 }
 
 const Instruction *getBarrierRangeEnd(const Observation &Obs) {
-  return Obs.getAnchor();
+  return &Obs.getAnchor();
 }
 
 bool isMaskedMemoryIntrinsic(const Instruction &I) {
@@ -309,20 +309,22 @@ static void printEdgeList(raw_ostream &OS, ArrayRef<ObservationEdge> Edges) {
 
 } // namespace
 
-ObservationSite ObservationSite::anchored(const BasicBlock *BB,
-                                          const Instruction *Anchor, Kind K) {
+ObservationSite ObservationSite::anchored(const Instruction &Anchor, Kind K) {
   assert(K != Kind::Edge && "an anchored site cannot have edge kind");
+  assert(Anchor.getParent() && "an observation anchor must belong to a block");
   ObservationSite Site;
   Site.SiteKind = K;
-  Site.BB = BB;
-  Site.Anchor = Anchor;
+  Site.Anchor = &Anchor;
   return Site;
 }
 
 ObservationSite ObservationSite::edge(const BasicBlock &From,
                                       const BasicBlock &To) {
+  const Instruction *Anchor = From.getTerminator();
+  assert(Anchor && "an edge observation source must have a terminator");
   ObservationSite Site;
   Site.SiteKind = Kind::Edge;
+  Site.Anchor = Anchor;
   Site.From = &From;
   Site.To = &To;
   return Site;
@@ -343,16 +345,10 @@ void ObservationSite::print(raw_ostream &OS) const {
     case Kind::Edge:
       llvm_unreachable("handled edge observation site");
     }
-    if (BB)
-      BB->printAsOperand(OS, false);
-    else
-      OS << "null";
+    getBasicBlock()->printAsOperand(OS, false);
     if (SiteKind == Kind::MemoryInst) {
       OS << ", ";
-      if (Anchor)
-        Anchor->printAsOperand(OS, false);
-      else
-        OS << "null";
+      getAnchor().printAsOperand(OS, false);
     }
     OS << ")";
     return;
@@ -1026,16 +1022,14 @@ void MemoryAccess::print(raw_ostream &OS, bool LLVM) const {
   getPeriodicRegion()->print(OS);
 }
 
-Observation::Observation(StringRef N, const BasicBlock *Block,
-                         const Instruction *Anchor, SiteKind K)
-    : Observation(N, ObservationSite::anchored(Block, Anchor, K),
-                  AlwaysGuard{}) {}
+Observation::Observation(StringRef N, const Instruction &Anchor, SiteKind K)
+    : Observation(N, ObservationSite::anchored(Anchor, K), AlwaysGuard{}) {}
 
 Observation::Observation(StringRef N, ObservationSite S, ObservationGuard G)
     : Name(N.str()), Site(std::move(S)), Guard(std::move(G)) {
-  const BasicBlock *Block = Site.getBasicBlock();
-  if (Block)
-    RepresentedBlocks.insert(Block);
+  assert(Site.getBasicBlock() && "an observation must have an anchor");
+  if (!Site.isEdge())
+    RepresentedBlocks.insert(Site.getBasicBlock());
 }
 
 Observation::~Observation() { AccessAllocator.DestroyAll(); }
@@ -1311,8 +1305,9 @@ Observation &MAIRGraph::createBBObservation(const BasicBlock &BB,
   assertLive("create an observation on");
   const Instruction *Anchor =
       IsEntry ? &*BB.getFirstNonPHIIt() : BB.getTerminator();
+  assert(Anchor && "a basic-block observation must have an anchor");
   Observation &Obs = addObservation(allocateNode<Observation>(
-      createObservationName(IsEntry ? "bs" : "be"), &BB, Anchor,
+      createObservationName(IsEntry ? "bs" : "be"), *Anchor,
       IsEntry ? Observation::SiteKind::BasicBlockEntry
               : Observation::SiteKind::BasicBlockExit));
   (IsEntry ? BBEntryRepresentatives : BBExitRepresentatives)[&BB] = &Obs;
@@ -1322,9 +1317,10 @@ Observation &MAIRGraph::createBBObservation(const BasicBlock &BB,
 Observation &MAIRGraph::createInstObservation(const BasicBlock &BB,
                                               const Instruction &Anchor) {
   assertLive("create an observation on");
-  auto &Obs = addObservation(
-      allocateNode<Observation>(createObservationName("ma"), &BB, &Anchor,
-                                Observation::SiteKind::MemoryInst));
+  assert(Anchor.getParent() == &BB &&
+         "a memory observation anchor must belong to its block");
+  auto &Obs = addObservation(allocateNode<Observation>(
+      createObservationName("ma"), Anchor, Observation::SiteKind::MemoryInst));
   const DataLayout &DL = Anchor.getModule()->getDataLayout();
   if (const auto *Transfer = dyn_cast<AnyMemTransferInst>(&Anchor)) {
     Obs.addAccess(makeAccess(Anchor, *Transfer->getRawDest(),

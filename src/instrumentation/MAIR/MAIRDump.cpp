@@ -175,8 +175,7 @@ void MAIRLLVMWriter::emitAnchoredObservations(const Instruction *I,
   if (!Graph)
     return;
   for (const Observation &Obs : *Graph)
-    if (Obs.getAnchor() == I || (Obs.isEdgeSite() && Obs.getEdgeFrom() &&
-                                 Obs.getEdgeFrom()->getTerminator() == I))
+    if (&Obs.getAnchor() == I)
       emitObservationLine(Obs, OS);
 }
 

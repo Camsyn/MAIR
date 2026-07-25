@@ -37,6 +37,8 @@ static_assert(
 static_assert(std::is_same_v<
               decltype(std::declval<const MemoryAccess &>().getMemoryObject()),
               const MemoryObject &>);
+static_assert(!std::is_default_constructible_v<ObservationSite>);
+static_assert(!std::is_default_constructible_v<Observation>);
 
 std::unique_ptr<llvm::Module> parseModule(llvm::StringRef IR,
                                           llvm::LLVMContext &Ctx) {
@@ -474,6 +476,40 @@ entry:
   EXPECT_NE(Dump.find("succs=[bs1(dom)]"), std::string::npos);
   EXPECT_EQ(Dump.find("site="), std::string::npos);
   EXPECT_EQ(Dump.find("guard="), std::string::npos);
+}
+
+TEST(MAIRSchema, EveryObservationDerivesItsBlockFromItsAnchor) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %v = load i32, ptr %p, align 4
+  br label %exit
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &Entry = F.getEntryBlock();
+  llvm::BasicBlock &Exit = *std::next(F.begin());
+  llvm::Instruction &Load = Entry.front();
+  llvm::Instruction &Terminator = *Entry.getTerminator();
+  MAIRGraph Graph(F);
+  Observation &EntryObs = Graph.createBBObservation(Entry, true);
+  Observation &MemoryObs = Graph.createInstObservation(Entry, Load);
+  Observation &ExitObs = Graph.createBBObservation(Entry, false);
+  Observation &EdgeObs = Graph.createEdgeObservation(Entry, Exit);
+
+  EXPECT_EQ(&EntryObs.getAnchor(), &Load);
+  EXPECT_EQ(&MemoryObs.getAnchor(), &Load);
+  EXPECT_EQ(&ExitObs.getAnchor(), &Terminator);
+  EXPECT_EQ(&EdgeObs.getAnchor(), &Terminator);
+  for (const Observation *Obs : {&EntryObs, &MemoryObs, &ExitObs, &EdgeObs})
+    EXPECT_EQ(Obs->getBasicBlock(), Obs->getAnchor().getParent());
+  EXPECT_TRUE(Graph.verify());
 }
 
 TEST(MAIRGraph, FindsTypedObservationAncestors) {
@@ -1155,7 +1191,7 @@ entry:
       continue;
     ++NumObservations;
     NumAccesses += Obs.size();
-    if (const auto *MI = llvm::dyn_cast<llvm::MemCpyInst>(Obs.getAnchor()))
+    if (const auto *MI = llvm::dyn_cast<llvm::MemCpyInst>(&Obs.getAnchor()))
       Memcpy = &Obs;
     for (const MemoryAccess &Access : Obs) {
       NumAtomic += Access.isAtomic();
@@ -1821,7 +1857,7 @@ exit:
   for (Observation &Obs : Graph) {
     if (!Obs.isMemoryInstSite() || Obs.getBasicBlock()->getName() != "header")
       continue;
-    const llvm::Instruction *I = Obs.getAnchor();
+    const llvm::Instruction *I = &Obs.getAnchor();
     if (I->getName() == "pv") {
       Source = &Obs;
       PLoad = const_cast<llvm::Instruction *>(I);
@@ -1899,6 +1935,51 @@ exit:
   ASSERT_EQ(EntryExit->size(), 2u);
   for (const MemoryAccess &Access : *EntryExit)
     EXPECT_EQ(Access.getInstructions().size(), 1u);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraphPass, InvariantMotionDoesNotReprocessEdgeObservations) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  br label %header
+header:
+  %value = load i32, ptr %p, align 4
+  %done = icmp eq i32 %value, 0
+  br i1 %done, label %exit, label %header
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &Header = *std::next(F.begin());
+  llvm::BasicBlock &Exit = *std::next(F.begin(), 2);
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  Observation *Source = findMutableMemoryObservation(Graph, "header");
+  Observation &Preheader = Graph.getBBExitRepresentative(F.getEntryBlock());
+  ASSERT_NE(Source, nullptr);
+  ASSERT_EQ(Source->size(), 1u);
+
+  Observation &Edge = Graph.createEdgeObservation(Header, Exit);
+  Edge.addAccess(*Source->begin());
+  Source->erase(Source->begin());
+  Graph.addEdge(Preheader, Edge, ObsEdgeKind::Dom);
+  Graph.addEdge(Edge, Preheader, ObsEdgeKind::PostDom);
+
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  LoopInvariantObservationMotionPass Pass;
+  EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
+  EXPECT_EQ(Edge.size(), 1u);
+  EXPECT_TRUE(Preheader.empty());
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -2739,7 +2820,7 @@ entry:
   EXPECT_EQ(Graph.find("ma1"), nullptr);
   const Observation *Merged = Graph.find("ma2");
   ASSERT_NE(Merged, nullptr);
-  EXPECT_EQ(Merged->getAnchor(), Second);
+  EXPECT_EQ(&Merged->getAnchor(), Second);
   ASSERT_EQ(Merged->size(), 2u);
   auto Access = Merged->begin();
   EXPECT_EQ(Access->getInstruction(), First);
@@ -5051,7 +5132,7 @@ entry:
   ObservationGuard Guard = AnyProvenanceExecutedGuard({&Load});
   Graph.createObservation(Entry.getSite(), Guard);
   Graph.createObservation(
-      ObservationSite::anchored(&BB, &Load, Observation::SiteKind::MemoryInst),
+      ObservationSite::anchored(Load, Observation::SiteKind::MemoryInst),
       Guard);
 
   ASSERT_TRUE(Graph.verify());

@@ -36,18 +36,17 @@ bool isValueAvailableAt(const Value *Value, const Instruction &Anchor,
 
 bool isAccessAvailableAt(const MemoryAccess &Access, const Observation &Target,
                          const DominatorTree &DT) {
-  const Instruction *Anchor = Target.getAnchor();
-  assert(Anchor && "motion target must have an anchor");
+  const Instruction &Anchor = Target.getAnchor();
   const AbstractAccess *Location = Access.getContiguousRegion();
   if (!Location)
     return false;
-  if (!isValueAvailableAt(Location->getBase(), *Anchor, DT))
+  if (!isValueAvailableAt(Location->getBase(), Anchor, DT))
     return false;
   if (Location->getOffset().isSymbol() &&
-      !isValueAvailableAt(Location->getOffset().getSymbol(), *Anchor, DT))
+      !isValueAvailableAt(Location->getOffset().getSymbol(), Anchor, DT))
     return false;
   return !Location->getSize().isSymbol() ||
-         isValueAvailableAt(Location->getSize().getSymbol(), *Anchor, DT);
+         isValueAvailableAt(Location->getSize().getSymbol(), Anchor, DT);
 }
 
 enum class MotionDirection { Hoist, Sink };

@@ -136,7 +136,10 @@ std::optional<InvariantMotionPlan> findInvariantMotion(MAIRGraph &G,
     return std::nullopt;
 
   for (Observation &Obs : G) {
-    if (!Obs.hasAlwaysGuard())
+    // Edge observations are already placed at a virtual CFG edge. Their
+    // source terminator anchor identifies that edge; it does not make the
+    // event an ordinary loop-body candidate for another round of motion.
+    if (Obs.isEdgeSite() || !Obs.hasAlwaysGuard())
       continue;
     Loop *L = Loops.getLoopFor(Obs);
     if (!L)

@@ -30,22 +30,12 @@ bool MAIRLoopInfo::isValueAvailableAt(const Value &V,
   if (!isAvailable())
     return false;
 
-  const Instruction *Anchor = nullptr;
-  if (Site.isEdge()) {
-    const BasicBlock *From = Site.getEdgeFrom();
-    if (!From || !From->getTerminator())
-      return false;
-    Anchor = From->getTerminator();
-  } else {
-    Anchor = Site.getAnchor();
-    if (!Site.getBasicBlock() || !Anchor)
-      return false;
-  }
+  const Instruction &Anchor = Site.getAnchor();
 
   if (isa<Constant>(&V) || isa<Argument>(&V))
     return true;
   const auto *Def = dyn_cast<Instruction>(&V);
-  return Def && DT->dominates(Def, Anchor);
+  return Def && DT->dominates(Def, &Anchor);
 }
 
 bool MAIRLoopInfo::executesOncePerRelevantIteration(const Observation &Obs,

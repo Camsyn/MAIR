@@ -229,33 +229,30 @@ public:
 
 private:
   Kind SiteKind = Kind::MemoryInst;
-  const BasicBlock *BB = nullptr;
   const Instruction *Anchor = nullptr;
   const BasicBlock *From = nullptr;
   const BasicBlock *To = nullptr;
 
-public:
   ObservationSite() = default;
 
-  static ObservationSite anchored(const BasicBlock *BB,
-                                  const Instruction *Anchor, Kind K);
+public:
+  static ObservationSite anchored(const Instruction &Anchor, Kind K);
   static ObservationSite edge(const BasicBlock &From, const BasicBlock &To);
 
   Kind getKind() const { return SiteKind; }
   bool isAnchored() const { return SiteKind != Kind::Edge; }
   bool isEdge() const { return SiteKind == Kind::Edge; }
-  const BasicBlock *getBasicBlock() const {
-    return isAnchored() ? BB : nullptr;
-  }
-  const Instruction *getAnchor() const {
-    return isAnchored() ? Anchor : nullptr;
+  const BasicBlock *getBasicBlock() const { return getAnchor().getParent(); }
+  const Instruction &getAnchor() const {
+    assert(Anchor && "observation site has no anchor");
+    return *Anchor;
   }
   const BasicBlock *getEdgeFrom() const { return isEdge() ? From : nullptr; }
   const BasicBlock *getEdgeTo() const { return isEdge() ? To : nullptr; }
 
   bool operator==(const ObservationSite &Other) const {
-    return SiteKind == Other.SiteKind && BB == Other.BB &&
-           Anchor == Other.Anchor && From == Other.From && To == Other.To;
+    return SiteKind == Other.SiteKind && Anchor == Other.Anchor &&
+           From == Other.From && To == Other.To;
   }
   bool operator!=(const ObservationSite &Other) const {
     return !(*this == Other);
@@ -720,8 +717,7 @@ private:
   void invalidateSort() { Sorted = false; }
 
 public:
-  Observation() = default;
-  Observation(StringRef N, const BasicBlock *Block, const Instruction *Anchor,
+  Observation(StringRef N, const Instruction &Anchor,
               SiteKind K = SiteKind::MemoryInst);
   Observation(StringRef N, ObservationSite S, ObservationGuard G);
   ~Observation();
@@ -735,7 +731,7 @@ public:
   const ObservationSite &getSite() const { return Site; }
   const ObservationGuard &getGuard() const { return Guard; }
   const BasicBlock *getBasicBlock() const { return Site.getBasicBlock(); }
-  const Instruction *getAnchor() const { return Site.getAnchor(); }
+  const Instruction &getAnchor() const { return Site.getAnchor(); }
   const BasicBlock *getEdgeFrom() const { return Site.getEdgeFrom(); }
   const BasicBlock *getEdgeTo() const { return Site.getEdgeTo(); }
   SiteKind getSiteKind() const { return Site.getKind(); }

@@ -54,6 +54,8 @@ struct MAIRVerifierSupport {
     *OS << "\n";
   }
 
+  void Write(const Instruction &I) { Write(&I); }
+
   void Write(const BasicBlock *BB) {
     if (!OS || !BB)
       return;
@@ -247,6 +249,9 @@ void MAIRVerifier::verifyObservation(const Observation &Obs) {
           "edge site is outside graph function", Obs, From, To);
     Check(llvm::is_contained(successors(From), To),
           "edge site is not a current CFG edge", Obs, From, To);
+    Check(&Obs.getAnchor() == From->getTerminator(),
+          "edge observation is not anchored at its source terminator", Obs,
+          From, &Obs.getAnchor());
   } else {
     const BasicBlock *BB = Obs.getBasicBlock();
     if (!CheckRequired(BB, "observation has no basic block", Obs))
@@ -254,24 +259,22 @@ void MAIRVerifier::verifyObservation(const Observation &Obs) {
     Check(BB->getParent() == Graph->getFunction(),
           "observation block is outside graph function", Obs, BB);
 
-    const Instruction *Anchor = Obs.getAnchor();
-    if (!CheckRequired(Anchor, "observation has no anchor", Obs))
-      return;
-    if (!CheckRequired(Anchor->getParent() == BB,
+    const Instruction &Anchor = Obs.getAnchor();
+    if (!CheckRequired(Anchor.getParent() == BB,
                        "observation anchor is outside its block", Obs, Anchor,
                        BB))
       return;
 
     if (Obs.isBasicBlockEntrySite()) {
-      Check(Anchor == &*BB->getFirstNonPHIIt(),
+      Check(&Anchor == &*BB->getFirstNonPHIIt(),
             "basic-block entry observation is not anchored at first non-PHI",
-            Obs, Anchor, BB);
+            Obs, &Anchor, BB);
     }
 
     if (Obs.isBasicBlockExitSite()) {
-      Check(Anchor == BB->getTerminator(),
+      Check(&Anchor == BB->getTerminator(),
             "basic-block exit observation is not anchored at terminator", Obs,
-            Anchor, BB);
+            &Anchor, BB);
     }
   }
 
@@ -316,9 +319,9 @@ void MAIRVerifier::verifyMemoryAccess(const Observation &Obs,
                        "memory observation has access without instruction",
                        Access, Obs))
       return;
-    Check(AccessI->getFunction() == Obs.getAnchor()->getFunction(),
+    Check(AccessI->getFunction() == Obs.getAnchor().getFunction(),
           "memory access instruction is outside observation function", Access,
-          Obs, AccessI, Obs.getAnchor());
+          Obs, AccessI, &Obs.getAnchor());
   }
 
   for (const Instruction *AccessI : Access.getInstructions()) {

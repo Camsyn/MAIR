@@ -57,9 +57,9 @@ public:
     for (const MaterializationUnit &Unit : Plan.units()) {
       SawCompletePlan &= Unit.Source && !Unit.Accesses.empty();
       SawCompletePlan &=
-          Unit.Site.isEdge()
-              ? Unit.Site.getEdgeFrom() && Unit.Site.getEdgeTo()
-              : Unit.Site.getBasicBlock() && Unit.Site.getAnchor();
+          Unit.Site.getBasicBlock() == Unit.Site.getAnchor().getParent();
+      if (Unit.Site.isEdge())
+        SawCompletePlan &= Unit.Site.getEdgeFrom() && Unit.Site.getEdgeTo();
       for (const PlannedAccess &Access : Unit.Accesses) {
         SawCompletePlan &= Access.Source != nullptr;
         PlannedProperties.push_back(Access.Properties);
@@ -292,7 +292,7 @@ merge:
 
   MAIRGraph Graph(F);
   Observation &Obs = Graph.createObservation(ObservationSite::anchored(
-      Merge, Merge->getTerminator(), Observation::SiteKind::BasicBlockExit));
+      *Merge->getTerminator(), Observation::SiteKind::BasicBlockExit));
   MAIRScalarExpr P = Graph.createValueExpr(*F.getArg(0));
   MAIRScalarExpr BadExpr = Graph.createValueExpr(*Bad);
   MAIRScalarExpr One =
@@ -345,7 +345,7 @@ merge:
 
   MAIRGraph Graph(F);
   Observation &Obs = Graph.createObservation(ObservationSite::anchored(
-      Merge, Merge->getTerminator(), Observation::SiteKind::BasicBlockExit));
+      *Merge->getTerminator(), Observation::SiteKind::BasicBlockExit));
   Obs.addAccess(MemoryAccess({},
                              AbstractAccess(Bad, AbstractValue::constant(0),
                                             AbstractValue::constant(4)),
@@ -471,8 +471,8 @@ entry:
   Type &I64 = *Type::getInt64Ty(Ctx);
 
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createObservation(ObservationSite::anchored(
-      &Entry, &Return, Observation::SiteKind::BasicBlockExit));
+  Observation &Obs = Graph.createObservation(
+      ObservationSite::anchored(Return, Observation::SiteKind::BasicBlockExit));
   MAIRScalarExpr PExpr = Graph.createValueExpr(P);
   MAIRScalarExpr NExpr = Graph.createValueExpr(N);
   MAIRScalarExpr DenomExpr = Graph.createValueExpr(Denom);
@@ -543,8 +543,8 @@ entry:
   BasicBlock &Entry = F.getEntryBlock();
   Instruction &Load = Entry.front();
   Instruction &Return = *Entry.getTerminator();
-  ObservationSite Site = ObservationSite::anchored(
-      &Entry, &Return, Observation::SiteKind::BasicBlockExit);
+  ObservationSite Site =
+      ObservationSite::anchored(Return, Observation::SiteKind::BasicBlockExit);
 
   MAIRGraph Graph(F);
   Observation &Guarded =

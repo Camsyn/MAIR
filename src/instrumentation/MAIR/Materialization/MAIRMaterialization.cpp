@@ -165,18 +165,19 @@ Expected<MAIRMaterializationPlan> buildPlan(const MAIRGraph &Graph, Function &F,
           !isPatchBLoopExit(*From, *To, LI))
         return materializationError(
             "unsupported edge site: expected a critical Patch B loop exit");
-      Target = From->getTerminator();
+      Target = &Obs.getAnchor();
     } else {
       const BasicBlock *BB = Obs.getBasicBlock();
-      const Instruction *Anchor = Obs.getAnchor();
-      if (!BB || !Anchor || BB->getParent() != &F || Anchor->getParent() != BB)
+      const Instruction &Anchor = Obs.getAnchor();
+      if (!BB || BB->getParent() != &F || Anchor.getParent() != BB)
         return materializationError("anchored observation has a stale anchor");
       BasicBlock::const_iterator FirstInsertion = BB->getFirstInsertionPt();
       if (FirstInsertion == BB->end() ||
-          (Anchor != &*FirstInsertion && !FirstInsertion->comesBefore(Anchor)))
+          (&Anchor != &*FirstInsertion &&
+           !FirstInsertion->comesBefore(&Anchor)))
         return materializationError(
             "anchored observation has no legal insertion point");
-      Target = Anchor;
+      Target = &Anchor;
     }
 
     std::string Failure;
@@ -397,7 +398,7 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
       assert(Edge && "preflight edge must have an apply cursor");
       Cursor = Edge->Cursor;
     } else {
-      Cursor = const_cast<Instruction *>(Unit.Site.getAnchor());
+      Cursor = const_cast<Instruction *>(&Unit.Site.getAnchor());
     }
 
     IRBuilder<> UnguardedBuilder(Cursor);

@@ -43,7 +43,7 @@ MergeCandidate findMergeCandidate(MAIRGraph &G) {
         continue;
       if (!O1.hasCompatibleMergeSemantics(O2))
         continue;
-      if (G.hasEdge(O2, O1, ObsEdgeKind::PostDom))
+      if (O2.hasChild(O1, ObsEdgeKind::PostDom))
         // Retain the post-dominating site so contraction sinks accesses.
         return {&O2, &O1};
     }

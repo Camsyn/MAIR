@@ -5,6 +5,7 @@
 #include "MAIR/Transforms/TransformUtils.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 
 using namespace llvm;
@@ -91,6 +92,44 @@ struct InvariantMotionPlan {
   InvariantMotionKind Kind = InvariantMotionKind::Preheader;
 };
 
+std::optional<InvariantMotionPlan>
+findInvariantMotionForLoop(MAIRGraph &G, MAIRLoopInfo &Loops,
+                           Observation &Source, MemoryAccess &Access,
+                           const AbstractAccess &Region, Loop &L) {
+  Observation *Preheader = Loops.getPreheaderExit(L);
+  if (Preheader && Preheader != &Source &&
+      G.isAncestor(*Preheader, Source, ObsEdgeKind::Dom) &&
+      G.isAncestor(Source, *Preheader, ObsEdgeKind::PostDom) &&
+      isRegionAvailableAt(Region, Preheader->getSite(), Loops))
+    return InvariantMotionPlan{&Access, Preheader, std::nullopt, AlwaysGuard{},
+                               InvariantMotionKind::Preheader};
+
+  std::optional<MAIRLoopExit> Exit = Loops.describeUniqueExit(L);
+  Observation *ExitAncestor = Loops.getUniqueExitEntry(L);
+  if (!Exit || !ExitAncestor ||
+      !G.isAncestor(*ExitAncestor, Source, ObsEdgeKind::PostDom))
+    return std::nullopt;
+
+  std::optional<AnyProvenanceExecutedGuard> ExecutionGuard =
+      makeExecutionGuard(Access);
+  if (!ExecutionGuard)
+    return std::nullopt;
+
+  ObservationSite TargetSite =
+      Exit->IsDedicated ? ExitAncestor->getSite()
+                        : ObservationSite::edge(*Exit->Exiting, *Exit->Exit);
+  if (!isRegionAvailableAt(Region, TargetSite, Loops))
+    return std::nullopt;
+
+  ObservationGuard Guard = std::move(*ExecutionGuard);
+  Observation *Target = findEvent(G, TargetSite, Guard);
+  std::optional<ObservationSite> NewTargetSite;
+  if (!Target)
+    NewTargetSite = TargetSite;
+  return InvariantMotionPlan{&Access, Target, NewTargetSite, std::move(Guard),
+                             InvariantMotionKind::Exit};
+}
+
 std::optional<InvariantMotionPlan> findInvariantMotion(MAIRGraph &G,
                                                        MAIRLoopInfo &Loops) {
   if (!Loops.isAvailable())
@@ -100,52 +139,37 @@ std::optional<InvariantMotionPlan> findInvariantMotion(MAIRGraph &G,
     if (!Obs.hasAlwaysGuard())
       continue;
     Loop *L = Loops.getLoopFor(Obs);
-    if (!L || !Loops.isSimpleLoop(*L))
+    if (!L)
       continue;
 
     for (MemoryAccess &Access : Obs) {
       if (!Access.isMovable())
         continue;
       const AbstractAccess *Region = Access.getContiguousRegion();
-      if (!Region || !Loops.isLoopInvariant(Access, *L))
+      if (!Region)
         continue;
 
       Loop *Top = Loops.getTopInvariantLoop(Access, *L);
       if (!Top)
         continue;
 
-      if (Loops.isGuaranteedOnLoopEntry(Access, *Top)) {
-        Observation *Target = Loops.getPreheaderExit(*Top);
-        if (!Target || Target == &Obs ||
-            !isRegionAvailableAt(*Region, Target->getSite(), Loops))
-          continue;
-        return InvariantMotionPlan{&Access, Target, std::nullopt, AlwaysGuard{},
-                                   InvariantMotionKind::Preheader};
+      // Invariance defines the outer bound, not whether motion to that loop is
+      // legal. Try candidates from outermost to innermost so graph barriers or
+      // unavailable values at an outer target can fall back to an inner one.
+      SmallVector<Loop *, 4> InvariantLoops;
+      for (Loop *Candidate = L; Candidate;
+           Candidate = Candidate->getParentLoop()) {
+        InvariantLoops.push_back(Candidate);
+        if (Candidate == Top)
+          break;
       }
-
-      std::optional<MAIRLoopExit> Exit = Loops.describeUniqueExit(*Top);
-      std::optional<AnyProvenanceExecutedGuard> ExecutionGuard =
-          makeExecutionGuard(Access);
-      if (!Exit || !ExecutionGuard)
-        continue;
-
-      ObservationSite TargetSite;
-      if (Exit->IsDedicated) {
-        Observation &ExitEntry = G.getBBEntryRepresentative(*Exit->Exit);
-        TargetSite = ExitEntry.getSite();
-      } else {
-        TargetSite = ObservationSite::edge(*Exit->Exiting, *Exit->Exit);
-      }
-      if (!isRegionAvailableAt(*Region, TargetSite, Loops))
-        continue;
-
-      ObservationGuard Guard = std::move(*ExecutionGuard);
-      Observation *Target = findEvent(G, TargetSite, Guard);
-      std::optional<ObservationSite> NewTargetSite;
-      if (!Target)
-        NewTargetSite = TargetSite;
-      return InvariantMotionPlan{&Access, Target, NewTargetSite,
-                                 std::move(Guard), InvariantMotionKind::Exit};
+      assert(InvariantLoops.back() == Top &&
+             "top invariant loop must be an ancestor of the source loop");
+      for (Loop *Candidate : llvm::reverse(InvariantLoops))
+        if (std::optional<InvariantMotionPlan> Plan =
+                findInvariantMotionForLoop(G, Loops, Obs, Access, *Region,
+                                           *Candidate))
+          return Plan;
     }
   }
   return std::nullopt;

@@ -145,10 +145,12 @@ exit:
   ret void
 }
 
-define void @keep_multiple_exits(ptr %p, i32 %n, i1 %early) {
-; CHECK-LABEL: mair graph of fn @keep_multiple_exits {
-; CHECK:       ma3: preds=
+define void @hoist_with_multiple_exits(ptr %p, i32 %n, i1 %early) {
+; CHECK-LABEL: mair graph of fn @hoist_with_multiple_exits {
+; CHECK:       be1: preds=
 ; CHECK-NEXT:    read ptr %p, 4
+; CHECK:       ma3: preds=
+; CHECK-EMPTY:
 entry:
   br label %header
 
@@ -169,9 +171,11 @@ exit.normal:
   ret void
 }
 
-define void @keep_without_preheader(ptr %p, i1 %path, i32 %n) {
-; CHECK-LABEL: mair graph of fn @keep_without_preheader {
+define void @sink_without_preheader(ptr %p, i1 %path, i32 %n) {
+; CHECK-LABEL: mair graph of fn @sink_without_preheader {
 ; CHECK:       ma7: preds=
+; CHECK-EMPTY:
+; CHECK:       va13: site=bb.entry(%exit), guard=any(%v), preds=[], succs=[]
 ; CHECK-NEXT:    read ptr %p, 4
 entry:
   br i1 %path, label %left, label %right

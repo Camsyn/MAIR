@@ -359,12 +359,12 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
     return std::nullopt;
 
   const Loop &RelevantLoop = *Recurrence->getLoop();
-  if (!Loops.isSimpleLoop(RelevantLoop) ||
-      !Loops.executesOncePerRelevantIteration(Obs, RelevantLoop))
-    return std::nullopt;
   const SCEV *ExecutionCount =
       Loops.getExactExecutionCountSCEV(Obs, RelevantLoop);
   if (!ExecutionCount)
+    return std::nullopt;
+  Observation *ExitAncestor = Loops.getUniqueExitEntry(RelevantLoop);
+  if (!ExitAncestor || !G.isAncestor(*ExitAncestor, Obs, ObsEdgeKind::PostDom))
     return std::nullopt;
   std::optional<AggregateTarget> Target =
       getAggregateTarget(G, Loops, RelevantLoop);

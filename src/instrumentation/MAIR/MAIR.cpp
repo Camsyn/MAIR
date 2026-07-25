@@ -1613,6 +1613,33 @@ bool MAIRGraph::hasEdge(const Observation &From, const Observation &To,
   return false;
 }
 
+bool MAIRGraph::isAncestor(const Observation &Ancestor,
+                           const Observation &Descendant,
+                           ObsEdgeKind Kind) const {
+  assertLive("query ancestry in");
+  assert(Ancestor.getParent() == this && Descendant.getParent() == this &&
+         "ancestry endpoints must belong to this graph");
+  if (&Ancestor == &Descendant)
+    return false;
+
+  SmallVector<const Observation *, 8> Worklist{&Ancestor};
+  SmallPtrSet<const Observation *, 16> Visited;
+  Visited.insert(&Ancestor);
+  while (!Worklist.empty()) {
+    const Observation &Current = *Worklist.pop_back_val();
+    for (const ObservationEdge &Edge : Current.children()) {
+      if (Edge.getKind() != Kind)
+        continue;
+      const Observation *Next = &Edge.getNode();
+      if (Next == &Descendant)
+        return true;
+      if (Visited.insert(Next).second)
+        Worklist.push_back(Next);
+    }
+  }
+  return false;
+}
+
 MAIRGraph::EdgeListType MAIRGraph::successors(Observation &Obs) {
   assertLive("query");
   EdgeListType Result;

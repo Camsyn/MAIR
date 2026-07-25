@@ -2,7 +2,6 @@
 
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/LoopIterator.h"
-#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Support/ErrorHandling.h"
 
 using namespace llvm;
@@ -17,7 +16,6 @@ MAIRLoopInfo::MAIRLoopInfo(MAIRGraph &G, FunctionAnalysisManager &Manager)
     return;
   LI = &FAM->getResult<llvm::LoopAnalysis>(*Func);
   DT = &FAM->getResult<DominatorTreeAnalysis>(*Func);
-  PDT = &FAM->getResult<PostDominatorTreeAnalysis>(*Func);
 }
 
 Loop *MAIRLoopInfo::getLoopFor(const Observation &Obs) const {
@@ -25,46 +23,6 @@ Loop *MAIRLoopInfo::getLoopFor(const Observation &Obs) const {
     return nullptr;
   const BasicBlock *BB = Obs.getBasicBlock();
   return BB ? LI->getLoopFor(BB) : nullptr;
-}
-
-bool MAIRLoopInfo::isSimpleLoop(const Loop &L) const {
-  if (auto It = SimpleLoopCache.find(&L); It != SimpleLoopCache.end())
-    return It->second;
-  bool Result = computeIsSimpleLoop(L);
-  SimpleLoopCache[&L] = Result;
-  return Result;
-}
-
-bool MAIRLoopInfo::computeIsSimpleLoop(const Loop &L) const {
-  if (!L.getHeader() || !L.getLoopPreheader() || !L.getLoopLatch() ||
-      !L.getUniqueExitBlock() || !L.getExitingBlock())
-    return false;
-
-  // A natural-loop summary is not enough for an observation proof: an
-  // irreducible SCC inside the summary can revisit a dominated block more
-  // than once in one loop iteration.  Keep all loop transforms conservative
-  // until that CFG shape has been structurally rejected.
-  LoopBlocksRPO RPOT(const_cast<Loop *>(&L));
-  RPOT.perform(LI);
-  if (containsIrreducibleCFG<const BasicBlock *>(RPOT, *LI))
-    return false;
-
-  for (const BasicBlock *BB : L.getBlocks()) {
-    // Loop transforms relocate or aggregate observations across iterations.
-    // Any sanitizer-specific barrier in the loop cuts that proof, even when
-    // the LLVM call itself is readonly and would otherwise pass alias checks.
-    if (Graph->hasFwdBarrier(*BB) || Graph->hasBwdBarrier(*BB))
-      return false;
-    for (const Instruction &I : *BB) {
-      if (isa<DbgInfoIntrinsic>(I))
-        continue;
-      if (I.isAtomic())
-        return false;
-      if (isa<CallBase>(I) && I.mayWriteToMemory())
-        return false;
-    }
-  }
-  return true;
 }
 
 bool MAIRLoopInfo::isValueAvailableAt(const Value &V,
@@ -92,8 +50,15 @@ bool MAIRLoopInfo::isValueAvailableAt(const Value &V,
 
 bool MAIRLoopInfo::executesOncePerRelevantIteration(const Observation &Obs,
                                                     const Loop &L) const {
-  if (!isAvailable() || !isSimpleLoop(L) || !Obs.hasAlwaysGuard() ||
-      !Obs.getSite().isAnchored())
+  if (!isAvailable() || !Obs.hasAlwaysGuard() || !Obs.getSite().isAnchored())
+    return false;
+
+  // An internal irreducible cycle can revisit a dominated event more than
+  // once during one natural-loop iteration. This check belongs to execution
+  // counting; barrier legality is represented separately by MAIRGraph edges.
+  LoopBlocksRPO RPOT(const_cast<Loop *>(&L));
+  RPOT.perform(LI);
+  if (containsIrreducibleCFG<const BasicBlock *>(RPOT, *LI))
     return false;
 
   const BasicBlock *SiteBlock = Obs.getBasicBlock();
@@ -145,22 +110,6 @@ bool MAIRLoopInfo::isEveryIterationAccess(const MemoryAccess &Access,
   return true;
 }
 
-bool MAIRLoopInfo::isGuaranteedOnLoopEntry(const MemoryAccess &Access,
-                                           const Loop &L) const {
-  if (!isAvailable())
-    return false;
-  BasicBlock *Preheader = L.getLoopPreheader();
-  if (!Preheader)
-    return false;
-  for (const Instruction *I : Access.getInstructions()) {
-    if (!I || !L.contains(I->getParent()))
-      return false;
-    if (!PDT->dominates(I->getParent(), Preheader))
-      return false;
-  }
-  return true;
-}
-
 bool MAIRLoopInfo::isLoopInvariant(const Value *V, const Loop &L) const {
   return V && L.isLoopInvariant(V);
 }
@@ -184,12 +133,12 @@ bool MAIRLoopInfo::isLoopInvariant(const MemoryAccess &Access,
 
 Loop *MAIRLoopInfo::getTopInvariantLoop(const MemoryAccess &Access,
                                         Loop &Start) const {
-  if (!isSimpleLoop(Start) || !isLoopInvariant(Access, Start))
+  if (!isLoopInvariant(Access, Start))
     return nullptr;
 
   Loop *Top = &Start;
   while (Loop *Parent = Top->getParentLoop()) {
-    if (!isSimpleLoop(*Parent) || !isLoopInvariant(Access, *Parent))
+    if (!isLoopInvariant(Access, *Parent))
       break;
     Top = Parent;
   }

@@ -476,6 +476,38 @@ entry:
   EXPECT_EQ(Dump.find("guard="), std::string::npos);
 }
 
+TEST(MAIRGraph, FindsTypedObservationAncestors) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %v = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  llvm::Instruction &Load = BB.front();
+  MAIRGraph Graph(F);
+  Observation &Entry = Graph.createBBObservation(BB, true);
+  Observation &Memory = Graph.createInstObservation(BB, Load);
+  Observation &Exit = Graph.createBBObservation(BB, false);
+  Graph.addEdge(Entry, Memory, ObsEdgeKind::Dom);
+  Graph.addEdge(Memory, Exit, ObsEdgeKind::Dom);
+  Graph.addEdge(Exit, Memory, ObsEdgeKind::PostDom);
+  Graph.addEdge(Memory, Entry, ObsEdgeKind::PostDom);
+
+  EXPECT_TRUE(Graph.isAncestor(Entry, Exit, ObsEdgeKind::Dom));
+  EXPECT_TRUE(Graph.isAncestor(Exit, Entry, ObsEdgeKind::PostDom));
+  EXPECT_FALSE(Graph.isAncestor(Entry, Exit, ObsEdgeKind::PostDom));
+  EXPECT_FALSE(Graph.isAncestor(Exit, Entry, ObsEdgeKind::Dom));
+  EXPECT_FALSE(Graph.isAncestor(Memory, Memory, ObsEdgeKind::Dom));
+  EXPECT_TRUE(Graph.verify());
+}
+
 TEST(MAIRGraph, AbstractAccessMergesConcreteRanges) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
@@ -1364,10 +1396,8 @@ exit:
   llvm::Loop *L = Loops.getLoopFor(*BodyObs);
   ASSERT_NE(L, nullptr);
   EXPECT_EQ(L->getHeader()->getName(), "header");
-  EXPECT_TRUE(Loops.isSimpleLoop(*L));
   EXPECT_TRUE(Loops.isEveryIterationAccess(*BodyObs->begin(), *L));
   EXPECT_TRUE(Loops.isLoopInvariant(*BodyObs->begin(), *L));
-  EXPECT_EQ(Loops.getTopInvariantLoop(*BodyObs->begin(), *L), L);
   EXPECT_EQ(Loops.getPreheaderExit(*L), findBlockExit(Graph, "entry"));
   EXPECT_TRUE(Loops.hasDedicatedExit(*L));
   EXPECT_EQ(Loops.getUniqueExitEntry(*L), findBlockEntry(Graph, "exit"));
@@ -1412,7 +1442,6 @@ exit:
   ASSERT_NE(ThenObs, nullptr);
   llvm::Loop *L = Loops.getLoopFor(*ThenObs);
   ASSERT_NE(L, nullptr);
-  EXPECT_TRUE(Loops.isSimpleLoop(*L));
   EXPECT_FALSE(Loops.isEveryIterationAccess(*ThenObs->begin(), *L));
 }
 
@@ -1424,10 +1453,14 @@ entry:
   br label %outer.header
 outer.header:
   %oi = phi i32 [ 0, %entry ], [ %oi.next, %outer.latch ]
+  %outer.ptr = getelementptr i8, ptr %p, i32 %oi
   br label %inner.header
 inner.header:
   %ii = phi i32 [ 0, %outer.header ], [ %ii.next, %inner.header ]
-  %v = load i32, ptr %p, align 4
+  %inner.ptr = getelementptr i8, ptr %p, i32 %ii
+  %outermost = load i8, ptr %p, align 1
+  %inner.only = load i8, ptr %outer.ptr, align 1
+  %variant = load i8, ptr %inner.ptr, align 1
   %ii.next = add i32 %ii, 1
   %inner.done = icmp eq i32 %ii.next, 2
   br i1 %inner.done, label %outer.latch, label %inner.header
@@ -1452,17 +1485,34 @@ exit:
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
   const MAIRLoopInfo &Loops = AM.getResult<mair::LoopAnalysis>(Graph);
 
-  const Observation *InnerObs = findMemoryObservation(Graph, "inner.header");
-  ASSERT_NE(InnerObs, nullptr);
-  llvm::Loop *Inner = Loops.getLoopFor(*InnerObs);
+  const MemoryAccess *OutermostAccess = nullptr;
+  const MemoryAccess *InnerOnlyAccess = nullptr;
+  const MemoryAccess *VariantAccess = nullptr;
+  for (const Observation &Obs : Graph)
+    for (const MemoryAccess &Access : Obs)
+      for (const llvm::Instruction *I : Access.getInstructions()) {
+        if (I->getName() == "outermost")
+          OutermostAccess = &Access;
+        else if (I->getName() == "inner.only")
+          InnerOnlyAccess = &Access;
+        else if (I->getName() == "variant")
+          VariantAccess = &Access;
+      }
+  ASSERT_NE(OutermostAccess, nullptr);
+  ASSERT_NE(InnerOnlyAccess, nullptr);
+  ASSERT_NE(VariantAccess, nullptr);
+
+  llvm::Loop *Inner = Loops.getLoopFor(*OutermostAccess->getParent());
   ASSERT_NE(Inner, nullptr);
   llvm::Loop *Outer = Inner->getParentLoop();
   ASSERT_NE(Outer, nullptr);
-  EXPECT_TRUE(Loops.isSimpleLoop(*Inner));
-  EXPECT_TRUE(Loops.isSimpleLoop(*Outer));
-  EXPECT_EQ(Loops.getTopInvariantLoop(*InnerObs->begin(), *Inner), Outer);
-  EXPECT_TRUE(Loops.executesOncePerRelevantIteration(*InnerObs, *Inner));
-  EXPECT_FALSE(Loops.executesOncePerRelevantIteration(*InnerObs, *Outer));
+  EXPECT_EQ(Loops.getTopInvariantLoop(*OutermostAccess, *Inner), Outer);
+  EXPECT_EQ(Loops.getTopInvariantLoop(*InnerOnlyAccess, *Inner), Inner);
+  EXPECT_EQ(Loops.getTopInvariantLoop(*VariantAccess, *Inner), nullptr);
+  EXPECT_TRUE(Loops.executesOncePerRelevantIteration(
+      *OutermostAccess->getParent(), *Inner));
+  EXPECT_FALSE(Loops.executesOncePerRelevantIteration(
+      *OutermostAccess->getParent(), *Outer));
 }
 
 TEST(MAIRLoopAnalysis, RejectsNonLoopAndMultiExitObservations) {
@@ -1507,7 +1557,6 @@ exit.normal:
   ASSERT_NE(Inside, nullptr);
   llvm::Loop *L = Loops.getLoopFor(*Inside);
   ASSERT_NE(L, nullptr);
-  EXPECT_FALSE(Loops.isSimpleLoop(*L));
   EXPECT_FALSE(Loops.hasDedicatedExit(*L));
 }
 
@@ -1596,7 +1645,6 @@ exit:
   llvm::Loop *L = Loops.getLoopFor(LatchEntry);
   ASSERT_NE(L, nullptr);
 
-  EXPECT_FALSE(Loops.isSimpleLoop(*L));
   EXPECT_FALSE(Loops.executesOncePerRelevantIteration(LatchEntry, *L));
   EXPECT_EQ(Loops.getExactExecutionCountSCEV(LatchEntry, *L), nullptr);
 }
@@ -1854,7 +1902,7 @@ exit:
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(MAIRGraphPass, InvariantMotionDoesNotCrossCallBarrier) {
+TEST(MAIRGraphPass, InvariantMotionHoistsBeforeFollowingCallBarrier) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 declare void @barrier() readonly
@@ -1885,6 +1933,108 @@ exit:
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
 
   LoopInvariantObservationMotionPass Pass;
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+
+  const Observation *Source = findMemoryObservation(Graph, "header");
+  const Observation *EntryExit = findBlockExit(Graph, "entry");
+  ASSERT_NE(Source, nullptr);
+  ASSERT_NE(EntryExit, nullptr);
+  EXPECT_TRUE(Source->empty());
+  EXPECT_EQ(EntryExit->size(), 1u);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraphPass, InvariantMotionRequiresPreheaderPostDomAncestry) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @barrier() readonly
+
+define void @f(ptr %p, i32 %n) {
+entry:
+  br label %header
+header:
+  %i = phi i32 [ 0, %entry ], [ %next, %header ]
+  call void @barrier()
+  %value = load i32, ptr %p, align 4
+  %next = add i32 %i, 1
+  %more = icmp slt i32 %next, %n
+  br i1 %more, label %header, label %exit
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph =
+      createGraphWithExplicitAnalyses<BackwardCallBarrierTrait>(F);
+  const Observation *Source = findMemoryObservation(Graph, "header");
+  const Observation *Preheader = findBlockExit(Graph, "entry");
+  const Observation *ExitEntry = findBlockEntry(Graph, "exit");
+  ASSERT_NE(Source, nullptr);
+  ASSERT_NE(Preheader, nullptr);
+  ASSERT_NE(ExitEntry, nullptr);
+  EXPECT_TRUE(Graph.isAncestor(*Preheader, *Source, ObsEdgeKind::Dom));
+  EXPECT_FALSE(Graph.isAncestor(*Source, *Preheader, ObsEdgeKind::PostDom));
+  EXPECT_TRUE(Graph.isAncestor(*ExitEntry, *Source, ObsEdgeKind::PostDom));
+
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  LoopInvariantObservationMotionPass Pass;
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+
+  EXPECT_TRUE(Source->empty());
+  EXPECT_TRUE(Preheader->empty());
+  EXPECT_TRUE(ExitEntry->empty());
+  const Observation *GuardedExit = nullptr;
+  for (const Observation &Obs : Graph)
+    if (Obs.hasExecutionGuard() &&
+        Obs.getBasicBlock() == ExitEntry->getBasicBlock()) {
+      GuardedExit = &Obs;
+      break;
+    }
+  ASSERT_NE(GuardedExit, nullptr);
+  EXPECT_EQ(GuardedExit->size(), 1u);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraphPass, InvariantMotionStopsAtSurroundingCallBarriers) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @barrier() readonly
+
+define void @f(ptr %p, i32 %n) {
+entry:
+  br label %header
+header:
+  %i = phi i32 [ 0, %entry ], [ %next, %header ]
+  call void @barrier()
+  %value = load i32, ptr %p, align 4
+  call void @barrier()
+  %next = add i32 %i, 1
+  %more = icmp slt i32 %next, %n
+  br i1 %more, label %header, label %exit
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  LoopInvariantObservationMotionPass Pass;
   EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
 
   const Observation *Source = findMemoryObservation(Graph, "header");
@@ -1893,6 +2043,110 @@ exit:
   ASSERT_NE(EntryExit, nullptr);
   EXPECT_EQ(Source->size(), 1u);
   EXPECT_TRUE(EntryExit->empty());
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraphPass, InvariantMotionSinksWhenOnlyExitIsAnAncestor) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @barrier() readonly
+
+define void @f(ptr %p, i32 %n) {
+entry:
+  br label %header
+header:
+  %i = phi i32 [ 0, %entry ], [ %next, %header ]
+  call void @barrier()
+  %value = load i32, ptr %p, align 4
+  %next = add i32 %i, 1
+  %more = icmp slt i32 %next, %n
+  br i1 %more, label %header, label %exit
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses<ForwardCallBarrierTrait>(F);
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  LoopInvariantObservationMotionPass Pass;
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+
+  const Observation *Source = findMemoryObservation(Graph, "header");
+  const Observation *ExitEntry = findBlockEntry(Graph, "exit");
+  ASSERT_NE(Source, nullptr);
+  ASSERT_NE(ExitEntry, nullptr);
+  EXPECT_TRUE(Source->empty());
+  EXPECT_TRUE(ExitEntry->empty());
+  const Observation *GuardedExit = nullptr;
+  for (const Observation &Obs : Graph)
+    if (Obs.hasExecutionGuard() && Obs.getBasicBlock() &&
+        Obs.getBasicBlock()->getName() == "exit") {
+      GuardedExit = &Obs;
+      break;
+    }
+  ASSERT_NE(GuardedExit, nullptr);
+  EXPECT_EQ(GuardedExit->size(), 1u);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraphPass, InvariantMotionFallsBackToInnerInvariantLoop) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @barrier() readonly
+
+define void @f(ptr %p) {
+entry:
+  br label %outer.header
+outer.header:
+  %oi = phi i32 [ 0, %entry ], [ %oi.next, %outer.latch ]
+  call void @barrier()
+  br label %inner.header
+inner.header:
+  %ii = phi i32 [ 0, %outer.header ], [ %ii.next, %inner.header ]
+  %value = load i32, ptr %p, align 4
+  %ii.next = add i32 %ii, 1
+  %inner.done = icmp eq i32 %ii.next, 2
+  br i1 %inner.done, label %outer.latch, label %inner.header
+outer.latch:
+  call void @barrier()
+  %oi.next = add i32 %oi, 1
+  %outer.done = icmp eq i32 %oi.next, 2
+  br i1 %outer.done, label %exit, label %outer.header
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  LoopInvariantObservationMotionPass Pass;
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+
+  const Observation *Source = findMemoryObservation(Graph, "inner.header");
+  const Observation *OuterPreheader = findBlockExit(Graph, "entry");
+  const Observation *InnerPreheader = findBlockExit(Graph, "outer.header");
+  ASSERT_NE(Source, nullptr);
+  ASSERT_NE(OuterPreheader, nullptr);
+  ASSERT_NE(InnerPreheader, nullptr);
+  EXPECT_TRUE(Source->empty());
+  EXPECT_TRUE(OuterPreheader->empty());
+  EXPECT_EQ(InnerPreheader->size(), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -1977,6 +2231,49 @@ exit:
   ASSERT_NE(ExitEntry, nullptr);
   EXPECT_EQ(Source->size(), 1u);
   EXPECT_TRUE(ExitEntry->empty());
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraphPass, PeriodicCombineSinksAfterPrecedingCallBarrier) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @barrier() readonly
+
+define void @f(ptr %p) {
+entry:
+  br label %header
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %header ]
+  call void @barrier()
+  %pi = getelementptr i8, ptr %p, i64 %i
+  %value = load i8, ptr %pi, align 1
+  %next = add i64 %i, 1
+  %done = icmp eq i64 %next, 4
+  br i1 %done, label %exit, label %header
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopTestAnalyses(FAM, PIC);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  LoopPeriodicObservationCombinePass Pass;
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+
+  const Observation *Source = findMemoryObservation(Graph, "header");
+  const Observation *ExitEntry = findBlockEntry(Graph, "exit");
+  ASSERT_NE(Source, nullptr);
+  ASSERT_NE(ExitEntry, nullptr);
+  EXPECT_TRUE(Source->empty());
+  EXPECT_EQ(ExitEntry->size(), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 

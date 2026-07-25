@@ -969,6 +969,10 @@ public:
   bool hasEdge(const Observation &From, const Observation &To) const;
   bool hasEdge(const Observation &From, const Observation &To,
                ObsEdgeKind Kind) const;
+  /// Return whether \p Ancestor reaches \p Descendant through one or more
+  /// observation edges of exactly \p Kind.
+  bool isAncestor(const Observation &Ancestor, const Observation &Descendant,
+                  ObsEdgeKind Kind) const;
   EdgeListType successors(Observation &Obs);
   ConstEdgeListType successors(const Observation &Obs) const;
   ObservationEdgeListType childEdges(const Observation &Obs) const;

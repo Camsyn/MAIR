@@ -204,6 +204,34 @@ const Observation *findMemoryObservation(const MAIRGraph &Graph,
   return nullptr;
 }
 
+Observation *findMutableMemoryObservation(MAIRGraph &Graph,
+                                          llvm::StringRef BlockName) {
+  for (Observation &Obs : Graph)
+    if (Obs.isMemoryInstSite() && Obs.getBasicBlock() &&
+        Obs.getBasicBlock()->getName() == BlockName)
+      return &Obs;
+  return nullptr;
+}
+
+void expectSimplifyGraphPreservesMutualPair(MAIRGraph &Graph,
+                                            Observation &Earlier,
+                                            Observation &Later) {
+  Graph.addEdge(Earlier, Later, ObsEdgeKind::Dom);
+  Graph.addEdge(Later, Earlier, ObsEdgeKind::PostDom);
+  const size_t InitialSize = Graph.size();
+  const std::string EarlierName = Earlier.getName().str();
+  const std::string LaterName = Later.getName().str();
+  ASSERT_TRUE(Graph.verify());
+
+  SimplifyGraphPass Pass;
+  MAIRGraphAnalysisManager AM;
+  EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
+  EXPECT_EQ(Graph.size(), InitialSize);
+  EXPECT_NE(Graph.find(EarlierName), nullptr);
+  EXPECT_NE(Graph.find(LaterName), nullptr);
+  EXPECT_TRUE(Graph.verify());
+}
+
 void moveMemoryObservationAccessesTo(MAIRGraph &Graph,
                                      llvm::StringRef BlockName,
                                      Observation &Target) {
@@ -2604,6 +2632,172 @@ right:
     EXPECT_TRUE(Entry.representsBlock(BB));
     EXPECT_TRUE(Exit.representsBlock(BB));
   }
+}
+
+TEST(MAIRGraphPass, SimplifyGraphDoesNotCrossLoopBoundary) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i1 %done) {
+entry:
+  %outside = load i32, ptr %p, align 4
+  br label %loop
+loop:
+  %inside = load i32, ptr %p, align 4
+  br i1 %done, label %exit, label %loop
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  Observation *Outside = findMutableMemoryObservation(Graph, "entry");
+  Observation *Inside = findMutableMemoryObservation(Graph, "loop");
+  ASSERT_NE(Outside, nullptr);
+  ASSERT_NE(Inside, nullptr);
+  expectSimplifyGraphPreservesMutualPair(Graph, *Outside, *Inside);
+}
+
+TEST(MAIRGraphPass, SimplifyGraphDoesNotCrossInterveningLoop) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i1 %take.loop, i1 %done) {
+entry:
+  %before = load i32, ptr %p, align 4
+  br i1 %take.loop, label %loop, label %direct
+direct:
+  br label %exit
+loop:
+  br i1 %done, label %exit, label %loop
+exit:
+  %after = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  Observation *Before = findMutableMemoryObservation(Graph, "entry");
+  Observation *After = findMutableMemoryObservation(Graph, "exit");
+  ASSERT_NE(Before, nullptr);
+  ASSERT_NE(After, nullptr);
+  expectSimplifyGraphPreservesMutualPair(Graph, *Before, *After);
+}
+
+TEST(MAIRGraphPass, SimplifyGraphDoesNotCrossNestedLoopBoundary) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  br label %outer.header
+outer.header:
+  %oi = phi i32 [ 0, %entry ], [ %oi.next, %outer.latch ]
+  %outer = load i32, ptr %p, align 4
+  br label %inner.header
+inner.header:
+  %ii = phi i32 [ 0, %outer.header ], [ %ii.next, %inner.header ]
+  %inner = load i32, ptr %p, align 4
+  %ii.next = add i32 %ii, 1
+  %inner.done = icmp eq i32 %ii.next, 2
+  br i1 %inner.done, label %outer.latch, label %inner.header
+outer.latch:
+  %oi.next = add i32 %oi, 1
+  %outer.done = icmp eq i32 %oi.next, 2
+  br i1 %outer.done, label %exit, label %outer.header
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  Observation *Outer = findMutableMemoryObservation(Graph, "outer.header");
+  Observation *Inner = findMutableMemoryObservation(Graph, "inner.header");
+  ASSERT_NE(Outer, nullptr);
+  ASSERT_NE(Inner, nullptr);
+  expectSimplifyGraphPreservesMutualPair(Graph, *Outer, *Inner);
+}
+
+TEST(MAIRGraphPass, SimplifyGraphDoesNotCrossInterveningNestedLoop) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  br label %outer.header
+outer.header:
+  %oi = phi i32 [ 0, %entry ], [ %oi.next, %outer.latch ]
+  %before = load i32, ptr %p, align 4
+  br label %inner.header
+inner.header:
+  %ii = phi i32 [ 0, %outer.header ], [ %ii.next, %inner.header ]
+  %ii.next = add i32 %ii, 1
+  %inner.done = icmp eq i32 %ii.next, 2
+  br i1 %inner.done, label %outer.latch, label %inner.header
+outer.latch:
+  %after = load i32, ptr %p, align 4
+  %oi.next = add i32 %oi, 1
+  %outer.done = icmp eq i32 %oi.next, 2
+  br i1 %outer.done, label %exit, label %outer.header
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  Observation *Before = findMutableMemoryObservation(Graph, "outer.header");
+  Observation *After = findMutableMemoryObservation(Graph, "outer.latch");
+  ASSERT_NE(Before, nullptr);
+  ASSERT_NE(After, nullptr);
+  expectSimplifyGraphPreservesMutualPair(Graph, *Before, *After);
+}
+
+TEST(MAIRGraphPass, SimplifyGraphCanContractWithinSameLoop) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i1 %done) {
+entry:
+  br label %loop.header
+loop.header:
+  %first = load i32, ptr %p, align 4
+  br label %loop.latch
+loop.latch:
+  %second = load i32, ptr %p, align 4
+  br i1 %done, label %exit, label %loop.header
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  Observation *First = findMutableMemoryObservation(Graph, "loop.header");
+  Observation *Second = findMutableMemoryObservation(Graph, "loop.latch");
+  ASSERT_NE(First, nullptr);
+  ASSERT_NE(Second, nullptr);
+  Graph.addEdge(*First, *Second, ObsEdgeKind::Dom);
+  Graph.addEdge(*Second, *First, ObsEdgeKind::PostDom);
+  const size_t InitialSize = Graph.size();
+  const std::string FirstName = First->getName().str();
+  ASSERT_TRUE(Graph.verify());
+
+  SimplifyGraphPass Pass;
+  MAIRGraphAnalysisManager AM;
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+
+  EXPECT_EQ(Graph.size(), InitialSize - 1);
+  EXPECT_EQ(Graph.find(FirstName), nullptr);
+  EXPECT_TRUE(Graph.verify());
 }
 
 TEST(MAIRGraph, EraseClearsBoundaryRepresentativeMaps) {

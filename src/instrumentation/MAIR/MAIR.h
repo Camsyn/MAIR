@@ -665,6 +665,7 @@ public:
   bool covers(const MemoryAccess &Other) const;
   bool mergeWith(const MemoryAccess &Other);
   void mergeKind(AccessKind Other);
+  void eraseFromParent();
 
   bool hasConcreteRange() const;
   static MemoryAccess fromInstruction(const Instruction &I,

@@ -610,7 +610,7 @@ entry:
   ASSERT_NE(QLoad, nullptr);
   ASSERT_FALSE(QLoad->empty());
   MemoryAccess &QAccess = *QLoad->begin();
-  QLoad->erase(QAccess);
+  QAccess.eraseFromParent();
 
   ASSERT_TRUE(Graph.verify());
   EXPECT_TRUE(QLoad->empty());
@@ -1982,7 +1982,7 @@ entry:
   EXPECT_EQ(Load.size(), 1u);
 }
 
-TEST(MAIRGraphPass, RedundantObservationEliminatesWithinObservation) {
+TEST(MAIRGraphPass, RedundantObservationRefreshesInterAnalysisAfterIntraROE) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(i32* %p) {
@@ -2007,13 +2007,21 @@ entry:
   Obs.addAccess(Second);
   Graph.addEdge(Obs, Obs, ObsEdgeKind::Dom);
 
+  unsigned NumAnalysisRuns = 0;
   llvm::PassInstrumentationCallbacks PIC;
+  PIC.registerBeforeAnalysisCallback([&](llvm::StringRef Name, llvm::Any) {
+    if (Name == RedundantObservationAnalysis::name())
+      ++NumAnalysisRuns;
+  });
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC);
+  (void)AM.getResult<RedundantObservationAnalysis>(Graph);
+  ASSERT_EQ(NumAnalysisRuns, 1u);
   RedundantObservationEliminationPass Pass;
   llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
 
   EXPECT_FALSE(PA.areAllPreserved());
+  EXPECT_EQ(NumAnalysisRuns, 2u);
   ASSERT_TRUE(Graph.verify());
   EXPECT_EQ(Obs.size(), 1u);
 }

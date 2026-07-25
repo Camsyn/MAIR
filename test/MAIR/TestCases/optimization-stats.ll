@@ -8,7 +8,7 @@
 ; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=INVARIANT < %t.stats
 ; RUN: mair-opt -stats --disable-output -passes=lpoc %S/loop-range-aggregation.ll 2>%t.stats
 ; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=PERIODIC < %t.stats
-; RUN: mair-opt -stats --disable-output -passes=roe %S/redundant-observation-elimination.ll 2>%t.stats
+; RUN: mair-opt -stats --disable-output -passes=simplifygraph,roe %S/redundant-observation-elimination.ll 2>%t.stats
 ; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=REDUNDANT < %t.stats
 ; RUN: mair-opt -stats --disable-output -O1 %S/pass-stat.ll 2>%t.stats
 ; RUN: if test ! -s %t.stats || grep -q "Statistics are disabled" %t.stats; then exit 0; fi; FileCheck %s --check-prefix=O1 < %t.stats
@@ -22,7 +22,9 @@
 ; PERIODIC: 13 mair-loop-periodic-combine - Number of memory accesses entering loop periodic combination
 ; INVARIANT: 7 mair-loop-invariant-motion - Number of memory accesses entering loop-invariant motion
 ; INVARIANT: {{[1-9][0-9]*}} mair-loop-invariant-motion - Number of invariant accesses moved to loop preheaders
-; REDUNDANT: {{[1-9][0-9]*}} mair-redundant-observation-elimination - Number of redundant accesses eliminated
+; REDUNDANT-DAG: 13 mair-redundant-observation-elimination - Number of redundant accesses eliminated
+; REDUNDANT-DAG: 4 mair-redundant-observation-elimination - Number of intra-observation redundant accesses eliminated
+; REDUNDANT-DAG: 9 mair-redundant-observation-elimination - Number of inter-observation redundant accesses eliminated
 ; REDUNDANT: 31 mair-redundant-observation-elimination - Number of memory accesses entering redundant observation elimination
 
 ; O1: 4 mair-commonmamotion - Number of memory accesses entering common MA motion

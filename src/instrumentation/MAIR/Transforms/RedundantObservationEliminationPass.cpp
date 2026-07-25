@@ -17,6 +17,10 @@ using namespace llvm;
 #define DEBUG_TYPE "mair-redundant-observation-elimination"
 
 STATISTIC(NumEliminatedAccesses, "Number of redundant accesses eliminated");
+STATISTIC(NumEliminatedIntraAccesses,
+          "Number of intra-observation redundant accesses eliminated");
+STATISTIC(NumEliminatedInterAccesses,
+          "Number of inter-observation redundant accesses eliminated");
 STATISTIC(
     NumInputAccesses,
     "Number of memory accesses entering redundant observation elimination");
@@ -61,6 +65,8 @@ bool compareForCoverage(const MemoryAccess &LHS, const MemoryAccess &RHS) {
   if (LHS.getBase() != RHS.getBase())
     return std::less<const Value *>()(LHS.getBase(), RHS.getBase());
 
+  // A coverage sweep needs containing intervals before the intervals they may
+  // eliminate: begin ascending, then end and coverage level descending.
   std::optional<ConcreteRange> LRange = getConcreteRange(LHS);
   std::optional<ConcreteRange> RRange = getConcreteRange(RHS);
   if (LRange.has_value() != RRange.has_value())
@@ -95,53 +101,91 @@ void updateWitness(WitnessesByLevel &Witnesses,
     Witness = {Candidate.Access, Candidate.End};
 }
 
-void findIntraObservationRedundancy(
-    Observation &Obs, DenseSet<const MemoryAccess *> &DeletedSources,
-    SmallVectorImpl<MemoryAccess *> &Redundant) {
-  Obs.sort(compareForCoverage);
+unsigned eraseAccesses(SmallVectorImpl<MemoryAccess *> &Accesses) {
+  for (MemoryAccess *Access : Accesses)
+    Access->eraseFromParent();
+  return Accesses.size();
+}
 
-  // Other region forms need their own coverage index; this sweep is exact only
-  // for concrete contiguous half-open intervals.
-  for (auto Begin = Obs.begin(); Begin != Obs.end();) {
-    std::optional<ConcreteRange> FirstRange = getConcreteRange(*Begin);
-    if (!FirstRange) {
-      ++Begin;
-      continue;
-    }
+unsigned doIntraROE(MAIRGraph &G) {
+  SmallVector<MemoryAccess *, 16> Redundant;
 
-    auto End = std::next(Begin);
-    while (End != Obs.end() && End->getBase() == Begin->getBase() &&
-           getConcreteRange(*End))
-      ++End;
+  // Phase 1 considers only accesses from the same Observation.  Sorting makes
+  // each base's concrete contiguous accesses one interval-sweep run.
+  for (Observation &Obs : G) {
+    Obs.sort(compareForCoverage);
 
-    WitnessesByAtomicity AllWitnesses{};
-    WitnessesByAtomicity MergeableWitnesses{};
-    // Equal atomicity is directly comparable.  Cross-atomic coverage requires
-    // both accesses to be mergeable, hence the second witness table.
-    for (auto It = Begin; It != End; ++It) {
-      std::optional<ConcreteRange> Range = getConcreteRange(*It);
-      assert(Range && "concrete coverage run contains a non-concrete access");
-      ConcreteAccess Candidate{&*It, Range->Begin, Range->End};
-      MemoryAccess &Access = *It;
-      const unsigned Atomicity = Access.isAtomic();
-      bool Covered = hasCoveringWitness(AllWitnesses[Atomicity], Candidate);
-      if (!Covered && Access.isMergeable())
-        Covered = hasCoveringWitness(MergeableWitnesses[!Atomicity], Candidate);
-
-      if (Covered) {
-        DeletedSources.insert(&Access);
-        Redundant.push_back(&Access);
+    // Other region forms need their own coverage index; this sweep is exact
+    // only for concrete contiguous half-open intervals.
+    for (auto Begin = Obs.begin(); Begin != Obs.end();) {
+      std::optional<ConcreteRange> FirstRange = getConcreteRange(*Begin);
+      if (!FirstRange) {
+        ++Begin;
         continue;
       }
-      if (!Access.isDeletable())
-        continue;
 
-      updateWitness(AllWitnesses[Atomicity], Candidate);
-      if (Access.isMergeable())
-        updateWitness(MergeableWitnesses[Atomicity], Candidate);
+      auto End = std::next(Begin);
+      while (End != Obs.end() && End->getBase() == Begin->getBase() &&
+             getConcreteRange(*End))
+        ++End;
+
+      WitnessesByAtomicity AllWitnesses{};
+      WitnessesByAtomicity MergeableWitnesses{};
+      // Equal atomicity is directly comparable. Cross-atomic coverage requires
+      // both accesses to be mergeable, hence the second witness table.
+      for (auto It = Begin; It != End; ++It) {
+        std::optional<ConcreteRange> Range = getConcreteRange(*It);
+        assert(Range && "concrete coverage run contains a non-concrete access");
+        ConcreteAccess Candidate{&*It, Range->Begin, Range->End};
+        MemoryAccess &Access = *It;
+        const unsigned Atomicity = Access.isAtomic();
+        bool Covered = hasCoveringWitness(AllWitnesses[Atomicity], Candidate);
+        if (!Covered && Access.isMergeable())
+          Covered =
+              hasCoveringWitness(MergeableWitnesses[!Atomicity], Candidate);
+
+        if (Covered) {
+          Redundant.push_back(&Access);
+          continue;
+        }
+
+        // MemoryAccess::covers requires both accesses to be deletable, so this
+        // candidate cannot become a covering witness.
+        if (!Access.isDeletable())
+          continue;
+
+        updateWitness(AllWitnesses[Atomicity], Candidate);
+        if (Access.isMergeable())
+          updateWitness(MergeableWitnesses[Atomicity], Candidate);
+      }
+      Begin = End;
     }
-    Begin = End;
   }
+
+  // Keep every sweep iterator valid until all intra-observation decisions have
+  // been made, then shrink the graph before the inter-observation analysis.
+  return eraseAccesses(Redundant);
+}
+
+unsigned doInterROE(MAIRGraph &G, const RedundantObservationInfo &Info) {
+  DenseSet<const MemoryAccess *> ExcludedSources;
+  SmallVector<MemoryAccess *, 16> Redundant;
+
+  // Query one post-intra data-flow snapshot while excluding accesses already
+  // selected by this phase from serving as later witnesses.
+  for (Observation &Obs : G) {
+    const AvailableAccessSet &In = Info.getIn(Obs);
+    for (MemoryAccess &Access : Obs) {
+      if (!In.covers(Access, ExcludedSources))
+        continue;
+      ExcludedSources.insert(&Access);
+      Redundant.push_back(&Access);
+    }
+  }
+
+  // The analysis retains source pointers, so physical deletion remains after
+  // all inter-observation coverage decisions.
+  return eraseAccesses(Redundant);
 }
 
 } // namespace
@@ -152,32 +196,18 @@ RedundantObservationEliminationPass::run(MAIRGraph &G,
 #if LLVM_ENABLE_STATS
   NumInputAccesses += MAIRStat::compute(G).getNumMemoryAccesses();
 #endif
-  DenseSet<const MemoryAccess *> DeletedSources;
-  SmallVector<MemoryAccess *, 16> Redundant;
-  // Select from one live snapshot.  Intra-observation deletions cannot witness
-  // inter-observation deletions; graph mutation starts only after both phases.
-  for (Observation &Obs : G)
-    findIntraObservationRedundancy(Obs, DeletedSources, Redundant);
+  const unsigned NumEliminatedIntra = doIntraROE(G);
 
   const RedundantObservationInfo &Info =
       AM.getResult<RedundantObservationAnalysis>(G);
-  for (Observation &Obs : G) {
-    const AvailableAccessSet &In = Info.getIn(Obs);
-    for (MemoryAccess &Access : Obs) {
-      if (DeletedSources.contains(&Access))
-        continue;
-      if (!In.covers(Access, DeletedSources))
-        continue;
-      DeletedSources.insert(&Access);
-      Redundant.push_back(&Access);
-    }
-  }
+  const unsigned NumEliminatedInter = doInterROE(G, Info);
 
-  for (MemoryAccess *Access : Redundant)
-    Access->getParent()->erase(*Access);
-  NumEliminatedAccesses += Redundant.size();
-  return Redundant.empty() ? PreservedAnalyses::all()
-                           : PreservedAnalyses::none();
+  const unsigned NumEliminated = NumEliminatedIntra + NumEliminatedInter;
+  NumEliminatedAccesses += NumEliminated;
+  NumEliminatedIntraAccesses += NumEliminatedIntra;
+  NumEliminatedInterAccesses += NumEliminatedInter;
+  return NumEliminated == 0 ? PreservedAnalyses::all()
+                            : PreservedAnalyses::none();
 }
 
 } // namespace mair

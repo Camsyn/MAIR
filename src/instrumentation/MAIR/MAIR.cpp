@@ -816,6 +816,12 @@ void MemoryAccess::mergeKind(AccessKind Other) {
     Obs->invalidateSort();
 }
 
+void MemoryAccess::eraseFromParent() {
+  Observation *Obs = getParent();
+  assert(Obs && "memory access has no parent");
+  Obs->erase(*this);
+}
+
 const Value *MemoryAccess::getBase() const {
   return std::visit([](const auto &R) { return R.getBase(); }, Region);
 }

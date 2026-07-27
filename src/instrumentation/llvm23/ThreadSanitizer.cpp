@@ -1109,11 +1109,13 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
   initialize(*F.getParent(), TLI);
 
   __xsan::TsanToInstrument Targets;
-#ifndef XSAN_PASS
-  if (!collectTargetsToIntrument(F, TLI, Targets))
+#ifdef XSAN_PASS
+  // XSan applies its own target-reduction analyses before instrumentation.
+  if (!prepareTsanTargetsToInstrument(F, FAM, TLI, Targets))
     return false;
 #else
-  if (!prepareTsanTargetsToInstrument(F, FAM, TLI, Targets))
+  // MAIR starts from the native TSan target set, then partitions it below.
+  if (!collectTargetsToIntrument(F, TLI, Targets))
     return false;
 #endif
 
@@ -1129,28 +1131,36 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
 
   // Instrument memory accesses only if we want to report bugs in the function.
   if (ClInstrumentMemoryAccesses && SanitizeFunction) {
-#ifndef XSAN_PASS
-    SmallPtrSet<const Instruction *, 32> MAIRTargets;
-    for (const auto &II : AllLoadsAndStores) {
-      Type *AccessTy = getLoadStoreType(II.Inst);
-      bool IsVolatile =
-          isa<LoadInst>(II.Inst)
-              ? cast<LoadInst>(II.Inst)->isVolatile()
-              : cast<StoreInst>(II.Inst)->isVolatile();
-      if ((II.Flags & InstructionInfo::kCompoundRW) || IsVolatile ||
-          isVtableAccess(II.Inst) || AccessTy->isVectorTy() ||
-          AccessTy->isScalableTy())
-        continue;
-      MAIRTargets.insert(II.Inst);
-    }
+#ifdef XSAN_PASS
+    // XSan instruments the targets produced by prepareTsanTargetsToInstrument.
+    for (const auto &II : AllLoadsAndStores)
+      Res |= instrumentLoadOrStore(II, DL);
+#else
+    SmallPtrSet<const Instruction *, 32> MAIRSourceInstructions;
+    auto CollectMAIRSourceInstructions =
+        [this](ArrayRef<InstructionInfo> Candidates,
+               SmallPtrSetImpl<const Instruction *> &SourceInstructions) {
+          for (const auto &II : Candidates) {
+            Type *AccessTy = getLoadStoreType(II.Inst);
+            bool IsVolatile = isa<LoadInst>(II.Inst)
+                                  ? cast<LoadInst>(II.Inst)->isVolatile()
+                                  : cast<StoreInst>(II.Inst)->isVolatile();
+            if ((II.Flags & InstructionInfo::kCompoundRW) || IsVolatile ||
+                isVtableAccess(II.Inst) || AccessTy->isVectorTy() ||
+                AccessTy->isScalableTy())
+              continue;
+            SourceInstructions.insert(II.Inst);
+          }
+        };
+    CollectMAIRSourceInstructions(AllLoadsAndStores, MAIRSourceInstructions);
 
-    if (!MAIRTargets.empty()) {
+    if (!MAIRSourceInstructions.empty()) {
       mair::MAOpt<TsanMAIRBarrierTrait> Opt(
           F, FAM, nullptr,
           /*KeepFullDebug=*/true,
           mair::MAIROptimizationConfig::forThreadSanitizer());
       Opt.build();
-      Opt.retainAccessesForInstructions(MAIRTargets);
+      Opt.retainAccessesForInstructions(MAIRSourceInstructions);
       if (Error Err = Opt.optimize())
         report_fatal_error(Twine(toString(std::move(Err))));
 
@@ -1163,9 +1173,9 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
       public:
         ThreadSanitizerBackend(
             XsanThreadSanitizer &TSan,
-            const SmallPtrSetImpl<const Instruction *> &Targets,
+            const SmallPtrSetImpl<const Instruction *> &SourceInstructions,
             const DataLayout &DL)
-            : TSan(TSan), Targets(Targets), DL(DL) {}
+            : TSan(TSan), Targets(SourceInstructions), DL(DL) {}
 
         Error prepare(const mair::MAIRMaterializationPlan &) override {
           return Error::success();
@@ -1178,7 +1188,7 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
         }
 
         bool changed() const { return Changed; }
-      } Backend(*this, MAIRTargets, DL);
+      } Backend(*this, MAIRSourceInstructions, DL);
 
       Expected<mair::MAIRInstantiationResult> Result = Opt.instantiate(Backend);
       if (!Result)
@@ -1187,11 +1197,8 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
     }
 
     for (const auto &II : AllLoadsAndStores)
-      if (!MAIRTargets.contains(II.Inst))
+      if (!MAIRSourceInstructions.contains(II.Inst))
         Res |= instrumentLoadOrStore(II, DL);
-#else
-    for (const auto &II : AllLoadsAndStores)
-      Res |= instrumentLoadOrStore(II, DL);
 #endif
   }
 
@@ -1219,7 +1226,8 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
 
   // Instrument function entry/exit points if there were instrumented accesses.
   if ((Res || HasCalls) && ClInstrumentFuncEntryExit) {
-    __xsan::InstrumentationIRBuilder IRB(&*F.getEntryBlock().getFirstNonPHIIt());
+    __xsan::InstrumentationIRBuilder IRB(
+        &*F.getEntryBlock().getFirstNonPHIIt());
     Value *ReturnAddress =
         IRB.CreateIntrinsic(Intrinsic::returnaddress, {}, {IRB.getInt32(0)});
     IRB.CreateCall(TsanFuncEntry, ReturnAddress);

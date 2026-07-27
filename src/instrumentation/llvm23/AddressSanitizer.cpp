@@ -4252,11 +4252,13 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
     markCatchParametersAsUninteresting(F);
 
   AsanToInstrument Targets;
-#ifndef XSAN_PASS
-  if (!collectTargetsToIntrument(F, TLI, TTI, Targets))
+#ifdef XSAN_PASS
+  // XSan applies its own target-reduction analyses before instrumentation.
+  if (!prepareAsanTargetsToInstrument(F, FAM, TLI, TTI, Targets))
     return false;
 #else
-  if (!prepareAsanTargetsToInstrument(F, FAM, TLI, TTI, Targets))
+  // MAIR starts from the native ASan target set, then partitions it below.
+  if (!collectTargetsToIntrument(F, TLI, TTI, Targets))
     return false;
 #endif
 
@@ -4272,35 +4274,50 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
   ObjectSizeOffsetVisitor ObjSizeVis(DL, TLI, F.getContext());
 
   int NumInstrumented = 0;
-#ifndef XSAN_PASS
-  SmallPtrSet<const Instruction *, 32> MAIRTargets;
-  auto IsElidedByNativeAsanOpt = [&](InterestingMemoryOperand &Operand) {
-    Value *Addr = Operand.getPtr();
-    if (ClOpt && ClOptGlobals) {
-      GlobalVariable *G = dyn_cast<GlobalVariable>(getUnderlyingObject(Addr));
-      if (G && (!ClInitializers || GlobalIsLinkerInitialized(G)) &&
-          isSafeAccess(ObjSizeVis, Addr, Operand.TypeStoreSize))
-        return true;
-    }
-    if (ClOpt && ClOptStack) {
-      if (isa<AllocaInst>(getUnderlyingObject(Addr)) &&
-          isSafeAccess(ObjSizeVis, Addr, Operand.TypeStoreSize))
-        return true;
-    }
-    return false;
-  };
-  for (InterestingMemoryOperand &Operand : OperandsToInstrument)
-    if (canOptimizeAsanOperandWithMAIR(Operand) &&
-        !IsElidedByNativeAsanOpt(Operand))
-      MAIRTargets.insert(Operand.getInsn());
+#ifdef XSAN_PASS
+  // XSan instruments the targets produced by prepareAsanTargetsToInstrument.
+  for (auto &Operand : OperandsToInstrument) {
+    if (!suppressInstrumentationSiteForDebug(NumInstrumented))
+      instrumentMop(ObjSizeVis, Operand, UseCalls, F.getDataLayout(), RTCI);
+    FunctionModified = true;
+  }
+#else
+  SmallPtrSet<const Instruction *, 32> MAIRSourceInstructions;
+  auto CollectMAIRSourceInstructions =
+      [this,
+       &ObjSizeVis](MutableArrayRef<InterestingMemoryOperand> Candidates,
+                    SmallPtrSetImpl<const Instruction *> &SourceInstructions) {
+        auto IsElidedByNativeAsanOpt = [&](InterestingMemoryOperand &Operand) {
+          Value *Addr = Operand.getPtr();
+          if (ClOpt && ClOptGlobals) {
+            GlobalVariable *G =
+                dyn_cast<GlobalVariable>(getUnderlyingObject(Addr));
+            if (G && (!ClInitializers || GlobalIsLinkerInitialized(G)) &&
+                isSafeAccess(ObjSizeVis, Addr, Operand.TypeStoreSize))
+              return true;
+          }
+          if (ClOpt && ClOptStack) {
+            if (isa<AllocaInst>(getUnderlyingObject(Addr)) &&
+                isSafeAccess(ObjSizeVis, Addr, Operand.TypeStoreSize))
+              return true;
+          }
+          return false;
+        };
 
-  if (!MAIRTargets.empty()) {
+        for (InterestingMemoryOperand &Operand : Candidates)
+          if (canOptimizeAsanOperandWithMAIR(Operand) &&
+              !IsElidedByNativeAsanOpt(Operand))
+            SourceInstructions.insert(Operand.getInsn());
+      };
+  CollectMAIRSourceInstructions(OperandsToInstrument, MAIRSourceInstructions);
+
+  if (!MAIRSourceInstructions.empty()) {
     mair::MAOpt<AsanMAIRBarrierTrait> Opt(
         F, FAM, nullptr,
-        /*KeepFullDebug=*/true,
+        /*KeepFullDebug=*/false,
         mair::MAIROptimizationConfig::forAddressSanitizer());
     Opt.build();
-    Opt.retainAccessesForInstructions(MAIRTargets);
+    Opt.retainAccessesForInstructions(MAIRSourceInstructions);
     if (Error Err = Opt.optimize())
       report_fatal_error(Twine(toString(std::move(Err))));
 
@@ -4315,9 +4332,10 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
     public:
       AddressSanitizerBackend(
           XsanAddressSanitizer &ASan,
-          const SmallPtrSetImpl<const Instruction *> &Targets, bool UseCalls,
-          ObjectSizeOffsetVisitor &ObjSizeVis, RuntimeCallInserter &RTCI)
-          : ASan(ASan), Targets(Targets), UseCalls(UseCalls),
+          const SmallPtrSetImpl<const Instruction *> &SourceInstructions,
+          bool UseCalls, ObjectSizeOffsetVisitor &ObjSizeVis,
+          RuntimeCallInserter &RTCI)
+          : ASan(ASan), Targets(SourceInstructions), UseCalls(UseCalls),
             ObjSizeVis(ObjSizeVis), RTCI(RTCI) {}
 
       Error prepare(const mair::MAIRMaterializationPlan &) override {
@@ -4327,12 +4345,12 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
       void emit(const mair::MaterializedObservation &Observation,
                 IRBuilderBase &Builder) override {
         for (const mair::MaterializedAccess &Access : Observation.Accesses)
-          Changed |= ASan.instrumentMAIRAccess(
-              Access, Builder, Targets, UseCalls, ObjSizeVis, RTCI);
+          Changed |= ASan.instrumentMAIRAccess(Access, Builder, Targets,
+                                               UseCalls, ObjSizeVis, RTCI);
       }
 
       bool changed() const { return Changed; }
-    } Backend(*this, MAIRTargets, UseCalls, ObjSizeVis, RTCI);
+    } Backend(*this, MAIRSourceInstructions, UseCalls, ObjSizeVis, RTCI);
 
     Expected<mair::MAIRInstantiationResult> Result = Opt.instantiate(Backend);
     if (!Result)
@@ -4341,14 +4359,8 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
   }
 
   for (auto &Operand : OperandsToInstrument) {
-    if (MAIRTargets.contains(Operand.getInsn()))
+    if (MAIRSourceInstructions.contains(Operand.getInsn()))
       continue;
-    if (!suppressInstrumentationSiteForDebug(NumInstrumented))
-      instrumentMop(ObjSizeVis, Operand, UseCalls, F.getDataLayout(), RTCI);
-    FunctionModified = true;
-  }
-#else
-  for (auto &Operand : OperandsToInstrument) {
     if (!suppressInstrumentationSiteForDebug(NumInstrumented))
       instrumentMop(ObjSizeVis, Operand, UseCalls, F.getDataLayout(), RTCI);
     FunctionModified = true;

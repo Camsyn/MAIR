@@ -3,7 +3,6 @@
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
 
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
@@ -410,31 +409,17 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
 }
 
 void commitAggregate(MAIRGraph &G, MemoryAccess &Access, AggregatePlan Plan,
-                     bool MergeEquivalentAccesses,
-                     Observation *&ChangedTarget) {
+                     bool MergeEquivalentAccesses) {
   Observation *TargetEvent = Plan.Target.Event;
   if (!TargetEvent)
     TargetEvent = &G.createObservation(Plan.Target.Site);
   addOrMergeAccess(*TargetEvent, Access, Plan.Region, MergeEquivalentAccesses);
   Access.getParent()->erase(Access);
-  ChangedTarget = TargetEvent;
   ++NumAggregatedAccesses;
   if (Plan.IsRange)
     ++NumRangeAggregates;
   else
     ++NumPeriodicAggregates;
-}
-
-bool aggregateOneObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
-                             Observation &Obs, MemoryAccess &Access,
-                             bool MergeEquivalentAccesses,
-                             Observation *&ChangedTarget) {
-  std::optional<AggregatePlan> Plan = buildAggregatePlan(G, Loops, Obs, Access);
-  if (!Plan)
-    return false;
-  commitAggregate(G, Access, std::move(*Plan), MergeEquivalentAccesses,
-                  ChangedTarget);
-  return true;
 }
 
 bool aggregateObservations(MAIRGraph &G, MAIRLoopInfo &Loops,
@@ -443,30 +428,23 @@ bool aggregateObservations(MAIRGraph &G, MAIRLoopInfo &Loops,
     return false;
 
   SmallVector<Observation *, 16> Worklist;
-  DenseSet<Observation *> Queued;
-  auto Enqueue = [&](Observation &Obs) {
-    if (Queued.insert(&Obs).second)
-      Worklist.push_back(&Obs);
-  };
   for (Observation &Obs : G)
-    Enqueue(Obs);
+    Worklist.push_back(&Obs);
 
   bool Changed = false;
-  // A successful aggregation only changes its source and destination events.
-  // Process the remaining source accesses in place and revisit the destination
-  // so nested-loop aggregation can still reach the same fixed point.
-  while (!Worklist.empty()) {
-    Observation &Obs = *Worklist.pop_back_val();
-    Queued.erase(&Obs);
+  // Snapshot the original observations. Aggregates are placed outside their
+  // relevant loop (or on its exit edge), so they are not candidates for a
+  // second aggregation of the same recurrence.
+  for (Observation *ObsPtr : Worklist) {
+    Observation &Obs = *ObsPtr;
     for (auto It = Obs.begin(); It != Obs.end();) {
       MemoryAccess &Access = *It++;
-      Observation *ChangedTarget = nullptr;
-      if (!aggregateOneObservation(G, Loops, Obs, Access,
-                                   MergeEquivalentAccesses, ChangedTarget))
+      std::optional<AggregatePlan> Plan =
+          buildAggregatePlan(G, Loops, Obs, Access);
+      if (!Plan)
         continue;
+      commitAggregate(G, Access, std::move(*Plan), MergeEquivalentAccesses);
       Changed = true;
-      assert(ChangedTarget && "successful aggregation must have a target");
-      Enqueue(*ChangedTarget);
     }
   }
   return Changed;

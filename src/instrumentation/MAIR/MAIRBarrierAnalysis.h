@@ -23,7 +23,6 @@ struct DefaultBarrierTrait {
 
 class MAIRBarrierAnalysisCore {
 public:
-  explicit MAIRBarrierAnalysisCore() {}
   /// Query barriers in one basic block interval.
   ///
   /// Null \p From means the interval starts at the block begin; null \p To
@@ -70,9 +69,6 @@ private:
 
 template <class BarrierTrait = DefaultBarrierTrait>
 class MAIRBarrierAnalysis final : public MAIRBarrierAnalysisCore {
-public:
-  explicit MAIRBarrierAnalysis() : MAIRBarrierAnalysisCore() {}
-
 protected:
   bool isBarrier(const Instruction &I, bool Forward) const override {
     return Forward ? BarrierTrait::isForwardBarrier(I)

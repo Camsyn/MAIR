@@ -2,8 +2,8 @@
 
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/BitmaskEnum.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallBitVector.h"
@@ -49,7 +49,6 @@ using llvm::BasicBlock;
 using llvm::cast;
 using llvm::DataLayout;
 using llvm::DenseMap;
-using llvm::DenseSet;
 using llvm::DominatorTree;
 using llvm::DominatorTreeAnalysis;
 using llvm::Error;
@@ -99,17 +98,9 @@ enum class AccessProperty : uint8_t {
   Volatile = 1 << 0,
   Atomic = 1 << 1,
   CallLike = 1 << 2,
+  LLVM_MARK_AS_BITMASK_ENUM(CallLike)
 };
-
-constexpr AccessProperty operator|(AccessProperty LHS, AccessProperty RHS) {
-  return static_cast<AccessProperty>(static_cast<uint8_t>(LHS) |
-                                     static_cast<uint8_t>(RHS));
-}
-
-constexpr AccessProperty &operator|=(AccessProperty &LHS, AccessProperty RHS) {
-  LHS = LHS | RHS;
-  return LHS;
-}
+LLVM_ENABLE_BITMASK_ENUMS_IN_NAMESPACE();
 
 enum class ObsEdgeKind : uint8_t;
 
@@ -243,6 +234,8 @@ public:
   Kind getKind() const { return SiteKind; }
   bool isAnchored() const { return SiteKind != Kind::Edge; }
   bool isEdge() const { return SiteKind == Kind::Edge; }
+  /// Edge sites are anchored at the source terminator, so this returns the
+  /// source block rather than the block created later by materialization.
   const BasicBlock *getBasicBlock() const { return getAnchor().getParent(); }
   const Instruction &getAnchor() const {
     assert(Anchor && "observation site has no anchor");
@@ -647,8 +640,7 @@ public:
   bool isReadWrite() const { return Kind == AccessKind::ReadWrite; }
   AccessProperty getProperties() const { return Properties; }
   bool hasProperty(AccessProperty Property) const {
-    return (static_cast<uint8_t>(Properties) &
-            static_cast<uint8_t>(Property)) != 0;
+    return any(Properties & Property);
   }
   bool isVolatile() const { return hasProperty(AccessProperty::Volatile); }
   bool isAtomic() const { return hasProperty(AccessProperty::Atomic); }
@@ -660,6 +652,9 @@ public:
   bool isDeletable() const { return Deletable; }
   uint8_t getLevel() const { return Level; }
 
+  /// Capabilities and level are fixed by the graph configuration when the
+  /// access is registered. Coverage requires LHS level >= RHS level, while
+  /// merging requires equal levels.
   bool covers(const MemoryAccess &Other) const;
   bool mergeWith(const MemoryAccess &Other);
   void mergeKind(AccessKind Other);
@@ -669,8 +664,8 @@ public:
   static MemoryAccess fromInstruction(const Instruction &I,
                                       const DataLayout &DL);
 
-  std::string toString(bool LLVM = false) const;
-  void print(raw_ostream &OS, bool LLVM = false) const;
+  std::string toString() const;
+  void print(raw_ostream &OS) const;
 
 private:
   friend class MAIRGraph;
@@ -773,14 +768,15 @@ public:
   bool hasCompatibleMergeSemantics(const Observation &Other) const;
 
   MemoryAccess &addAccess(const MemoryAccess &A);
+  /// Normalize access order. MAIR analyses must not depend on list order.
   void sort(AccessComparator Compare);
   iterator erase(iterator It);
   iterator erase(MemoryAccess &Access);
   void mergeAccessesFrom(const Observation &Other);
   void prependAccessesFrom(const Observation &Other);
 
-  std::string toString(bool LLVM = false) const;
-  void print(raw_ostream &OS, bool LLVM = false) const;
+  std::string toString() const;
+  void print(raw_ostream &OS) const;
 
 private:
   friend class MAIRGraph;
@@ -805,12 +801,33 @@ public:
       simple_ilist<Observation, ilist_parent<MAIRGraph>>;
   using iterator = ObservationListType::iterator;
   using const_iterator = ObservationListType::const_iterator;
-  using EdgeListType = SmallVector<Observation *, 2>;
-  using ConstEdgeListType = SmallVector<const Observation *, 2>;
-  using ObservationEdgeListType = SmallVector<ObservationEdge, 2>;
 
 private:
   enum class State : uint8_t { Live, ConsumedByInstantiation, MovedFrom };
+
+  struct FunctionAnalysisState {
+    std::unique_ptr<DominatorTree> OwnedDT;
+    std::unique_ptr<PostDominatorTree> OwnedPDT;
+    std::unique_ptr<LoopInfo> OwnedLI;
+    const DominatorTree *DT = nullptr;
+    const PostDominatorTree *PDT = nullptr;
+    const LoopInfo *LI = nullptr;
+
+    void bind(const DominatorTree &NewDT, const PostDominatorTree &NewPDT,
+              const LoopInfo &NewLI) {
+      DT = &NewDT;
+      PDT = &NewPDT;
+      LI = &NewLI;
+    }
+    void takeOwnership(DominatorTree &&NewDT, PostDominatorTree &&NewPDT,
+                       LoopInfo &&NewLI) {
+      OwnedDT = std::make_unique<DominatorTree>(std::move(NewDT));
+      OwnedPDT = std::make_unique<PostDominatorTree>(std::move(NewPDT));
+      OwnedLI = std::make_unique<LoopInfo>(std::move(NewLI));
+      bind(*OwnedDT, *OwnedPDT, *OwnedLI);
+    }
+    void clearReferences() { DT = nullptr, PDT = nullptr, LI = nullptr; }
+  };
 
   const Function *F = nullptr;
   Function *MutableF = nullptr;
@@ -820,17 +837,10 @@ private:
   SpecificBumpPtrAllocator<MemoryObject> MemoryObjectAllocator;
   std::unique_ptr<MAIRScalarExprOwner> ScalarExprOwner;
   SpecificBumpPtrAllocator<MAIRScalarExprNode> ScalarExprAllocator;
-  std::unique_ptr<DominatorTree> OwnedDT;
-  std::unique_ptr<PostDominatorTree> OwnedPDT;
-  std::unique_ptr<LoopInfo> OwnedLI;
-  const DominatorTree *DT = nullptr;
-  const PostDominatorTree *PDT = nullptr;
-  const LoopInfo *LI = nullptr;
+  FunctionAnalysisState Analyses;
   DenseMap<const Value *, MemoryObject *> MemoryObjects;
   DenseMap<const BasicBlock *, Observation *> BBEntryRepresentatives;
   DenseMap<const BasicBlock *, Observation *> BBExitRepresentatives;
-  DenseSet<const BasicBlock *> FwdBarrierBlocks;
-  DenseSet<const BasicBlock *> BwdBarrierBlocks;
   ObservationListType Observations;
   unsigned NumObservations = 0;
   unsigned NumEdges = 0;
@@ -857,18 +867,19 @@ public:
   Function *getMutableFunction() { return MutableF; }
   const DominatorTree &getDominatorTree() const {
     assertLive("query dominance analysis");
-    assert(DT && "MAIRGraph was constructed without a dominator tree");
-    return *DT;
+    assert(Analyses.DT && "MAIRGraph was constructed without a dominator tree");
+    return *Analyses.DT;
   }
   const PostDominatorTree &getPostDominatorTree() const {
     assertLive("query post-dominance analysis");
-    assert(PDT && "MAIRGraph was constructed without a post-dominator tree");
-    return *PDT;
+    assert(Analyses.PDT &&
+           "MAIRGraph was constructed without a post-dominator tree");
+    return *Analyses.PDT;
   }
   const LoopInfo &getLoopInfo() const {
     assertLive("query loop analysis");
-    assert(LI && "MAIRGraph was constructed without loop information");
-    return *LI;
+    assert(Analyses.LI && "MAIRGraph was constructed without loop information");
+    return *Analyses.LI;
   }
   bool isLive() const { return GraphState == State::Live; }
   bool isConsumed() const {
@@ -885,9 +896,8 @@ public:
 
   /// Build a MAIR graph for \p F using DT/PDT/LI results owned by \p FAM.
   ///
-  /// This overload is the pass-pipeline entry point: it must only fetch
-  /// reusable LLVM analyses from FAM and bind them to the graph. It
-  /// intentionally does not construct function analyses itself.
+  /// The graph borrows the exact FAM results. They must remain valid, and the
+  /// underlying LLVM IR must not change, throughout the graph's live lifetime.
   template <class BarrierTrait = DefaultBarrierTrait>
   static MAIRGraph
   build(Function &F, FunctionAnalysisManager &FAM,
@@ -909,12 +919,7 @@ public:
         MAIROptimizationConfig Config = MAIROptimizationConfig::generic()) {
     MAIRBarrierAnalysis<BarrierTrait> BarrierAnalysis;
     MAIRGraph Graph = build(F, DT, PDT, LI, BarrierAnalysis, Config);
-    Graph.OwnedDT = std::make_unique<DominatorTree>(std::move(DT));
-    Graph.OwnedPDT = std::make_unique<PostDominatorTree>(std::move(PDT));
-    Graph.OwnedLI = std::make_unique<LoopInfo>(std::move(LI));
-    Graph.DT = Graph.OwnedDT.get();
-    Graph.PDT = Graph.OwnedPDT.get();
-    Graph.LI = Graph.OwnedLI.get();
+    Graph.Analyses.takeOwnership(std::move(DT), std::move(PDT), std::move(LI));
     return Graph;
   }
 
@@ -965,33 +970,19 @@ public:
   void replaceObservation(Observation &From, Observation &Into);
 
   void addEdge(Observation &From, Observation &To, ObsEdgeKind Kind);
-  void removeEdge(Observation &From, Observation &To);
   void removeEdge(Observation &From, Observation &To, ObsEdgeKind Kind);
-  bool hasEdge(const Observation &From, const Observation &To) const;
   bool hasEdge(const Observation &From, const Observation &To,
                ObsEdgeKind Kind) const;
   /// Return whether \p Ancestor reaches \p Descendant through one or more
   /// observation edges of exactly \p Kind.
   bool isAncestor(const Observation &Ancestor, const Observation &Descendant,
                   ObsEdgeKind Kind) const;
-  EdgeListType successors(Observation &Obs);
-  ConstEdgeListType successors(const Observation &Obs) const;
-  ObservationEdgeListType childEdges(const Observation &Obs) const;
-  EdgeListType predecessors(Observation &Obs);
-  ConstEdgeListType predecessors(const Observation &Obs) const;
-  ObservationEdgeListType parentEdges(const Observation &Obs) const;
   MemoryObject *getMemoryObject(const Value &Base);
   const MemoryObject *getMemoryObject(const Value &Base) const;
-  bool hasFwdBarrier(const BasicBlock &BB) const {
-    return FwdBarrierBlocks.contains(&BB);
-  }
-  bool hasBwdBarrier(const BasicBlock &BB) const {
-    return BwdBarrierBlocks.contains(&BB);
-  }
 
   bool verify(raw_ostream *OS = nullptr) const;
-  std::string toString(bool LLVM = false) const;
-  void print(raw_ostream &OS, bool LLVM = false) const;
+  std::string toString() const;
+  void print(raw_ostream &OS) const;
   void dump(raw_ostream &OS) const { print(OS); }
 
   llvm::Expected<MAIRInstantiationResult>

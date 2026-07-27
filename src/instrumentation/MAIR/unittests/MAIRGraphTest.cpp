@@ -171,8 +171,9 @@ TEST(MAOpt, RetainsAccessesForTargetInstructions) {
 
 bool hasSuccessor(const MAIRGraph &Graph, const Observation &From,
                   const Observation &To) {
-  for (const Observation *Succ : Graph.successors(From))
-    if (Succ == &To)
+  (void)Graph;
+  for (const ObservationEdge &Edge : From.children())
+    if (&Edge.getNode() == &To)
       return true;
   return false;
 }
@@ -467,9 +468,9 @@ entry:
   ASSERT_EQ(Graph.size(), 2u);
   EXPECT_TRUE(Entry.isBasicBlockEntrySite());
   EXPECT_TRUE(Obs.isBasicBlockEntrySite());
-  ASSERT_EQ(Graph.successors(Entry).size(), 1u);
-  EXPECT_EQ(Graph.successors(Entry)[0], &Obs);
-  EXPECT_EQ(Graph.predecessors(Obs)[0], &Entry);
+  ASSERT_EQ(Entry.children().size(), 1u);
+  EXPECT_EQ(&Entry.children()[0].getNode(), &Obs);
+  EXPECT_EQ(&Obs.parents()[0].getNode(), &Entry);
   ASSERT_EQ(Obs.accesses().size(), 2u);
   for (const MemoryAccess &Access : Obs)
     EXPECT_EQ(Access.getParent(), &Obs);
@@ -846,7 +847,7 @@ entry:
   Graph.erase(Load);
 
   EXPECT_TRUE(Graph.verify());
-  EXPECT_TRUE(Graph.successors(Entry).empty());
+  EXPECT_TRUE(Entry.children().empty());
   EXPECT_EQ(Graph.size(), 1u);
 }
 
@@ -877,7 +878,7 @@ entry:
   EXPECT_TRUE(LoadObs.isMemoryInstSite());
   ASSERT_EQ(LoadObs.accesses().size(), 1u);
   EXPECT_EQ(LoadObs.accesses().front().getParent(), &LoadObs);
-  EXPECT_EQ(Graph.successors(Entry).front(), &LoadObs);
+  EXPECT_EQ(&Entry.children().front().getNode(), &LoadObs);
 }
 
 TEST(MAIRGraph, CreateFromBuildsLinearMemoryObservationChain) {
@@ -1460,10 +1461,8 @@ exit:
   llvm::Loop *L = Loops.getLoopFor(*BodyObs);
   ASSERT_NE(L, nullptr);
   EXPECT_EQ(L->getHeader()->getName(), "header");
-  EXPECT_TRUE(Loops.isEveryIterationAccess(*BodyObs->begin(), *L));
   EXPECT_TRUE(Loops.isLoopInvariant(*BodyObs->begin(), *L));
   EXPECT_EQ(Loops.getPreheaderExit(*L), findBlockExit(Graph, "entry"));
-  EXPECT_TRUE(Loops.hasDedicatedExit(*L));
   EXPECT_EQ(Loops.getUniqueExitEntry(*L), findBlockEntry(Graph, "exit"));
 }
 
@@ -1528,7 +1527,6 @@ exit:
   ASSERT_NE(ThenObs, nullptr);
   llvm::Loop *L = Loops.getLoopFor(*ThenObs);
   ASSERT_NE(L, nullptr);
-  EXPECT_FALSE(Loops.isEveryIterationAccess(*ThenObs->begin(), *L));
 }
 
 TEST(MAIRLoopAnalysis, FindsTopInvariantLoop) {
@@ -1643,7 +1641,6 @@ exit.normal:
   ASSERT_NE(Inside, nullptr);
   llvm::Loop *L = Loops.getLoopFor(*Inside);
   ASSERT_NE(L, nullptr);
-  EXPECT_FALSE(Loops.hasDedicatedExit(*L));
 }
 
 TEST(MAIRLoopAnalysis, ComputesExactObservationExecutionCounts) {
@@ -3015,7 +3012,7 @@ entry:
   EXPECT_TRUE(Source.hasChild(Target, ObsEdgeKind::PostDom));
   EXPECT_FALSE(Target.hasParent(Source, ObsEdgeKind::Dom));
   EXPECT_TRUE(Target.hasParent(Source, ObsEdgeKind::PostDom));
-  EXPECT_EQ(Graph.hasEdge(Source, Target), true);
+  EXPECT_TRUE(Graph.hasEdge(Source, Target, ObsEdgeKind::PostDom));
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -3867,10 +3864,41 @@ entry:
   ObservationGuard AB = AnyProvenanceExecutedGuard({A, B});
   ObservationGuard BA = AnyProvenanceExecutedGuard({B, A});
   ObservationGuard AOnly = AnyProvenanceExecutedGuard({A});
+  ObservationGuard DuplicateA = AnyProvenanceExecutedGuard({A, A});
 
   EXPECT_EQ(AB, BA);
   EXPECT_NE(AB, AOnly);
+  EXPECT_NE(DuplicateA, AB);
+  EXPECT_NE(AB, DuplicateA);
   EXPECT_NE(AB, ObservationGuard(AlwaysGuard{}));
+}
+
+TEST(MAIRSchema, VerifierRejectsNonEmptyFunctionlessGraph) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+@base = global i8 0
+define void @f() {
+entry:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::GlobalVariable &Base = *M->getGlobalVariable("base");
+  llvm::Type &I64 = *llvm::Type::getInt64Ty(Ctx);
+  MAIRGraph Graph;
+  Observation &Obs = Graph.createBBObservation(F.getEntryBlock(), false);
+  MAIRScalarExpr Start = Graph.createValueExpr(Base);
+  MAIRScalarExpr One = Graph.createConstantExpr(I64, llvm::APInt(64, 1));
+  Obs.addAccess(MemoryAccess({}, PeriodicRegion(&Base, Start, One, One, One),
+                             AccessKind::Read));
+
+  std::string Error;
+  llvm::raw_string_ostream OS(Error);
+  EXPECT_FALSE(Graph.verify(&OS));
+  EXPECT_NE(Error.find("non-empty graph has no function"), std::string::npos);
 }
 
 TEST(MAIRSchema, VerifierRejectsMalformedExecutionGuard) {

@@ -63,7 +63,6 @@ void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
   // then alternate global motion with local merging/elimination. The final
   // simplification removes observations emptied by those access transforms.
   PM.addPass(SimplifyGraphPass());
-  PM.addPass(CommonMAMotionPass());
   PM.addPass(LoopInvariantObservationMotionPass());
   PM.addPass(LoopPeriodicObservationCombinePass());
   PM.addPass(LocationMergePass());

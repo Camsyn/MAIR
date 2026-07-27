@@ -198,8 +198,10 @@ RedundantObservationEliminationPass::run(MAIRGraph &G,
 #endif
   const unsigned NumEliminatedIntra = doIntraROE(G);
 
-  const RedundantObservationInfo &Info =
-      AM.getResult<RedundantObservationAnalysis>(G);
+  // Intra elimination changes the source set. Compute this pass's inter
+  // snapshot from the current graph instead of reusing a possibly cached
+  // pre-intra result; unrelated analyses remain untouched.
+  RedundantObservationInfo Info = RedundantObservationAnalysis().run(G, AM);
   const unsigned NumEliminatedInter = doInterROE(G, Info);
 
   const unsigned NumEliminated = NumEliminatedIntra + NumEliminatedInter;

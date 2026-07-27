@@ -269,18 +269,11 @@ Value *lowerExpr(const MAIRScalarExpr &Expr, IRBuilder<> &Builder,
     default:
       llvm_unreachable("not a min/max expression");
     }
-    Value *Compare =
-        IsSigned
-            ? Builder.CreateICmpSLT(LHS, RHS,
-                                    (Twine("mair.expr.") + KindName + ".cmp"))
-            : Builder.CreateICmpULT(LHS, RHS,
-                                    (Twine("mair.expr.") + KindName + ".cmp"));
-    if (!IsMin)
-      Compare = IsSigned
-                    ? Builder.CreateICmpSGT(
-                          LHS, RHS, (Twine("mair.expr.") + KindName + ".cmp"))
-                    : Builder.CreateICmpUGT(
-                          LHS, RHS, (Twine("mair.expr.") + KindName + ".cmp"));
+    CmpInst::Predicate Predicate =
+        IsSigned ? (IsMin ? CmpInst::ICMP_SLT : CmpInst::ICMP_SGT)
+                 : (IsMin ? CmpInst::ICMP_ULT : CmpInst::ICMP_UGT);
+    Value *Compare = Builder.CreateICmp(
+        Predicate, LHS, RHS, Twine("mair.expr.") + KindName + ".cmp");
     Result = Builder.CreateSelect(Compare, LHS, RHS,
                                   (Twine("mair.expr.") + KindName));
     break;
@@ -414,12 +407,12 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
     }
 
     SmallVector<MaterializedAccess, 4> Lowered;
+    DenseMap<const void *, Value *> ExprCache;
     for (const PlannedAccess &Access : Unit.Accesses) {
       MaterializedAccess Materialized;
       Materialized.Source = Access.Source;
       Materialized.Kind = Access.Kind;
       Materialized.Properties = Access.Properties;
-      DenseMap<const void *, Value *> Cache;
       if (const auto *Contiguous =
               std::get_if<AbstractAccess>(&Access.Region)) {
         Materialized.Address = lowerContiguous(*Contiguous, *BuilderPtr);
@@ -446,13 +439,13 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
         const PeriodicRegion &Periodic =
             std::get<PeriodicRegion>(Access.Region);
         Materialized.Address =
-            lowerExpr(Periodic.getStart(), *BuilderPtr, Cache);
+            lowerExpr(Periodic.getStart(), *BuilderPtr, ExprCache);
         Materialized.Stride =
-            lowerExpr(Periodic.getStride(), *BuilderPtr, Cache);
+            lowerExpr(Periodic.getStride(), *BuilderPtr, ExprCache);
         Materialized.AccessSize =
-            lowerExpr(Periodic.getAccessSize(), *BuilderPtr, Cache);
+            lowerExpr(Periodic.getAccessSize(), *BuilderPtr, ExprCache);
         Materialized.TripCount =
-            lowerExpr(Periodic.getTripCount(), *BuilderPtr, Cache);
+            lowerExpr(Periodic.getTripCount(), *BuilderPtr, ExprCache);
       }
       Lowered.push_back(Materialized);
     }

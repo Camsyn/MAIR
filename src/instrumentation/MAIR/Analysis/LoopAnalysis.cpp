@@ -84,22 +84,6 @@ const SCEV *MAIRLoopInfo::getExactExecutionCountSCEV(const Observation &Obs,
   return Count;
 }
 
-bool MAIRLoopInfo::isEveryIterationAccess(const MemoryAccess &Access,
-                                          const Loop &L) const {
-  if (!isAvailable())
-    return false;
-  BasicBlock *Latch = L.getLoopLatch();
-  if (!Latch)
-    return false;
-  for (const Instruction *I : Access.getInstructions()) {
-    if (!I || !L.contains(I->getParent()))
-      return false;
-    if (!DT->dominates(I->getParent(), Latch))
-      return false;
-  }
-  return true;
-}
-
 bool MAIRLoopInfo::isLoopInvariant(const Value *V, const Loop &L) const {
   return V && L.isLoopInvariant(V);
 }
@@ -140,11 +124,6 @@ Observation *MAIRLoopInfo::getPreheaderExit(const Loop &L) const {
     return nullptr;
   BasicBlock *Preheader = L.getLoopPreheader();
   return Preheader ? &Graph->getBBExitRepresentative(*Preheader) : nullptr;
-}
-
-bool MAIRLoopInfo::hasDedicatedExit(const Loop &L) const {
-  std::optional<MAIRLoopExit> Exit = describeUniqueExit(L);
-  return Exit && Exit->IsDedicated;
 }
 
 std::optional<MAIRLoopExit>

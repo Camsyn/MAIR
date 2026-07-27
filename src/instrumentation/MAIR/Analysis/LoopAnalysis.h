@@ -23,7 +23,6 @@ class MAIRLoopInfo {
   const llvm::DominatorTree *DT = nullptr;
 
 public:
-  MAIRLoopInfo() = default;
   MAIRLoopInfo(MAIRGraph &G, llvm::FunctionAnalysisManager &FAM);
 
   bool isAvailable() const { return Graph && FAM && Func && LI && DT; }
@@ -35,15 +34,14 @@ public:
                                         const llvm::Loop &L) const;
   const llvm::SCEV *getExactExecutionCountSCEV(const Observation &Obs,
                                                const llvm::Loop &L) const;
-  bool isEveryIterationAccess(const MemoryAccess &Access,
-                              const llvm::Loop &L) const;
   bool isLoopInvariant(const MemoryAccess &Access, const llvm::Loop &L) const;
   llvm::Loop *getTopInvariantLoop(const MemoryAccess &Access,
                                   llvm::Loop &Start) const;
   Observation *getPreheaderExit(const llvm::Loop &L) const;
   std::optional<MAIRLoopExit> describeUniqueExit(const llvm::Loop &L) const;
-  bool hasDedicatedExit(const llvm::Loop &L) const;
   Observation *getUniqueExitEntry(const llvm::Loop &L) const;
+  /// ScalarEvolution must come from the same FAM generation as the graph's
+  /// borrowed LoopInfo; mixing snapshots would invalidate SCEV loop identity.
   llvm::ScalarEvolution &getSE() const;
 
 private:

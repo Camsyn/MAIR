@@ -21,7 +21,7 @@
 ; REDUNDANT-DAG: 9 mair-redundant-observation-elimination - Number of inter-observation redundant accesses eliminated
 ; REDUNDANT: 31 mair-redundant-observation-elimination - Number of memory accesses entering redundant observation elimination
 
-; O1: 4 mair-commonmamotion - Number of memory accesses entering common MA motion
+; O1: 2 mair-commonmamotion - Number of memory accesses entering common MA motion
 ; O1: 4 mair-locationmerge - Number of memory accesses entering location merging
 ; O1: 2 mair-loop-invariant-motion - Number of memory accesses entering loop-invariant motion
 ; O1: 2 mair-loop-periodic-combine - Number of memory accesses entering loop periodic combination

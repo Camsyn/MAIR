@@ -51,10 +51,8 @@ class MAIRLLVMWriter final : public AssemblyAnnotationWriter {
 public:
   explicit MAIRLLVMWriter(ArrayRef<const MAIRGraph *> Gs) : Graphs(Gs) {}
 
-  void emitFunctionAnnot(const Function *F, formatted_raw_ostream &OS) override;
   void emitInstructionAnnot(const Instruction *I,
                             formatted_raw_ostream &OS) override;
-  void printInfoComment(const Value &V, formatted_raw_ostream &OS) override;
 };
 } // namespace
 
@@ -181,7 +179,7 @@ void MAIRLLVMWriter::emitAnchoredObservations(const Instruction *I,
 
 void MAIRLLVMWriter::emitObservationLine(const Observation &Obs,
                                          formatted_raw_ostream &OS) const {
-  std::string Text = Obs.toString(true);
+  std::string Text = Obs.toString();
   SmallVector<StringRef, 4> Lines;
   StringRef(Text).split(Lines, '\n');
   for (StringRef Line : Lines)
@@ -189,21 +187,9 @@ void MAIRLLVMWriter::emitObservationLine(const Observation &Obs,
       OS << "  ; " << Line << "\n";
 }
 
-void MAIRLLVMWriter::emitFunctionAnnot(const Function *F,
-                                       formatted_raw_ostream &OS) {
-  (void)F;
-  (void)OS;
-}
-
 void MAIRLLVMWriter::emitInstructionAnnot(const Instruction *I,
                                           formatted_raw_ostream &OS) {
   emitAnchoredObservations(I, OS);
-}
-
-void MAIRLLVMWriter::printInfoComment(const Value &V,
-                                      formatted_raw_ostream &OS) {
-  (void)V;
-  (void)OS;
 }
 
 void dumpMAIR(const MAIRGraph &Graph, raw_ostream &OS) { Graph.print(OS); }

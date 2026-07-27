@@ -2,6 +2,9 @@
 ; RUN: mair-opt -passes=simplifygraph,cmm --disable-output %s
 ; RUN: mair-opt -passes=simplifygraph %s | FileCheck %s --check-prefix=SIMPLIFY
 
+; Raw construction keeps MAs on memory-instruction observations. CMM is
+; boundary-only, so these cases verify that it does not search descendants.
+
 define void @hoist_diamond(ptr %p, ptr %q, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @hoist_diamond {
 ; CHECK:       ma4: preds=

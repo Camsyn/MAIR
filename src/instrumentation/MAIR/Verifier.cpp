@@ -34,7 +34,7 @@ struct MAIRVerifierSupport {
     if (!OS)
       return;
     *OS << "  observation: ";
-    Obs.print(*OS, true);
+    Obs.print(*OS);
     *OS << "\n";
   }
 
@@ -42,7 +42,7 @@ struct MAIRVerifierSupport {
     if (!OS)
       return;
     *OS << "  access: ";
-    Access.print(*OS, true);
+    Access.print(*OS);
     *OS << "\n";
   }
 
@@ -173,6 +173,9 @@ private:
 bool MAIRVerifier::verify(const MAIRGraph &G) {
   Graph = &G;
   Broken = false;
+  if (!G.Observations.empty() &&
+      !CheckRequired(G.getFunction(), "non-empty graph has no function"))
+    return false;
   buildEdgeIndex();
 
   for (const Observation &Obs : G.Observations)

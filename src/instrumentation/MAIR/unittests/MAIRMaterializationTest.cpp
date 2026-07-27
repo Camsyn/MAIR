@@ -508,6 +508,7 @@ entry:
       Graph.createUnaryExpr(MAIRScalarExpr::Kind::SignExtend, I64, Trunc);
   PeriodicRegion Region(&P, Pointer, Stride, C2, WideN);
   Obs.addAccess(MemoryAccess({}, MemoryRegion(Region), AccessKind::Read));
+  Obs.addAccess(MemoryAccess({}, MemoryRegion(Region), AccessKind::Write));
   ASSERT_TRUE(Graph.verify());
 
   PassInstrumentationCallbacks PIC;
@@ -533,6 +534,19 @@ entry:
   EXPECT_NE(Text.find("mair.expr.umin"), std::string::npos);
   EXPECT_NE(Text.find("mair.expr.smax"), std::string::npos);
   EXPECT_NE(Text.find("mair.expr.umax"), std::string::npos);
+
+  unsigned NumGEPs = 0;
+  unsigned NumSMaxCmps = 0;
+  unsigned NumUMaxCmps = 0;
+  for (const BasicBlock &BB : F)
+    for (const Instruction &I : BB) {
+      NumGEPs += I.getName().starts_with("mair.expr.gep");
+      NumSMaxCmps += I.getName().starts_with("mair.expr.smax.cmp");
+      NumUMaxCmps += I.getName().starts_with("mair.expr.umax.cmp");
+    }
+  EXPECT_EQ(NumGEPs, 1u);
+  EXPECT_EQ(NumSMaxCmps, 1u);
+  EXPECT_EQ(NumUMaxCmps, 1u);
 }
 
 TEST(MAIRMaterialization, RetargetsMultipleObservationsAtOneAnchor) {

@@ -82,9 +82,7 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
                            MAIRBarrierAnalysisCore &BA,
                            MAIROptimizationConfig Config) {
   MAIRGraph Graph(F, Config);
-  Graph.DT = &DT;
-  Graph.PDT = &PDT;
-  Graph.LI = &LI;
+  Graph.Analyses.bind(DT, PDT, LI);
   DenseMap<const BasicBlock *, Observation *> BBEntryObs;
   DenseMap<const BasicBlock *, Observation *> BBExitObs;
   DenseMap<const BasicBlock *, SmallVector<Observation *, 4>> OrderedObs;
@@ -93,11 +91,6 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
   // 1. Create observations for each MA and BB
   // ===========================================================
   for (BasicBlock &BB : F) {
-    if (BA.hasFwdBarrier(BB))
-      Graph.FwdBarrierBlocks.insert(&BB);
-    if (BA.hasBwdBarrier(BB))
-      Graph.BwdBarrierBlocks.insert(&BB);
-
     auto &ObsInOneBB = OrderedObs[&BB];
     auto &Start = Graph.createBBObservation(BB, true);
     BBEntryObs[&BB] = &Start;
@@ -369,9 +362,13 @@ bool AnyProvenanceExecutedGuard::operator==(
     const AnyProvenanceExecutedGuard &Other) const {
   if (Provenance.size() != Other.Provenance.size())
     return false;
-  return llvm::all_of(Provenance, [&](const Instruction *I) {
-    return llvm::is_contained(Other.Provenance, I);
-  });
+  return llvm::all_of(Provenance,
+                      [&](const Instruction *I) {
+                        return llvm::is_contained(Other.Provenance, I);
+                      }) &&
+         llvm::all_of(Other.Provenance, [&](const Instruction *I) {
+           return llvm::is_contained(Provenance, I);
+         });
 }
 
 MAIRScalarExpr::Kind MAIRScalarExpr::getKind() const {
@@ -916,10 +913,10 @@ bool MemoryAccess::mergeWith(const MemoryAccess &Other) {
   return true;
 }
 
-std::string MemoryAccess::toString(bool LLVM) const {
+std::string MemoryAccess::toString() const {
   std::string S;
   raw_string_ostream OS(S);
-  print(OS, LLVM);
+  print(OS);
   OS.flush();
   return S;
 }
@@ -994,8 +991,7 @@ MemoryAccess MemoryAccess::fromInstruction(const Instruction &I,
   return makeAccess(I, *Ptr, std::move(Size), Kind, DL);
 }
 
-void MemoryAccess::print(raw_ostream &OS, bool LLVM) const {
-  (void)LLVM;
+void MemoryAccess::print(raw_ostream &OS) const {
   printAccessKind(OS, Kind);
   if (isVolatile())
     OS << " volatile";
@@ -1124,16 +1120,15 @@ void Observation::mergeRepresentationFrom(const Observation &Other) {
   RepresentedBlocks.insert_range(Other.RepresentedBlocks);
 }
 
-std::string Observation::toString(bool LLVM) const {
+std::string Observation::toString() const {
   std::string S;
   raw_string_ostream OS(S);
-  print(OS, LLVM);
+  print(OS);
   OS.flush();
   return S;
 }
 
-void Observation::print(raw_ostream &OS, bool LLVM) const {
-  (void)LLVM;
+void Observation::print(raw_ostream &OS) const {
   OS << Name << ": ";
   if (isEdgeSite() || !hasAlwaysGuard()) {
     OS << "site=";
@@ -1162,7 +1157,7 @@ void Observation::print(raw_ostream &OS, bool LLVM) const {
   OS << "]";
   for (const MemoryAccess &A : Accesses) {
     OS << "\n  ";
-    A.print(OS, LLVM);
+    A.print(OS);
   }
   OS << "\n";
 }
@@ -1191,13 +1186,10 @@ MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
       MemoryObjectAllocator(std::move(Other.MemoryObjectAllocator)),
       ScalarExprOwner(std::move(Other.ScalarExprOwner)),
       ScalarExprAllocator(std::move(Other.ScalarExprAllocator)),
-      OwnedDT(std::move(Other.OwnedDT)), OwnedPDT(std::move(Other.OwnedPDT)),
-      OwnedLI(std::move(Other.OwnedLI)), DT(Other.DT), PDT(Other.PDT),
-      LI(Other.LI), MemoryObjects(std::move(Other.MemoryObjects)),
+      Analyses(std::move(Other.Analyses)),
+      MemoryObjects(std::move(Other.MemoryObjects)),
       BBEntryRepresentatives(std::move(Other.BBEntryRepresentatives)),
       BBExitRepresentatives(std::move(Other.BBExitRepresentatives)),
-      FwdBarrierBlocks(std::move(Other.FwdBarrierBlocks)),
-      BwdBarrierBlocks(std::move(Other.BwdBarrierBlocks)),
       Observations(std::move(Other.Observations)),
       NumObservations(Other.NumObservations), NumEdges(Other.NumEdges),
       NextObservationID(Other.NextObservationID) {
@@ -1205,9 +1197,7 @@ MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
     Obs.setParent(this);
   Other.F = nullptr;
   Other.MutableF = nullptr;
-  Other.DT = nullptr;
-  Other.PDT = nullptr;
-  Other.LI = nullptr;
+  Other.Analyses.clearReferences();
   Other.GraphState = State::MovedFrom;
 }
 
@@ -1223,17 +1213,10 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   MemoryObjectAllocator = std::move(Other.MemoryObjectAllocator);
   ScalarExprOwner = std::move(Other.ScalarExprOwner);
   ScalarExprAllocator = std::move(Other.ScalarExprAllocator);
-  OwnedDT = std::move(Other.OwnedDT);
-  OwnedPDT = std::move(Other.OwnedPDT);
-  OwnedLI = std::move(Other.OwnedLI);
-  DT = Other.DT;
-  PDT = Other.PDT;
-  LI = Other.LI;
+  Analyses = std::move(Other.Analyses);
   MemoryObjects = std::move(Other.MemoryObjects);
   BBEntryRepresentatives = std::move(Other.BBEntryRepresentatives);
   BBExitRepresentatives = std::move(Other.BBExitRepresentatives);
-  FwdBarrierBlocks = std::move(Other.FwdBarrierBlocks);
-  BwdBarrierBlocks = std::move(Other.BwdBarrierBlocks);
   Observations = std::move(Other.Observations);
   NumObservations = Other.NumObservations;
   NumEdges = Other.NumEdges;
@@ -1242,9 +1225,7 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
     Obs.setParent(this);
   Other.F = nullptr;
   Other.MutableF = nullptr;
-  Other.DT = nullptr;
-  Other.PDT = nullptr;
-  Other.LI = nullptr;
+  Other.Analyses.clearReferences();
   Other.GraphState = State::MovedFrom;
   return *this;
 }
@@ -1388,10 +1369,8 @@ MAIRGraph::iterator MAIRGraph::erase(Observation &Obs) {
   for (const ObservationEdge &Edge : Obs.Children)
     SelfEdges += &Edge.getNode() == &Obs;
 
-  // Detach both adjacency lists in one pass. The old implementation called
-  // removeEdge once per neighbor, repeatedly rescanning Obs's vectors during
-  // graph contraction. Each mirror edge is removed directly from its peer;
-  // self-edges are present in both lists but count only once.
+  // Remove each peer's mirror entry directly. A self-edge occurs in both local
+  // lists but contributes only once to the graph edge count.
   auto RemoveMirror = [](auto &Edges, const Observation &Neighbor,
                          ObsEdgeKind Kind) {
     auto EdgeIt = llvm::find_if(Edges, [&](const ObservationEdge &Edge) {
@@ -1443,8 +1422,6 @@ void MAIRGraph::clearStorage() {
   MemoryObjects.clear();
   BBEntryRepresentatives.clear();
   BBExitRepresentatives.clear();
-  FwdBarrierBlocks.clear();
-  BwdBarrierBlocks.clear();
   NumObservations = 0;
   NumEdges = 0;
   NextObservationID = 0;
@@ -1524,8 +1501,8 @@ void MAIRGraph::contractObservation(Observation &Into, Observation &From) {
          "contraction requires mutual Dom/PostDom edges");
 
   Into.prependAccessesFrom(From);
-  ObservationEdgeListType Incoming = parentEdges(From);
-  ObservationEdgeListType Outgoing = childEdges(From);
+  SmallVector<ObservationEdge, 2> Incoming(From.parents());
+  SmallVector<ObservationEdge, 2> Outgoing(From.children());
   for (const ObservationEdge &Edge : Incoming) {
     Observation &Pred = Edge.getNode();
     if (&Pred != &Into)
@@ -1552,11 +1529,6 @@ void MAIRGraph::addEdge(Observation &From, Observation &To, ObsEdgeKind Kind) {
   ++NumEdges;
 }
 
-void MAIRGraph::removeEdge(Observation &From, Observation &To) {
-  removeEdge(From, To, ObsEdgeKind::Dom);
-  removeEdge(From, To, ObsEdgeKind::PostDom);
-}
-
 void MAIRGraph::removeEdge(Observation &From, Observation &To,
                            ObsEdgeKind Kind) {
   assertLive("remove an edge from");
@@ -1575,14 +1547,6 @@ void MAIRGraph::removeEdge(Observation &From, Observation &To,
   assert(ParentIt != To.Parents.end() && "MAIR edge lists are not symmetric");
   To.Parents.erase(ParentIt);
   --NumEdges;
-}
-
-bool MAIRGraph::hasEdge(const Observation &From, const Observation &To) const {
-  assertLive("query");
-  for (const ObservationEdge &Edge : From.children())
-    if (&Edge.getNode() == &To)
-      return true;
-  return false;
 }
 
 bool MAIRGraph::hasEdge(const Observation &From, const Observation &To,
@@ -1621,56 +1585,6 @@ bool MAIRGraph::isAncestor(const Observation &Ancestor,
   return false;
 }
 
-MAIRGraph::EdgeListType MAIRGraph::successors(Observation &Obs) {
-  assertLive("query");
-  EdgeListType Result;
-  for (const ObservationEdge &Edge : Obs.children())
-    Result.push_back(&Edge.getNode());
-  return Result;
-}
-
-MAIRGraph::ConstEdgeListType
-MAIRGraph::successors(const Observation &Obs) const {
-  assertLive("query");
-  ConstEdgeListType Result;
-  for (const ObservationEdge &Edge : Obs.children())
-    Result.push_back(&Edge.getNode());
-  return Result;
-}
-
-MAIRGraph::ObservationEdgeListType
-MAIRGraph::childEdges(const Observation &Obs) const {
-  assertLive("query");
-  ObservationEdgeListType Result;
-  Result.append(Obs.children().begin(), Obs.children().end());
-  return Result;
-}
-
-MAIRGraph::EdgeListType MAIRGraph::predecessors(Observation &Obs) {
-  assertLive("query");
-  EdgeListType Result;
-  for (const ObservationEdge &Edge : Obs.parents())
-    Result.push_back(&Edge.getNode());
-  return Result;
-}
-
-MAIRGraph::ConstEdgeListType
-MAIRGraph::predecessors(const Observation &Obs) const {
-  assertLive("query");
-  ConstEdgeListType Result;
-  for (const ObservationEdge &Edge : Obs.parents())
-    Result.push_back(&Edge.getNode());
-  return Result;
-}
-
-MAIRGraph::ObservationEdgeListType
-MAIRGraph::parentEdges(const Observation &Obs) const {
-  assertLive("query");
-  ObservationEdgeListType Result;
-  Result.append(Obs.parents().begin(), Obs.parents().end());
-  return Result;
-}
-
 MemoryObject *MAIRGraph::getMemoryObject(const Value &Base) {
   assertLive("query");
   return MemoryObjects.lookup(&Base);
@@ -1681,17 +1595,16 @@ const MemoryObject *MAIRGraph::getMemoryObject(const Value &Base) const {
   return MemoryObjects.lookup(&Base);
 }
 
-std::string MAIRGraph::toString(bool LLVM) const {
+std::string MAIRGraph::toString() const {
   std::string S;
   raw_string_ostream OS(S);
-  print(OS, LLVM);
+  print(OS);
   OS.flush();
   return S;
 }
 
-void MAIRGraph::print(raw_ostream &OS, bool LLVM) const {
+void MAIRGraph::print(raw_ostream &OS) const {
   assertLive("print");
-  (void)LLVM;
   OS << "mair graph";
   if (F) {
     OS << " of fn ";
@@ -1699,7 +1612,7 @@ void MAIRGraph::print(raw_ostream &OS, bool LLVM) const {
   }
   OS << " {\n";
   for (const Observation &Obs : Observations) {
-    Obs.print(OS, LLVM);
+    Obs.print(OS);
     OS << "\n";
   }
   OS << "}\n\n";

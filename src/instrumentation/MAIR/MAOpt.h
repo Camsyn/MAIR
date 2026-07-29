@@ -48,21 +48,13 @@ public:
     return *Graph;
   }
 
-  void retainAccessesForInstructions(
-      const llvm::SmallPtrSetImpl<const llvm::Instruction *> &Targets) {
+  void
+  retainAccesses(const llvm::SmallPtrSetImpl<const MemoryAccess *> &Targets) {
     assert(Graph && "MAOpt graph has not been built");
-    assert(!Optimized && "MAOpt graph has already been optimized");
 
     for (Observation &Obs : *Graph) {
       for (auto It = Obs.begin(); It != Obs.end();) {
-        bool Keep = false;
-        for (llvm::Instruction *I : It->getInstructions()) {
-          if (Targets.contains(I)) {
-            Keep = true;
-            break;
-          }
-        }
-        if (Keep)
+        if (Targets.contains(&*It))
           ++It;
         else
           It = Obs.erase(It);

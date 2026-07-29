@@ -118,7 +118,7 @@ TEST(MAOpt, BuildsOptimizesAndExposesObservationAccesses) {
   EXPECT_TRUE(O1.getGraph().verify());
 }
 
-TEST(MAOpt, RetainsAccessesForTargetInstructions) {
+TEST(MAOpt, RetainsSelectedAccesses) {
   llvm::LLVMContext Ctx;
   std::unique_ptr<llvm::Module> M = parseModule(R"(
     define void @f(ptr %p, ptr %q) {
@@ -131,8 +131,6 @@ TEST(MAOpt, RetainsAccessesForTargetInstructions) {
                                                 Ctx);
   ASSERT_NE(M, nullptr);
   llvm::Function &F = *M->getFunction("f");
-  llvm::BasicBlock &Entry = F.getEntryBlock();
-  llvm::Instruction *Target = &Entry.front();
   llvm::Argument *P = F.getArg(0);
   llvm::Argument *Q = F.getArg(1);
 
@@ -156,9 +154,18 @@ TEST(MAOpt, RetainsAccessesForTargetInstructions) {
   EXPECT_EQ(llvm::range_size(PObject->users()), 1u);
   EXPECT_EQ(llvm::range_size(QObject->users()), 1u);
 
-  llvm::SmallPtrSet<const llvm::Instruction *, 1> Targets;
+  ASSERT_FALSE(Opt.optimize());
+  const MemoryAccess *Target = nullptr;
+  for (const Observation &Obs : Graph) {
+    if (!Obs.empty()) {
+      Target = &*Obs.begin();
+      break;
+    }
+  }
+  ASSERT_NE(Target, nullptr);
+  llvm::SmallPtrSet<const MemoryAccess *, 1> Targets;
   Targets.insert(Target);
-  Opt.retainAccessesForInstructions(Targets);
+  Opt.retainAccesses(Targets);
 
   size_t NumAccesses = 0;
   for (const Observation &Obs : Graph)

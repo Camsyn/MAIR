@@ -61,9 +61,10 @@ using namespace llvm;
 
 #define DEBUG_TYPE "tsan"
 
-static cl::opt<bool> ClInstrumentMemoryAccesses(
-    "ts-instrument-memory-accesses", cl::init(true),
-    cl::desc("Instrument memory accesses"), cl::Hidden);
+static cl::opt<bool>
+    ClInstrumentMemoryAccesses("ts-instrument-memory-accesses", cl::init(true),
+                               cl::desc("Instrument memory accesses"),
+                               cl::Hidden);
 static cl::opt<bool>
     ClInstrumentFuncEntryExit("ts-instrument-func-entry-exit", cl::init(true),
                               cl::desc("Instrument function entry and exit"),
@@ -199,9 +200,7 @@ struct XsanThreadSanitizer : public ThreadSanitizer {
   bool sanitizeFunctionViaMAIR(Function &F, FunctionAnalysisManager &FAM,
                                const TargetLibraryInfo &TLI);
   bool instrumentMAIRAccess(const mair::MaterializedAccess &Access,
-                            IRBuilderBase &Builder,
-                            const SmallPtrSetImpl<const Instruction *> &Targets,
-                            const DataLayout &DL);
+                            IRBuilderBase &Builder, const DataLayout &DL);
 #endif
   bool collectTargetsToIntrument(Function &F, const TargetLibraryInfo &TLI,
                                  __xsan::TsanToInstrument &Targets);
@@ -258,7 +257,7 @@ void insertModuleCtor(Module &M) {
       // time. Hook them into the global ctors list in that case:
       [&](Function *Ctor, FunctionCallee) { appendToGlobalCtors(M, Ctor, 0); });
 }
-}  // namespace
+} // namespace
 
 PreservedAnalyses ThreadSanitizerPass::run(Function &F,
                                            FunctionAnalysisManager &FAM) {
@@ -300,12 +299,12 @@ void ThreadSanitizer::initialize(Module &M, const TargetLibraryInfo &TLI) {
     std::string ByteSizeStr = utostr(ByteSize);
     std::string BitSizeStr = utostr(BitSize);
     SmallString<32> ReadName("__tsan_read" + ByteSizeStr);
-    TsanRead[i] = M.getOrInsertFunction(ReadName, Attr, IRB.getVoidTy(),
-                                        IRB.getPtrTy());
+    TsanRead[i] =
+        M.getOrInsertFunction(ReadName, Attr, IRB.getVoidTy(), IRB.getPtrTy());
 
     SmallString<32> WriteName("__tsan_write" + ByteSizeStr);
-    TsanWrite[i] = M.getOrInsertFunction(WriteName, Attr, IRB.getVoidTy(),
-                                         IRB.getPtrTy());
+    TsanWrite[i] =
+        M.getOrInsertFunction(WriteName, Attr, IRB.getVoidTy(), IRB.getPtrTy());
 
     SmallString<64> UnalignedReadName("__tsan_unaligned_read" + ByteSizeStr);
     TsanUnalignedRead[i] = M.getOrInsertFunction(
@@ -334,8 +333,8 @@ void ThreadSanitizer::initialize(Module &M, const TargetLibraryInfo &TLI) {
         UnalignedVolatileWriteName, Attr, IRB.getVoidTy(), IRB.getPtrTy());
 
     SmallString<64> CompoundRWName("__tsan_read_write" + ByteSizeStr);
-    TsanCompoundRW[i] = M.getOrInsertFunction(
-        CompoundRWName, Attr, IRB.getVoidTy(), IRB.getPtrTy());
+    TsanCompoundRW[i] = M.getOrInsertFunction(CompoundRWName, Attr,
+                                              IRB.getVoidTy(), IRB.getPtrTy());
 
     SmallString<64> UnalignedCompoundRWName("__tsan_unaligned_read_write" +
                                             ByteSizeStr);
@@ -353,7 +352,7 @@ void ThreadSanitizer::initialize(Module &M, const TargetLibraryInfo &TLI) {
 
     // Args of type Ty need extension only when BitSize is 32 or less.
     using Idxs = std::vector<unsigned>;
-    Idxs Idxs2Or12   ((BitSize <= 32) ? Idxs({1, 2})       : Idxs({2}));
+    Idxs Idxs2Or12((BitSize <= 32) ? Idxs({1, 2}) : Idxs({2}));
     Idxs Idxs34Or1234((BitSize <= 32) ? Idxs({1, 2, 3, 4}) : Idxs({3, 4}));
     SmallString<32> AtomicStoreName("__tsan_atomic" + BitSizeStr + "_store");
     TsanAtomicStore[i] = M.getOrInsertFunction(
@@ -412,12 +411,10 @@ void ThreadSanitizer::initialize(Module &M, const TargetLibraryInfo &TLI) {
       TLI.getAttrList(&Ctx, {0}, /*Signed=*/true, /*Ret=*/false, Attr),
       IRB.getVoidTy(), OrdTy);
 
-  MemmoveFn =
-      M.getOrInsertFunction("__tsan_memmove", Attr, IRB.getPtrTy(),
-                            IRB.getPtrTy(), IRB.getPtrTy(), IntptrTy);
-  MemcpyFn =
-      M.getOrInsertFunction("__tsan_memcpy", Attr, IRB.getPtrTy(),
-                            IRB.getPtrTy(), IRB.getPtrTy(), IntptrTy);
+  MemmoveFn = M.getOrInsertFunction("__tsan_memmove", Attr, IRB.getPtrTy(),
+                                    IRB.getPtrTy(), IRB.getPtrTy(), IntptrTy);
+  MemcpyFn = M.getOrInsertFunction("__tsan_memcpy", Attr, IRB.getPtrTy(),
+                                   IRB.getPtrTy(), IRB.getPtrTy(), IntptrTy);
   MemsetFn = M.getOrInsertFunction(
       "__tsan_memset",
       TLI.getAttrList(&Ctx, {1}, /*Signed=*/true, /*Ret=*/false, Attr),
@@ -590,9 +587,9 @@ bool ThreadSanitizer::sanitizeFunction(Function &F,
 
   initialize(*F.getParent(), TLI);
   SmallVector<InstructionInfo, 8> AllLoadsAndStores;
-  SmallVector<Instruction*, 8> LocalLoadsAndStores;
-  SmallVector<Instruction*, 8> AtomicAccesses;
-  SmallVector<Instruction*, 8> MemIntrinCalls;
+  SmallVector<Instruction *, 8> LocalLoadsAndStores;
+  SmallVector<Instruction *, 8> AtomicAccesses;
+  SmallVector<Instruction *, 8> MemIntrinCalls;
   bool Res = false;
   bool HasCalls = false;
   bool SanitizeFunction = F.hasFnAttribute(Attribute::SanitizeThread);
@@ -744,16 +741,27 @@ bool ThreadSanitizer::instrumentLoadOrStore(const InstructionInfo &II,
 static ConstantInt *createOrdering(IRBuilder<> *IRB, AtomicOrdering ord) {
   uint32_t v = 0;
   switch (ord) {
-    case AtomicOrdering::NotAtomic:
-      llvm_unreachable("unexpected atomic ordering!");
-    case AtomicOrdering::Unordered:              [[fallthrough]];
-    case AtomicOrdering::Monotonic:              v = 0; break;
-    // Not specified yet:
-    // case AtomicOrdering::Consume:                v = 1; break;
-    case AtomicOrdering::Acquire:                v = 2; break;
-    case AtomicOrdering::Release:                v = 3; break;
-    case AtomicOrdering::AcquireRelease:         v = 4; break;
-    case AtomicOrdering::SequentiallyConsistent: v = 5; break;
+  case AtomicOrdering::NotAtomic:
+    llvm_unreachable("unexpected atomic ordering!");
+  case AtomicOrdering::Unordered:
+    [[fallthrough]];
+  case AtomicOrdering::Monotonic:
+    v = 0;
+    break;
+  // Not specified yet:
+  // case AtomicOrdering::Consume:                v = 1; break;
+  case AtomicOrdering::Acquire:
+    v = 2;
+    break;
+  case AtomicOrdering::Release:
+    v = 3;
+    break;
+  case AtomicOrdering::AcquireRelease:
+    v = 4;
+    break;
+  case AtomicOrdering::SequentiallyConsistent:
+    v = 5;
+    break;
   }
   return IRB->getInt32(v);
 }
@@ -769,20 +777,15 @@ static ConstantInt *createOrdering(IRBuilder<> *IRB, AtomicOrdering ord) {
 bool ThreadSanitizer::instrumentMemIntrinsic(Instruction *I) {
   InstrumentationIRBuilder IRB(I);
   if (MemSetInst *M = dyn_cast<MemSetInst>(I)) {
-    Value *Cast1 = IRB.CreateIntCast(M->getArgOperand(1), IRB.getInt32Ty(), false);
+    Value *Cast1 =
+        IRB.CreateIntCast(M->getArgOperand(1), IRB.getInt32Ty(), false);
     Value *Cast2 = IRB.CreateIntCast(M->getArgOperand(2), IntptrTy, false);
-    IRB.CreateCall(
-        MemsetFn,
-        {M->getArgOperand(0),
-         Cast1,
-         Cast2});
+    IRB.CreateCall(MemsetFn, {M->getArgOperand(0), Cast1, Cast2});
     I->eraseFromParent();
   } else if (MemTransferInst *M = dyn_cast<MemTransferInst>(I)) {
-    IRB.CreateCall(
-        isa<MemCpyInst>(M) ? MemcpyFn : MemmoveFn,
-        {M->getArgOperand(0),
-         M->getArgOperand(1),
-         IRB.CreateIntCast(M->getArgOperand(2), IntptrTy, false)});
+    IRB.CreateCall(isa<MemCpyInst>(M) ? MemcpyFn : MemmoveFn,
+                   {M->getArgOperand(0), M->getArgOperand(1),
+                    IRB.CreateIntCast(M->getArgOperand(2), IntptrTy, false)});
     I->eraseFromParent();
   }
   return false;
@@ -804,8 +807,7 @@ bool ThreadSanitizer::instrumentAtomic(Instruction *I, const DataLayout &DL) {
     int Idx = getMemoryAccessFuncIndex(OrigTy, Addr, DL);
     if (Idx < 0)
       return false;
-    Value *Args[] = {Addr,
-                     createOrdering(&IRB, LI->getOrdering())};
+    Value *Args[] = {Addr, createOrdering(&IRB, LI->getOrdering())};
     Value *C = IRB.CreateCall(TsanAtomicLoad[Idx], Args);
     Value *Cast = IRB.CreateBitOrPointerCast(C, OrigTy);
     I->replaceAllUsesWith(Cast);
@@ -852,12 +854,10 @@ bool ThreadSanitizer::instrumentAtomic(Instruction *I, const DataLayout &DL) {
     const unsigned BitSize = ByteSize * 8;
     Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
     Value *CmpOperand =
-      IRB.CreateBitOrPointerCast(CASI->getCompareOperand(), Ty);
+        IRB.CreateBitOrPointerCast(CASI->getCompareOperand(), Ty);
     Value *NewOperand =
-      IRB.CreateBitOrPointerCast(CASI->getNewValOperand(), Ty);
-    Value *Args[] = {Addr,
-                     CmpOperand,
-                     NewOperand,
+        IRB.CreateBitOrPointerCast(CASI->getNewValOperand(), Ty);
+    Value *Args[] = {Addr, CmpOperand, NewOperand,
                      createOrdering(&IRB, CASI->getSuccessOrdering()),
                      createOrdering(&IRB, CASI->getFailureOrdering())};
     CallInst *C = IRB.CreateCall(TsanAtomicCAS[Idx], Args);
@@ -869,7 +869,7 @@ bool ThreadSanitizer::instrumentAtomic(Instruction *I, const DataLayout &DL) {
     }
 
     Value *Res =
-      IRB.CreateInsertValue(PoisonValue::get(CASI->getType()), OldVal, 0);
+        IRB.CreateInsertValue(PoisonValue::get(CASI->getType()), OldVal, 0);
     Res = IRB.CreateInsertValue(Res, Success, 1);
 
     I->replaceAllUsesWith(Res);
@@ -893,8 +893,8 @@ int ThreadSanitizer::getMemoryAccessFuncIndex(Type *OrigTy, Value *Addr,
     return -1;
   }
   uint32_t TypeSize = DL.getTypeStoreSizeInBits(OrigTy);
-  if (TypeSize != 8  && TypeSize != 16 &&
-      TypeSize != 32 && TypeSize != 64 && TypeSize != 128) {
+  if (TypeSize != 8 && TypeSize != 16 && TypeSize != 32 && TypeSize != 64 &&
+      TypeSize != 128) {
     NumAccessesWithBadSize++;
     // Ignore all unusual sizes.
     return -1;
@@ -1023,16 +1023,13 @@ bool XsanThreadSanitizer::collectTargetsToIntrument(
 #ifndef XSAN_PASS
 bool XsanThreadSanitizer::instrumentMAIRAccess(
     const mair::MaterializedAccess &Access, IRBuilderBase &Builder,
-    const SmallPtrSetImpl<const Instruction *> &Targets, const DataLayout &DL) {
+    const DataLayout &DL) {
   if (!Access.Source)
     report_fatal_error("TSan MAIR access has no source");
 
-  SmallVector<Instruction *, 4> SelectedSources;
-  for (Instruction *Source : Access.Source->getInstructions())
-    if (Source && Targets.contains(Source))
-      SelectedSources.push_back(Source);
+  ArrayRef<Instruction *> SelectedSources = Access.Source->getInstructions();
   if (SelectedSources.empty())
-    return false;
+    report_fatal_error("TSan MAIR access has no source instruction");
 
   auto InstrumentAtSource = [&](Instruction &Source) {
     return instrumentLoadOrStore(InstructionInfo(&Source), DL);
@@ -1103,57 +1100,113 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
 
   initialize(*F.getParent(), TLI);
 
+  bool Res = false;
+  bool SanitizeFunction = F.hasFnAttribute(Attribute::SanitizeThread);
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  SmallPtrSet<const Instruction *, 32> MAIRHandledSources;
+  SmallPtrSet<const mair::MemoryAccess *, 32> MAIRTargets;
+  std::unique_ptr<mair::MAOpt<TsanMAIRBarrierTrait>> Opt;
+
+  if (ClInstrumentMemoryAccesses && SanitizeFunction) {
+    Opt = std::make_unique<mair::MAOpt<TsanMAIRBarrierTrait>>(
+        F, FAM, nullptr,
+        /*KeepFullDebug=*/true,
+        mair::MAIROptimizationConfig::forThreadSanitizer());
+    Opt->build();
+
+    SmallPtrSet<const Instruction *, 32> MAIRModeledSources;
+    for (const auto &[Observation, Accesses] : Opt->getObservationMAs()) {
+      (void)Observation;
+      for (const mair::MemoryAccess *Access : Accesses)
+        for (const Instruction *Source : Access->getInstructions())
+          MAIRModeledSources.insert(Source);
+    }
+
+    if (Error Err = Opt->optimize())
+      report_fatal_error(Twine(toString(std::move(Err))));
+
+    auto PointsToConstantData = [](Value *Addr) {
+      if (auto *GEP = dyn_cast<GetElementPtrInst>(Addr))
+        Addr = GEP->getPointerOperand();
+      if (auto *GV = dyn_cast<GlobalVariable>(Addr))
+        return GV->isConstant();
+      if (auto *LI = dyn_cast<LoadInst>(Addr))
+        return isVtableAccess(LI);
+      return false;
+    };
+
+    auto CanInstrumentViaMAIR = [&](const mair::MemoryAccess &Access) {
+      if (!Access.isContiguous() || Access.isVolatile() || Access.isAtomic() ||
+          Access.isCallLike() || Access.getInstructions().size() != 1 ||
+          !Access.hasConcreteRange())
+        return false;
+
+      Instruction *Source = Access.getInstructions().front();
+      auto *LI = dyn_cast<LoadInst>(Source);
+      auto *SI = dyn_cast<StoreInst>(Source);
+      if ((!LI && !SI) || __xsan::DelegateToXSan::is(*Source) ||
+          isTsanAtomic(Source) || isVtableAccess(Source) ||
+          (LI && LI->isVolatile()) || (SI && SI->isVolatile()))
+        return false;
+
+      Type *AccessTy = LI ? LI->getType() : SI->getValueOperand()->getType();
+      if (AccessTy->isVectorTy() || AccessTy->isScalableTy())
+        return false;
+
+      Value *Addr = LI ? LI->getPointerOperand() : SI->getPointerOperand();
+      if (!shouldInstrumentReadWriteFromAddress(Source->getModule(), Addr) ||
+          (LI && PointsToConstantData(Addr)))
+        return false;
+
+      const AllocaInst *AI = findAllocaForValue(Addr);
+      return !AI || !ClOmitNonCaptured ||
+             PointerMayBeCaptured(AI, /*ReturnCaptures=*/true);
+    };
+
+    SmallVector<const mair::MemoryAccess *, 32> MAIRCandidates;
+    SmallPtrSet<const Instruction *, 32> MAIRFallbackSources;
+    for (const auto &[Observation, Accesses] : Opt->getObservationMAs()) {
+      (void)Observation;
+      for (const mair::MemoryAccess *Access : Accesses) {
+        if (CanInstrumentViaMAIR(*Access)) {
+          MAIRCandidates.push_back(Access);
+          continue;
+        }
+        for (const Instruction *Source : Access->getInstructions())
+          MAIRFallbackSources.insert(Source);
+      }
+    }
+    for (const mair::MemoryAccess *Access : MAIRCandidates) {
+      const Instruction *Source = Access->getInstructions().front();
+      if (!MAIRFallbackSources.contains(Source))
+        MAIRTargets.insert(Access);
+    }
+
+    MAIRHandledSources = MAIRModeledSources;
+    for (const Instruction *Source : MAIRFallbackSources)
+      MAIRHandledSources.erase(Source);
+    Opt->retainAccesses(MAIRTargets);
+  }
+
   __xsan::TsanToInstrument Targets;
   if (!collectTargetsToIntrument(F, TLI, Targets))
     return false;
 
   auto &[AllLoadsAndStores, AtomicAccesses, MemIntrinCalls, HasCalls] = Targets;
 
-  bool Res = false;
-  bool SanitizeFunction = F.hasFnAttribute(Attribute::SanitizeThread);
-  const DataLayout &DL = F.getParent()->getDataLayout();
-
-  // We have collected all loads and stores.
-  // FIXME: many of these accesses do not need to be checked for races
-  // (e.g. variables that do not escape, etc).
-
-  // Instrument memory accesses only if we want to report bugs in the function.
+  // The native load/store list is fallback-only. Optimized MemoryAccess
+  // objects from MAOpt own the primary instrumentation target set.
   if (ClInstrumentMemoryAccesses && SanitizeFunction) {
-    SmallPtrSet<const Instruction *, 32> MAIRSourceInstructions;
-    for (const InstructionInfo &II : AllLoadsAndStores) {
-      Type *AccessTy = getLoadStoreType(II.Inst);
-      bool IsVolatile = isa<LoadInst>(II.Inst)
-                            ? cast<LoadInst>(II.Inst)->isVolatile()
-                            : cast<StoreInst>(II.Inst)->isVolatile();
-      if ((II.Flags & InstructionInfo::kCompoundRW) || IsVolatile ||
-          isVtableAccess(II.Inst) || AccessTy->isVectorTy() ||
-          AccessTy->isScalableTy())
-        continue;
-      MAIRSourceInstructions.insert(II.Inst);
-    }
-
-    if (!MAIRSourceInstructions.empty()) {
-      mair::MAOpt<TsanMAIRBarrierTrait> Opt(
-          F, FAM, nullptr,
-          /*KeepFullDebug=*/true,
-          mair::MAIROptimizationConfig::forThreadSanitizer());
-      Opt.build();
-      Opt.retainAccessesForInstructions(MAIRSourceInstructions);
-      if (Error Err = Opt.optimize())
-        report_fatal_error(Twine(toString(std::move(Err))));
+    if (!MAIRTargets.empty()) {
 
       class ThreadSanitizerBackend final : public mair::MAIRObservationBackend {
         XsanThreadSanitizer &TSan;
-        const SmallPtrSetImpl<const Instruction *> &Targets;
         const DataLayout &DL;
         bool Changed = false;
 
       public:
-        ThreadSanitizerBackend(
-            XsanThreadSanitizer &TSan,
-            const SmallPtrSetImpl<const Instruction *> &SourceInstructions,
-            const DataLayout &DL)
-            : TSan(TSan), Targets(SourceInstructions), DL(DL) {}
+        ThreadSanitizerBackend(XsanThreadSanitizer &TSan, const DataLayout &DL)
+            : TSan(TSan), DL(DL) {}
 
         Error prepare(const mair::MAIRMaterializationPlan &) override {
           return Error::success();
@@ -1162,20 +1215,21 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
         void emit(const mair::MaterializedObservation &Observation,
                   IRBuilderBase &Builder) override {
           for (const mair::MaterializedAccess &Access : Observation.Accesses)
-            Changed |= TSan.instrumentMAIRAccess(Access, Builder, Targets, DL);
+            Changed |= TSan.instrumentMAIRAccess(Access, Builder, DL);
         }
 
         bool changed() const { return Changed; }
-      } Backend(*this, MAIRSourceInstructions, DL);
+      } Backend(*this, DL);
 
-      Expected<mair::MAIRInstantiationResult> Result = Opt.instantiate(Backend);
+      Expected<mair::MAIRInstantiationResult> Result =
+          Opt->instantiate(Backend);
       if (!Result)
         report_fatal_error(Twine(toString(Result.takeError())));
       Res |= Backend.changed();
     }
 
     for (const auto &II : AllLoadsAndStores)
-      if (!MAIRSourceInstructions.contains(II.Inst))
+      if (!MAIRHandledSources.contains(II.Inst))
         Res |= instrumentLoadOrStore(II, DL);
   }
 

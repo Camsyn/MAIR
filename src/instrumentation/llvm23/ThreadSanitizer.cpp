@@ -196,6 +196,8 @@ struct XsanThreadSanitizer : public ThreadSanitizer {
   bool shouldSkipFunction(Function &F);
   bool sanitizeFunction(Function &F, FunctionAnalysisManager &FAM);
 #ifndef XSAN_PASS
+  bool sanitizeFunctionViaMAIR(Function &F, FunctionAnalysisManager &FAM,
+                               const TargetLibraryInfo &TLI);
   bool instrumentMAIRAccess(const mair::MaterializedAccess &Access,
                             IRBuilderBase &Builder,
                             const SmallPtrSetImpl<const Instruction *> &Targets,
@@ -1093,31 +1095,17 @@ bool XsanThreadSanitizer::instrumentMAIRAccess(
     NumInstrumentedReads++;
   return true;
 }
-#endif
 
-bool XsanThreadSanitizer::sanitizeFunction(Function &F,
-                                           FunctionAnalysisManager &FAM) {
-  const TargetLibraryInfo &TLI = FAM.getResult<TargetLibraryAnalysis>(F);
-
-#ifndef XSAN_PASS
-  if (!mair::isMAIROptEnabled())
-    return ThreadSanitizer::sanitizeFunction(F, TLI);
-#endif
+bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
+    Function &F, FunctionAnalysisManager &FAM, const TargetLibraryInfo &TLI) {
   if (shouldSkipFunction(F))
     return false;
 
   initialize(*F.getParent(), TLI);
 
   __xsan::TsanToInstrument Targets;
-#ifdef XSAN_PASS
-  // XSan applies its own target-reduction analyses before instrumentation.
-  if (!prepareTsanTargetsToInstrument(F, FAM, TLI, Targets))
-    return false;
-#else
-  // MAIR starts from the native TSan target set, then partitions it below.
   if (!collectTargetsToIntrument(F, TLI, Targets))
     return false;
-#endif
 
   auto &[AllLoadsAndStores, AtomicAccesses, MemIntrinCalls, HasCalls] = Targets;
 
@@ -1131,28 +1119,18 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
 
   // Instrument memory accesses only if we want to report bugs in the function.
   if (ClInstrumentMemoryAccesses && SanitizeFunction) {
-#ifdef XSAN_PASS
-    // XSan instruments the targets produced by prepareTsanTargetsToInstrument.
-    for (const auto &II : AllLoadsAndStores)
-      Res |= instrumentLoadOrStore(II, DL);
-#else
     SmallPtrSet<const Instruction *, 32> MAIRSourceInstructions;
-    auto CollectMAIRSourceInstructions =
-        [this](ArrayRef<InstructionInfo> Candidates,
-               SmallPtrSetImpl<const Instruction *> &SourceInstructions) {
-          for (const auto &II : Candidates) {
-            Type *AccessTy = getLoadStoreType(II.Inst);
-            bool IsVolatile = isa<LoadInst>(II.Inst)
-                                  ? cast<LoadInst>(II.Inst)->isVolatile()
-                                  : cast<StoreInst>(II.Inst)->isVolatile();
-            if ((II.Flags & InstructionInfo::kCompoundRW) || IsVolatile ||
-                isVtableAccess(II.Inst) || AccessTy->isVectorTy() ||
-                AccessTy->isScalableTy())
-              continue;
-            SourceInstructions.insert(II.Inst);
-          }
-        };
-    CollectMAIRSourceInstructions(AllLoadsAndStores, MAIRSourceInstructions);
+    for (const InstructionInfo &II : AllLoadsAndStores) {
+      Type *AccessTy = getLoadStoreType(II.Inst);
+      bool IsVolatile = isa<LoadInst>(II.Inst)
+                            ? cast<LoadInst>(II.Inst)->isVolatile()
+                            : cast<StoreInst>(II.Inst)->isVolatile();
+      if ((II.Flags & InstructionInfo::kCompoundRW) || IsVolatile ||
+          isVtableAccess(II.Inst) || AccessTy->isVectorTy() ||
+          AccessTy->isScalableTy())
+        continue;
+      MAIRSourceInstructions.insert(II.Inst);
+    }
 
     if (!MAIRSourceInstructions.empty()) {
       mair::MAOpt<TsanMAIRBarrierTrait> Opt(
@@ -1199,7 +1177,6 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
     for (const auto &II : AllLoadsAndStores)
       if (!MAIRSourceInstructions.contains(II.Inst))
         Res |= instrumentLoadOrStore(II, DL);
-#endif
   }
 
   // Instrument atomic memory accesses in any case (they can be used to
@@ -1240,6 +1217,82 @@ bool XsanThreadSanitizer::sanitizeFunction(Function &F,
     Res = true;
   }
   return Res;
+}
+#endif
+
+bool XsanThreadSanitizer::sanitizeFunction(Function &F,
+                                           FunctionAnalysisManager &FAM) {
+  const TargetLibraryInfo &TLI = FAM.getResult<TargetLibraryAnalysis>(F);
+
+#ifndef XSAN_PASS
+  if (mair::isMAIROptEnabled())
+    return sanitizeFunctionViaMAIR(F, FAM, TLI);
+  return ThreadSanitizer::sanitizeFunction(F, TLI);
+#else
+  if (shouldSkipFunction(F))
+    return false;
+
+  initialize(*F.getParent(), TLI);
+
+  __xsan::TsanToInstrument Targets;
+  if (!prepareTsanTargetsToInstrument(F, FAM, TLI, Targets))
+    return false;
+
+  auto &[AllLoadsAndStores, AtomicAccesses, MemIntrinCalls, HasCalls] = Targets;
+
+  bool Res = false;
+  bool SanitizeFunction = F.hasFnAttribute(Attribute::SanitizeThread);
+  const DataLayout &DL = F.getParent()->getDataLayout();
+
+  // We have collected all loads and stores.
+  // FIXME: many of these accesses do not need to be checked for races
+  // (e.g. variables that do not escape, etc).
+
+  // Instrument memory accesses only if we want to report bugs in the function.
+  if (ClInstrumentMemoryAccesses && SanitizeFunction) {
+    for (const auto &II : AllLoadsAndStores)
+      Res |= instrumentLoadOrStore(II, DL);
+  }
+
+  // Instrument atomic memory accesses in any case (they can be used to
+  // implement synchronization).
+  if (ClInstrumentAtomics)
+    for (auto *Inst : AtomicAccesses)
+      Res |= instrumentAtomic(Inst, DL);
+
+  /// ASan's instrumentation might replace some GlobalVariables, MemIntrinsics
+  /// and AllocInsts.
+  /// TSan does not instrument on GlobalVariables and AllocInsts, but it does
+  /// instrument on MemIntrinsics. We need to handle MemIntrinsics separately.
+  /// TODO: Use XSan's unified mem intrinsic.
+  // if (ClInstrumentMemIntrinsics && SanitizeFunction)
+  //   for (auto *Inst : MemIntrinCalls) {
+  //     Res |= instrumentMemIntrinsic(Inst);
+  //   }
+
+  if (F.hasFnAttribute("sanitize_thread_no_checking_at_run_time")) {
+    assert(!F.hasFnAttribute(Attribute::SanitizeThread));
+    if (HasCalls)
+      InsertRuntimeIgnores(F);
+  }
+
+  // Instrument function entry/exit points if there were instrumented accesses.
+  if ((Res || HasCalls) && ClInstrumentFuncEntryExit) {
+    __xsan::InstrumentationIRBuilder IRB(
+        &*F.getEntryBlock().getFirstNonPHIIt());
+    Value *ReturnAddress =
+        IRB.CreateIntrinsic(Intrinsic::returnaddress, {}, {IRB.getInt32(0)});
+    IRB.CreateCall(TsanFuncEntry, ReturnAddress);
+
+    EscapeEnumerator EE(F, "tsan_cleanup", ClHandleCxxExceptions);
+    while (IRBuilder<> *AtExit = EE.Next()) {
+      __xsan::InstrumentationIRBuilder::ensureDebugInfo(*AtExit, F);
+      AtExit->CreateCall(TsanFuncExit, {});
+    }
+    Res = true;
+  }
+  return Res;
+#endif
 }
 
 #ifndef XSAN_PASS

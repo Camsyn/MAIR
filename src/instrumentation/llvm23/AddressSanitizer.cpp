@@ -1336,6 +1336,9 @@ public:
   bool instrumentFunction(Function &F, FunctionAnalysisManager &FAM);
 
 #ifndef XSAN_PASS
+  bool instrumentFunctionViaMAIR(Function &F, FunctionAnalysisManager &FAM,
+                                 const TargetLibraryInfo *TLI,
+                                 const TargetTransformInfo *TTI);
   bool instrumentMAIRAccess(
       const mair::MaterializedAccess &Access, IRBuilderBase &Builder,
       const SmallPtrSetImpl<const Instruction *> &Targets, bool UseCalls,
@@ -4205,16 +4208,10 @@ bool XsanAddressSanitizer::instrumentMAIRAccess(
                       UseCalls, ClForceExperiment, RTCI);
   return true;
 }
-#endif
 
-bool XsanAddressSanitizer::instrumentFunction(Function &F,
-                                              FunctionAnalysisManager &FAM) {
-  const TargetLibraryInfo *TLI = &FAM.getResult<TargetLibraryAnalysis>(F);
-  const TargetTransformInfo *TTI = &FAM.getResult<TargetIRAnalysis>(F);
-#ifndef XSAN_PASS
-  if (!mair::isMAIROptEnabled())
-    return AddressSanitizer::instrumentFunction(F, TLI, TTI);
-#endif
+bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
+    Function &F, FunctionAnalysisManager &FAM, const TargetLibraryInfo *TLI,
+    const TargetTransformInfo *TTI) {
   if (shouldSkipFunction(F))
     return false;
 
@@ -4252,15 +4249,8 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
     markCatchParametersAsUninteresting(F);
 
   AsanToInstrument Targets;
-#ifdef XSAN_PASS
-  // XSan applies its own target-reduction analyses before instrumentation.
-  if (!prepareAsanTargetsToInstrument(F, FAM, TLI, TTI, Targets))
-    return false;
-#else
-  // MAIR starts from the native ASan target set, then partitions it below.
   if (!collectTargetsToIntrument(F, TLI, TTI, Targets))
     return false;
-#endif
 
   auto &[OperandsToInstrument, IntrinToInstrument, NoReturnCalls,
          PointerComparisonsOrSubtracts, IsBug11395] = Targets;
@@ -4274,42 +4264,26 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
   ObjectSizeOffsetVisitor ObjSizeVis(DL, TLI, F.getContext());
 
   int NumInstrumented = 0;
-#ifdef XSAN_PASS
-  // XSan instruments the targets produced by prepareAsanTargetsToInstrument.
-  for (auto &Operand : OperandsToInstrument) {
-    if (!suppressInstrumentationSiteForDebug(NumInstrumented))
-      instrumentMop(ObjSizeVis, Operand, UseCalls, F.getDataLayout(), RTCI);
-    FunctionModified = true;
-  }
-#else
   SmallPtrSet<const Instruction *, 32> MAIRSourceInstructions;
-  auto CollectMAIRSourceInstructions =
-      [this,
-       &ObjSizeVis](MutableArrayRef<InterestingMemoryOperand> Candidates,
-                    SmallPtrSetImpl<const Instruction *> &SourceInstructions) {
-        auto IsElidedByNativeAsanOpt = [&](InterestingMemoryOperand &Operand) {
-          Value *Addr = Operand.getPtr();
-          if (ClOpt && ClOptGlobals) {
-            GlobalVariable *G =
-                dyn_cast<GlobalVariable>(getUnderlyingObject(Addr));
-            if (G && (!ClInitializers || GlobalIsLinkerInitialized(G)) &&
-                isSafeAccess(ObjSizeVis, Addr, Operand.TypeStoreSize))
-              return true;
-          }
-          if (ClOpt && ClOptStack) {
-            if (isa<AllocaInst>(getUnderlyingObject(Addr)) &&
-                isSafeAccess(ObjSizeVis, Addr, Operand.TypeStoreSize))
-              return true;
-          }
-          return false;
-        };
-
-        for (InterestingMemoryOperand &Operand : Candidates)
-          if (canOptimizeAsanOperandWithMAIR(Operand) &&
-              !IsElidedByNativeAsanOpt(Operand))
-            SourceInstructions.insert(Operand.getInsn());
-      };
-  CollectMAIRSourceInstructions(OperandsToInstrument, MAIRSourceInstructions);
+  auto IsElidedByNativeAsanOpt = [&](InterestingMemoryOperand &Operand) {
+    Value *Addr = Operand.getPtr();
+    if (ClOpt && ClOptGlobals) {
+      GlobalVariable *G = dyn_cast<GlobalVariable>(getUnderlyingObject(Addr));
+      if (G && (!ClInitializers || GlobalIsLinkerInitialized(G)) &&
+          isSafeAccess(ObjSizeVis, Addr, Operand.TypeStoreSize))
+        return true;
+    }
+    if (ClOpt && ClOptStack) {
+      if (isa<AllocaInst>(getUnderlyingObject(Addr)) &&
+          isSafeAccess(ObjSizeVis, Addr, Operand.TypeStoreSize))
+        return true;
+    }
+    return false;
+  };
+  for (InterestingMemoryOperand &Operand : OperandsToInstrument)
+    if (canOptimizeAsanOperandWithMAIR(Operand) &&
+        !IsElidedByNativeAsanOpt(Operand))
+      MAIRSourceInstructions.insert(Operand.getInsn());
 
   if (!MAIRSourceInstructions.empty()) {
     mair::MAOpt<AsanMAIRBarrierTrait> Opt(
@@ -4365,7 +4339,100 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
       instrumentMop(ObjSizeVis, Operand, UseCalls, F.getDataLayout(), RTCI);
     FunctionModified = true;
   }
+  for (auto *Inst : IntrinToInstrument) {
+    if (!suppressInstrumentationSiteForDebug(NumInstrumented))
+      instrumentMemIntrinsic(Inst, RTCI);
+    FunctionModified = true;
+  }
+
+  FunctionStackPoisoner FSP(F, *this, RTCI);
+  bool ChangedStack = FSP.runOnFunction();
+
+  for (auto *CI : NoReturnCalls) {
+    IRBuilder<> IRB(CI);
+    RTCI.createRuntimeCall(IRB, AsanHandleNoReturnFunc, {});
+  }
+
+  for (auto *Inst : PointerComparisonsOrSubtracts) {
+    instrumentPointerComparisonOrSubtraction(Inst, RTCI);
+    FunctionModified = true;
+  }
+
+  if (ChangedStack || !NoReturnCalls.empty())
+    FunctionModified = true;
+
+  LLVM_DEBUG(dbgs() << "ASAN done instrumenting via MAIR: " << FunctionModified
+                    << " " << F << "\n");
+  return FunctionModified;
+}
 #endif
+
+bool XsanAddressSanitizer::instrumentFunction(Function &F,
+                                              FunctionAnalysisManager &FAM) {
+  const TargetLibraryInfo *TLI = &FAM.getResult<TargetLibraryAnalysis>(F);
+  const TargetTransformInfo *TTI = &FAM.getResult<TargetIRAnalysis>(F);
+#ifndef XSAN_PASS
+  if (mair::isMAIROptEnabled())
+    return instrumentFunctionViaMAIR(F, FAM, TLI, TTI);
+  return AddressSanitizer::instrumentFunction(F, TLI, TTI);
+#else
+  if (shouldSkipFunction(F))
+    return false;
+
+  bool FunctionModified = false;
+
+  // Do not apply any instrumentation for naked functions.
+  if (F.hasFnAttribute(Attribute::Naked))
+    return FunctionModified;
+
+  // If needed, insert __asan_init before checking for SanitizeAddress attr.
+  // This function needs to be called even if the function body is not
+  // instrumented.
+  if (maybeInsertAsanInitAtFunctionEntry(F))
+    FunctionModified = true;
+
+  // Leave if the function doesn't need instrumentation.
+  if (!F.hasFnAttribute(Attribute::SanitizeAddress))
+    return FunctionModified;
+
+  if (F.hasFnAttribute(Attribute::DisableSanitizerInstrumentation))
+    return FunctionModified;
+
+  LLVM_DEBUG(dbgs() << "ASAN instrumenting:\n" << F << "\n");
+
+  initializeCallbacks(TLI);
+
+  FunctionStateRAII CleanupObj(this);
+
+  RuntimeCallInserter RTCI(F);
+
+  FunctionModified |= maybeInsertDynamicShadowAtFunctionEntry(F);
+  markEscapedLocalAllocas(F);
+
+  if (TargetTriple.isOSWindows())
+    markCatchParametersAsUninteresting(F);
+
+  AsanToInstrument Targets;
+  if (!prepareAsanTargetsToInstrument(F, FAM, TLI, TTI, Targets))
+    return false;
+
+  auto &[OperandsToInstrument, IntrinToInstrument, NoReturnCalls,
+         PointerComparisonsOrSubtracts, IsBug11395] = Targets;
+  if (IsBug11395)
+    return false;
+
+  bool UseCalls = (InstrumentationWithCallsThreshold >= 0 &&
+                   OperandsToInstrument.size() + IntrinToInstrument.size() >
+                       (unsigned)InstrumentationWithCallsThreshold);
+  const DataLayout &DL = F.getDataLayout();
+  ObjectSizeOffsetVisitor ObjSizeVis(DL, TLI, F.getContext());
+
+  int NumInstrumented = 0;
+  for (auto &Operand : OperandsToInstrument) {
+    if (!suppressInstrumentationSiteForDebug(NumInstrumented))
+      instrumentMop(ObjSizeVis, Operand, UseCalls, F.getDataLayout(), RTCI);
+    FunctionModified = true;
+  }
   for (auto *Inst : IntrinToInstrument) {
     if (!suppressInstrumentationSiteForDebug(NumInstrumented))
       instrumentMemIntrinsic(Inst, RTCI);
@@ -4391,6 +4458,7 @@ bool XsanAddressSanitizer::instrumentFunction(Function &F,
   LLVM_DEBUG(dbgs() << "ASAN done instrumenting: " << FunctionModified << " "
                     << F << "\n");
   return FunctionModified;
+#endif
 }
 
 } // namespace

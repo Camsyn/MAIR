@@ -4270,16 +4270,21 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
       mair::MAIROptimizationConfig::forAddressSanitizer());
   Opt.build();
 
-  // Reads disabled by -asan-instrument-reads are not sanitizer observations.
-  // Drop them before optimization so they cannot cover a later write and then
-  // disappear, taking that write check with them.
-  if (!ClInstrumentReads) {
+  // Reads or writes disabled by the instrumentation flags are not sanitizer
+  // observations. Drop them before optimization so a disabled access cannot
+  // cover a later one and then disappear, taking that check with it.
+  if (!ClInstrumentReads || !ClInstrumentWrites) {
     SmallPtrSet<const mair::MemoryAccess *, 32> Kept;
     for (const auto &[Observation, Accesses] : Opt.getObservationMAs()) {
       (void)Observation;
-      for (const mair::MemoryAccess *Access : Accesses)
-        if (Access->getKind() != mair::AccessKind::Read)
-          Kept.insert(Access);
+      for (const mair::MemoryAccess *Access : Accesses) {
+        mair::AccessKind Kind = Access->getKind();
+        if (!ClInstrumentReads && Kind == mair::AccessKind::Read)
+          continue;
+        if (!ClInstrumentWrites && Kind == mair::AccessKind::Write)
+          continue;
+        Kept.insert(Access);
+      }
     }
     Opt.retainAccesses(Kept);
   }

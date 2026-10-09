@@ -190,6 +190,7 @@ private:
   FunctionCallee TsanVptrUpdate;
   FunctionCallee TsanVptrLoad;
   FunctionCallee MemmoveFn, MemcpyFn, MemsetFn;
+  FunctionCallee TsanReadRange, TsanWriteRange;
 };
 
 struct XsanThreadSanitizer : public ThreadSanitizer {
@@ -419,6 +420,10 @@ void ThreadSanitizer::initialize(Module &M, const TargetLibraryInfo &TLI) {
       "__tsan_memset",
       TLI.getAttrList(&Ctx, {1}, /*Signed=*/true, /*Ret=*/false, Attr),
       IRB.getPtrTy(), IRB.getPtrTy(), IRB.getInt32Ty(), IntptrTy);
+  TsanReadRange = M.getOrInsertFunction(
+      "__tsan_read_range", Attr, IRB.getVoidTy(), IRB.getPtrTy(), IntptrTy);
+  TsanWriteRange = M.getOrInsertFunction(
+      "__tsan_write_range", Attr, IRB.getVoidTy(), IRB.getPtrTy(), IntptrTy);
 }
 
 static bool isVtableAccess(Instruction *I) {
@@ -1036,6 +1041,25 @@ bool XsanThreadSanitizer::instrumentMAIRAccess(
   };
 
   Instruction *Source = SelectedSources.front();
+  if (isa<AnyMemIntrinsic>(Source)) {
+    if (!Access.Address || !Access.AccessSize)
+      return false;
+    __xsan::InstrumentationIRBuilder IRB(Builder);
+    Value *Size = Access.AccessSize;
+    if (Size->getType() != IntptrTy)
+      Size = IRB.CreateIntCast(Size, IntptrTy, /*isSigned=*/false);
+    const bool IsWrite = Access.Kind != mair::AccessKind::Read;
+    IRB.CreateCall(IsWrite ? TsanWriteRange : TsanReadRange,
+                   {Access.Address, Size});
+    if (Access.Kind == mair::AccessKind::ReadWrite)
+      IRB.CreateCall(TsanReadRange, {Access.Address, Size});
+    if (IsWrite)
+      NumInstrumentedWrites++;
+    if (Access.Kind != mair::AccessKind::Write)
+      NumInstrumentedReads++;
+    return true;
+  }
+
   Type *SourceType =
       isa<LoadInst>(Source)
           ? cast<LoadInst>(Source)->getType()
@@ -1137,11 +1161,32 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
 
     auto CanInstrumentViaMAIR = [&](const mair::MemoryAccess &Access) {
       if (!Access.isContiguous() || Access.isVolatile() || Access.isAtomic() ||
-          Access.isCallLike() || Access.getInstructions().size() != 1 ||
-          !Access.hasConcreteRange())
+          Access.getInstructions().size() != 1)
         return false;
 
       Instruction *Source = Access.getInstructions().front();
+      // memcpy and memmove are one range read plus one range write. memset is
+      // one range write. MAIR already creates those accesses, and the length
+      // may be symbolic.
+      const bool IsRangeIntrinsic = isa<AnyMemIntrinsic>(Source);
+      if ((Access.isCallLike() && !IsRangeIntrinsic) ||
+          (!IsRangeIntrinsic && !Access.hasConcreteRange()))
+        return false;
+      if (IsRangeIntrinsic) {
+        Value *Addr = nullptr;
+        if (auto *Transfer = dyn_cast<AnyMemTransferInst>(Source))
+          Addr = Access.getKind() == mair::AccessKind::Read
+                     ? Transfer->getRawSource()
+                     : Transfer->getRawDest();
+        else
+          Addr = cast<AnyMemSetInst>(Source)->getRawDest();
+        if (!shouldInstrumentReadWriteFromAddress(Source->getModule(), Addr))
+          return false;
+        const AllocaInst *AI = findAllocaForValue(Addr);
+        return !AI || !ClOmitNonCaptured ||
+               PointerMayBeCaptured(AI, /*ReturnCaptures=*/true);
+      }
+
       auto *LI = dyn_cast<LoadInst>(Source);
       auto *SI = dyn_cast<StoreInst>(Source);
       if ((!LI && !SI) || __xsan::DelegateToXSan::is(*Source) ||
@@ -1243,11 +1288,9 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
   /// and AllocInsts.
   /// TSan does not instrument on GlobalVariables and AllocInsts, but it does
   /// instrument on MemIntrinsics. We need to handle MemIntrinsics separately.
-  /// TODO: Use XSan's unified mem intrinsic.
-  // if (ClInstrumentMemIntrinsics && SanitizeFunction)
-  //   for (auto *Inst : MemIntrinCalls) {
-  //     Res |= instrumentMemIntrinsic(Inst);
-  //   }
+  // memcpy, memmove, and memset are emitted above as
+  // __tsan_read_range and __tsan_write_range. Leave the intrinsic in place.
+  (void)MemIntrinCalls;
 
   if (F.hasFnAttribute("sanitize_thread_no_checking_at_run_time")) {
     assert(!F.hasFnAttribute(Attribute::SanitizeThread));

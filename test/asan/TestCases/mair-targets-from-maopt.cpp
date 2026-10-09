@@ -8,3 +8,13 @@ int load_two_addresses(int *p, int *q) { return *p + *q; }
 
 // NO-READ-LABEL: define {{.*}} @_Z18load_two_addressesPiS_
 // NO-READ-NOT: call void @__asan_report_load4
+
+void read_then_write(int *p) { *p = *p + 1; }
+
+// CHECK-LABEL: define {{.*}} @_Z15read_then_writePi
+// CHECK: call void @__asan_report_load4
+// CHECK: call void @__asan_report_store4
+
+// NO-READ-LABEL: define {{.*}} @_Z15read_then_writePi
+// NO-READ: call void @__asan_report_store4
+// NO-READ-NOT: call void @__asan_report_load4

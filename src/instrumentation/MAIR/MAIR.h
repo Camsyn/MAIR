@@ -876,6 +876,7 @@ public:
            "MAIRGraph was constructed without a post-dominator tree");
     return *Analyses.PDT;
   }
+  bool hasLoopInfo() const { return Analyses.LI != nullptr; }
   const LoopInfo &getLoopInfo() const {
     assertLive("query loop analysis");
     assert(Analyses.LI && "MAIRGraph was constructed without loop information");

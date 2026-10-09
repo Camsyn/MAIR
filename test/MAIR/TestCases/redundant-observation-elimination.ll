@@ -130,7 +130,7 @@ exit:
 define void @cross_bb_loop_postdom(ptr %p, i1 %stop) {
 ; CHECK-LABEL: mair graph of fn @cross_bb_loop_postdom {
 ; CHECK:       ma5: preds=
-; CHECK-NOT:     read ptr %p, 4
+; CHECK-NEXT:    read ptr %p, 4
 ; CHECK:       ma8: preds=
 ; CHECK-NEXT:    read ptr %p, 8
 entry:
@@ -204,4 +204,54 @@ entry:
 dead:
   %narrow = load i32, ptr %p, align 4
   ret void
+}
+
+define i32 @loop_pointer_conditional(ptr %base, i64 %n) {
+; CHECK-LABEL: mair graph of fn @loop_pointer_conditional {
+; CHECK:       ma5:
+; CHECK-NEXT:    read ptr %base + %p, 4
+; CHECK:       ma10:
+; CHECK-NEXT:    read ptr %base + %p, 4
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %next, %latch ]
+  %sum = phi i32 [ 0, %entry ], [ %next.sum, %latch ]
+  %p = getelementptr i32, ptr %base, i64 %i
+  %selected = icmp eq i64 %i, 0
+  br i1 %selected, label %body, label %latch
+body:
+  %v = load i32, ptr %p, align 4
+  %added = add i32 %sum, %v
+  br label %latch
+latch:
+  %next.sum = phi i32 [ %sum, %loop ], [ %added, %body ]
+  %next = add i64 %i, 1
+  %more = icmp ult i64 %next, %n
+  br i1 %more, label %loop, label %exit
+exit:
+  %last = load i32, ptr %p, align 4
+  %result = add i32 %last, %next.sum
+  ret i32 %result
+}
+
+define i32 @same_loop_repeated_read(ptr %base, i64 %n) {
+; CHECK-LABEL: mair graph of fn @same_loop_repeated_read {
+; CHECK:       ma3: preds=
+; CHECK-NOT:     read ptr %base + %p, 4
+; CHECK:       ma4: preds=
+; CHECK-NEXT:    read ptr %base + %p, 4
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [ 0, %entry ], [ %next, %loop ]
+  %p = getelementptr i32, ptr %base, i64 %i
+  %first = load i32, ptr %p, align 4
+  %second = load i32, ptr %p, align 4
+  %sum = add i32 %first, %second
+  %next = add i64 %i, 1
+  %more = icmp ult i64 %next, %n
+  br i1 %more, label %loop, label %exit
+exit:
+  ret i32 %sum
 }

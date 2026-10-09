@@ -33,6 +33,39 @@ struct PendingFact {
   const MemoryAccess *Source = nullptr;
 };
 
+// PostDom coverage compares two uses of a value that dominates both. The
+// value can denote different addresses when its definition and the earlier
+// use are in one loop and the later use is outside that loop:
+//
+//   loop:
+//     %p = getelementptr i32, ptr %base, i64 %i
+//     %v = load i32, ptr %p        ; iteration 0 reads base[0]
+//   exit:
+//     %last = load i32, ptr %p     ; reads base[n-1]
+//
+// A PostDom edge may connect those observations. They are redundant only when
+// both are in the same loop. Two blocks outside every loop also match.
+bool sameLoopForPostDom(const Observation &From, const Observation &To,
+                        const llvm::LoopInfo &LI) {
+  const BasicBlock *FromBB = From.getBasicBlock();
+  const BasicBlock *ToBB = To.getBasicBlock();
+  if (!FromBB || !ToBB)
+    return false;
+  return LI.getLoopFor(FromBB) == LI.getLoopFor(ToBB);
+}
+
+bool canPropagate(const MAIRGraph &G, const Observation &From,
+                  const ObservationEdge &Edge) {
+  if (!G.getOptimizationConfig().allowsCoverageAlong(Edge.getKind()))
+    return false;
+  // Some unit-test graphs are built without analyses. A graph that has no
+  // LoopInfo keeps the previous coverage rule.
+  if (Edge.getKind() == ObsEdgeKind::PostDom && G.hasLoopInfo() &&
+      !sameLoopForPostDom(From, Edge.getNode(), G.getLoopInfo()))
+    return false;
+  return true;
+}
+
 } // namespace
 
 RedundantObservationInfo
@@ -48,7 +81,7 @@ RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
       // A local access becomes available only after its observation, so seed
       // it at each allowed child rather than in the source observation's IN.
       for (const ObservationEdge &Edge : Obs.children())
-        if (G.getOptimizationConfig().allowsCoverageAlong(Edge.getKind()))
+        if (canPropagate(G, Obs, Edge))
           Worklist.push_back({&Edge.getNode(), &Access});
     }
   }
@@ -65,7 +98,7 @@ RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
     // Edge kinds are filtered at every hop because sanitizer configurations
     // may allow Dom coverage while rejecting PostDom coverage.
     for (const ObservationEdge &Edge : Fact.Destination->children())
-      if (G.getOptimizationConfig().allowsCoverageAlong(Edge.getKind()))
+      if (canPropagate(G, *Fact.Destination, Edge))
         Worklist.push_back({&Edge.getNode(), Fact.Source});
   }
 

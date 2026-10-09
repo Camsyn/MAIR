@@ -46,6 +46,9 @@ MergeCandidate findMergeCandidate(MAIRGraph &G) {
       if (O1Block != O2Block) {
         assert(O1Block && O2Block &&
                "compatible observations must use the same site category");
+        // Same constraint as PostDom redundancy: a loop-carried pointer can
+        // take a new address on the exit, as in `load %p` inside the loop
+        // and `load %p` after it. Do not merge those observations.
         const LoopInfo &Loops = G.getLoopInfo();
         if (Loops.getLoopFor(O1Block) != Loops.getLoopFor(O2Block))
           continue;

@@ -1087,6 +1087,10 @@ bool XsanThreadSanitizer::instrumentMAIRAccess(
   if (Access.Address->isSwiftError())
     return false;
   int Idx = getMemoryAccessFuncIndex(SourceType, Access.Address, DL);
+  // TODO: TSan MAIR lowering does not yet support a nonstandard width, such
+  // as an i24 store. Returning here drops that access. If an earlier pass used
+  // it to cover a smaller standard access, that smaller access is not
+  // instrumented either.
   if (Idx < 0)
     return false;
 

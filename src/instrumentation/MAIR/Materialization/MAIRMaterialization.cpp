@@ -300,6 +300,22 @@ Value *lowerContiguous(const AbstractAccess &Region, IRBuilder<> &Builder) {
                            "mair.access.gep");
 }
 
+// A basic block has no internal control flow. If every provenance instruction
+// is in the insertion block, that block's execution is exactly the guard, so
+// the branch would be constant true and should not be created.
+bool provenanceExecutesWithTarget(const ObservationGuard &Guard,
+                                  const BasicBlock *Target) {
+  const auto *Executed = std::get_if<AnyProvenanceExecutedGuard>(&Guard);
+  if (!Executed || !Target)
+    return false;
+  ArrayRef<Instruction *> Provenance = Executed->getProvenance();
+  if (Provenance.empty())
+    return false;
+  return llvm::all_of(Provenance, [&](const Instruction *I) {
+    return I && I->getParent() == Target;
+  });
+}
+
 Value *materializeGuard(const ObservationGuard &ObservationGuard,
                         BasicBlock *Target, Function &F) {
   SmallVector<PHINode *, 8> InsertedPhis;
@@ -395,7 +411,8 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
     IRBuilder<> *BuilderPtr = &UnguardedBuilder;
     std::optional<IRBuilder<>> GuardBuilder;
     bool IsGuarded =
-        std::holds_alternative<AnyProvenanceExecutedGuard>(Unit.Guard);
+        std::holds_alternative<AnyProvenanceExecutedGuard>(Unit.Guard) &&
+        !provenanceExecutesWithTarget(Unit.Guard, Cursor->getParent());
     if (IsGuarded) {
       Value *Guard = materializeGuard(Unit.Guard, Cursor->getParent(), F);
       Instruction *ThenTerminator = SplitBlockAndInsertIfThen(

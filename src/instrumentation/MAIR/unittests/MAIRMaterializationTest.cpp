@@ -586,12 +586,15 @@ entry:
   }
 
   EXPECT_EQ(Result->SplitEdges, 0u);
-  EXPECT_EQ(Result->GuardBranches, 1u);
+  EXPECT_EQ(Result->GuardBranches, 0u);
   EXPECT_EQ(Result->LoweredObservations, 2u);
-  EXPECT_TRUE(Result->CFGChanged);
+  EXPECT_FALSE(Result->CFGChanged);
   EXPECT_EQ(Backend.EmittedObservations, 2u);
   EXPECT_TRUE(Graph.isConsumed());
   EXPECT_FALSE(verifyModule(*M, &errs()));
+  std::string Text = printModule(*M);
+  EXPECT_EQ(Text.find("br i1"), std::string::npos);
+  EXPECT_EQ(Text.find("poison"), std::string::npos);
 }
 
 TEST(MAIRMaterialization, InvalidatesFunctionAnalysesAndIsSingleUse) {

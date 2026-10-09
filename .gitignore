@@ -28,3 +28,4 @@ build*/
 
 # lit outputs
 test/**/Output/
+test-e2e/re2/build

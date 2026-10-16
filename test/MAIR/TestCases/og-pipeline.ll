@@ -9,9 +9,9 @@
 
 define void @og_keeps_branch_accesses(ptr %p, ptr %q, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @og_keeps_branch_accesses {
-; CHECK:       read ptr %p, 4
-; CHECK:       read ptr %q, 4
-; CHECK:       read ptr %p, 4
+; CHECK:       o: read ptr %p, 4
+; CHECK:       o: read ptr %q, 4
+; CHECK:       o: read ptr %p, 4
 entry:
   br i1 %cond, label %left, label %right
 
@@ -27,8 +27,8 @@ right:
 
 define void @og_preserves_precise_locations(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @og_preserves_precise_locations {
-; CHECK:       read ptr %p, 4
-; CHECK:       write ptr %p + 4, 4
+; CHECK:       o: read ptr %p, 4
+; CHECK:       o: write ptr %p + 4, 4
 entry:
   %v = load i32, ptr %p, align 4
   %p4 = getelementptr i8, ptr %p, i64 4
@@ -39,9 +39,9 @@ entry:
 define void @og_includes_provenance_preserving_loop_transforms(ptr %p,
                                                                 i32 %n) {
 ; CHECK-LABEL: mair graph of fn @og_includes_provenance_preserving_loop_transforms {
-; CHECK:       be1: preds=
-; CHECK-NEXT:    read ptr %p, 4
-; CHECK:       ma4: preds=
+; CHECK:       pp1: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK:       pp4: preds=
 ; CHECK-EMPTY:
 entry:
   br label %header
@@ -63,8 +63,8 @@ exit:
 
 define void @og_includes_periodic_combine(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @og_includes_periodic_combine {
-; CHECK:       bs6: preds=
-; CHECK-NEXT:    read ptr %p, 4
+; CHECK:       pp6: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br label %header
 

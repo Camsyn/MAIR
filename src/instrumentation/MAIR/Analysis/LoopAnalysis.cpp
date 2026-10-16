@@ -18,15 +18,15 @@ MAIRLoopInfo::MAIRLoopInfo(MAIRGraph &G, FunctionAnalysisManager &Manager)
   DT = &G.getDominatorTree();
 }
 
-Loop *MAIRLoopInfo::getLoopFor(const Observation &Obs) const {
+Loop *MAIRLoopInfo::getLoopFor(const ProgramPoint &PP) const {
   if (!isAvailable())
     return nullptr;
-  const BasicBlock *BB = Obs.getBasicBlock();
+  const BasicBlock *BB = PP.getBasicBlock();
   return BB ? LI->getLoopFor(BB) : nullptr;
 }
 
 bool MAIRLoopInfo::isValueAvailableAt(const Value &V,
-                                      const ObservationSite &Site) const {
+                                      const ProgramPointSite &Site) const {
   if (!isAvailable())
     return false;
 
@@ -38,20 +38,21 @@ bool MAIRLoopInfo::isValueAvailableAt(const Value &V,
   return Def && DT->dominates(Def, &Anchor);
 }
 
-bool MAIRLoopInfo::executesOncePerRelevantIteration(const Observation &Obs,
+bool MAIRLoopInfo::executesOncePerRelevantIteration(const ProgramPoint &PP,
                                                     const Loop &L) const {
-  if (!isAvailable() || !Obs.hasAlwaysGuard() || !Obs.getSite().isAnchored())
+  if (!isAvailable() || !PP.hasAlwaysGuard() || !PP.getSite().isAnchored())
     return false;
 
-  // An internal irreducible cycle can revisit a dominated event more than
-  // once during one natural-loop iteration. This check belongs to execution
-  // counting; barrier legality is represented separately by MAIRGraph edges.
+  // An internal irreducible cycle can revisit a dominated program point more
+  // than once during one natural-loop iteration. This check belongs to
+  // execution counting; barrier legality is represented separately by graph
+  // edges.
   LoopBlocksRPO RPOT(const_cast<Loop *>(&L));
   RPOT.perform(LI);
   if (containsIrreducibleCFG<const BasicBlock *>(RPOT, *LI))
     return false;
 
-  const BasicBlock *SiteBlock = Obs.getBasicBlock();
+  const BasicBlock *SiteBlock = PP.getBasicBlock();
   BasicBlock *Latch = L.getLoopLatch();
   if (!SiteBlock || !Latch || LI->getLoopFor(SiteBlock) != &L)
     return false;
@@ -59,9 +60,9 @@ bool MAIRLoopInfo::executesOncePerRelevantIteration(const Observation &Obs,
   return DT->dominates(SiteBlock, Latch);
 }
 
-const SCEV *MAIRLoopInfo::getExactExecutionCountSCEV(const Observation &Obs,
+const SCEV *MAIRLoopInfo::getExactExecutionCountSCEV(const ProgramPoint &PP,
                                                      const Loop &L) const {
-  if (!executesOncePerRelevantIteration(Obs, L))
+  if (!executesOncePerRelevantIteration(PP, L))
     return nullptr;
 
   const SCEV *BackedgeTakenCount = getSE().getBackedgeTakenCount(&L);
@@ -76,7 +77,7 @@ const SCEV *MAIRLoopInfo::getExactExecutionCountSCEV(const Observation &Obs,
   const SCEV *Count = getSE().getZeroExtendExpr(BackedgeTakenCount, WideType);
 
   BasicBlock *Exiting = L.getExitingBlock();
-  const BasicBlock *SiteBlock = Obs.getBasicBlock();
+  const BasicBlock *SiteBlock = PP.getBasicBlock();
   if (!Exiting || !SiteBlock)
     return nullptr;
   if (DT->dominates(SiteBlock, Exiting))
@@ -97,29 +98,29 @@ bool MAIRLoopInfo::isLoopInvariant(const AbstractValue &Value,
   return false;
 }
 
-bool MAIRLoopInfo::isLoopInvariant(const MemoryAccess &Access,
+bool MAIRLoopInfo::isLoopInvariant(const Observation &Obs,
                                    const Loop &L) const {
-  const AbstractAccess *Loc = Access.getContiguousRegion();
+  const AbstractAccess *Loc = Obs.getContiguousRegion();
   return Loc && isLoopInvariant(Loc->getBase(), L) &&
          isLoopInvariant(Loc->getOffset(), L) &&
          isLoopInvariant(Loc->getSize(), L);
 }
 
-Loop *MAIRLoopInfo::getTopInvariantLoop(const MemoryAccess &Access,
+Loop *MAIRLoopInfo::getTopInvariantLoop(const Observation &Obs,
                                         Loop &Start) const {
-  if (!isLoopInvariant(Access, Start))
+  if (!isLoopInvariant(Obs, Start))
     return nullptr;
 
   Loop *Top = &Start;
   while (Loop *Parent = Top->getParentLoop()) {
-    if (!isLoopInvariant(Access, *Parent))
+    if (!isLoopInvariant(Obs, *Parent))
       break;
     Top = Parent;
   }
   return Top;
 }
 
-Observation *MAIRLoopInfo::getPreheaderExit(const Loop &L) const {
+ProgramPoint *MAIRLoopInfo::getPreheaderExit(const Loop &L) const {
   if (!Graph)
     return nullptr;
   BasicBlock *Preheader = L.getLoopPreheader();
@@ -135,7 +136,7 @@ MAIRLoopInfo::describeUniqueExit(const Loop &L) const {
   return MAIRLoopExit{Exiting, Exit, Exit->getUniquePredecessor() == Exiting};
 }
 
-Observation *MAIRLoopInfo::getUniqueExitEntry(const Loop &L) const {
+ProgramPoint *MAIRLoopInfo::getUniqueExitEntry(const Loop &L) const {
   if (!Graph)
     return nullptr;
   BasicBlock *Exit = L.getUniqueExitBlock();

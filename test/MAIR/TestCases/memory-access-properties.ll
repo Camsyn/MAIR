@@ -28,24 +28,24 @@ entry:
 }
 
 ; CHECK-LABEL: mair graph of fn @properties {
-; CHECK: ma1:
-; CHECK-NEXT:   read volatile ptr %p, 4
-; CHECK: ma2:
-; CHECK-NEXT:   read atomic ptr %p, 4
-; CHECK: ma3:
-; CHECK-NEXT:   read/write atomic ptr %p, 4
-; CHECK: ma4:
-; CHECK-NEXT:   read/write atomic ptr %p, 4
-; CHECK: ma5:
-; CHECK-NEXT:   write call ptr %p, %size
-; CHECK: ma6:
-; CHECK-NEXT:   write volatile call ptr %p, %size
-; CHECK-NEXT:   read volatile call ptr %q, %size
-; CHECK: ma7:
-; CHECK-DAG:    read call ptr %p, %size
-; CHECK-DAG:    write call ptr %q, %size
-; CHECK: ma8:
-; CHECK-NEXT:   write atomic call ptr %p, %size
-; CHECK-NEXT:   read atomic call ptr %q, %size
-; CHECK: read masked ptr %p, 16
-; CHECK: write masked ptr %q, 16
+; CHECK: pp1:
+; CHECK-NEXT:   o: read volatile ptr %p, 4
+; CHECK: pp2:
+; CHECK-NEXT:   o: read atomic ptr %p, 4
+; CHECK: pp3:
+; CHECK-NEXT:   o: read/write atomic ptr %p, 4
+; CHECK: pp4:
+; CHECK-NEXT:   o: read/write atomic ptr %p, 4
+; CHECK: pp5:
+; CHECK-NEXT:   o: write call ptr %p, %size
+; CHECK: pp6:
+; CHECK-NEXT:   o: write volatile call ptr %p, %size
+; CHECK-NEXT:   o: read volatile call ptr %q, %size
+; CHECK: pp7:
+; CHECK-DAG:    o: read call ptr %p, %size
+; CHECK-DAG:    o: write call ptr %q, %size
+; CHECK: pp8:
+; CHECK-NEXT:   o: write atomic call ptr %p, %size
+; CHECK-NEXT:   o: read atomic call ptr %q, %size
+; CHECK: o: read masked ptr %p, 16
+; CHECK: o: write masked ptr %q, 16

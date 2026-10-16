@@ -9,11 +9,11 @@
 
 define void @o1_common_before_location_merge(ptr %p, ptr %q, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @o1_common_before_location_merge {
-; CHECK:       ma4: preds=
-; CHECK-NEXT:    read ptr %p, 4
-; CHECK-NEXT:    read ptr %q, 4
-; CHECK:       ma8: preds=
-; CHECK-NEXT:    read ptr %p, 8
+; CHECK:       pp4: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK-NEXT:    o: read ptr %q, 4
+; CHECK:       pp8: preds=
+; CHECK-NEXT:    o: read ptr %p, 8
 entry:
   br i1 %cond, label %left, label %right
 
@@ -31,10 +31,10 @@ right:
 
 define void @o1_location_merge_after_motion(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @o1_location_merge_after_motion {
-; CHECK:       ma3: preds=
-; CHECK-NEXT:    read ptr %p, 4
-; CHECK-NEXT:    write ptr %p + 4, 4
-; CHECK-NEXT:    read ptr %p + 8, 4
+; CHECK:       pp3: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK-NEXT:    o: write ptr %p + 4, 4
+; CHECK-NEXT:    o: read ptr %p + 8, 4
 entry:
   %p8 = getelementptr i8, ptr %p, i64 8
   %v8 = load i32, ptr %p8, align 4
@@ -46,10 +46,10 @@ entry:
 
 define void @o1_loop_periodic_combine(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @o1_loop_periodic_combine {
-; CHECK:       ma3: preds=
+; CHECK:       pp3: preds=
 ; CHECK-EMPTY:
-; CHECK:       bs5: preds=
-; CHECK-NEXT:    read ptr %p, 4
+; CHECK:       pp5: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br label %header
 
@@ -67,9 +67,9 @@ exit:
 
 define void @o1_loop_invariant_motion(ptr %p, i32 %n) {
 ; CHECK-LABEL: mair graph of fn @o1_loop_invariant_motion {
-; CHECK:       be1: preds=
-; CHECK-NEXT:    read ptr %p, 4
-; CHECK:       ma3: preds=
+; CHECK:       pp1: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK:       pp3: preds=
 ; CHECK-EMPTY:
 entry:
   br label %header
@@ -90,10 +90,10 @@ exit:
 
 define void @o1_redundant_cross_bb(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @o1_redundant_cross_bb {
-; CHECK:       ma1: preds=
-; CHECK-NEXT:    read ptr %p, 8
-; CHECK:       ma6: preds=
-; CHECK-NOT:     read ptr %p, 4
+; CHECK:       pp1: preds=
+; CHECK-NEXT:    o: read ptr %p, 8
+; CHECK:       pp6: preds=
+; CHECK-NOT:     o: read ptr %p, 4
 entry:
   %wide = load i64, ptr %p, align 8
   br label %empty

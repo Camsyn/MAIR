@@ -8,29 +8,29 @@ namespace mair {
 
 AnalysisKey RedundantObservationAnalysis::Key;
 
-bool AvailableAccessSet::insert(const MemoryAccess &Access) {
-  return Sources.insert(&Access);
+bool AvailableObservationSet::insert(const Observation &Obs) {
+  return Sources.insert(&Obs);
 }
 
-bool AvailableAccessSet::covers(
-    const MemoryAccess &Access,
-    const DenseSet<const MemoryAccess *> &ExcludedSources) const {
-  return llvm::any_of(Sources, [&](const MemoryAccess *Source) {
+bool AvailableObservationSet::covers(
+    const Observation &Obs,
+    const DenseSet<const Observation *> &ExcludedSources) const {
+  return llvm::any_of(Sources, [&](const Observation *Source) {
     return !ExcludedSources.contains(Source) &&
-           Source->getParent() != Access.getParent() && Source->covers(Access);
+           Source->getParent() != Obs.getParent() && Source->covers(Obs);
   });
 }
 
-const AvailableAccessSet &
-RedundantObservationInfo::getIn(const Observation &Obs) const {
-  return InSets.find(&Obs)->second;
+const AvailableObservationSet &
+RedundantObservationInfo::getIn(const ProgramPoint &PP) const {
+  return InSets.find(&PP)->second;
 }
 
 namespace {
 
 struct PendingFact {
-  const Observation *Destination = nullptr;
-  const MemoryAccess *Source = nullptr;
+  const ProgramPoint *Destination = nullptr;
+  const Observation *Source = nullptr;
 };
 
 // PostDom coverage compares two uses of a value that dominates both. The
@@ -43,9 +43,10 @@ struct PendingFact {
 //   exit:
 //     %last = load i32, ptr %p     ; reads base[n-1]
 //
-// A PostDom edge may connect those observations. They are redundant only when
-// both are in the same loop. Two blocks outside every loop also match.
-bool sameLoopForPostDom(const Observation &From, const Observation &To,
+// A PostDom edge may connect their program points. The observations are
+// redundant only when both points are in the same loop. Two blocks outside
+// every loop also match.
+bool sameLoopForPostDom(const ProgramPoint &From, const ProgramPoint &To,
                         const llvm::LoopInfo &LI) {
   const BasicBlock *FromBB = From.getBasicBlock();
   const BasicBlock *ToBB = To.getBasicBlock();
@@ -54,13 +55,13 @@ bool sameLoopForPostDom(const Observation &From, const Observation &To,
   return LI.getLoopFor(FromBB) == LI.getLoopFor(ToBB);
 }
 
-bool canPropagate(const MAIRGraph &G, const Observation &From,
-                  const ObservationEdge &Edge) {
+bool canPropagate(const MAIRGraph &G, const ProgramPoint &From,
+                  const ProgramPointEdge &Edge) {
   if (!G.getOptimizationConfig().allowsCoverageAlong(Edge.getKind()))
     return false;
   // Some unit-test graphs are built without analyses. A graph that has no
   // LoopInfo keeps the previous coverage rule.
-  if (Edge.getKind() == ObsEdgeKind::PostDom && G.hasLoopInfo() &&
+  if (Edge.getKind() == PPEdgeKind::PostDom && G.hasLoopInfo() &&
       !sameLoopForPostDom(From, Edge.getNode(), G.getLoopInfo()))
     return false;
   return true;
@@ -73,31 +74,31 @@ RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
   (void)AM;
   RedundantObservationInfo Result;
   SmallVector<PendingFact, 32> Worklist;
-  for (const Observation &Obs : G) {
-    Result.InSets.try_emplace(&Obs);
-    for (const MemoryAccess &Access : Obs) {
-      if (!Access.isDeletable())
+  for (const ProgramPoint &PP : G) {
+    Result.InSets.try_emplace(&PP);
+    for (const Observation &Obs : PP) {
+      if (!Obs.isDeletable())
         continue;
-      // A local access becomes available only after its observation, so seed
-      // it at each allowed child rather than in the source observation's IN.
-      for (const ObservationEdge &Edge : Obs.children())
-        if (canPropagate(G, Obs, Edge))
-          Worklist.push_back({&Edge.getNode(), &Access});
+      // A local observation becomes available only after its program point,
+      // so seed it at each allowed child rather than in the source point's IN.
+      for (const ProgramPointEdge &Edge : PP.children())
+        if (canPropagate(G, PP, Edge))
+          Worklist.push_back({&Edge.getNode(), &Obs});
     }
   }
 
-  // Propagate only the newly discovered (observation, access) fact. The set
-  // insertion is both the visited check and the fixed-point condition: cycles
-  // terminate because an identical fact is never forwarded twice.
+  // Propagate only the newly discovered (program point, observation) fact.
+  // Set insertion is both the visited check and the fixed-point condition:
+  // cycles terminate because an identical fact is never forwarded twice.
   while (!Worklist.empty()) {
     PendingFact Fact = Worklist.pop_back_val();
-    AvailableAccessSet &In = Result.InSets.find(Fact.Destination)->second;
+    AvailableObservationSet &In = Result.InSets.find(Fact.Destination)->second;
     if (!In.insert(*Fact.Source))
       continue;
 
     // Edge kinds are filtered at every hop because sanitizer configurations
     // may allow Dom coverage while rejecting PostDom coverage.
-    for (const ObservationEdge &Edge : Fact.Destination->children())
+    for (const ProgramPointEdge &Edge : Fact.Destination->children())
       if (canPropagate(G, *Fact.Destination, Edge))
         Worklist.push_back({&Edge.getNode(), Fact.Source});
   }

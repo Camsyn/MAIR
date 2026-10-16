@@ -11,15 +11,16 @@ using namespace llvm;
 
 #define DEBUG_TYPE "mair-locationmerge"
 
-STATISTIC(NumMergedAccesses, "Number of accesses merged by location merging");
-STATISTIC(NumInputAccesses,
-          "Number of memory accesses entering location merging");
+STATISTIC(NumMergedObservations,
+          "Number of observations merged by location merging");
+STATISTIC(NumInputObservations,
+          "Number of observations entering location merging");
 
 namespace mair {
 
 namespace {
 
-using AccessIterator = Observation::iterator;
+using ObservationIterator = ProgramPoint::iterator;
 
 enum class MergeClass : uint8_t {
   ConcreteContiguous,
@@ -28,20 +29,20 @@ enum class MergeClass : uint8_t {
   Periodic,
 };
 
-MergeClass getMergeClass(const MemoryAccess &Access) {
-  if (Access.hasConcreteRange())
+MergeClass getMergeClass(const Observation &Obs) {
+  if (Obs.hasConcreteRange())
     return MergeClass::ConcreteContiguous;
-  if (Access.isContiguous())
+  if (Obs.isContiguous())
     return MergeClass::NonConcreteContiguous;
-  if (Access.getMaskedRegion())
+  if (Obs.getMaskedRegion())
     return MergeClass::Masked;
   return MergeClass::Periodic;
 }
 
-const AbstractAccess *getLocationBounds(const MemoryAccess &Access) {
-  if (const AbstractAccess *Region = Access.getContiguousRegion())
+const AbstractAccess *getLocationBounds(const Observation &Obs) {
+  if (const AbstractAccess *Region = Obs.getContiguousRegion())
     return Region;
-  if (const MaskedRegion *Region = Access.getMaskedRegion())
+  if (const MaskedRegion *Region = Obs.getMaskedRegion())
     return &Region->getBounds();
   return nullptr;
 }
@@ -58,7 +59,7 @@ bool compareAbstractValue(const AbstractValue &LHS, const AbstractValue &RHS) {
   return false;
 }
 
-bool compareForLocationMerge(const MemoryAccess &LHS, const MemoryAccess &RHS) {
+bool compareForLocationMerge(const Observation &LHS, const Observation &RHS) {
   const MemoryObject *LObject = LHS.getBaseUse().get();
   const MemoryObject *RObject = RHS.getBaseUse().get();
   if (LObject != RObject)
@@ -86,71 +87,71 @@ bool compareForLocationMerge(const MemoryAccess &LHS, const MemoryAccess &RHS) {
   return compareAbstractValue(LBounds->getSize(), RBounds->getSize());
 }
 
-bool hasSameMergeClass(const MemoryAccess &LHS, const MemoryAccess &RHS) {
+bool hasSameMergeClass(const Observation &LHS, const Observation &RHS) {
   return LHS.getBaseUse().get() == RHS.getBaseUse().get() &&
          LHS.isMergeable() && RHS.isMergeable() &&
          LHS.getLevel() == RHS.getLevel() &&
          getMergeClass(LHS) == getMergeClass(RHS);
 }
 
-bool mergeConcreteRange(Observation &Obs, AccessIterator Begin,
-                        AccessIterator End) {
+bool mergeConcreteRange(ProgramPoint &PP, ObservationIterator Begin,
+                        ObservationIterator End) {
   bool Changed = false;
   if (Begin == End)
     return false;
 
-  AccessIterator Current = Begin;
-  AccessIterator Next = std::next(Current);
+  ObservationIterator Current = Begin;
+  ObservationIterator Next = std::next(Current);
   while (Next != End) {
     if (!Current->mergeWith(*Next)) {
       Current = Next;
       Next = std::next(Current);
       continue;
     }
-    Next = Obs.erase(Next);
+    Next = PP.erase(Next);
     Changed = true;
-    ++NumMergedAccesses;
+    ++NumMergedObservations;
   }
   return Changed;
 }
 
-bool mergeNonConcreteRange(Observation &Obs, AccessIterator Begin,
-                           AccessIterator End) {
+bool mergeNonConcreteRange(ProgramPoint &PP, ObservationIterator Begin,
+                           ObservationIterator End) {
   bool Changed = false;
 
-  for (AccessIterator Current = Begin; Current != End; ++Current) {
-    for (AccessIterator Next = std::next(Current); Next != End;) {
+  for (ObservationIterator Current = Begin; Current != End; ++Current) {
+    for (ObservationIterator Next = std::next(Current); Next != End;) {
       if (!Current->mergeWith(*Next)) {
         ++Next;
         continue;
       }
-      Obs.erase(Next);
+      PP.erase(Next);
       Next = std::next(Current);
       Changed = true;
-      ++NumMergedAccesses;
+      ++NumMergedObservations;
     }
   }
   return Changed;
 }
 
-bool mergeLocations(Observation &Obs) {
-  Obs.sort(compareForLocationMerge);
+bool mergeLocations(ProgramPoint &PP) {
+  PP.sort(compareForLocationMerge);
 
   bool Changed = false;
-  for (AccessIterator Begin = Obs.begin(); Begin != Obs.end();) {
+  for (ObservationIterator Begin = PP.begin(); Begin != PP.end();) {
     if (!Begin->isMergeable() || Begin->isPeriodic()) {
       ++Begin;
       continue;
     }
 
-    AccessIterator End = std::next(Begin);
-    while (End != Obs.end() && hasSameMergeClass(*Begin, *End))
+    ObservationIterator End = std::next(Begin);
+    while (End != PP.end() && hasSameMergeClass(*Begin, *End))
       ++End;
 
     if (Begin->hasConcreteRange())
-      Changed |= mergeConcreteRange(Obs, Begin, End);
+      Changed |= mergeConcreteRange(PP, Begin, End);
     else
-      Changed |= mergeNonConcreteRange(Obs, Begin, End);
+      Changed |= mergeNonConcreteRange(PP, Begin, End);
     Begin = End;
   }
   return Changed;
@@ -161,13 +162,13 @@ bool mergeLocations(Observation &Obs) {
 PreservedAnalyses LocationMergePass::run(MAIRGraph &G,
                                          MAIRGraphAnalysisManager &AM) {
 #if LLVM_ENABLE_STATS
-  NumInputAccesses += MAIRStat::compute(G).getNumMemoryAccesses();
+  NumInputObservations += MAIRStat::compute(G).getNumObservations();
 #else
   (void)AM;
 #endif
   bool Changed = false;
-  for (Observation &Obs : G)
-    Changed |= mergeLocations(Obs);
+  for (ProgramPoint &PP : G)
+    Changed |= mergeLocations(PP);
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 

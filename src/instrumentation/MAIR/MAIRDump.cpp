@@ -15,37 +15,37 @@ using namespace llvm;
 
 namespace mair {
 
-static StringRef getObservationSiteKindName(Observation::SiteKind Kind) {
+static StringRef getProgramPointSiteKindName(ProgramPoint::SiteKind Kind) {
   switch (Kind) {
-  case Observation::SiteKind::MemoryInst:
+  case ProgramPoint::SiteKind::MemoryInst:
     return "memory";
-  case Observation::SiteKind::BasicBlockEntry:
+  case ProgramPoint::SiteKind::BasicBlockEntry:
     return "bb.entry";
-  case Observation::SiteKind::BasicBlockExit:
+  case ProgramPoint::SiteKind::BasicBlockExit:
     return "bb.exit";
-  case Observation::SiteKind::Edge:
+  case ProgramPoint::SiteKind::Edge:
     return "edge";
   }
-  llvm_unreachable("unknown MAIR observation site kind");
+  llvm_unreachable("unknown MAIR program point site kind");
 }
 
-static StringRef getObservationEdgeKindName(ObsEdgeKind Kind) {
+static StringRef getProgramPointEdgeKindName(PPEdgeKind Kind) {
   switch (Kind) {
-  case ObsEdgeKind::Dom:
+  case PPEdgeKind::Dom:
     return "dom";
-  case ObsEdgeKind::PostDom:
+  case PPEdgeKind::PostDom:
     return "pdom";
   }
-  llvm_unreachable("unknown MAIR observation edge kind");
+  llvm_unreachable("unknown MAIR program point edge kind");
 }
 
 namespace {
 class MAIRLLVMWriter final : public AssemblyAnnotationWriter {
   ArrayRef<const MAIRGraph *> Graphs;
-  void emitAnchoredObservations(const Instruction *I,
-                                formatted_raw_ostream &OS) const;
-  void emitObservationLine(const Observation &Obs,
-                           formatted_raw_ostream &OS) const;
+  void emitAnchoredProgramPoints(const Instruction *I,
+                                 formatted_raw_ostream &OS) const;
+  void emitProgramPointLine(const ProgramPoint &PP,
+                            formatted_raw_ostream &OS) const;
   const MAIRGraph *findGraph(const Function *F) const;
 
 public:
@@ -63,7 +63,7 @@ namespace llvm {
 template <>
 struct DOTGraphTraits<const mair::MAIRGraph *> : public DefaultDOTGraphTraits {
   using ChildIteratorType =
-      GraphTraits<const mair::Observation *>::ChildIteratorType;
+      GraphTraits<const mair::ProgramPoint *>::ChildIteratorType;
 
   explicit DOTGraphTraits(bool IsSimple = false)
       : DefaultDOTGraphTraits(IsSimple) {}
@@ -74,20 +74,20 @@ struct DOTGraphTraits<const mair::MAIRGraph *> : public DefaultDOTGraphTraits {
     return "MAIRGraph";
   }
 
-  std::string getNodeLabel(const mair::Observation *Obs,
+  std::string getNodeLabel(const mair::ProgramPoint *PP,
                            const mair::MAIRGraph *) {
     std::string Label;
     raw_string_ostream OS(Label);
-    OS << Obs->getName() << "\\n";
-    OS << mair::getObservationSiteKindName(Obs->getSiteKind());
-    if (const BasicBlock *BB = Obs->getBasicBlock())
+    OS << PP->getName() << "\\n";
+    OS << mair::getProgramPointSiteKindName(PP->getSiteKind());
+    if (const BasicBlock *BB = PP->getBasicBlock())
       OS << " in " << BB->getName();
-    if (Obs->isEdgeSite() || !Obs->hasAlwaysGuard()) {
+    if (PP->isEdgeSite() || !PP->hasAlwaysGuard()) {
       OS << "\\n";
-      Obs->getSite().print(OS);
+      PP->getSite().print(OS);
     }
     if (const auto *Guard =
-            std::get_if<mair::AnyProvenanceExecutedGuard>(&Obs->getGuard())) {
+            std::get_if<mair::AnyProvenanceExecutedGuard>(&PP->getGuard())) {
       OS << "\\nguard=any(";
       bool First = true;
       for (const Instruction *I : Guard->getProvenance()) {
@@ -101,34 +101,34 @@ struct DOTGraphTraits<const mair::MAIRGraph *> : public DefaultDOTGraphTraits {
       }
       OS << ")";
     }
-    for (const mair::MemoryAccess &Access : Obs->accesses())
-      OS << "\\n" << Access.toString();
+    for (const mair::Observation &Obs : PP->observations())
+      OS << "\\n" << Obs.toString();
     return OS.str();
   }
 
-  static std::string getNodeAttributes(const mair::Observation *Obs,
+  static std::string getNodeAttributes(const mair::ProgramPoint *PP,
                                        const mair::MAIRGraph *) {
-    switch (Obs->getSiteKind()) {
-    case mair::Observation::SiteKind::MemoryInst:
+    switch (PP->getSiteKind()) {
+    case mair::ProgramPoint::SiteKind::MemoryInst:
       return "style=filled, fillcolor=lightyellow";
-    case mair::Observation::SiteKind::BasicBlockEntry:
+    case mair::ProgramPoint::SiteKind::BasicBlockEntry:
       return "style=filled, fillcolor=lightcyan";
-    case mair::Observation::SiteKind::BasicBlockExit:
+    case mair::ProgramPoint::SiteKind::BasicBlockExit:
       return "style=filled, fillcolor=lightgray";
-    case mair::Observation::SiteKind::Edge:
+    case mair::ProgramPoint::SiteKind::Edge:
       return "style=filled, fillcolor=mistyrose";
     }
-    llvm_unreachable("unknown MAIR observation site kind");
+    llvm_unreachable("unknown MAIR program point site kind");
   }
 
-  static std::string getEdgeAttributes(const mair::Observation *,
+  static std::string getEdgeAttributes(const mair::ProgramPoint *,
                                        ChildIteratorType I,
                                        const mair::MAIRGraph *) {
     std::string Attrs;
     raw_string_ostream OS(Attrs);
-    mair::ObsEdgeKind Kind = I.getKind();
-    OS << "label=\"" << mair::getObservationEdgeKindName(Kind) << "\"";
-    if (Kind == mair::ObsEdgeKind::Dom)
+    mair::PPEdgeKind Kind = I.getKind();
+    OS << "label=\"" << mair::getProgramPointEdgeKindName(Kind) << "\"";
+    if (Kind == mair::PPEdgeKind::Dom)
       OS << ", color=blue";
     else
       OS << ", color=red";
@@ -167,19 +167,19 @@ static const Module &getModuleForDump(ArrayRef<const MAIRGraph *> Graphs) {
   return *M;
 }
 
-void MAIRLLVMWriter::emitAnchoredObservations(const Instruction *I,
-                                              formatted_raw_ostream &OS) const {
+void MAIRLLVMWriter::emitAnchoredProgramPoints(
+    const Instruction *I, formatted_raw_ostream &OS) const {
   const MAIRGraph *Graph = findGraph(I->getFunction());
   if (!Graph)
     return;
-  for (const Observation &Obs : *Graph)
-    if (&Obs.getAnchor() == I)
-      emitObservationLine(Obs, OS);
+  for (const ProgramPoint &PP : *Graph)
+    if (&PP.getAnchor() == I)
+      emitProgramPointLine(PP, OS);
 }
 
-void MAIRLLVMWriter::emitObservationLine(const Observation &Obs,
-                                         formatted_raw_ostream &OS) const {
-  std::string Text = Obs.toString();
+void MAIRLLVMWriter::emitProgramPointLine(const ProgramPoint &PP,
+                                          formatted_raw_ostream &OS) const {
+  std::string Text = PP.toString();
   SmallVector<StringRef, 4> Lines;
   StringRef(Text).split(Lines, '\n');
   for (StringRef Line : Lines)
@@ -189,7 +189,7 @@ void MAIRLLVMWriter::emitObservationLine(const Observation &Obs,
 
 void MAIRLLVMWriter::emitInstructionAnnot(const Instruction *I,
                                           formatted_raw_ostream &OS) {
-  emitAnchoredObservations(I, OS);
+  emitAnchoredProgramPoints(I, OS);
 }
 
 void dumpMAIR(const MAIRGraph &Graph, raw_ostream &OS) { Graph.print(OS); }

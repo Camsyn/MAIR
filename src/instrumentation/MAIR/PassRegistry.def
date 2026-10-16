@@ -14,7 +14,7 @@
 
 MAIR_GRAPH_ANALYSIS("stat", MAIRStatAnalysis())
 MAIR_GRAPH_ANALYSIS("redundant-observation", RedundantObservationAnalysis())
-MAIR_GRAPH_PASS("cmm", CommonMAMotionPass())
+MAIR_GRAPH_PASS("com", CommonObservationMotionPass())
 MAIR_GRAPH_PASS("locationmerge", LocationMergePass())
 MAIR_GRAPH_PASS("liom", LoopInvariantObservationMotionPass())
 MAIR_GRAPH_PASS("lpoc", LoopPeriodicObservationCombinePass())

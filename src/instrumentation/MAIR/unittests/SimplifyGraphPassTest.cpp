@@ -22,11 +22,11 @@ entry:
   MAIRGraphAnalysisManager AM;
   EXPECT_FALSE(SimplifyGraphPass().run(Graph, AM).areAllPreserved());
   EXPECT_EQ(Graph.size(), Before - 1);
-  EXPECT_EQ(accessCount(Graph, "entry"), 2u);
-  const Observation *Kept = nullptr;
-  for (const Observation &Obs : Graph)
-    if (!Obs.empty())
-      Kept = &Obs;
+  EXPECT_EQ(observationCount(Graph, "entry"), 2u);
+  const ProgramPoint *Kept = nullptr;
+  for (const ProgramPoint &PP : Graph)
+    if (!PP.empty())
+      Kept = &PP;
   ASSERT_NE(Kept, nullptr);
   EXPECT_EQ(Kept->size(), 2u);
   EXPECT_TRUE(Graph.verify());
@@ -48,7 +48,7 @@ entry:
   MAIRGraphAnalysisManager AM;
   EXPECT_TRUE(SimplifyGraphPass().run(Graph, AM).areAllPreserved());
   EXPECT_EQ(Graph.size(), Before);
-  EXPECT_EQ(accessCount(Graph, "entry"), 1u);
+  EXPECT_EQ(observationCount(Graph, "entry"), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -69,18 +69,18 @@ exit:
                        Ctx);
   ASSERT_TRUE(M);
   MAIRGraph Graph = buildGraph(*M->getFunction("f"));
-  Observation *Outside = findMutableMemoryObservation(Graph, "entry");
-  Observation *Inside = findMutableMemoryObservation(Graph, "loop");
+  ProgramPoint *Outside = findMutableMemoryProgramPoint(Graph, "entry");
+  ProgramPoint *Inside = findMutableMemoryProgramPoint(Graph, "loop");
   ASSERT_NE(Outside, nullptr);
   ASSERT_NE(Inside, nullptr);
-  Graph.addEdge(*Outside, *Inside, ObsEdgeKind::Dom);
-  Graph.addEdge(*Inside, *Outside, ObsEdgeKind::PostDom);
+  Graph.addEdge(*Outside, *Inside, PPEdgeKind::Dom);
+  Graph.addEdge(*Inside, *Outside, PPEdgeKind::PostDom);
   const size_t Before = Graph.size();
   MAIRGraphAnalysisManager AM;
   EXPECT_TRUE(SimplifyGraphPass().run(Graph, AM).areAllPreserved());
   EXPECT_EQ(Graph.size(), Before);
-  EXPECT_EQ(accessCount(Graph, "entry"), 1u);
-  EXPECT_EQ(accessCount(Graph, "loop"), 1u);
+  EXPECT_EQ(observationCount(Graph, "entry"), 1u);
+  EXPECT_EQ(observationCount(Graph, "loop"), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 

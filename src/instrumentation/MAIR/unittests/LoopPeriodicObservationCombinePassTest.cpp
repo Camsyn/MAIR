@@ -41,8 +41,8 @@ TEST(LoopPeriodicObservationCombinePass, AggregatesAUnitStrideLoop) {
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
   EXPECT_FALSE(
       LoopPeriodicObservationCombinePass().run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(accessCount(Graph, "exit"), 1u);
-  EXPECT_EQ(accessCount(Graph, "header"), 0u);
+  EXPECT_EQ(observationCount(Graph, "exit"), 1u);
+  EXPECT_EQ(observationCount(Graph, "header"), 0u);
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -58,8 +58,8 @@ TEST(LoopPeriodicObservationCombinePass, AddressSanitizerDoesNotAggregate) {
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
   EXPECT_TRUE(
       LoopPeriodicObservationCombinePass().run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(accessCount(Graph, "header"), 1u);
-  EXPECT_EQ(accessCount(Graph, "exit"), 0u);
+  EXPECT_EQ(observationCount(Graph, "header"), 1u);
+  EXPECT_EQ(observationCount(Graph, "exit"), 0u);
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -82,7 +82,7 @@ entry:
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
   EXPECT_TRUE(
       LoopPeriodicObservationCombinePass().run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(accessCount(Graph, "entry"), 1u);
+  EXPECT_EQ(observationCount(Graph, "entry"), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 

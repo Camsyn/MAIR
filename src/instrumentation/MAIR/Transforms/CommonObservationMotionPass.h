@@ -6,7 +6,8 @@
 
 namespace mair {
 
-class CommonMAMotionPass : public llvm::PassInfoMixin<CommonMAMotionPass> {
+class CommonObservationMotionPass
+    : public llvm::PassInfoMixin<CommonObservationMotionPass> {
 public:
   llvm::PreservedAnalyses run(MAIRGraph &G, MAIRGraphAnalysisManager &AM);
 };

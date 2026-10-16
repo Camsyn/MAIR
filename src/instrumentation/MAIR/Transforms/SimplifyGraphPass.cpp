@@ -7,54 +7,54 @@ using namespace llvm;
 
 #define DEBUG_TYPE "mair-simplifygraph"
 
-STATISTIC(NumInputObservations,
-          "Number of observations entering graph simplification");
-STATISTIC(NumMergedObservations,
-          "Number of observations merged by graph simplification");
+STATISTIC(NumInputProgramPoints,
+          "Number of program points entering graph simplification");
+STATISTIC(NumMergedProgramPoints,
+          "Number of program points merged by graph simplification");
 
 namespace mair {
 
 namespace {
 
 struct MergeCandidate {
-  Observation *Into = nullptr;
-  Observation *From = nullptr;
+  ProgramPoint *Into = nullptr;
+  ProgramPoint *From = nullptr;
 };
 
-bool hasPinnedAccess(const Observation &Obs) {
-  return llvm::any_of(
-      Obs, [&](const MemoryAccess &Access) { return !Access.isMovable(); });
+bool hasPinnedObservation(const ProgramPoint &PP) {
+  return llvm::any_of(PP,
+                      [&](const Observation &Obs) { return !Obs.isMovable(); });
 }
 
 MergeCandidate findMergeCandidate(MAIRGraph &G) {
-  for (Observation &O1 : G) {
-    if (hasPinnedAccess(O1))
+  for (ProgramPoint &PP1 : G) {
+    if (hasPinnedObservation(PP1))
       continue;
-    for (const ObservationEdge &Edge : O1.children()) {
+    for (const ProgramPointEdge &Edge : PP1.children()) {
       if (!Edge.isDom())
         continue;
 
-      Observation &O2 = Edge.getNode();
-      if (&O1 == &O2)
+      ProgramPoint &PP2 = Edge.getNode();
+      if (&PP1 == &PP2)
         continue;
-      if (!O1.hasCompatibleMergeSemantics(O2))
+      if (!PP1.hasCompatibleMergeSemantics(PP2))
         continue;
-      if (!O2.hasChild(O1, ObsEdgeKind::PostDom))
+      if (!PP2.hasChild(PP1, PPEdgeKind::PostDom))
         continue;
-      const BasicBlock *O1Block = O1.getBasicBlock();
-      const BasicBlock *O2Block = O2.getBasicBlock();
-      if (O1Block != O2Block) {
-        assert(O1Block && O2Block &&
-               "compatible observations must use the same site category");
+      const BasicBlock *PP1Block = PP1.getBasicBlock();
+      const BasicBlock *PP2Block = PP2.getBasicBlock();
+      if (PP1Block != PP2Block) {
+        assert(PP1Block && PP2Block &&
+               "compatible program points must use the same site category");
         // Same constraint as PostDom redundancy: a loop-carried pointer can
         // take a new address on the exit, as in `load %p` inside the loop
-        // and `load %p` after it. Do not merge those observations.
+        // and `load %p` after it. Do not merge those program points.
         const LoopInfo &Loops = G.getLoopInfo();
-        if (Loops.getLoopFor(O1Block) != Loops.getLoopFor(O2Block))
+        if (Loops.getLoopFor(PP1Block) != Loops.getLoopFor(PP2Block))
           continue;
       }
-      // Retain the post-dominating site so contraction sinks accesses.
-      return {&O2, &O1};
+      // Retain the post-dominating site so contraction sinks observations.
+      return {&PP2, &PP1};
     }
   }
   return {};
@@ -65,7 +65,7 @@ MergeCandidate findMergeCandidate(MAIRGraph &G) {
 PreservedAnalyses SimplifyGraphPass::run(MAIRGraph &G,
                                          MAIRGraphAnalysisManager &AM) {
 #if LLVM_ENABLE_STATS
-  NumInputObservations += MAIRStat::compute(G).getNumObservations();
+  NumInputProgramPoints += MAIRStat::compute(G).getNumProgramPoints();
 #else
   (void)AM;
 #endif
@@ -78,8 +78,8 @@ PreservedAnalyses SimplifyGraphPass::run(MAIRGraph &G,
     MergeCandidate Candidate = findMergeCandidate(G);
     if (!Candidate.Into)
       break;
-    G.contractObservation(*Candidate.Into, *Candidate.From);
-    ++NumMergedObservations;
+    G.contractProgramPoint(*Candidate.Into, *Candidate.From);
+    ++NumMergedProgramPoints;
     Changed = true;
   }
 

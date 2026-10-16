@@ -9,16 +9,16 @@ namespace mair {
 AnalysisKey MAIRStatAnalysis::Key;
 
 void MAIRStat::print(raw_ostream &OS) const {
+  OS << "  program-points: " << NumProgramPoints << "\n";
   OS << "  observations: " << NumObservations << "\n";
-  OS << "  memory-accesses: " << NumMemoryAccesses << "\n";
 }
 
 MAIRStat MAIRStat::compute(const MAIRGraph &G) {
-  unsigned NumMemoryAccesses = 0;
-  for (const Observation &Obs : G)
-    NumMemoryAccesses += Obs.size();
+  unsigned NumObservations = 0;
+  for (const ProgramPoint &PP : G)
+    NumObservations += PP.size();
 
-  return MAIRStat(G.size(), NumMemoryAccesses);
+  return MAIRStat(G.size(), NumObservations);
 }
 
 MAIRStat MAIRStatAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &) {

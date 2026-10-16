@@ -27,19 +27,19 @@ public:
 
   bool isAvailable() const { return Graph && FAM && Func && LI && DT; }
 
-  llvm::Loop *getLoopFor(const Observation &Obs) const;
+  llvm::Loop *getLoopFor(const ProgramPoint &PP) const;
   bool isValueAvailableAt(const llvm::Value &V,
-                          const ObservationSite &Site) const;
-  bool executesOncePerRelevantIteration(const Observation &Obs,
+                          const ProgramPointSite &Site) const;
+  bool executesOncePerRelevantIteration(const ProgramPoint &PP,
                                         const llvm::Loop &L) const;
-  const llvm::SCEV *getExactExecutionCountSCEV(const Observation &Obs,
+  const llvm::SCEV *getExactExecutionCountSCEV(const ProgramPoint &PP,
                                                const llvm::Loop &L) const;
-  bool isLoopInvariant(const MemoryAccess &Access, const llvm::Loop &L) const;
-  llvm::Loop *getTopInvariantLoop(const MemoryAccess &Access,
+  bool isLoopInvariant(const Observation &Obs, const llvm::Loop &L) const;
+  llvm::Loop *getTopInvariantLoop(const Observation &Obs,
                                   llvm::Loop &Start) const;
-  Observation *getPreheaderExit(const llvm::Loop &L) const;
+  ProgramPoint *getPreheaderExit(const llvm::Loop &L) const;
   std::optional<MAIRLoopExit> describeUniqueExit(const llvm::Loop &L) const;
-  Observation *getUniqueExitEntry(const llvm::Loop &L) const;
+  ProgramPoint *getUniqueExitEntry(const llvm::Loop &L) const;
   /// ScalarEvolution must come from the same FAM generation as the graph's
   /// borrowed LoopInfo; mixing snapshots would invalidate SCEV loop identity.
   llvm::ScalarEvolution &getSE() const;

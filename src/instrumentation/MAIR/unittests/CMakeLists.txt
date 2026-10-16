@@ -16,7 +16,7 @@ if(EXISTS ${MAIR_GTEST_DIR}/src/gtest-all.cc)
   add_llvm_executable(MAIRGraphTest
     MAIRGraphTest.cpp
     MAIRMaterializationTest.cpp
-    CommonMAMotionPassTest.cpp
+    CommonObservationMotionPassTest.cpp
     LocationMergePassTest.cpp
     LoopInvariantObservationMotionPassTest.cpp
     LoopPeriodicObservationCombinePassTest.cpp
@@ -32,7 +32,7 @@ else()
   add_unittest(MAIRUnitTests MAIRGraphTest
     MAIRGraphTest.cpp
     MAIRMaterializationTest.cpp
-    CommonMAMotionPassTest.cpp
+    CommonObservationMotionPassTest.cpp
     LocationMergePassTest.cpp
     LoopInvariantObservationMotionPassTest.cpp
     LoopPeriodicObservationCombinePassTest.cpp

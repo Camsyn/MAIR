@@ -5,18 +5,18 @@
 namespace mair {
 
 class MAIRStat {
+  unsigned NumProgramPoints = 0;
   unsigned NumObservations = 0;
-  unsigned NumMemoryAccesses = 0;
 
 public:
   MAIRStat() = default;
-  MAIRStat(unsigned Observations, unsigned MemoryAccesses)
-      : NumObservations(Observations), NumMemoryAccesses(MemoryAccesses) {}
+  MAIRStat(unsigned ProgramPoints, unsigned Observations)
+      : NumProgramPoints(ProgramPoints), NumObservations(Observations) {}
 
   static MAIRStat compute(const MAIRGraph &G);
 
+  unsigned getNumProgramPoints() const { return NumProgramPoints; }
   unsigned getNumObservations() const { return NumObservations; }
-  unsigned getNumMemoryAccesses() const { return NumMemoryAccesses; }
 
   void print(llvm::raw_ostream &OS) const;
 };

@@ -80,10 +80,10 @@ class MAIRGraph;
 class MAIRVerifier;
 class MAIRObservationBackend;
 class SimplifyGraphPass;
-class MemoryAccess;
+class Observation;
 class MemoryObject;
 class MemoryUse;
-class Observation;
+class ProgramPoint;
 class MAIRScalarExpr;
 struct MAIRScalarExprNode;
 struct MAIRScalarExprOwner;
@@ -102,10 +102,10 @@ enum class AccessProperty : uint8_t {
 };
 LLVM_ENABLE_BITMASK_ENUMS_IN_NAMESPACE();
 
-enum class ObsEdgeKind : uint8_t;
+enum class PPEdgeKind : uint8_t;
 
 /// Sanitizer-specific legality rules shared by every MAIR optimization pass.
-/// Region geometry remains a property of MemoryAccess; this configuration
+/// Region geometry remains a property of Observation; this configuration
 /// controls which semantic distinctions an observer must preserve.
 class MAIROptimizationConfig {
   uint8_t ReadLevel = 1;
@@ -129,12 +129,12 @@ public:
   static MAIROptimizationConfig forAddressSanitizer();
   static MAIROptimizationConfig forThreadSanitizer();
 
-  bool allowsCoverageAlong(ObsEdgeKind Kind) const;
+  bool allowsCoverageAlong(PPEdgeKind Kind) const;
   uint8_t getLevel(AccessKind Kind) const;
-  void initializeAccess(MemoryAccess &Access) const;
+  void initializeObservation(Observation &Obs) const;
 };
 
-enum class ObsEdgeKind : uint8_t { Dom, PostDom };
+enum class PPEdgeKind : uint8_t { Dom, PostDom };
 
 class AbstractValue {
 public:
@@ -208,9 +208,9 @@ public:
   void print(raw_ostream &OS) const;
 };
 
-/// A physical placement for one observation event. Edge sites remain virtual
+/// A physical placement for one program point. Edge sites remain virtual
 /// until instantiate() creates a dedicated CFG block in a later stage.
-class ObservationSite {
+class ProgramPointSite {
 public:
   enum class Kind : uint8_t {
     MemoryInst,
@@ -225,11 +225,11 @@ private:
   const BasicBlock *From = nullptr;
   const BasicBlock *To = nullptr;
 
-  ObservationSite() = default;
+  ProgramPointSite() = default;
 
 public:
-  static ObservationSite anchored(const Instruction &Anchor, Kind K);
-  static ObservationSite edge(const BasicBlock &From, const BasicBlock &To);
+  static ProgramPointSite anchored(const Instruction &Anchor, Kind K);
+  static ProgramPointSite edge(const BasicBlock &From, const BasicBlock &To);
 
   Kind getKind() const { return SiteKind; }
   bool isAnchored() const { return SiteKind != Kind::Edge; }
@@ -238,24 +238,24 @@ public:
   /// source block rather than the block created later by materialization.
   const BasicBlock *getBasicBlock() const { return getAnchor().getParent(); }
   const Instruction &getAnchor() const {
-    assert(Anchor && "observation site has no anchor");
+    assert(Anchor && "program point site has no anchor");
     return *Anchor;
   }
   const BasicBlock *getEdgeFrom() const { return isEdge() ? From : nullptr; }
   const BasicBlock *getEdgeTo() const { return isEdge() ? To : nullptr; }
 
-  bool operator==(const ObservationSite &Other) const {
+  bool operator==(const ProgramPointSite &Other) const {
     return SiteKind == Other.SiteKind && Anchor == Other.Anchor &&
            From == Other.From && To == Other.To;
   }
-  bool operator!=(const ObservationSite &Other) const {
+  bool operator!=(const ProgramPointSite &Other) const {
     return !(*this == Other);
   }
 
   void print(raw_ostream &OS) const;
 };
 
-/// Execute the observation whenever control reaches its site.
+/// Execute the program point observations whenever control reaches its site.
 struct AlwaysGuard {
   bool operator==(const AlwaysGuard &) const { return true; }
   bool operator!=(const AlwaysGuard &) const { return false; }
@@ -278,7 +278,7 @@ public:
   }
 };
 
-using ObservationGuard = std::variant<AlwaysGuard, AnyProvenanceExecutedGuard>;
+using ProgramPointGuard = std::variant<AlwaysGuard, AnyProvenanceExecutedGuard>;
 
 /// An immutable handle into a MAIRGraph-owned typed expression arena.
 /// Expressions store materializable semantics, never Loop or SCEV objects.
@@ -401,37 +401,37 @@ public:
 /// A contiguous, masked, or explicitly periodic memory-access region.
 using MemoryRegion = std::variant<AbstractAccess, MaskedRegion, PeriodicRegion>;
 
-class ObservationEdge {
-  Observation *Node = nullptr;
-  ObsEdgeKind Kind = ObsEdgeKind::Dom;
+class ProgramPointEdge {
+  ProgramPoint *Node = nullptr;
+  PPEdgeKind Kind = PPEdgeKind::Dom;
 
 public:
-  ObservationEdge() = default;
-  ObservationEdge(Observation &N, ObsEdgeKind K) : Node(&N), Kind(K) {}
+  ProgramPointEdge() = default;
+  ProgramPointEdge(ProgramPoint &N, PPEdgeKind K) : Node(&N), Kind(K) {}
 
-  Observation &getNode() const {
-    assert(Node && "MAIR observation edge has no endpoint");
+  ProgramPoint &getNode() const {
+    assert(Node && "MAIR program point edge has no endpoint");
     return *Node;
   }
-  ObsEdgeKind getKind() const { return Kind; }
-  bool isDom() const { return Kind == ObsEdgeKind::Dom; }
-  bool isPostDom() const { return Kind == ObsEdgeKind::PostDom; }
+  PPEdgeKind getKind() const { return Kind; }
+  bool isDom() const { return Kind == PPEdgeKind::Dom; }
+  bool isPostDom() const { return Kind == PPEdgeKind::PostDom; }
 };
 
-/// The operand edge from a MemoryAccess user to a MemoryObject, analogous to
+/// The operand edge from an Observation user to a MemoryObject, analogous to
 /// llvm::Use. It maintains the object's intrusive use-list.
 class MemoryUse {
-  friend class MemoryAccess;
+  friend class Observation;
   friend class MAIRGraph;
 
   MemoryObject *Object = nullptr;
   MemoryUse *Next = nullptr;
   MemoryUse **Prev = nullptr;
-  MemoryAccess *Parent = nullptr;
+  Observation *Parent = nullptr;
 
 public:
   MemoryUse() = default;
-  explicit MemoryUse(MemoryAccess &P) : Parent(&P) {}
+  explicit MemoryUse(Observation &P) : Parent(&P) {}
   ~MemoryUse() { set(nullptr); }
 
   MemoryUse(const MemoryUse &) = delete;
@@ -440,7 +440,7 @@ public:
   MemoryUse &operator=(MemoryUse &&) = delete;
 
   MemoryObject *get() const { return Object; }
-  MemoryAccess *getUser() const { return Parent; }
+  Observation *getUser() const { return Parent; }
   MemoryUse *getNext() const { return Next; }
 
 private:
@@ -482,14 +482,15 @@ public:
 };
 
 struct MemoryUseToUser {
-  MemoryAccess &operator()(MemoryUse &Use) const { return *Use.getUser(); }
-  const MemoryAccess &operator()(const MemoryUse &Use) const {
+  Observation &operator()(MemoryUse &Use) const { return *Use.getUser(); }
+  const Observation &operator()(const MemoryUse &Use) const {
     return *Use.getUser();
   }
 };
 
 /// A graph-owned wrapper for one LLVM base pointer, analogous to llvm::Value.
-/// Memory accesses referring to the base are reachable through its use-list.
+/// Memory observations referring to the base are reachable through its
+/// use-list.
 class MemoryObject {
   friend class MemoryUse;
 
@@ -539,8 +540,8 @@ public:
   auto users() const { return make_range(user_begin(), user_end()); }
 };
 
-template <class NodeT> class ObservationEdgeIterator {
-  ArrayRef<ObservationEdge>::iterator It = nullptr;
+template <class NodeT> class ProgramPointEdgeIterator {
+  ArrayRef<ProgramPointEdge>::iterator It = nullptr;
 
 public:
   using iterator_category = std::forward_iterator_tag;
@@ -549,33 +550,34 @@ public:
   using pointer = NodeT **;
   using reference = NodeT *;
 
-  ObservationEdgeIterator() = default;
-  explicit ObservationEdgeIterator(ArrayRef<ObservationEdge>::iterator I)
+  ProgramPointEdgeIterator() = default;
+  explicit ProgramPointEdgeIterator(ArrayRef<ProgramPointEdge>::iterator I)
       : It(I) {}
 
   reference operator*() const { return &It->getNode(); }
-  ObservationEdgeIterator &operator++() {
+  ProgramPointEdgeIterator &operator++() {
     ++It;
     return *this;
   }
-  ObservationEdgeIterator operator++(int) {
-    ObservationEdgeIterator Tmp = *this;
+  ProgramPointEdgeIterator operator++(int) {
+    ProgramPointEdgeIterator Tmp = *this;
     ++*this;
     return Tmp;
   }
-  bool operator==(const ObservationEdgeIterator &Other) const {
+  bool operator==(const ProgramPointEdgeIterator &Other) const {
     return It == Other.It;
   }
-  bool operator!=(const ObservationEdgeIterator &Other) const {
+  bool operator!=(const ProgramPointEdgeIterator &Other) const {
     return !(*this == Other);
   }
 
-  ObsEdgeKind getKind() const { return It->getKind(); }
+  PPEdgeKind getKind() const { return It->getKind(); }
 };
 
-class MemoryAccess final
-    : public ilist_node_with_parent<MemoryAccess, Observation,
-                                    ilist_parent<Observation>> {
+/// An identity-bearing memory observation (o), owned by one ProgramPoint.
+class Observation final
+    : public ilist_node_with_parent<Observation, ProgramPoint,
+                                    ilist_parent<ProgramPoint>> {
   SmallVector<Instruction *, 2> Insts;
   MemoryRegion Region;
   AccessKind Kind = AccessKind::Read;
@@ -588,21 +590,21 @@ class MemoryAccess final
   MemoryUse BaseUse;
 
 public:
-  MemoryAccess() = default;
-  MemoryAccess(ArrayRef<Instruction *> I, AbstractAccess A, AccessKind K,
-               AccessProperty P = AccessProperty::None)
-      : MemoryAccess(I, MemoryRegion(std::move(A)), K, P) {}
-  MemoryAccess(ArrayRef<Instruction *> I, MemoryRegion R, AccessKind K,
-               AccessProperty P = AccessProperty::None)
+  Observation() = default;
+  Observation(ArrayRef<Instruction *> I, AbstractAccess A, AccessKind K,
+              AccessProperty P = AccessProperty::None)
+      : Observation(I, MemoryRegion(std::move(A)), K, P) {}
+  Observation(ArrayRef<Instruction *> I, MemoryRegion R, AccessKind K,
+              AccessProperty P = AccessProperty::None)
       : Insts(I.begin(), I.end()), Region(std::move(R)), Kind(K), Properties(P),
         BaseUse(*this) {
-    MAIROptimizationConfig::generic().initializeAccess(*this);
+    MAIROptimizationConfig::generic().initializeObservation(*this);
   }
 
-  MemoryAccess(const MemoryAccess &) = delete;
-  MemoryAccess &operator=(const MemoryAccess &) = delete;
-  MemoryAccess(MemoryAccess &&) = delete;
-  MemoryAccess &operator=(MemoryAccess &&) = delete;
+  Observation(const Observation &) = delete;
+  Observation &operator=(const Observation &) = delete;
+  Observation(Observation &&) = delete;
+  Observation &operator=(Observation &&) = delete;
 
   ArrayRef<Instruction *> getInstructions() const { return Insts; }
   const Instruction *getInstruction() const {
@@ -625,11 +627,11 @@ public:
     return std::holds_alternative<PeriodicRegion>(Region);
   }
   MemoryObject &getMemoryObject() {
-    assert(BaseUse.get() && "MAIR memory access has no memory object");
+    assert(BaseUse.get() && "MAIR observation has no memory object");
     return *BaseUse.get();
   }
   const MemoryObject &getMemoryObject() const {
-    assert(BaseUse.get() && "MAIR memory access has no memory object");
+    assert(BaseUse.get() && "MAIR observation has no memory object");
     return *BaseUse.get();
   }
   const MemoryUse &getBaseUse() const { return BaseUse; }
@@ -653,16 +655,16 @@ public:
   uint8_t getLevel() const { return Level; }
 
   /// Capabilities and level are fixed by the graph configuration when the
-  /// access is registered. Coverage requires LHS level >= RHS level, while
+  /// observation is registered. Coverage requires LHS level >= RHS level, while
   /// merging requires equal levels.
-  bool covers(const MemoryAccess &Other) const;
-  bool mergeWith(const MemoryAccess &Other);
+  bool covers(const Observation &Other) const;
+  bool mergeWith(const Observation &Other);
   void mergeKind(AccessKind Other);
   void eraseFromParent();
 
   bool hasConcreteRange() const;
-  static MemoryAccess fromInstruction(const Instruction &I,
-                                      const DataLayout &DL);
+  static Observation fromInstruction(const Instruction &I,
+                                     const DataLayout &DL);
 
   std::string toString() const;
   void print(raw_ostream &OS) const;
@@ -670,7 +672,7 @@ public:
 private:
   friend class MAIRGraph;
   friend class MAIROptimizationConfig;
-  friend class Observation;
+  friend class ProgramPoint;
 
   void setOptimizationProperties(bool CanMerge, bool CanMove, bool CanDelete,
                                  uint8_t AccessLevel) {
@@ -684,48 +686,52 @@ private:
   void clearMemoryObject() { BaseUse.set(nullptr); }
 };
 
-class Observation final
-    : public ilist_node_with_parent<Observation, MAIRGraph,
+/// A program point (PP) owns a site, a guard, and a list of observations.
+/// Like a BasicBlock containing Instructions, this models containment only.
+class ProgramPoint final
+    : public ilist_node_with_parent<ProgramPoint, MAIRGraph,
                                     ilist_parent<MAIRGraph>> {
 public:
-  using SiteKind = ObservationSite::Kind;
-  using AccessListType = simple_ilist<MemoryAccess, ilist_parent<Observation>>;
-  using iterator = AccessListType::iterator;
-  using const_iterator = AccessListType::const_iterator;
-  using AccessComparator = bool (*)(const MemoryAccess &, const MemoryAccess &);
-  using EdgeListType = SmallVector<ObservationEdge, 4>;
+  using SiteKind = ProgramPointSite::Kind;
+  using ObservationListType =
+      simple_ilist<Observation, ilist_parent<ProgramPoint>>;
+  using iterator = ObservationListType::iterator;
+  using const_iterator = ObservationListType::const_iterator;
+  using ObservationComparator = bool (*)(const Observation &,
+                                         const Observation &);
+  using EdgeListType = SmallVector<ProgramPointEdge, 4>;
 
 private:
-  friend class MemoryAccess;
+  friend class Observation;
 
   std::string Name;
-  ObservationSite Site;
-  ObservationGuard Guard = AlwaysGuard{};
-  SpecificBumpPtrAllocator<MemoryAccess> AccessAllocator;
-  AccessListType Accesses;
+  ProgramPointSite Site;
+  ProgramPointGuard Guard = AlwaysGuard{};
+  SpecificBumpPtrAllocator<Observation> ObservationAllocator;
+  ObservationListType Observations;
   EdgeListType Children;
   EdgeListType Parents;
   SmallPtrSet<const BasicBlock *, 2> RepresentedBlocks;
-  unsigned NumAccesses = 0;
+  unsigned NumObservations = 0;
   bool Sorted = true;
-  AccessComparator SortedWith = nullptr;
+  ObservationComparator SortedWith = nullptr;
 
   void invalidateSort() { Sorted = false; }
 
 public:
-  Observation(StringRef N, const Instruction &Anchor,
-              SiteKind K = SiteKind::MemoryInst);
-  Observation(StringRef N, ObservationSite S, ObservationGuard G);
-  ~Observation();
+  ProgramPoint(StringRef N, const Instruction &Anchor,
+               SiteKind K = SiteKind::MemoryInst);
+  ProgramPoint(StringRef N, ProgramPointSite S, ProgramPointGuard G);
+  ~ProgramPoint();
 
-  Observation(const Observation &) = delete;
-  Observation &operator=(const Observation &) = delete;
-  Observation(Observation &&) = delete;
-  Observation &operator=(Observation &&) = delete;
+  ProgramPoint(const ProgramPoint &) = delete;
+  ProgramPoint &operator=(const ProgramPoint &) = delete;
+  ProgramPoint(ProgramPoint &&) = delete;
+  ProgramPoint &operator=(ProgramPoint &&) = delete;
 
   StringRef getName() const { return Name; }
-  const ObservationSite &getSite() const { return Site; }
-  const ObservationGuard &getGuard() const { return Guard; }
+  const ProgramPointSite &getSite() const { return Site; }
+  const ProgramPointGuard &getGuard() const { return Guard; }
   const BasicBlock *getBasicBlock() const { return Site.getBasicBlock(); }
   const Instruction &getAnchor() const { return Site.getAnchor(); }
   const BasicBlock *getEdgeFrom() const { return Site.getEdgeFrom(); }
@@ -752,28 +758,28 @@ public:
     return RepresentedBlocks.contains(&Block);
   }
 
-  const AccessListType &accesses() const { return Accesses; }
-  ArrayRef<ObservationEdge> children() const { return Children; }
-  ArrayRef<ObservationEdge> parents() const { return Parents; }
-  iterator begin() { return Accesses.begin(); }
-  iterator end() { return Accesses.end(); }
-  const_iterator begin() const { return Accesses.begin(); }
-  const_iterator end() const { return Accesses.end(); }
-  bool empty() const { return NumAccesses == 0; }
-  unsigned size() const { return NumAccesses; }
-  bool hasChild(const Observation &Obs, ObsEdgeKind Kind) const;
-  bool hasParent(const Observation &Obs, ObsEdgeKind Kind) const;
+  const ObservationListType &observations() const { return Observations; }
+  ArrayRef<ProgramPointEdge> children() const { return Children; }
+  ArrayRef<ProgramPointEdge> parents() const { return Parents; }
+  iterator begin() { return Observations.begin(); }
+  iterator end() { return Observations.end(); }
+  const_iterator begin() const { return Observations.begin(); }
+  const_iterator end() const { return Observations.end(); }
+  bool empty() const { return NumObservations == 0; }
+  unsigned size() const { return NumObservations; }
+  bool hasChild(const ProgramPoint &PP, PPEdgeKind Kind) const;
+  bool hasParent(const ProgramPoint &PP, PPEdgeKind Kind) const;
   /// Merging preserves execution semantics only for equal guards and equal
-  /// anchored kinds, or for observations on the exact same CFG edge.
-  bool hasCompatibleMergeSemantics(const Observation &Other) const;
+  /// anchored kinds, or for program points on the exact same CFG edge.
+  bool hasCompatibleMergeSemantics(const ProgramPoint &Other) const;
 
-  MemoryAccess &addAccess(const MemoryAccess &A);
-  /// Normalize access order. MAIR analyses must not depend on list order.
-  void sort(AccessComparator Compare);
+  Observation &addObservation(const Observation &A);
+  /// Normalize observation order. MAIR analyses must not depend on list order.
+  void sort(ObservationComparator Compare);
   iterator erase(iterator It);
-  iterator erase(MemoryAccess &Access);
-  void mergeAccessesFrom(const Observation &Other);
-  void prependAccessesFrom(const Observation &Other);
+  iterator erase(Observation &Obs);
+  void mergeObservationsFrom(const ProgramPoint &Other);
+  void prependObservationsFrom(const ProgramPoint &Other);
 
   std::string toString() const;
   void print(raw_ostream &OS) const;
@@ -782,25 +788,25 @@ private:
   friend class MAIRGraph;
   friend class MAIRVerifier;
 
-  static AccessListType Observation::*getSublistAccess(MemoryAccess *) {
-    return &Observation::Accesses;
+  static ObservationListType ProgramPoint::*getSublistAccess(Observation *) {
+    return &ProgramPoint::Observations;
   }
-  MemoryAccess &createAccess(ArrayRef<Instruction *> Insts,
-                             const MemoryRegion &Region, AccessKind Kind,
-                             AccessProperty Properties);
-  void mergeRepresentationFrom(const Observation &Other);
+  Observation &createObservation(ArrayRef<Instruction *> Insts,
+                                 const MemoryRegion &Region, AccessKind Kind,
+                                 AccessProperty Properties);
+  void mergeRepresentationFrom(const ProgramPoint &Other);
 };
 
 class MAIRGraph final {
   friend class MAIRVerifier;
-  friend class Observation;
+  friend class ProgramPoint;
   friend class SimplifyGraphPass;
 
 public:
-  using ObservationListType =
-      simple_ilist<Observation, ilist_parent<MAIRGraph>>;
-  using iterator = ObservationListType::iterator;
-  using const_iterator = ObservationListType::const_iterator;
+  using ProgramPointListType =
+      simple_ilist<ProgramPoint, ilist_parent<MAIRGraph>>;
+  using iterator = ProgramPointListType::iterator;
+  using const_iterator = ProgramPointListType::const_iterator;
 
 private:
   enum class State : uint8_t { Live, ConsumedByInstantiation, MovedFrom };
@@ -833,18 +839,18 @@ private:
   Function *MutableF = nullptr;
   State GraphState = State::Live;
   MAIROptimizationConfig OptimizationConfig;
-  SpecificBumpPtrAllocator<Observation> GraphAllocator;
+  SpecificBumpPtrAllocator<ProgramPoint> GraphAllocator;
   SpecificBumpPtrAllocator<MemoryObject> MemoryObjectAllocator;
   std::unique_ptr<MAIRScalarExprOwner> ScalarExprOwner;
   SpecificBumpPtrAllocator<MAIRScalarExprNode> ScalarExprAllocator;
   FunctionAnalysisState Analyses;
   DenseMap<const Value *, MemoryObject *> MemoryObjects;
-  DenseMap<const BasicBlock *, Observation *> BBEntryRepresentatives;
-  DenseMap<const BasicBlock *, Observation *> BBExitRepresentatives;
-  ObservationListType Observations;
-  unsigned NumObservations = 0;
+  DenseMap<const BasicBlock *, ProgramPoint *> BBEntryRepresentatives;
+  DenseMap<const BasicBlock *, ProgramPoint *> BBExitRepresentatives;
+  ProgramPointListType ProgramPoints;
+  unsigned NumProgramPoints = 0;
   unsigned NumEdges = 0;
-  unsigned NextObservationID = 0;
+  unsigned NextProgramPointID = 0;
 
 public:
   explicit MAIRGraph(
@@ -888,11 +894,11 @@ public:
   }
   bool empty() const {
     assertLive("query");
-    return NumObservations == 0;
+    return NumProgramPoints == 0;
   }
   size_t size() const {
     assertLive("query");
-    return NumObservations;
+    return NumProgramPoints;
   }
 
   /// Build a MAIR graph for \p F using DT/PDT/LI results owned by \p FAM.
@@ -926,30 +932,30 @@ public:
 
   iterator begin() {
     assertLive("iterate");
-    return Observations.begin();
+    return ProgramPoints.begin();
   }
   iterator end() {
     assertLive("iterate");
-    return Observations.end();
+    return ProgramPoints.end();
   }
   const_iterator begin() const {
     assertLive("iterate");
-    return Observations.begin();
+    return ProgramPoints.begin();
   }
   const_iterator end() const {
     assertLive("iterate");
-    return Observations.end();
+    return ProgramPoints.end();
   }
 
-  Observation &createBBObservation(const BasicBlock &BB, bool IsEntry);
-  Observation &createInstObservation(const BasicBlock &BB,
-                                     const Instruction &Anchor);
+  ProgramPoint &createBBProgramPoint(const BasicBlock &BB, bool IsEntry);
+  ProgramPoint &createInstProgramPoint(const BasicBlock &BB,
+                                       const Instruction &Anchor);
   /// Create an additional semantic event without changing boundary maps.
-  Observation &createObservation(ObservationSite Site,
-                                 ObservationGuard Guard = AlwaysGuard{});
-  Observation &createEdgeObservation(const BasicBlock &From,
-                                     const BasicBlock &To,
-                                     ObservationGuard Guard = AlwaysGuard{});
+  ProgramPoint &createProgramPoint(ProgramPointSite Site,
+                                   ProgramPointGuard Guard = AlwaysGuard{});
+  ProgramPoint &createEdgeProgramPoint(const BasicBlock &From,
+                                       const BasicBlock &To,
+                                       ProgramPointGuard Guard = AlwaysGuard{});
 
   MAIRScalarExpr createConstantExpr(Type &Ty, const APInt &Value);
   MAIRScalarExpr createValueExpr(const Value &Value);
@@ -959,25 +965,25 @@ public:
                                   MAIRScalarExpr LHS, MAIRScalarExpr RHS);
   bool ownsScalarExpr(MAIRScalarExpr Expr) const;
 
-  iterator erase(Observation &Obs);
+  iterator erase(ProgramPoint &PP);
   void clear();
 
-  Observation *find(StringRef Name);
-  const Observation *find(StringRef Name) const;
-  Observation &getBBEntryRepresentative(const BasicBlock &BB);
-  const Observation &getBBEntryRepresentative(const BasicBlock &BB) const;
-  Observation &getBBExitRepresentative(const BasicBlock &BB);
-  const Observation &getBBExitRepresentative(const BasicBlock &BB) const;
-  void replaceObservation(Observation &From, Observation &Into);
+  ProgramPoint *find(StringRef Name);
+  const ProgramPoint *find(StringRef Name) const;
+  ProgramPoint &getBBEntryRepresentative(const BasicBlock &BB);
+  const ProgramPoint &getBBEntryRepresentative(const BasicBlock &BB) const;
+  ProgramPoint &getBBExitRepresentative(const BasicBlock &BB);
+  const ProgramPoint &getBBExitRepresentative(const BasicBlock &BB) const;
+  void replaceProgramPoint(ProgramPoint &From, ProgramPoint &Into);
 
-  void addEdge(Observation &From, Observation &To, ObsEdgeKind Kind);
-  void removeEdge(Observation &From, Observation &To, ObsEdgeKind Kind);
-  bool hasEdge(const Observation &From, const Observation &To,
-               ObsEdgeKind Kind) const;
+  void addEdge(ProgramPoint &From, ProgramPoint &To, PPEdgeKind Kind);
+  void removeEdge(ProgramPoint &From, ProgramPoint &To, PPEdgeKind Kind);
+  bool hasEdge(const ProgramPoint &From, const ProgramPoint &To,
+               PPEdgeKind Kind) const;
   /// Return whether \p Ancestor reaches \p Descendant through one or more
-  /// observation edges of exactly \p Kind.
-  bool isAncestor(const Observation &Ancestor, const Observation &Descendant,
-                  ObsEdgeKind Kind) const;
+  /// program point edges of exactly \p Kind.
+  bool isAncestor(const ProgramPoint &Ancestor, const ProgramPoint &Descendant,
+                  PPEdgeKind Kind) const;
   MemoryObject *getMemoryObject(const Value &Base);
   const MemoryObject *getMemoryObject(const Value &Base) const;
 
@@ -996,26 +1002,26 @@ private:
   void clearStorage();
 
   template <class T, class... Args> T &allocateNode(Args &&...ArgsPack);
-  std::string createObservationName(StringRef Prefix);
-  Observation &addObservation(Observation &Obs);
+  std::string createProgramPointName();
+  ProgramPoint &addProgramPoint(ProgramPoint &PP);
   MemoryObject &getOrCreateMemoryObject(const Value &Base);
-  void registerAccess(MemoryAccess &Access);
-  void unregisterAccess(MemoryAccess &Access);
-  void contractObservation(Observation &Into, Observation &From);
+  void registerObservation(Observation &Obs);
+  void unregisterObservation(Observation &Obs);
+  void contractProgramPoint(ProgramPoint &Into, ProgramPoint &From);
 
   /// Construct the raw MAIR graph once dominance and barrier analyses are
   /// fixed.
   ///
-  /// Creates BB-entry, memory-instruction, and BB-exit observations, then adds
-  /// intra-block and dominance/post-dominance edges gated by \p
+  /// Creates BB-entry, memory-instruction, and BB-exit program points, then
+  /// adds intra-block and dominance/post-dominance edges gated by \p
   /// BarrierAnalysis.
   static MAIRGraph build(Function &F, const DominatorTree &DT,
                          const PostDominatorTree &PDT, const LoopInfo &LI,
                          MAIRBarrierAnalysisCore &BarrierAnalysis,
                          MAIROptimizationConfig Config);
 
-  static ObservationListType MAIRGraph::*getSublistAccess(Observation *) {
-    return &MAIRGraph::Observations;
+  static ProgramPointListType MAIRGraph::*getSublistAccess(ProgramPoint *) {
+    return &MAIRGraph::ProgramPoints;
   }
 };
 
@@ -1023,103 +1029,103 @@ private:
 
 namespace llvm {
 
-template <> struct GraphTraits<mair::MemoryAccess *> {
-  using NodeRef = mair::MemoryAccess *;
-  using ChildIteratorType = mair::MemoryAccess *const *;
-
-  static NodeRef getEntryNode(NodeRef Access) { return Access; }
-  static ChildIteratorType child_begin(NodeRef) { return nullptr; }
-  static ChildIteratorType child_end(NodeRef) { return nullptr; }
-};
-
-template <> struct GraphTraits<const mair::MemoryAccess *> {
-  using NodeRef = const mair::MemoryAccess *;
-  using ChildIteratorType = const mair::MemoryAccess *const *;
-
-  static NodeRef getEntryNode(NodeRef Access) { return Access; }
-  static ChildIteratorType child_begin(NodeRef) { return nullptr; }
-  static ChildIteratorType child_end(NodeRef) { return nullptr; }
-};
-
 template <> struct GraphTraits<mair::Observation *> {
   using NodeRef = mair::Observation *;
-  using ChildIteratorType = mair::ObservationEdgeIterator<mair::Observation>;
-  using EdgeRef = mair::ObservationEdge;
-  using ChildEdgeIteratorType = ArrayRef<mair::ObservationEdge>::iterator;
+  using ChildIteratorType = mair::Observation *const *;
 
   static NodeRef getEntryNode(NodeRef Obs) { return Obs; }
-  static ChildIteratorType child_begin(NodeRef Obs) {
-    return ChildIteratorType(Obs->children().begin());
-  }
-  static ChildIteratorType child_end(NodeRef Obs) {
-    return ChildIteratorType(Obs->children().end());
-  }
-  static ChildEdgeIteratorType child_edge_begin(NodeRef Obs) {
-    return Obs->children().begin();
-  }
-  static ChildEdgeIteratorType child_edge_end(NodeRef Obs) {
-    return Obs->children().end();
-  }
-  static NodeRef edge_dest(EdgeRef Edge) { return &Edge.getNode(); }
+  static ChildIteratorType child_begin(NodeRef) { return nullptr; }
+  static ChildIteratorType child_end(NodeRef) { return nullptr; }
 };
 
 template <> struct GraphTraits<const mair::Observation *> {
   using NodeRef = const mair::Observation *;
-  using ChildIteratorType =
-      mair::ObservationEdgeIterator<const mair::Observation>;
-  using EdgeRef = mair::ObservationEdge;
-  using ChildEdgeIteratorType = ArrayRef<mair::ObservationEdge>::iterator;
+  using ChildIteratorType = const mair::Observation *const *;
 
   static NodeRef getEntryNode(NodeRef Obs) { return Obs; }
-  static ChildIteratorType child_begin(NodeRef Obs) {
-    return ChildIteratorType(Obs->children().begin());
+  static ChildIteratorType child_begin(NodeRef) { return nullptr; }
+  static ChildIteratorType child_end(NodeRef) { return nullptr; }
+};
+
+template <> struct GraphTraits<mair::ProgramPoint *> {
+  using NodeRef = mair::ProgramPoint *;
+  using ChildIteratorType = mair::ProgramPointEdgeIterator<mair::ProgramPoint>;
+  using EdgeRef = mair::ProgramPointEdge;
+  using ChildEdgeIteratorType = ArrayRef<mair::ProgramPointEdge>::iterator;
+
+  static NodeRef getEntryNode(NodeRef PP) { return PP; }
+  static ChildIteratorType child_begin(NodeRef PP) {
+    return ChildIteratorType(PP->children().begin());
   }
-  static ChildIteratorType child_end(NodeRef Obs) {
-    return ChildIteratorType(Obs->children().end());
+  static ChildIteratorType child_end(NodeRef PP) {
+    return ChildIteratorType(PP->children().end());
   }
-  static ChildEdgeIteratorType child_edge_begin(NodeRef Obs) {
-    return Obs->children().begin();
+  static ChildEdgeIteratorType child_edge_begin(NodeRef PP) {
+    return PP->children().begin();
   }
-  static ChildEdgeIteratorType child_edge_end(NodeRef Obs) {
-    return Obs->children().end();
+  static ChildEdgeIteratorType child_edge_end(NodeRef PP) {
+    return PP->children().end();
   }
   static NodeRef edge_dest(EdgeRef Edge) { return &Edge.getNode(); }
 };
 
-template <> struct GraphTraits<Inverse<mair::Observation *>> {
-  using NodeRef = mair::Observation *;
-  using ChildIteratorType = mair::ObservationEdgeIterator<mair::Observation>;
+template <> struct GraphTraits<const mair::ProgramPoint *> {
+  using NodeRef = const mair::ProgramPoint *;
+  using ChildIteratorType =
+      mair::ProgramPointEdgeIterator<const mair::ProgramPoint>;
+  using EdgeRef = mair::ProgramPointEdge;
+  using ChildEdgeIteratorType = ArrayRef<mair::ProgramPointEdge>::iterator;
 
-  static NodeRef getEntryNode(Inverse<mair::Observation *> G) {
+  static NodeRef getEntryNode(NodeRef PP) { return PP; }
+  static ChildIteratorType child_begin(NodeRef PP) {
+    return ChildIteratorType(PP->children().begin());
+  }
+  static ChildIteratorType child_end(NodeRef PP) {
+    return ChildIteratorType(PP->children().end());
+  }
+  static ChildEdgeIteratorType child_edge_begin(NodeRef PP) {
+    return PP->children().begin();
+  }
+  static ChildEdgeIteratorType child_edge_end(NodeRef PP) {
+    return PP->children().end();
+  }
+  static NodeRef edge_dest(EdgeRef Edge) { return &Edge.getNode(); }
+};
+
+template <> struct GraphTraits<Inverse<mair::ProgramPoint *>> {
+  using NodeRef = mair::ProgramPoint *;
+  using ChildIteratorType = mair::ProgramPointEdgeIterator<mair::ProgramPoint>;
+
+  static NodeRef getEntryNode(Inverse<mair::ProgramPoint *> G) {
     return G.Graph;
   }
-  static ChildIteratorType child_begin(NodeRef Obs) {
-    return ChildIteratorType(Obs->parents().begin());
+  static ChildIteratorType child_begin(NodeRef PP) {
+    return ChildIteratorType(PP->parents().begin());
   }
-  static ChildIteratorType child_end(NodeRef Obs) {
-    return ChildIteratorType(Obs->parents().end());
+  static ChildIteratorType child_end(NodeRef PP) {
+    return ChildIteratorType(PP->parents().end());
   }
 };
 
-template <> struct GraphTraits<Inverse<const mair::Observation *>> {
-  using NodeRef = const mair::Observation *;
+template <> struct GraphTraits<Inverse<const mair::ProgramPoint *>> {
+  using NodeRef = const mair::ProgramPoint *;
   using ChildIteratorType =
-      mair::ObservationEdgeIterator<const mair::Observation>;
+      mair::ProgramPointEdgeIterator<const mair::ProgramPoint>;
 
-  static NodeRef getEntryNode(Inverse<const mair::Observation *> G) {
+  static NodeRef getEntryNode(Inverse<const mair::ProgramPoint *> G) {
     return G.Graph;
   }
-  static ChildIteratorType child_begin(NodeRef Obs) {
-    return ChildIteratorType(Obs->parents().begin());
+  static ChildIteratorType child_begin(NodeRef PP) {
+    return ChildIteratorType(PP->parents().begin());
   }
-  static ChildIteratorType child_end(NodeRef Obs) {
-    return ChildIteratorType(Obs->parents().end());
+  static ChildIteratorType child_end(NodeRef PP) {
+    return ChildIteratorType(PP->parents().end());
   }
 };
 
 template <>
 struct GraphTraits<mair::MAIRGraph *>
-    : public GraphTraits<mair::Observation *> {
+    : public GraphTraits<mair::ProgramPoint *> {
   using nodes_iterator = pointer_iterator<mair::MAIRGraph::iterator>;
 
   static NodeRef getEntryNode(mair::MAIRGraph *G) {
@@ -1136,7 +1142,7 @@ struct GraphTraits<mair::MAIRGraph *>
 
 template <>
 struct GraphTraits<const mair::MAIRGraph *>
-    : public GraphTraits<const mair::Observation *> {
+    : public GraphTraits<const mair::ProgramPoint *> {
   using nodes_iterator = pointer_iterator<mair::MAIRGraph::const_iterator>;
 
   static NodeRef getEntryNode(const mair::MAIRGraph *G) {
@@ -1153,7 +1159,7 @@ struct GraphTraits<const mair::MAIRGraph *>
 
 template <>
 struct GraphTraits<Inverse<mair::MAIRGraph *>>
-    : public GraphTraits<Inverse<mair::Observation *>> {
+    : public GraphTraits<Inverse<mair::ProgramPoint *>> {
   using nodes_iterator = pointer_iterator<mair::MAIRGraph::iterator>;
 
   static NodeRef getEntryNode(Inverse<mair::MAIRGraph *> G) {
@@ -1169,7 +1175,7 @@ struct GraphTraits<Inverse<mair::MAIRGraph *>>
 
 template <>
 struct GraphTraits<Inverse<const mair::MAIRGraph *>>
-    : public GraphTraits<Inverse<const mair::Observation *>> {
+    : public GraphTraits<Inverse<const mair::ProgramPoint *>> {
   using nodes_iterator = pointer_iterator<mair::MAIRGraph::const_iterator>;
 
   static NodeRef getEntryNode(Inverse<const mair::MAIRGraph *> G) {

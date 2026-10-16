@@ -38,12 +38,12 @@ struct MAIRScalarExprNode {
 };
 
 namespace {
-const Instruction *getBarrierRangeStart(const Observation &Obs) {
-  return Obs.isBasicBlockEntrySite() ? nullptr : &Obs.getAnchor();
+const Instruction *getBarrierRangeStart(const ProgramPoint &PP) {
+  return PP.isBasicBlockEntrySite() ? nullptr : &PP.getAnchor();
 }
 
-const Instruction *getBarrierRangeEnd(const Observation &Obs) {
-  return &Obs.getAnchor();
+const Instruction *getBarrierRangeEnd(const ProgramPoint &PP) {
+  return &PP.getAnchor();
 }
 
 bool isMaskedMemoryIntrinsic(const Instruction &I) {
@@ -71,9 +71,9 @@ bool isInterestingMop(const Instruction &I) {
 
 // Build the initial, unoptimized MAIR graph for one LLVM function.
 //
-// Observation layout follows each LLVM basic block:
-//   BBEntry -> memory observations in source order -> BBExit.
-// Edges are then added for adjacent observations inside each block and for
+// ProgramPoint layout follows each LLVM basic block:
+//   BBEntry -> memory-instruction program points in source order -> BBExit.
+// Edges are then added for adjacent program points inside each block and for
 // immediate dominator/post-dominator relationships across blocks. Barrier
 // queries decide whether the corresponding forward/backward sanitizer
 // reachability edge is legal.
@@ -83,38 +83,38 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
                            MAIROptimizationConfig Config) {
   MAIRGraph Graph(F, Config);
   Graph.Analyses.bind(DT, PDT, LI);
-  DenseMap<const BasicBlock *, Observation *> BBEntryObs;
-  DenseMap<const BasicBlock *, Observation *> BBExitObs;
-  DenseMap<const BasicBlock *, SmallVector<Observation *, 4>> OrderedObs;
+  DenseMap<const BasicBlock *, ProgramPoint *> BBEntryPPs;
+  DenseMap<const BasicBlock *, ProgramPoint *> BBExitPPs;
+  DenseMap<const BasicBlock *, SmallVector<ProgramPoint *, 4>> OrderedPPs;
 
   // ===========================================================
-  // 1. Create observations for each MA and BB
+  // 1. Create program points for memory instructions and block boundaries
   // ===========================================================
   for (BasicBlock &BB : F) {
-    auto &ObsInOneBB = OrderedObs[&BB];
-    auto &Start = Graph.createBBObservation(BB, true);
-    BBEntryObs[&BB] = &Start;
-    ObsInOneBB.push_back(&Start);
+    auto &PPsInOneBB = OrderedPPs[&BB];
+    auto &Start = Graph.createBBProgramPoint(BB, true);
+    BBEntryPPs[&BB] = &Start;
+    PPsInOneBB.push_back(&Start);
     for (Instruction &I : BB) {
       if (isInterestingMop(I)) {
-        auto &Obs = Graph.createInstObservation(BB, I);
-        ObsInOneBB.push_back(&Obs);
+        auto &PP = Graph.createInstProgramPoint(BB, I);
+        PPsInOneBB.push_back(&PP);
       }
     }
-    auto &End = Graph.createBBObservation(BB, false);
-    BBExitObs[&BB] = &End;
-    ObsInOneBB.push_back(&End);
+    auto &End = Graph.createBBProgramPoint(BB, false);
+    BBExitPPs[&BB] = &End;
+    PPsInOneBB.push_back(&End);
   }
 
   // ===========================================================
-  // 2. Connect observations' edges intra-block
+  // 2. Connect program point edges inside each block
   // ===========================================================
-  for (auto &Entry : OrderedObs) {
+  for (auto &Entry : OrderedPPs) {
     const BasicBlock &BB = *Entry.first;
-    ArrayRef<Observation *> Points = Entry.second;
+    ArrayRef<ProgramPoint *> Points = Entry.second;
     assert(Points.size() > 1);
     for (unsigned I = 1; I < Points.size(); ++I) {
-      Observation &Prev = *Points[I - 1], &Next = *Points[I];
+      ProgramPoint &Prev = *Points[I - 1], &Next = *Points[I];
       const Instruction *PrevI = getBarrierRangeStart(Prev);
       const Instruction *NextI = getBarrierRangeEnd(Next);
       bool FwdEndpointBarrier =
@@ -122,14 +122,14 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
       bool BwdEndpointBarrier =
           Prev.isMemoryInstSite() && PrevI && BA.isBwdBarrier(*PrevI);
       if (!FwdEndpointBarrier && !BA.hasFwdBarrierBetween(BB, PrevI, NextI))
-        Graph.addEdge(Prev, Next, ObsEdgeKind::Dom);
+        Graph.addEdge(Prev, Next, PPEdgeKind::Dom);
       if (!BwdEndpointBarrier && !BA.hasBwdBarrierBetween(BB, PrevI, NextI))
-        Graph.addEdge(Next, Prev, ObsEdgeKind::PostDom);
+        Graph.addEdge(Next, Prev, PPEdgeKind::PostDom);
     }
   }
 
   // ===========================================================
-  // 3. Connect observations' edges inter-block via DT/PDT
+  // 3. Connect program point edges across blocks via DT/PDT
   // ===========================================================
   auto GetIDom = [](auto &DT, const BasicBlock &BB) -> const BasicBlock * {
     if (const DomTreeNode *Node = DT.getNode(&BB))
@@ -138,22 +138,22 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
     return nullptr;
   };
   for (BasicBlock &BB : F) {
-    Observation *EntryObs = BBEntryObs.lookup(&BB);
-    Observation *ExitObs = BBExitObs.lookup(&BB);
-    assert(EntryObs && ExitObs);
+    ProgramPoint *EntryPP = BBEntryPPs.lookup(&BB);
+    ProgramPoint *ExitPP = BBExitPPs.lookup(&BB);
+    assert(EntryPP && ExitPP);
     if (const BasicBlock *IDom = GetIDom(DT, BB)) {
-      Observation *Pred = BBExitObs.lookup(IDom);
+      ProgramPoint *Pred = BBExitPPs.lookup(IDom);
       assert(Pred);
       if (!BA.isFwdBarrier(*IDom->getTerminator()) &&
           !BA.hasFwdBarrierPath(*IDom, BB))
-        Graph.addEdge(*Pred, *EntryObs, ObsEdgeKind::Dom);
+        Graph.addEdge(*Pred, *EntryPP, PPEdgeKind::Dom);
     }
     if (const BasicBlock *IPDom = GetIDom(PDT, BB)) {
-      Observation *Succ = BBEntryObs.lookup(IPDom);
+      ProgramPoint *Succ = BBEntryPPs.lookup(IPDom);
       assert(Succ);
       if (!BA.isBwdBarrier(*BB.getTerminator()) &&
           !BA.hasBwdBarrierPath(BB, *IPDom))
-        Graph.addEdge(*Succ, *ExitObs, ObsEdgeKind::PostDom);
+        Graph.addEdge(*Succ, *ExitPP, PPEdgeKind::PostDom);
     }
   }
 
@@ -240,14 +240,14 @@ static AccessProperty getInstructionProperties(const Instruction &I) {
   return Properties;
 }
 
-static MemoryAccess makeAccess(const Instruction &I, const Value &Ptr,
-                               AbstractValue Size, AccessKind Kind,
-                               const DataLayout &DL) {
-  AbstractAccess Access =
+static Observation makeObservation(const Instruction &I, const Value &Ptr,
+                                   AbstractValue Size, AccessKind Kind,
+                                   const DataLayout &DL) {
+  AbstractAccess Obs =
       AbstractAccess::fromPointerAndSize(Ptr, std::move(Size), DL);
   Instruction *Inst = const_cast<Instruction *>(&I);
-  return MemoryAccess(ArrayRef<Instruction *>(&Inst, 1), std::move(Access),
-                      Kind, getInstructionProperties(I));
+  return Observation(ArrayRef<Instruction *>(&Inst, 1), std::move(Obs), Kind,
+                     getInstructionProperties(I));
 }
 
 static void printAbstractValue(raw_ostream &OS, const AbstractValue &Value) {
@@ -276,20 +276,20 @@ static void printAccessKind(raw_ostream &OS, AccessKind Kind) {
   }
 }
 
-static void printEdgeKind(raw_ostream &OS, ObsEdgeKind Kind) {
+static void printEdgeKind(raw_ostream &OS, PPEdgeKind Kind) {
   switch (Kind) {
-  case ObsEdgeKind::Dom:
+  case PPEdgeKind::Dom:
     OS << "dom";
     break;
-  case ObsEdgeKind::PostDom:
+  case PPEdgeKind::PostDom:
     OS << "pdom";
     break;
   }
 }
 
-static void printEdgeList(raw_ostream &OS, ArrayRef<ObservationEdge> Edges) {
+static void printEdgeList(raw_ostream &OS, ArrayRef<ProgramPointEdge> Edges) {
   bool First = true;
-  for (const ObservationEdge &Edge : Edges) {
+  for (const ProgramPointEdge &Edge : Edges) {
     if (!First)
       OS << ", ";
     OS << Edge.getNode().getName() << "(";
@@ -301,20 +301,20 @@ static void printEdgeList(raw_ostream &OS, ArrayRef<ObservationEdge> Edges) {
 
 } // namespace
 
-ObservationSite ObservationSite::anchored(const Instruction &Anchor, Kind K) {
+ProgramPointSite ProgramPointSite::anchored(const Instruction &Anchor, Kind K) {
   assert(K != Kind::Edge && "an anchored site cannot have edge kind");
-  assert(Anchor.getParent() && "an observation anchor must belong to a block");
-  ObservationSite Site;
+  assert(Anchor.getParent() && "a program point anchor must belong to a block");
+  ProgramPointSite Site;
   Site.SiteKind = K;
   Site.Anchor = &Anchor;
   return Site;
 }
 
-ObservationSite ObservationSite::edge(const BasicBlock &From,
-                                      const BasicBlock &To) {
+ProgramPointSite ProgramPointSite::edge(const BasicBlock &From,
+                                        const BasicBlock &To) {
   const Instruction *Anchor = From.getTerminator();
-  assert(Anchor && "an edge observation source must have a terminator");
-  ObservationSite Site;
+  assert(Anchor && "an edge program point source must have a terminator");
+  ProgramPointSite Site;
   Site.SiteKind = Kind::Edge;
   Site.Anchor = Anchor;
   Site.From = &From;
@@ -322,7 +322,7 @@ ObservationSite ObservationSite::edge(const BasicBlock &From,
   return Site;
 }
 
-void ObservationSite::print(raw_ostream &OS) const {
+void ProgramPointSite::print(raw_ostream &OS) const {
   if (!isEdge()) {
     switch (SiteKind) {
     case Kind::MemoryInst:
@@ -335,7 +335,7 @@ void ObservationSite::print(raw_ostream &OS) const {
       OS << "bb.exit(";
       break;
     case Kind::Edge:
-      llvm_unreachable("handled edge observation site");
+      llvm_unreachable("handled edge program point site");
     }
     getBasicBlock()->printAsOperand(OS, false);
     if (SiteKind == Kind::MemoryInst) {
@@ -764,8 +764,8 @@ MAIROptimizationConfig MAIROptimizationConfig::forThreadSanitizer() {
                                 /*AllowRelocation=*/true);
 }
 
-bool MAIROptimizationConfig::allowsCoverageAlong(ObsEdgeKind Kind) const {
-  return !DomCoverageOnly || Kind == ObsEdgeKind::Dom;
+bool MAIROptimizationConfig::allowsCoverageAlong(PPEdgeKind Kind) const {
+  return !DomCoverageOnly || Kind == PPEdgeKind::Dom;
 }
 
 uint8_t MAIROptimizationConfig::getLevel(AccessKind Kind) const {
@@ -780,51 +780,50 @@ uint8_t MAIROptimizationConfig::getLevel(AccessKind Kind) const {
   llvm_unreachable("unknown access kind");
 }
 
-void MAIROptimizationConfig::initializeAccess(MemoryAccess &Access) const {
-  const MaskedRegion *Masked = Access.getMaskedRegion();
+void MAIROptimizationConfig::initializeObservation(Observation &Obs) const {
+  const MaskedRegion *Masked = Obs.getMaskedRegion();
   const bool IsComparableMasked = !Masked || Masked->isComparable();
-  const bool CanMerge = !Access.isVolatile() && !Access.isCallLike() &&
-                        IsComparableMasked &&
-                        (IgnoreAtomic || !Access.isAtomic());
-  const bool CanMove = AllowRelocation && !Access.isVolatile() &&
-                       !Access.isCallLike() && !Access.isAtomic();
-  const bool CanDelete = !Access.isVolatile() && !Access.isCallLike() &&
-                         (IgnoreAtomic || !Access.isAtomic());
-  Access.setOptimizationProperties(CanMerge, CanMove, CanDelete,
-                                   getLevel(Access.getKind()));
+  const bool CanMerge = !Obs.isVolatile() && !Obs.isCallLike() &&
+                        IsComparableMasked && (IgnoreAtomic || !Obs.isAtomic());
+  const bool CanMove = AllowRelocation && !Obs.isVolatile() &&
+                       !Obs.isCallLike() && !Obs.isAtomic();
+  const bool CanDelete = !Obs.isVolatile() && !Obs.isCallLike() &&
+                         (IgnoreAtomic || !Obs.isAtomic());
+  Obs.setOptimizationProperties(CanMerge, CanMove, CanDelete,
+                                getLevel(Obs.getKind()));
 }
 
-void MemoryAccess::refreshOptimizationProperties() {
-  if (Observation *Obs = getParent())
-    if (MAIRGraph *Graph = Obs->getParent())
-      return Graph->getOptimizationConfig().initializeAccess(*this);
-  MAIROptimizationConfig::generic().initializeAccess(*this);
+void Observation::refreshOptimizationProperties() {
+  if (ProgramPoint *PP = getParent())
+    if (MAIRGraph *Graph = PP->getParent())
+      return Graph->getOptimizationConfig().initializeObservation(*this);
+  MAIROptimizationConfig::generic().initializeObservation(*this);
 }
 
-void MemoryAccess::mergeKind(AccessKind Other) {
+void Observation::mergeKind(AccessKind Other) {
   Kind = ::mair::mergeKind(Kind, Other);
   refreshOptimizationProperties();
-  if (Observation *Obs = getParent())
-    Obs->invalidateSort();
+  if (ProgramPoint *PP = getParent())
+    PP->invalidateSort();
 }
 
-void MemoryAccess::eraseFromParent() {
-  Observation *Obs = getParent();
-  assert(Obs && "memory access has no parent");
-  Obs->erase(*this);
+void Observation::eraseFromParent() {
+  ProgramPoint *PP = getParent();
+  assert(PP && "observation has no parent");
+  PP->erase(*this);
 }
 
-const Value *MemoryAccess::getBase() const {
+const Value *Observation::getBase() const {
   return std::visit([](const auto &R) { return R.getBase(); }, Region);
 }
 
-bool MemoryAccess::hasConcreteRange() const {
+bool Observation::hasConcreteRange() const {
   const AbstractAccess *Location = getContiguousRegion();
   return Location && Location->getOffset().isConstant() &&
          Location->getSize().isConstant();
 }
 
-bool MemoryAccess::covers(const MemoryAccess &Other) const {
+bool Observation::covers(const Observation &Other) const {
   if (getBase() != Other.getBase() || !isDeletable() || !Other.isDeletable() ||
       getLevel() < Other.getLevel())
     return false;
@@ -848,7 +847,7 @@ bool MemoryAccess::covers(const MemoryAccess &Other) const {
   return ThisPeriodic && OtherPeriodic && *ThisPeriodic == *OtherPeriodic;
 }
 
-bool MemoryAccess::mergeWith(const MemoryAccess &Other) {
+bool Observation::mergeWith(const Observation &Other) {
   if (getBase() != Other.getBase())
     return false;
   if (!isMergeable() || !Other.isMergeable())
@@ -908,12 +907,12 @@ bool MemoryAccess::mergeWith(const MemoryAccess &Other) {
   Kind = ::mair::mergeKind(Kind, Other.Kind);
   Properties |= Other.Properties;
   refreshOptimizationProperties();
-  if (Observation *Obs = getParent())
-    Obs->invalidateSort();
+  if (ProgramPoint *PP = getParent())
+    PP->invalidateSort();
   return true;
 }
 
-std::string MemoryAccess::toString() const {
+std::string Observation::toString() const {
   std::string S;
   raw_string_ostream OS(S);
   print(OS);
@@ -921,8 +920,8 @@ std::string MemoryAccess::toString() const {
   return S;
 }
 
-MemoryAccess MemoryAccess::fromInstruction(const Instruction &I,
-                                           const DataLayout &DL) {
+Observation Observation::fromInstruction(const Instruction &I,
+                                         const DataLayout &DL) {
   const Value *Ptr = nullptr;
   AbstractValue Size = AbstractValue::unknown();
   AccessKind Kind = AccessKind::Read;
@@ -944,7 +943,7 @@ MemoryAccess MemoryAccess::fromInstruction(const Instruction &I,
     Kind = AccessKind::ReadWrite;
   } else if (isa<AnyMemTransferInst>(I)) {
     report_fatal_error(
-        "MemoryAccess::fromInstruction cannot represent a memory transfer");
+        "Observation::fromInstruction cannot represent a memory transfer");
   } else if (const auto *MI = dyn_cast<AnyMemSetInst>(&I)) {
     Ptr = MI->getRawDest();
     Size = getAccessSize(*MI->getLength());
@@ -974,24 +973,25 @@ MemoryAccess MemoryAccess::fromInstruction(const Instruction &I,
             : MaskedRegion(Bounds, Mask, ElementStoreSize.getFixedValue(),
                            /*Comparable=*/!isa<Constant>(Mask));
     Instruction *Inst = const_cast<Instruction *>(&I);
-    return MemoryAccess(ArrayRef<Instruction *>(&Inst, 1),
-                        MemoryRegion(std::move(Region)), Kind,
-                        getInstructionProperties(I));
+    return Observation(ArrayRef<Instruction *>(&Inst, 1),
+                       MemoryRegion(std::move(Region)), Kind,
+                       getInstructionProperties(I));
   } else if (I.mayReadFromMemory() && I.mayWriteToMemory()) {
     Kind = AccessKind::ReadWrite;
   } else if (I.mayWriteToMemory()) {
     Kind = AccessKind::Write;
   } else if (!I.mayReadFromMemory()) {
     report_fatal_error(
-        "MemoryAccess::fromInstruction expects a memory access instruction");
+        "Observation::fromInstruction expects a memory access instruction");
   }
 
   if (!Ptr)
     report_fatal_error("memory access instruction has no modeled pointer");
-  return makeAccess(I, *Ptr, std::move(Size), Kind, DL);
+  return makeObservation(I, *Ptr, std::move(Size), Kind, DL);
 }
 
-void MemoryAccess::print(raw_ostream &OS) const {
+void Observation::print(raw_ostream &OS) const {
+  OS << "o: ";
   printAccessKind(OS, Kind);
   if (isVolatile())
     OS << " volatile";
@@ -1001,11 +1001,11 @@ void MemoryAccess::print(raw_ostream &OS) const {
     OS << " call";
   if (isMasked())
     OS << " masked";
-  if (const auto *Access = getContiguousRegion()) {
+  if (const auto *Obs = getContiguousRegion()) {
     OS << " ptr ";
-    Access->print(OS);
+    Obs->print(OS);
     OS << ", ";
-    printAbstractValue(OS, Access->getSize());
+    printAbstractValue(OS, Obs->getSize());
     return;
   }
   if (const MaskedRegion *Masked = getMaskedRegion()) {
@@ -1017,51 +1017,52 @@ void MemoryAccess::print(raw_ostream &OS) const {
   getPeriodicRegion()->print(OS);
 }
 
-Observation::Observation(StringRef N, const Instruction &Anchor, SiteKind K)
-    : Observation(N, ObservationSite::anchored(Anchor, K), AlwaysGuard{}) {}
+ProgramPoint::ProgramPoint(StringRef N, const Instruction &Anchor, SiteKind K)
+    : ProgramPoint(N, ProgramPointSite::anchored(Anchor, K), AlwaysGuard{}) {}
 
-Observation::Observation(StringRef N, ObservationSite S, ObservationGuard G)
+ProgramPoint::ProgramPoint(StringRef N, ProgramPointSite S, ProgramPointGuard G)
     : Name(N.str()), Site(std::move(S)), Guard(std::move(G)) {
-  assert(Site.getBasicBlock() && "an observation must have an anchor");
+  assert(Site.getBasicBlock() && "a program point must have an anchor");
   if (!Site.isEdge())
     RepresentedBlocks.insert(Site.getBasicBlock());
 }
 
-Observation::~Observation() { AccessAllocator.DestroyAll(); }
+ProgramPoint::~ProgramPoint() { ObservationAllocator.DestroyAll(); }
 
-MemoryAccess &Observation::createAccess(ArrayRef<Instruction *> Insts,
-                                        const MemoryRegion &Region,
-                                        AccessKind Kind,
-                                        AccessProperty Properties) {
-  return *new (AccessAllocator.Allocate())
-      MemoryAccess(Insts, Region, Kind, Properties);
+Observation &ProgramPoint::createObservation(ArrayRef<Instruction *> Insts,
+                                             const MemoryRegion &Region,
+                                             AccessKind Kind,
+                                             AccessProperty Properties) {
+  return *new (ObservationAllocator.Allocate())
+      Observation(Insts, Region, Kind, Properties);
 }
 
-MemoryAccess &Observation::addAccess(const MemoryAccess &A) {
-  auto &Node = createAccess(A.getInstructions(), A.getRegion(), A.getKind(),
-                            A.getProperties());
-  Accesses.push_back(Node);
+Observation &ProgramPoint::addObservation(const Observation &A) {
+  auto &Node = createObservation(A.getInstructions(), A.getRegion(),
+                                 A.getKind(), A.getProperties());
+  Observations.push_back(Node);
   Node.setParent(this);
   if (MAIRGraph *Graph = getParent())
-    Graph->registerAccess(Node);
-  ++NumAccesses;
+    Graph->registerObservation(Node);
+  ++NumObservations;
   Sorted = false;
   return Node;
 }
 
-bool Observation::hasChild(const Observation &Obs, ObsEdgeKind Kind) const {
-  return llvm::any_of(children(), [&](const ObservationEdge &Edge) {
-    return &Edge.getNode() == &Obs && Edge.getKind() == Kind;
+bool ProgramPoint::hasChild(const ProgramPoint &PP, PPEdgeKind Kind) const {
+  return llvm::any_of(children(), [&](const ProgramPointEdge &Edge) {
+    return &Edge.getNode() == &PP && Edge.getKind() == Kind;
   });
 }
 
-bool Observation::hasParent(const Observation &Obs, ObsEdgeKind Kind) const {
-  return llvm::any_of(parents(), [&](const ObservationEdge &Edge) {
-    return &Edge.getNode() == &Obs && Edge.getKind() == Kind;
+bool ProgramPoint::hasParent(const ProgramPoint &PP, PPEdgeKind Kind) const {
+  return llvm::any_of(parents(), [&](const ProgramPointEdge &Edge) {
+    return &Edge.getNode() == &PP && Edge.getKind() == Kind;
   });
 }
 
-bool Observation::hasCompatibleMergeSemantics(const Observation &Other) const {
+bool ProgramPoint::hasCompatibleMergeSemantics(
+    const ProgramPoint &Other) const {
   if (Guard != Other.Guard)
     return false;
   if (!isEdgeSite() && !Other.isEdgeSite())
@@ -1069,58 +1070,60 @@ bool Observation::hasCompatibleMergeSemantics(const Observation &Other) const {
   return isEdgeSite() && Other.isEdgeSite() && Site == Other.Site;
 }
 
-void Observation::sort(AccessComparator Compare) {
+void ProgramPoint::sort(ObservationComparator Compare) {
   if (Sorted && SortedWith == Compare)
     return;
-  Accesses.sort(Compare);
+  Observations.sort(Compare);
   Sorted = true;
   SortedWith = Compare;
 }
 
-Observation::iterator Observation::erase(iterator It) {
-  assert(It != Accesses.end() && "Cannot erase end iterator");
+ProgramPoint::iterator ProgramPoint::erase(iterator It) {
+  assert(It != Observations.end() && "Cannot erase end iterator");
   if (MAIRGraph *Graph = getParent())
-    Graph->unregisterAccess(*It);
+    Graph->unregisterObservation(*It);
   else
     It->clearMemoryObject();
-  auto Next = Accesses.erase(It);
-  --NumAccesses;
+  auto Next = Observations.erase(It);
+  --NumObservations;
   return Next;
 }
 
-Observation::iterator Observation::erase(MemoryAccess &Access) {
-  assert(Access.getParent() == this &&
-         "memory access does not belong to this observation");
-  return erase(Access.getIterator());
+ProgramPoint::iterator ProgramPoint::erase(Observation &Obs) {
+  assert(Obs.getParent() == this &&
+         "observation does not belong to this program point");
+  return erase(Obs.getIterator());
 }
 
-void Observation::mergeAccessesFrom(const Observation &Other) {
-  assert(hasCompatibleMergeSemantics(Other) &&
-         "cannot merge observations with incompatible site or guard semantics");
-  for (const MemoryAccess &A : Other.Accesses)
-    addAccess(A);
+void ProgramPoint::mergeObservationsFrom(const ProgramPoint &Other) {
+  assert(
+      hasCompatibleMergeSemantics(Other) &&
+      "cannot merge program points with incompatible site or guard semantics");
+  for (const Observation &A : Other.Observations)
+    addObservation(A);
 }
 
-void Observation::prependAccessesFrom(const Observation &Other) {
-  assert(hasCompatibleMergeSemantics(Other) &&
-         "cannot merge observations with incompatible site or guard semantics");
-  for (const MemoryAccess &A : llvm::reverse(Other.Accesses)) {
-    auto &Node = createAccess(A.getInstructions(), A.getRegion(), A.getKind(),
-                              A.getProperties());
-    Accesses.push_front(Node);
+void ProgramPoint::prependObservationsFrom(const ProgramPoint &Other) {
+  assert(
+      hasCompatibleMergeSemantics(Other) &&
+      "cannot merge program points with incompatible site or guard semantics");
+  for (const Observation &A : llvm::reverse(Other.Observations)) {
+    auto &Node = createObservation(A.getInstructions(), A.getRegion(),
+                                   A.getKind(), A.getProperties());
+    Observations.push_front(Node);
     Node.setParent(this);
     if (MAIRGraph *Graph = getParent())
-      Graph->registerAccess(Node);
-    ++NumAccesses;
+      Graph->registerObservation(Node);
+    ++NumObservations;
     Sorted = false;
   }
 }
 
-void Observation::mergeRepresentationFrom(const Observation &Other) {
+void ProgramPoint::mergeRepresentationFrom(const ProgramPoint &Other) {
   RepresentedBlocks.insert_range(Other.RepresentedBlocks);
 }
 
-std::string Observation::toString() const {
+std::string ProgramPoint::toString() const {
   std::string S;
   raw_string_ostream OS(S);
   print(OS);
@@ -1128,7 +1131,7 @@ std::string Observation::toString() const {
   return S;
 }
 
-void Observation::print(raw_ostream &OS) const {
+void ProgramPoint::print(raw_ostream &OS) const {
   OS << Name << ": ";
   if (isEdgeSite() || !hasAlwaysGuard()) {
     OS << "site=";
@@ -1155,7 +1158,7 @@ void Observation::print(raw_ostream &OS) const {
   OS << "], succs=[";
   printEdgeList(OS, Children);
   OS << "]";
-  for (const MemoryAccess &A : Accesses) {
+  for (const Observation &A : Observations) {
     OS << "\n  ";
     A.print(OS);
   }
@@ -1190,11 +1193,11 @@ MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
       MemoryObjects(std::move(Other.MemoryObjects)),
       BBEntryRepresentatives(std::move(Other.BBEntryRepresentatives)),
       BBExitRepresentatives(std::move(Other.BBExitRepresentatives)),
-      Observations(std::move(Other.Observations)),
-      NumObservations(Other.NumObservations), NumEdges(Other.NumEdges),
-      NextObservationID(Other.NextObservationID) {
-  for (Observation &Obs : Observations)
-    Obs.setParent(this);
+      ProgramPoints(std::move(Other.ProgramPoints)),
+      NumProgramPoints(Other.NumProgramPoints), NumEdges(Other.NumEdges),
+      NextProgramPointID(Other.NextProgramPointID) {
+  for (ProgramPoint &PP : ProgramPoints)
+    PP.setParent(this);
   Other.F = nullptr;
   Other.MutableF = nullptr;
   Other.Analyses.clearReferences();
@@ -1217,12 +1220,12 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   MemoryObjects = std::move(Other.MemoryObjects);
   BBEntryRepresentatives = std::move(Other.BBEntryRepresentatives);
   BBExitRepresentatives = std::move(Other.BBExitRepresentatives);
-  Observations = std::move(Other.Observations);
-  NumObservations = Other.NumObservations;
+  ProgramPoints = std::move(Other.ProgramPoints);
+  NumProgramPoints = Other.NumProgramPoints;
   NumEdges = Other.NumEdges;
-  NextObservationID = Other.NextObservationID;
-  for (Observation &Obs : Observations)
-    Obs.setParent(this);
+  NextProgramPointID = Other.NextProgramPointID;
+  for (ProgramPoint &PP : ProgramPoints)
+    PP.setParent(this);
   Other.F = nullptr;
   Other.MutableF = nullptr;
   Other.Analyses.clearReferences();
@@ -1237,15 +1240,15 @@ T &MAIRGraph::allocateNode(Args &&...ArgsPack) {
   return *new (GraphAllocator.Allocate()) T(std::forward<Args>(ArgsPack)...);
 }
 
-std::string MAIRGraph::createObservationName(StringRef Prefix) {
-  return (Twine(Prefix) + Twine(NextObservationID++)).str();
+std::string MAIRGraph::createProgramPointName() {
+  return (Twine("pp") + Twine(NextProgramPointID++)).str();
 }
 
-Observation &MAIRGraph::addObservation(Observation &Obs) {
-  Observations.push_back(Obs);
-  Obs.setParent(this);
-  ++NumObservations;
-  return Obs;
+ProgramPoint &MAIRGraph::addProgramPoint(ProgramPoint &PP) {
+  ProgramPoints.push_back(PP);
+  PP.setParent(this);
+  ++NumProgramPoints;
+  return PP;
 }
 
 MemoryObject &MAIRGraph::getOrCreateMemoryObject(const Value &Base) {
@@ -1255,65 +1258,64 @@ MemoryObject &MAIRGraph::getOrCreateMemoryObject(const Value &Base) {
   return *Object;
 }
 
-void MAIRGraph::registerAccess(MemoryAccess &Access) {
-  const Value *Base = Access.getBase();
-  assert(Base && "cannot add a base-less memory access to a MAIRGraph");
-  OptimizationConfig.initializeAccess(Access);
-  Access.setMemoryObject(&getOrCreateMemoryObject(*Base));
+void MAIRGraph::registerObservation(Observation &Obs) {
+  const Value *Base = Obs.getBase();
+  assert(Base && "cannot add a base-less observation to a MAIRGraph");
+  OptimizationConfig.initializeObservation(Obs);
+  Obs.setMemoryObject(&getOrCreateMemoryObject(*Base));
 }
 
-void MAIRGraph::unregisterAccess(MemoryAccess &Access) {
-  Access.clearMemoryObject();
+void MAIRGraph::unregisterObservation(Observation &Obs) {
+  Obs.clearMemoryObject();
 }
 
-Observation &MAIRGraph::createBBObservation(const BasicBlock &BB,
-                                            bool IsEntry) {
-  assertLive("create an observation on");
+ProgramPoint &MAIRGraph::createBBProgramPoint(const BasicBlock &BB,
+                                              bool IsEntry) {
+  assertLive("create a program point on");
   const Instruction *Anchor =
       IsEntry ? &*BB.getFirstNonPHIIt() : BB.getTerminator();
-  assert(Anchor && "a basic-block observation must have an anchor");
-  Observation &Obs = addObservation(allocateNode<Observation>(
-      createObservationName(IsEntry ? "bs" : "be"), *Anchor,
-      IsEntry ? Observation::SiteKind::BasicBlockEntry
-              : Observation::SiteKind::BasicBlockExit));
-  (IsEntry ? BBEntryRepresentatives : BBExitRepresentatives)[&BB] = &Obs;
-  return Obs;
+  assert(Anchor && "a basic-block program point must have an anchor");
+  ProgramPoint &PP = addProgramPoint(allocateNode<ProgramPoint>(
+      createProgramPointName(), *Anchor,
+      IsEntry ? ProgramPoint::SiteKind::BasicBlockEntry
+              : ProgramPoint::SiteKind::BasicBlockExit));
+  (IsEntry ? BBEntryRepresentatives : BBExitRepresentatives)[&BB] = &PP;
+  return PP;
 }
 
-Observation &MAIRGraph::createInstObservation(const BasicBlock &BB,
-                                              const Instruction &Anchor) {
-  assertLive("create an observation on");
+ProgramPoint &MAIRGraph::createInstProgramPoint(const BasicBlock &BB,
+                                                const Instruction &Anchor) {
+  assertLive("create a program point on");
   assert(Anchor.getParent() == &BB &&
-         "a memory observation anchor must belong to its block");
-  auto &Obs = addObservation(allocateNode<Observation>(
-      createObservationName("ma"), Anchor, Observation::SiteKind::MemoryInst));
+         "a memory-instruction program point anchor must belong to its block");
+  auto &PP = addProgramPoint(allocateNode<ProgramPoint>(
+      createProgramPointName(), Anchor, ProgramPoint::SiteKind::MemoryInst));
   const DataLayout &DL = Anchor.getModule()->getDataLayout();
   if (const auto *Transfer = dyn_cast<AnyMemTransferInst>(&Anchor)) {
-    Obs.addAccess(makeAccess(Anchor, *Transfer->getRawDest(),
-                             getAccessSize(*Transfer->getLength()),
-                             AccessKind::Write, DL));
-    Obs.addAccess(makeAccess(Anchor, *Transfer->getRawSource(),
-                             getAccessSize(*Transfer->getLength()),
-                             AccessKind::Read, DL));
+    PP.addObservation(makeObservation(Anchor, *Transfer->getRawDest(),
+                                      getAccessSize(*Transfer->getLength()),
+                                      AccessKind::Write, DL));
+    PP.addObservation(makeObservation(Anchor, *Transfer->getRawSource(),
+                                      getAccessSize(*Transfer->getLength()),
+                                      AccessKind::Read, DL));
   } else {
-    Obs.addAccess(MemoryAccess::fromInstruction(Anchor, DL));
+    PP.addObservation(Observation::fromInstruction(Anchor, DL));
   }
-  return Obs;
+  return PP;
 }
 
-Observation &MAIRGraph::createObservation(ObservationSite Site,
-                                          ObservationGuard Guard) {
-  assertLive("create an observation on");
-  StringRef Prefix = Site.isEdge() ? "ve" : "va";
-  return addObservation(allocateNode<Observation>(
-      createObservationName(Prefix), std::move(Site), std::move(Guard)));
+ProgramPoint &MAIRGraph::createProgramPoint(ProgramPointSite Site,
+                                            ProgramPointGuard Guard) {
+  assertLive("create a program point on");
+  return addProgramPoint(allocateNode<ProgramPoint>(
+      createProgramPointName(), std::move(Site), std::move(Guard)));
 }
 
-Observation &MAIRGraph::createEdgeObservation(const BasicBlock &From,
-                                              const BasicBlock &To,
-                                              ObservationGuard Guard) {
-  assertLive("create an observation on");
-  return createObservation(ObservationSite::edge(From, To), std::move(Guard));
+ProgramPoint &MAIRGraph::createEdgeProgramPoint(const BasicBlock &From,
+                                                const BasicBlock &To,
+                                                ProgramPointGuard Guard) {
+  assertLive("create a program point on");
+  return createProgramPoint(ProgramPointSite::edge(From, To), std::move(Guard));
 }
 
 MAIRScalarExpr MAIRGraph::createConstantExpr(Type &Ty, const APInt &Value) {
@@ -1360,57 +1362,57 @@ bool MAIRGraph::ownsScalarExpr(MAIRScalarExpr Expr) const {
   return ScalarExprOwner && Expr.getOwner() == ScalarExprOwner.get();
 }
 
-MAIRGraph::iterator MAIRGraph::erase(Observation &Obs) {
+MAIRGraph::iterator MAIRGraph::erase(ProgramPoint &PP) {
   assertLive("erase from");
-  assert(Obs.getParent() == this &&
-         "Observation does not belong to this MAIRGraph");
-  auto It = Obs.getIterator();
+  assert(PP.getParent() == this &&
+         "ProgramPoint does not belong to this MAIRGraph");
+  auto It = PP.getIterator();
   unsigned SelfEdges = 0;
-  for (const ObservationEdge &Edge : Obs.Children)
-    SelfEdges += &Edge.getNode() == &Obs;
+  for (const ProgramPointEdge &Edge : PP.Children)
+    SelfEdges += &Edge.getNode() == &PP;
 
   // Remove each peer's mirror entry directly. A self-edge occurs in both local
   // lists but contributes only once to the graph edge count.
-  auto RemoveMirror = [](auto &Edges, const Observation &Neighbor,
-                         ObsEdgeKind Kind) {
-    auto EdgeIt = llvm::find_if(Edges, [&](const ObservationEdge &Edge) {
+  auto RemoveMirror = [](auto &Edges, const ProgramPoint &Neighbor,
+                         PPEdgeKind Kind) {
+    auto EdgeIt = llvm::find_if(Edges, [&](const ProgramPointEdge &Edge) {
       return &Edge.getNode() == &Neighbor && Edge.getKind() == Kind;
     });
     assert(EdgeIt != Edges.end() && "MAIR edge lists are not symmetric");
     Edges.erase(EdgeIt);
   };
-  for (const ObservationEdge &Edge : Obs.Children) {
-    Observation &To = Edge.getNode();
-    if (&To != &Obs)
-      RemoveMirror(To.Parents, Obs, Edge.getKind());
+  for (const ProgramPointEdge &Edge : PP.Children) {
+    ProgramPoint &To = Edge.getNode();
+    if (&To != &PP)
+      RemoveMirror(To.Parents, PP, Edge.getKind());
   }
-  for (const ObservationEdge &Edge : Obs.Parents) {
-    Observation &From = Edge.getNode();
-    if (&From != &Obs)
-      RemoveMirror(From.Children, Obs, Edge.getKind());
+  for (const ProgramPointEdge &Edge : PP.Parents) {
+    ProgramPoint &From = Edge.getNode();
+    if (&From != &PP)
+      RemoveMirror(From.Children, PP, Edge.getKind());
   }
   const unsigned IncidentEdges =
-      Obs.Children.size() + Obs.Parents.size() - SelfEdges;
-  Obs.Children.clear();
-  Obs.Parents.clear();
+      PP.Children.size() + PP.Parents.size() - SelfEdges;
+  PP.Children.clear();
+  PP.Parents.clear();
   NumEdges -= IncidentEdges;
 
   SmallVector<const BasicBlock *, 4> EntryKeys;
   SmallVector<const BasicBlock *, 4> ExitKeys;
   for (const auto &Entry : BBEntryRepresentatives)
-    if (Entry.second == &Obs)
+    if (Entry.second == &PP)
       EntryKeys.push_back(Entry.first);
   for (const auto &Entry : BBExitRepresentatives)
-    if (Entry.second == &Obs)
+    if (Entry.second == &PP)
       ExitKeys.push_back(Entry.first);
   for (const BasicBlock *BB : EntryKeys)
     BBEntryRepresentatives.erase(BB);
   for (const BasicBlock *BB : ExitKeys)
     BBExitRepresentatives.erase(BB);
-  for (MemoryAccess &Access : Obs.Accesses)
-    unregisterAccess(Access);
-  auto Next = Observations.erase(It);
-  --NumObservations;
+  for (Observation &Obs : PP.Observations)
+    unregisterObservation(Obs);
+  auto Next = ProgramPoints.erase(It);
+  --NumProgramPoints;
   return Next;
 }
 
@@ -1418,13 +1420,13 @@ void MAIRGraph::clearStorage() {
   GraphAllocator.DestroyAll();
   ScalarExprAllocator.DestroyAll();
   MemoryObjectAllocator.DestroyAll();
-  Observations.clear();
+  ProgramPoints.clear();
   MemoryObjects.clear();
   BBEntryRepresentatives.clear();
   BBExitRepresentatives.clear();
-  NumObservations = 0;
+  NumProgramPoints = 0;
   NumEdges = 0;
-  NextObservationID = 0;
+  NextProgramPointID = 0;
 }
 
 void MAIRGraph::clear() {
@@ -1432,55 +1434,55 @@ void MAIRGraph::clear() {
   clearStorage();
 }
 
-Observation *MAIRGraph::find(StringRef Name) {
+ProgramPoint *MAIRGraph::find(StringRef Name) {
   assertLive("find in");
-  return const_cast<Observation *>(std::as_const(*this).find(Name));
+  return const_cast<ProgramPoint *>(std::as_const(*this).find(Name));
 }
 
-const Observation *MAIRGraph::find(StringRef Name) const {
+const ProgramPoint *MAIRGraph::find(StringRef Name) const {
   assertLive("find in");
-  for (const Observation &Obs : Observations)
-    if (Obs.getName() == Name)
-      return &Obs;
+  for (const ProgramPoint &PP : ProgramPoints)
+    if (PP.getName() == Name)
+      return &PP;
   return nullptr;
 }
 
-Observation &MAIRGraph::getBBEntryRepresentative(const BasicBlock &BB) {
+ProgramPoint &MAIRGraph::getBBEntryRepresentative(const BasicBlock &BB) {
   assertLive("query");
-  Observation *Representative = BBEntryRepresentatives.lookup(&BB);
+  ProgramPoint *Representative = BBEntryRepresentatives.lookup(&BB);
   assert(Representative && "Seems the MAIRGraph is broken.");
   return *Representative;
 }
 
-const Observation &
+const ProgramPoint &
 MAIRGraph::getBBEntryRepresentative(const BasicBlock &BB) const {
   assertLive("query");
-  const Observation *Representative = BBEntryRepresentatives.lookup(&BB);
+  const ProgramPoint *Representative = BBEntryRepresentatives.lookup(&BB);
   assert(Representative && "Seems the MAIRGraph is broken.");
   return *Representative;
 }
 
-Observation &MAIRGraph::getBBExitRepresentative(const BasicBlock &BB) {
+ProgramPoint &MAIRGraph::getBBExitRepresentative(const BasicBlock &BB) {
   assertLive("query");
-  Observation *Representative = BBExitRepresentatives.lookup(&BB);
+  ProgramPoint *Representative = BBExitRepresentatives.lookup(&BB);
   assert(Representative && "Seems the MAIRGraph is broken.");
   return *Representative;
 }
 
-const Observation &
+const ProgramPoint &
 MAIRGraph::getBBExitRepresentative(const BasicBlock &BB) const {
   assertLive("query");
-  const Observation *Representative = BBExitRepresentatives.lookup(&BB);
+  const ProgramPoint *Representative = BBExitRepresentatives.lookup(&BB);
   assert(Representative && "Seems the MAIRGraph is broken.");
   return *Representative;
 }
 
-void MAIRGraph::replaceObservation(Observation &From, Observation &Into) {
-  assertLive("replace observations in");
+void MAIRGraph::replaceProgramPoint(ProgramPoint &From, ProgramPoint &Into) {
+  assertLive("replace program points in");
   assert(From.getParent() == this && Into.getParent() == this &&
-         "replacement observations must belong to this graph");
+         "replacement program points must belong to this graph");
   assert(Into.hasCompatibleMergeSemantics(From) &&
-         "replacement observations have incompatible semantics");
+         "replacement program points have incompatible semantics");
   Into.mergeRepresentationFrom(From);
   for (auto &Entry : BBEntryRepresentatives)
     if (Entry.second == &From)
@@ -1490,58 +1492,59 @@ void MAIRGraph::replaceObservation(Observation &From, Observation &Into) {
       Entry.second = &Into;
 }
 
-void MAIRGraph::contractObservation(Observation &Into, Observation &From) {
-  assertLive("contract observations in");
+void MAIRGraph::contractProgramPoint(ProgramPoint &Into, ProgramPoint &From) {
+  assertLive("contract program points in");
   assert(Into.getParent() == this && From.getParent() == this &&
-         "contracted observations must belong to this graph");
+         "contracted program points must belong to this graph");
   assert(Into.hasCompatibleMergeSemantics(From) &&
-         "contracted observations have incompatible semantics");
-  assert(Into.hasChild(From, ObsEdgeKind::PostDom) &&
-         From.hasChild(Into, ObsEdgeKind::Dom) &&
+         "contracted program points have incompatible semantics");
+  assert(Into.hasChild(From, PPEdgeKind::PostDom) &&
+         From.hasChild(Into, PPEdgeKind::Dom) &&
          "contraction requires mutual Dom/PostDom edges");
 
-  Into.prependAccessesFrom(From);
-  SmallVector<ObservationEdge, 2> Incoming(From.parents());
-  SmallVector<ObservationEdge, 2> Outgoing(From.children());
-  for (const ObservationEdge &Edge : Incoming) {
-    Observation &Pred = Edge.getNode();
+  Into.prependObservationsFrom(From);
+  SmallVector<ProgramPointEdge, 2> Incoming(From.parents());
+  SmallVector<ProgramPointEdge, 2> Outgoing(From.children());
+  for (const ProgramPointEdge &Edge : Incoming) {
+    ProgramPoint &Pred = Edge.getNode();
     if (&Pred != &Into)
       addEdge(Pred, Into, Edge.getKind());
   }
-  for (const ObservationEdge &Edge : Outgoing) {
-    Observation &Succ = Edge.getNode();
+  for (const ProgramPointEdge &Edge : Outgoing) {
+    ProgramPoint &Succ = Edge.getNode();
     if (&Succ != &Into)
       addEdge(Into, Succ, Edge.getKind());
   }
 
-  replaceObservation(From, Into);
+  replaceProgramPoint(From, Into);
   erase(From);
 }
 
-void MAIRGraph::addEdge(Observation &From, Observation &To, ObsEdgeKind Kind) {
+void MAIRGraph::addEdge(ProgramPoint &From, ProgramPoint &To, PPEdgeKind Kind) {
   assertLive("add an edge to");
   assert(From.getParent() == this && To.getParent() == this &&
          "MAIRGraph edge endpoints must belong to this graph");
   if (hasEdge(From, To, Kind))
     return;
-  From.Children.push_back(ObservationEdge(To, Kind));
-  To.Parents.push_back(ObservationEdge(From, Kind));
+  From.Children.push_back(ProgramPointEdge(To, Kind));
+  To.Parents.push_back(ProgramPointEdge(From, Kind));
   ++NumEdges;
 }
 
-void MAIRGraph::removeEdge(Observation &From, Observation &To,
-                           ObsEdgeKind Kind) {
+void MAIRGraph::removeEdge(ProgramPoint &From, ProgramPoint &To,
+                           PPEdgeKind Kind) {
   assertLive("remove an edge from");
   assert(From.getParent() == this && To.getParent() == this &&
          "MAIRGraph edge endpoints must belong to this graph");
-  auto ChildIt = llvm::find_if(From.Children, [&](const ObservationEdge &Edge) {
-    return &Edge.getNode() == &To && Edge.getKind() == Kind;
-  });
+  auto ChildIt =
+      llvm::find_if(From.Children, [&](const ProgramPointEdge &Edge) {
+        return &Edge.getNode() == &To && Edge.getKind() == Kind;
+      });
   if (ChildIt == From.Children.end())
     return;
   From.Children.erase(ChildIt);
 
-  auto ParentIt = llvm::find_if(To.Parents, [&](const ObservationEdge &Edge) {
+  auto ParentIt = llvm::find_if(To.Parents, [&](const ProgramPointEdge &Edge) {
     return &Edge.getNode() == &From && Edge.getKind() == Kind;
   });
   assert(ParentIt != To.Parents.end() && "MAIR edge lists are not symmetric");
@@ -1549,33 +1552,33 @@ void MAIRGraph::removeEdge(Observation &From, Observation &To,
   --NumEdges;
 }
 
-bool MAIRGraph::hasEdge(const Observation &From, const Observation &To,
-                        ObsEdgeKind Kind) const {
+bool MAIRGraph::hasEdge(const ProgramPoint &From, const ProgramPoint &To,
+                        PPEdgeKind Kind) const {
   assertLive("query");
-  for (const ObservationEdge &Edge : From.children())
+  for (const ProgramPointEdge &Edge : From.children())
     if (&Edge.getNode() == &To && Edge.getKind() == Kind)
       return true;
   return false;
 }
 
-bool MAIRGraph::isAncestor(const Observation &Ancestor,
-                           const Observation &Descendant,
-                           ObsEdgeKind Kind) const {
+bool MAIRGraph::isAncestor(const ProgramPoint &Ancestor,
+                           const ProgramPoint &Descendant,
+                           PPEdgeKind Kind) const {
   assertLive("query ancestry in");
   assert(Ancestor.getParent() == this && Descendant.getParent() == this &&
          "ancestry endpoints must belong to this graph");
   if (&Ancestor == &Descendant)
     return false;
 
-  SmallVector<const Observation *, 8> Worklist{&Ancestor};
-  SmallPtrSet<const Observation *, 16> Visited;
+  SmallVector<const ProgramPoint *, 8> Worklist{&Ancestor};
+  SmallPtrSet<const ProgramPoint *, 16> Visited;
   Visited.insert(&Ancestor);
   while (!Worklist.empty()) {
-    const Observation &Current = *Worklist.pop_back_val();
-    for (const ObservationEdge &Edge : Current.children()) {
+    const ProgramPoint &Current = *Worklist.pop_back_val();
+    for (const ProgramPointEdge &Edge : Current.children()) {
       if (Edge.getKind() != Kind)
         continue;
-      const Observation *Next = &Edge.getNode();
+      const ProgramPoint *Next = &Edge.getNode();
       if (Next == &Descendant)
         return true;
       if (Visited.insert(Next).second)
@@ -1611,8 +1614,8 @@ void MAIRGraph::print(raw_ostream &OS) const {
     OS << getPrintedValueName(*F);
   }
   OS << " {\n";
-  for (const Observation &Obs : Observations) {
-    Obs.print(OS);
+  for (const ProgramPoint &PP : ProgramPoints) {
+    PP.print(OS);
     OS << "\n";
   }
   OS << "}\n\n";

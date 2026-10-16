@@ -12,18 +12,19 @@ using namespace llvm;
 
 #define DEBUG_TYPE "mair-loop-invariant-motion"
 
-STATISTIC(NumInputAccesses,
-          "Number of memory accesses entering loop-invariant motion");
+STATISTIC(NumInputObservations,
+          "Number of observations entering loop-invariant motion");
 STATISTIC(NumMovedToPreheaders,
-          "Number of invariant accesses moved to loop preheaders");
-STATISTIC(NumMovedToExits, "Number of invariant accesses moved to loop exits");
+          "Number of invariant observations moved to loop preheaders");
+STATISTIC(NumMovedToExits,
+          "Number of invariant observations moved to loop exits");
 
 namespace mair {
 
 namespace {
 
 bool isAbstractValueAvailableAt(const AbstractValue &Value,
-                                const ObservationSite &Site,
+                                const ProgramPointSite &Site,
                                 const MAIRLoopInfo &Loops) {
   if (Value.isConstant())
     return true;
@@ -31,7 +32,7 @@ bool isAbstractValueAvailableAt(const AbstractValue &Value,
 }
 
 bool isRegionAvailableAt(const AbstractAccess &Region,
-                         const ObservationSite &Site,
+                         const ProgramPointSite &Site,
                          const MAIRLoopInfo &Loops) {
   return Region.getBase() &&
          Loops.isValueAvailableAt(*Region.getBase(), Site) &&
@@ -40,9 +41,9 @@ bool isRegionAvailableAt(const AbstractAccess &Region,
 }
 
 std::optional<AnyProvenanceExecutedGuard>
-makeExecutionGuard(const MemoryAccess &Access) {
+makeExecutionGuard(const Observation &Obs) {
   SmallVector<Instruction *, 4> Provenance;
-  for (Instruction *I : Access.getInstructions()) {
+  for (Instruction *I : Obs.getInstructions()) {
     if (!I)
       return std::nullopt;
     if (!llvm::is_contained(Provenance, I))
@@ -53,80 +54,80 @@ makeExecutionGuard(const MemoryAccess &Access) {
   return AnyProvenanceExecutedGuard(Provenance);
 }
 
-Observation *findEvent(MAIRGraph &G, const ObservationSite &Site,
-                       const ObservationGuard &Guard) {
-  for (Observation &Obs : G)
-    if (Obs.getSite() == Site && Obs.getGuard() == Guard)
-      return &Obs;
+ProgramPoint *findProgramPoint(MAIRGraph &G, const ProgramPointSite &Site,
+                               const ProgramPointGuard &Guard) {
+  for (ProgramPoint &PP : G)
+    if (PP.getSite() == Site && PP.getGuard() == Guard)
+      return &PP;
   return nullptr;
 }
 
-void moveAccessTo(MemoryAccess &Access, Observation &Target,
-                  bool MergeEquivalentAccesses) {
-  MemoryAccess *Accumulator = nullptr;
-  if (MergeEquivalentAccesses) {
-    for (MemoryAccess &Existing : Target)
-      if (isEquivalentMovableAccess(Existing, Access)) {
+void moveObservationTo(Observation &Obs, ProgramPoint &Target,
+                       bool MergeEquivalentObservations) {
+  Observation *Accumulator = nullptr;
+  if (MergeEquivalentObservations) {
+    for (Observation &Existing : Target)
+      if (isEquivalentMovableObservation(Existing, Obs)) {
         Accumulator = &Existing;
         break;
       }
   }
 
   if (!Accumulator) {
-    Target.addAccess(Access);
+    Target.addObservation(Obs);
   } else {
-    bool Merged = Accumulator->mergeWith(Access);
-    assert(Merged && "exactly matching accesses must be mergeable");
+    bool Merged = Accumulator->mergeWith(Obs);
+    assert(Merged && "exactly matching observations must be mergeable");
     (void)Merged;
   }
-  Access.getParent()->erase(Access);
+  Obs.getParent()->erase(Obs);
 }
 
 enum class InvariantMotionKind { Preheader, Exit };
 
 struct InvariantMotionPlan {
-  MemoryAccess *Access = nullptr;
-  Observation *Target = nullptr;
-  std::optional<ObservationSite> NewTargetSite;
-  ObservationGuard Guard = AlwaysGuard{};
+  Observation *Obs = nullptr;
+  ProgramPoint *Target = nullptr;
+  std::optional<ProgramPointSite> NewTargetSite;
+  ProgramPointGuard Guard = AlwaysGuard{};
   InvariantMotionKind Kind = InvariantMotionKind::Preheader;
 };
 
 std::optional<InvariantMotionPlan>
 findInvariantMotionForLoop(MAIRGraph &G, MAIRLoopInfo &Loops,
-                           Observation &Source, MemoryAccess &Access,
+                           ProgramPoint &Source, Observation &Obs,
                            const AbstractAccess &Region, Loop &L) {
-  Observation *Preheader = Loops.getPreheaderExit(L);
+  ProgramPoint *Preheader = Loops.getPreheaderExit(L);
   if (Preheader && Preheader != &Source &&
-      G.isAncestor(*Preheader, Source, ObsEdgeKind::Dom) &&
-      G.isAncestor(Source, *Preheader, ObsEdgeKind::PostDom) &&
+      G.isAncestor(*Preheader, Source, PPEdgeKind::Dom) &&
+      G.isAncestor(Source, *Preheader, PPEdgeKind::PostDom) &&
       isRegionAvailableAt(Region, Preheader->getSite(), Loops))
-    return InvariantMotionPlan{&Access, Preheader, std::nullopt, AlwaysGuard{},
+    return InvariantMotionPlan{&Obs, Preheader, std::nullopt, AlwaysGuard{},
                                InvariantMotionKind::Preheader};
 
   std::optional<MAIRLoopExit> Exit = Loops.describeUniqueExit(L);
-  Observation *ExitAncestor = Loops.getUniqueExitEntry(L);
+  ProgramPoint *ExitAncestor = Loops.getUniqueExitEntry(L);
   if (!Exit || !ExitAncestor ||
-      !G.isAncestor(*ExitAncestor, Source, ObsEdgeKind::PostDom))
+      !G.isAncestor(*ExitAncestor, Source, PPEdgeKind::PostDom))
     return std::nullopt;
 
   std::optional<AnyProvenanceExecutedGuard> ExecutionGuard =
-      makeExecutionGuard(Access);
+      makeExecutionGuard(Obs);
   if (!ExecutionGuard)
     return std::nullopt;
 
-  ObservationSite TargetSite =
+  ProgramPointSite TargetSite =
       Exit->IsDedicated ? ExitAncestor->getSite()
-                        : ObservationSite::edge(*Exit->Exiting, *Exit->Exit);
+                        : ProgramPointSite::edge(*Exit->Exiting, *Exit->Exit);
   if (!isRegionAvailableAt(Region, TargetSite, Loops))
     return std::nullopt;
 
-  ObservationGuard Guard = std::move(*ExecutionGuard);
-  Observation *Target = findEvent(G, TargetSite, Guard);
-  std::optional<ObservationSite> NewTargetSite;
+  ProgramPointGuard Guard = std::move(*ExecutionGuard);
+  ProgramPoint *Target = findProgramPoint(G, TargetSite, Guard);
+  std::optional<ProgramPointSite> NewTargetSite;
   if (!Target)
     NewTargetSite = TargetSite;
-  return InvariantMotionPlan{&Access, Target, NewTargetSite, std::move(Guard),
+  return InvariantMotionPlan{&Obs, Target, NewTargetSite, std::move(Guard),
                              InvariantMotionKind::Exit};
 }
 
@@ -135,24 +136,24 @@ std::optional<InvariantMotionPlan> findInvariantMotion(MAIRGraph &G,
   if (!Loops.isAvailable())
     return std::nullopt;
 
-  for (Observation &Obs : G) {
-    // Edge observations are already placed at a virtual CFG edge. Their
+  for (ProgramPoint &PP : G) {
+    // Edge program points are already placed at a virtual CFG edge. Their
     // source terminator anchor identifies that edge; it does not make the
-    // event an ordinary loop-body candidate for another round of motion.
-    if (Obs.isEdgeSite() || !Obs.hasAlwaysGuard())
+    // program point an ordinary loop-body candidate for another motion round.
+    if (PP.isEdgeSite() || !PP.hasAlwaysGuard())
       continue;
-    Loop *L = Loops.getLoopFor(Obs);
+    Loop *L = Loops.getLoopFor(PP);
     if (!L)
       continue;
 
-    for (MemoryAccess &Access : Obs) {
-      if (!Access.isMovable())
+    for (Observation &Obs : PP) {
+      if (!Obs.isMovable())
         continue;
-      const AbstractAccess *Region = Access.getContiguousRegion();
+      const AbstractAccess *Region = Obs.getContiguousRegion();
       if (!Region)
         continue;
 
-      Loop *Top = Loops.getTopInvariantLoop(Access, *L);
+      Loop *Top = Loops.getTopInvariantLoop(Obs, *L);
       if (!Top)
         continue;
 
@@ -170,7 +171,7 @@ std::optional<InvariantMotionPlan> findInvariantMotion(MAIRGraph &G,
              "top invariant loop must be an ancestor of the source loop");
       for (Loop *Candidate : llvm::reverse(InvariantLoops))
         if (std::optional<InvariantMotionPlan> Plan =
-                findInvariantMotionForLoop(G, Loops, Obs, Access, *Region,
+                findInvariantMotionForLoop(G, Loops, PP, Obs, *Region,
                                            *Candidate))
           return Plan;
     }
@@ -179,26 +180,26 @@ std::optional<InvariantMotionPlan> findInvariantMotion(MAIRGraph &G,
 }
 
 void commitInvariantMotion(MAIRGraph &G, InvariantMotionPlan Plan,
-                           bool MergeEquivalentAccesses) {
-  assert(Plan.Access && "invariant motion requires an access");
-  Observation *Target = Plan.Target;
+                           bool MergeEquivalentObservations) {
+  assert(Plan.Obs && "invariant motion requires an observation");
+  ProgramPoint *Target = Plan.Target;
   if (!Target) {
     assert(Plan.NewTargetSite && "new motion target requires a site");
-    Target = &G.createObservation(*Plan.NewTargetSite, Plan.Guard);
+    Target = &G.createProgramPoint(*Plan.NewTargetSite, Plan.Guard);
   }
-  moveAccessTo(*Plan.Access, *Target, MergeEquivalentAccesses);
+  moveObservationTo(*Plan.Obs, *Target, MergeEquivalentObservations);
   if (Plan.Kind == InvariantMotionKind::Preheader)
     ++NumMovedToPreheaders;
   else
     ++NumMovedToExits;
 }
 
-bool moveOneInvariantAccess(MAIRGraph &G, MAIRLoopInfo &Loops,
-                            bool MergeEquivalentAccesses) {
+bool moveOneInvariantObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
+                                 bool MergeEquivalentObservations) {
   std::optional<InvariantMotionPlan> Plan = findInvariantMotion(G, Loops);
   if (!Plan)
     return false;
-  commitInvariantMotion(G, std::move(*Plan), MergeEquivalentAccesses);
+  commitInvariantMotion(G, std::move(*Plan), MergeEquivalentObservations);
   return true;
 }
 
@@ -208,11 +209,11 @@ PreservedAnalyses
 LoopInvariantObservationMotionPass::run(MAIRGraph &G,
                                         MAIRGraphAnalysisManager &AM) {
 #if LLVM_ENABLE_STATS
-  NumInputAccesses += MAIRStat::compute(G).getNumMemoryAccesses();
+  NumInputObservations += MAIRStat::compute(G).getNumObservations();
 #endif
   bool Changed = false;
   MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
-  while (moveOneInvariantAccess(G, Loops, MergeEquivalentAccesses))
+  while (moveOneInvariantObservation(G, Loops, MergeEquivalentObservations))
     Changed = true;
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

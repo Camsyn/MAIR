@@ -31,21 +31,21 @@ inline mair::MAIRGraph buildGraph(llvm::Function &F,
                                 Config);
 }
 
-inline unsigned accessCount(const mair::MAIRGraph &Graph,
-                            llvm::StringRef Block) {
+inline unsigned observationCount(const mair::MAIRGraph &Graph,
+                                 llvm::StringRef Block) {
   unsigned Count = 0;
-  for (const mair::Observation &Obs : Graph)
-    if (Obs.getBasicBlock() && Obs.getBasicBlock()->getName() == Block)
-      Count += Obs.size();
+  for (const mair::ProgramPoint &PP : Graph)
+    if (PP.getBasicBlock() && PP.getBasicBlock()->getName() == Block)
+      Count += PP.size();
   return Count;
 }
 
-inline mair::Observation *findMutableMemoryObservation(mair::MAIRGraph &Graph,
-                                                       llvm::StringRef Block) {
-  for (mair::Observation &Obs : Graph)
-    if (Obs.isMemoryInstSite() && Obs.getBasicBlock() &&
-        Obs.getBasicBlock()->getName() == Block)
-      return &Obs;
+inline mair::ProgramPoint *
+findMutableMemoryProgramPoint(mair::MAIRGraph &Graph, llvm::StringRef Block) {
+  for (mair::ProgramPoint &PP : Graph)
+    if (PP.isMemoryInstSite() && PP.getBasicBlock() &&
+        PP.getBasicBlock()->getName() == Block)
+      return &PP;
   return nullptr;
 }
 

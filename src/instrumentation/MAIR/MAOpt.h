@@ -22,13 +22,13 @@ inline bool isMAIROptEnabled() { return std::getenv("MAIR") != nullptr; }
 ///
 /// The barrier policy is a type because it is part of graph construction, not
 /// a run-time optimization choice. Keeping the graph and its pass managers in
-/// this object also makes the observation-to-access view valid until
+/// this object also makes the program-point-to-observation view valid until
 /// instantiate() consumes the graph.
 template <class BarrierTrait = DefaultBarrierTrait> class MAOpt {
 public:
-  using ObservationAccesses =
-      llvm::DenseMap<const Observation *,
-                     llvm::SmallVector<const MemoryAccess *, 4>>;
+  using ProgramPointObservations =
+      llvm::DenseMap<const ProgramPoint *,
+                     llvm::SmallVector<const Observation *, 4>>;
 
   MAOpt(llvm::Function &F, llvm::FunctionAnalysisManager &FAM,
         llvm::PassInstrumentationCallbacks *PIC, bool KeepFullDebug,
@@ -44,23 +44,23 @@ public:
     assert(!Graph && "MAOpt graph has already been built");
     Graph = std::make_unique<MAIRGraph>(
         MAIRGraph::template build<BarrierTrait>(F, FAM, Config));
-    rebuildObservationAccesses();
+    rebuildProgramPointObservations();
     return *Graph;
   }
 
-  void
-  retainAccesses(const llvm::SmallPtrSetImpl<const MemoryAccess *> &Targets) {
+  void retainObservations(
+      const llvm::SmallPtrSetImpl<const Observation *> &Targets) {
     assert(Graph && "MAOpt graph has not been built");
 
-    for (Observation &Obs : *Graph) {
-      for (auto It = Obs.begin(); It != Obs.end();) {
+    for (ProgramPoint &PP : *Graph) {
+      for (auto It = PP.begin(); It != PP.end();) {
         if (Targets.contains(&*It))
           ++It;
         else
-          It = Obs.erase(It);
+          It = PP.erase(It);
       }
     }
-    rebuildObservationAccesses();
+    rebuildProgramPointObservations();
   }
 
   llvm::Error optimize() {
@@ -81,7 +81,7 @@ public:
                                      "MAOpt produced an invalid MAIRGraph");
     GAM.clear(*Graph, F.getName());
     Optimized = true;
-    rebuildObservationAccesses();
+    rebuildProgramPointObservations();
     return llvm::Error::success();
   }
 
@@ -96,7 +96,7 @@ public:
     llvm::Expected<MAIRInstantiationResult> Result =
         Graph->instantiate(FAM, Backend);
     if (Result)
-      ObservationToAccesses.clear();
+      ProgramPointToObservations.clear();
     return Result;
   }
 
@@ -109,27 +109,27 @@ public:
     return *Graph;
   }
 
-  const ObservationAccesses &getObservationMAs() const {
+  const ProgramPointObservations &getProgramPointObservations() const {
     assert(Graph && "MAOpt graph has not been built");
-    return ObservationToAccesses;
+    return ProgramPointToObservations;
   }
 
-  llvm::ArrayRef<const MemoryAccess *>
-  getObservationMAs(const Observation &Obs) const {
+  llvm::ArrayRef<const Observation *>
+  getProgramPointObservations(const ProgramPoint &PP) const {
     assert(Graph && "MAOpt graph has not been built");
-    const auto It = ObservationToAccesses.find(&Obs);
-    if (It == ObservationToAccesses.end())
+    const auto It = ProgramPointToObservations.find(&PP);
+    if (It == ProgramPointToObservations.end())
       return {};
     return It->second;
   }
 
 private:
-  void rebuildObservationAccesses() {
-    ObservationToAccesses.clear();
-    for (const Observation &Obs : *Graph) {
-      auto &Accesses = ObservationToAccesses[&Obs];
-      for (const MemoryAccess &Access : Obs)
-        Accesses.push_back(&Access);
+  void rebuildProgramPointObservations() {
+    ProgramPointToObservations.clear();
+    for (const ProgramPoint &PP : *Graph) {
+      auto &Observations = ProgramPointToObservations[&PP];
+      for (const Observation &Obs : PP)
+        Observations.push_back(&Obs);
     }
   }
 
@@ -141,7 +141,7 @@ private:
   std::unique_ptr<MAIRGraph> Graph;
   MAIRGraphAnalysisManager GAM;
   MAIRGraphPassManager PM;
-  ObservationAccesses ObservationToAccesses;
+  ProgramPointObservations ProgramPointToObservations;
 };
 
 } // namespace mair

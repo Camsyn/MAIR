@@ -1331,10 +1331,10 @@ public:
   bool instrumentFunctionViaMAIR(Function &F, FunctionAnalysisManager &FAM,
                                  const TargetLibraryInfo *TLI,
                                  const TargetTransformInfo *TTI);
-  bool instrumentMAIRAccess(const mair::MaterializedAccess &Access,
-                            IRBuilderBase &Builder, bool UseCalls,
-                            ObjectSizeOffsetVisitor &ObjSizeVis,
-                            RuntimeCallInserter &RTCI);
+  bool instrumentMAIRObservation(const mair::MaterializedObservation &Obs,
+                                 IRBuilderBase &Builder, bool UseCalls,
+                                 ObjectSizeOffsetVisitor &ObjSizeVis,
+                                 RuntimeCallInserter &RTCI);
 #endif
 
 private:
@@ -4141,16 +4141,16 @@ bool XsanAddressSanitizer::prepareAsanTargetsToInstrument(
 }
 
 #ifndef XSAN_PASS
-bool XsanAddressSanitizer::instrumentMAIRAccess(
-    const mair::MaterializedAccess &Access, IRBuilderBase &Builder,
+bool XsanAddressSanitizer::instrumentMAIRObservation(
+    const mair::MaterializedObservation &Obs, IRBuilderBase &Builder,
     bool UseCalls, ObjectSizeOffsetVisitor &ObjSizeVis,
     RuntimeCallInserter &RTCI) {
-  if (!Access.Source)
-    report_fatal_error("ASan MAIR access has no source");
+  if (!Obs.Source)
+    report_fatal_error("ASan MAIR observation has no source");
 
-  ArrayRef<Instruction *> SelectedSources = Access.Source->getInstructions();
+  ArrayRef<Instruction *> SelectedSources = Obs.Source->getInstructions();
   if (SelectedSources.empty())
-    report_fatal_error("ASan MAIR access has no source instruction");
+    report_fatal_error("ASan MAIR observation has no source instruction");
 
   auto InstrumentAtSource = [&](Instruction &Source) {
     if (auto *LI = dyn_cast<LoadInst>(&Source)) {
@@ -4174,10 +4174,10 @@ bool XsanAddressSanitizer::instrumentMAIRAccess(
       isa<LoadInst>(Source)
           ? cast<LoadInst>(Source)->getType()
           : cast<StoreInst>(Source)->getValueOperand()->getType();
-  const auto *Size = dyn_cast_or_null<ConstantInt>(Access.AccessSize);
+  const auto *Size = dyn_cast_or_null<ConstantInt>(Obs.AccessSize);
   bool CanUseOptimizedSite = SelectedSources.size() == 1 &&
-                             Access.Source->getInstructions().size() == 1 &&
-                             Access.Source->isContiguous() &&
+                             Obs.Source->getInstructions().size() == 1 &&
+                             Obs.Source->isContiguous() &&
                              !SourceType->isVectorTy() && Size &&
                              Size->getValue().getActiveBits() < 32;
   if (!CanUseOptimizedSite) {
@@ -4215,8 +4215,8 @@ bool XsanAddressSanitizer::instrumentMAIRAccess(
                              ? MaybeAlign(cast<LoadInst>(Source)->getAlign())
                              : MaybeAlign(cast<StoreInst>(Source)->getAlign());
   TypeSize SizeInBits = TypeSize::getFixed(Size->getZExtValue() * 8);
-  bool IsWrite = Access.Kind != mair::AccessKind::Read;
-  doInstrumentAddress(this, Source, InsertBefore, Access.Address, Alignment,
+  bool IsWrite = Obs.Kind != mair::AccessKind::Read;
+  doInstrumentAddress(this, Source, InsertBefore, Obs.Address, Alignment,
                       1U << Mapping.Scale, SizeInBits, IsWrite, nullptr,
                       UseCalls, ClForceExperiment, RTCI);
   return true;
@@ -4274,26 +4274,26 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
   // observations. Drop them before optimization so a disabled access cannot
   // cover a later one and then disappear, taking that check with it.
   if (!ClInstrumentReads || !ClInstrumentWrites) {
-    SmallPtrSet<const mair::MemoryAccess *, 32> Kept;
-    for (const auto &[Observation, Accesses] : Opt.getObservationMAs()) {
-      (void)Observation;
-      for (const mair::MemoryAccess *Access : Accesses) {
-        mair::AccessKind Kind = Access->getKind();
+    SmallPtrSet<const mair::Observation *, 32> Kept;
+    for (const auto &[PP, Observations] : Opt.getProgramPointObservations()) {
+      (void)PP;
+      for (const mair::Observation *Obs : Observations) {
+        mair::AccessKind Kind = Obs->getKind();
         if (!ClInstrumentReads && Kind == mair::AccessKind::Read)
           continue;
         if (!ClInstrumentWrites && Kind == mair::AccessKind::Write)
           continue;
-        Kept.insert(Access);
+        Kept.insert(Obs);
       }
     }
-    Opt.retainAccesses(Kept);
+    Opt.retainObservations(Kept);
   }
 
   SmallPtrSet<const Instruction *, 32> MAIRModeledSources;
-  for (const auto &[Observation, Accesses] : Opt.getObservationMAs()) {
-    (void)Observation;
-    for (const mair::MemoryAccess *Access : Accesses)
-      for (const Instruction *Source : Access->getInstructions())
+  for (const auto &[PP, Observations] : Opt.getProgramPointObservations()) {
+    (void)PP;
+    for (const mair::Observation *Obs : Observations)
+      for (const Instruction *Source : Obs->getInstructions())
         MAIRModeledSources.insert(Source);
   }
 
@@ -4320,13 +4320,13 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
     return false;
   };
 
-  auto CanInstrumentViaMAIR = [&](const mair::MemoryAccess &Access) {
-    if ((ClDebugMin >= 0 && ClDebugMax >= 0) || !Access.isContiguous() ||
-        Access.isVolatile() || Access.isCallLike() ||
-        Access.getInstructions().size() != 1 || !Access.hasConcreteRange())
+  auto CanInstrumentViaMAIR = [&](const mair::Observation &Obs) {
+    if ((ClDebugMin >= 0 && ClDebugMax >= 0) || !Obs.isContiguous() ||
+        Obs.isVolatile() || Obs.isCallLike() ||
+        Obs.getInstructions().size() != 1 || !Obs.hasConcreteRange())
       return false;
 
-    Instruction *Source = Access.getInstructions().front();
+    Instruction *Source = Obs.getInstructions().front();
     auto *LI = dyn_cast<LoadInst>(Source);
     auto *SI = dyn_cast<StoreInst>(Source);
     if ((!LI && !SI) || (LI && LI->isVolatile()) || (SI && SI->isVolatile()))
@@ -4342,30 +4342,30 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
            !IsElidedByNativeAsanOpt(*Source);
   };
 
-  SmallVector<const mair::MemoryAccess *, 32> MAIRCandidates;
-  SmallPtrSet<const mair::MemoryAccess *, 32> MAIRTargets;
+  SmallVector<const mair::Observation *, 32> MAIRCandidates;
+  SmallPtrSet<const mair::Observation *, 32> MAIRTargets;
   SmallPtrSet<const Instruction *, 32> MAIRFallbackSources;
-  for (const auto &[Observation, Accesses] : Opt.getObservationMAs()) {
-    (void)Observation;
-    for (const mair::MemoryAccess *Access : Accesses) {
-      if (CanInstrumentViaMAIR(*Access)) {
-        MAIRCandidates.push_back(Access);
+  for (const auto &[PP, Observations] : Opt.getProgramPointObservations()) {
+    (void)PP;
+    for (const mair::Observation *Obs : Observations) {
+      if (CanInstrumentViaMAIR(*Obs)) {
+        MAIRCandidates.push_back(Obs);
         continue;
       }
-      for (const Instruction *Source : Access->getInstructions())
+      for (const Instruction *Source : Obs->getInstructions())
         MAIRFallbackSources.insert(Source);
     }
   }
-  for (const mair::MemoryAccess *Access : MAIRCandidates) {
-    const Instruction *Source = Access->getInstructions().front();
+  for (const mair::Observation *Obs : MAIRCandidates) {
+    const Instruction *Source = Obs->getInstructions().front();
     if (!MAIRFallbackSources.contains(Source))
-      MAIRTargets.insert(Access);
+      MAIRTargets.insert(Obs);
   }
 
   SmallPtrSet<const Instruction *, 32> MAIRHandledSources = MAIRModeledSources;
   for (const Instruction *Source : MAIRFallbackSources)
     MAIRHandledSources.erase(Source);
-  Opt.retainAccesses(MAIRTargets);
+  Opt.retainObservations(MAIRTargets);
 
   AsanToInstrument Targets;
   if (!collectTargetsToIntrument(F, TLI, TTI, Targets))
@@ -4406,11 +4406,11 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
         return Error::success();
       }
 
-      void emit(const mair::MaterializedObservation &Observation,
+      void emit(const mair::MaterializedProgramPoint &PP,
                 IRBuilderBase &Builder) override {
-        for (const mair::MaterializedAccess &Access : Observation.Accesses)
-          Changed |= ASan.instrumentMAIRAccess(Access, Builder, UseCalls,
-                                               ObjSizeVis, RTCI);
+        for (const mair::MaterializedObservation &Obs : PP.Observations)
+          Changed |= ASan.instrumentMAIRObservation(Obs, Builder, UseCalls,
+                                                    ObjSizeVis, RTCI);
       }
 
       bool changed() const { return Changed; }

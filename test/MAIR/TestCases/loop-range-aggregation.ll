@@ -6,10 +6,10 @@
 
 define void @aggregate_fixed_range(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @aggregate_fixed_range {
-; CHECK:       ma3: preds=
+; CHECK:       pp3: preds=
 ; CHECK-EMPTY:
-; CHECK:       bs5: preds=
-; CHECK-NEXT:    read ptr %p, 4
+; CHECK:       pp5: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br label %header
 
@@ -27,10 +27,10 @@ exit:
 
 define void @aggregate_decreasing_range(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @aggregate_decreasing_range {
-; CHECK:       ma3: preds=
+; CHECK:       pp3: preds=
 ; CHECK-EMPTY:
-; CHECK:       bs5: preds=
-; CHECK-NEXT:    read ptr %p, 4
+; CHECK:       pp5: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br label %header
 
@@ -48,10 +48,10 @@ exit:
 
 define void @aggregate_non_contiguous_period(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @aggregate_non_contiguous_period {
-; CHECK:       ma3: preds=
+; CHECK:       pp3: preds=
 ; CHECK-EMPTY:
-; CHECK:       bs5: preds=
-; CHECK-NEXT:    read period start=%p, stride=2, access-size=1, trips=4
+; CHECK:       pp5: preds=
+; CHECK-NEXT:    o: read period start=%p, stride=2, access-size=1, trips=4
 entry:
   br label %header
 
@@ -70,10 +70,10 @@ exit:
 
 define void @aggregate_dynamic_header_count(ptr %p, i64 %n) {
 ; CHECK-LABEL: mair graph of fn @aggregate_dynamic_header_count {
-; CHECK:       ma3: preds=
+; CHECK:       pp3: preds=
 ; CHECK-EMPTY:
-; CHECK:       bs7: preds=
-; CHECK-NEXT:    read period start=%p, stride=1, access-size=1, trips=(1 + zext(%n to i65))
+; CHECK:       pp7: preds=
+; CHECK-NEXT:    o: read period start=%p, stride=1, access-size=1, trips=(1 + zext(%n to i65))
 entry:
   br label %header
 
@@ -94,10 +94,10 @@ exit:
 
 define void @aggregate_zero_trip_dynamic_body(ptr %p, i64 %n) {
 ; CHECK-LABEL: mair graph of fn @aggregate_zero_trip_dynamic_body {
-; CHECK:       ma5: preds=
+; CHECK:       pp5: preds=
 ; CHECK-EMPTY:
-; CHECK:       bs7: preds=
-; CHECK-NEXT:    read period start=%p, stride=1, access-size=1, trips=zext(%n to i65)
+; CHECK:       pp7: preds=
+; CHECK-NEXT:    o: read period start=%p, stride=1, access-size=1, trips=zext(%n to i65)
 entry:
   br label %header
 
@@ -118,10 +118,10 @@ exit:
 
 define void @aggregate_dynamic_stride_body(ptr %p, i64 %n, i64 %stride) {
 ; CHECK-LABEL: mair graph of fn @aggregate_dynamic_stride_body {
-; CHECK:       ma5: preds=
+; CHECK:       pp5: preds=
 ; CHECK-EMPTY:
-; CHECK:       bs7: preds=
-; CHECK-NEXT:    read period start=%p, stride=%stride, access-size=1, trips=zext(%n to i65)
+; CHECK:       pp7: preds=
+; CHECK-NEXT:    o: read period start=%p, stride=%stride, access-size=1, trips=zext(%n to i65)
 entry:
   br label %header
 
@@ -144,8 +144,8 @@ exit:
 define void @aggregate_dynamic_scev_ops(ptr %p, i64 %n, i32 %stride,
                                         i64 %denom) {
 ; CHECK-LABEL: mair graph of fn @aggregate_dynamic_scev_ops {
-; CHECK:       bs7: preds=
-; CHECK-NEXT:    read period start=%p, stride=((3 * zext(%stride to i64)) udiv %denom), access-size=1, trips=zext(%n to i65)
+; CHECK:       pp7: preds=
+; CHECK-NEXT:    o: read period start=%p, stride=((3 * zext(%stride to i64)) udiv %denom), access-size=1, trips=zext(%n to i65)
 entry:
   %wide = zext i32 %stride to i64
   %scaled = mul i64 %wide, 3
@@ -170,10 +170,10 @@ exit:
 
 define void @aggregate_shared_exit(ptr %p, i1 %bypass) {
 ; CHECK-LABEL: mair graph of fn @aggregate_shared_exit {
-; CHECK:       ma5: preds=
+; CHECK:       pp5: preds=
 ; CHECK-EMPTY:
-; CHECK:       ve11: site=edge(%header -> %exit), preds=[], succs=[]
-; CHECK-NEXT:    read ptr %p, 4
+; CHECK:       pp11: site=edge(%header -> %exit), preds=[], succs=[]
+; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br i1 %bypass, label %other, label %preheader
 
@@ -197,8 +197,8 @@ exit:
 
 define void @keep_branch_only_period(ptr %p, i64 %n, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @keep_branch_only_period {
-; CHECK:       ma7: preds=
-; CHECK-NEXT:    read ptr %p + %pi, 1
+; CHECK:       pp7: preds=
+; CHECK-NEXT:    o: read ptr %p + %pi, 1
 entry:
   br label %header
 
@@ -225,10 +225,10 @@ exit:
 
 define void @aggregate_maximal_header_count(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @aggregate_maximal_header_count {
-; CHECK:       ma3: preds=
+; CHECK:       pp3: preds=
 ; CHECK-EMPTY:
-; CHECK:       bs5: preds=
-; CHECK-NEXT:    read period start=%p, stride=1, access-size=1, trips=18446744073709551616
+; CHECK:       pp5: preds=
+; CHECK-NEXT:    o: read period start=%p, stride=1, access-size=1, trips=18446744073709551616
 entry:
   br label %header
 
@@ -246,7 +246,7 @@ exit:
 
 define void @keep_nested_addrec_site(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @keep_nested_addrec_site {
-; CHECK:       read ptr %p + %pi, 1
+; CHECK:       o: read ptr %p + %pi, 1
 entry:
   br label %outer.header
 
@@ -273,7 +273,7 @@ exit:
 
 define void @keep_quadratic_pointer_recurrence(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @keep_quadratic_pointer_recurrence {
-; CHECK:       read ptr %p + %pi, 1
+; CHECK:       o: read ptr %p + %pi, 1
 entry:
   br label %header
 
@@ -296,7 +296,7 @@ exit:
 define void @keep_irreducible_period(ptr %p, i1 %entry.sel, i1 %cycle.sel,
                                      i1 %again) {
 ; CHECK-LABEL: mair graph of fn @keep_irreducible_period {
-; CHECK:       read ptr %p + %pi, 1
+; CHECK:       o: read ptr %p + %pi, 1
 entry:
   br label %header
 

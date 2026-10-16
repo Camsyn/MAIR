@@ -6,9 +6,9 @@
 
 define void @hoist_header_invariant(ptr %p, i32 %n) {
 ; CHECK-LABEL: mair graph of fn @hoist_header_invariant {
-; CHECK:       be1: preds=
-; CHECK-NEXT:    read ptr %p, 4
-; CHECK:       ma3: preds=
+; CHECK:       pp1: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK:       pp3: preds=
 ; CHECK-EMPTY:
 entry:
   br label %header
@@ -29,9 +29,9 @@ exit:
 
 define void @hoist_to_outer_preheader(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @hoist_to_outer_preheader {
-; CHECK:       be1: preds=
-; CHECK-NEXT:    read ptr %p, 4
-; CHECK:       ma5: preds=
+; CHECK:       pp1: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK:       pp5: preds=
 ; CHECK-EMPTY:
 entry:
   br label %outer.header
@@ -58,12 +58,12 @@ exit:
 
 define void @sink_branch_only(ptr %p, i32 %n, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @sink_branch_only {
-; CHECK:       be1: preds=
+; CHECK:       pp1: preds=
 ; CHECK-EMPTY:
-; CHECK:       ma7: preds=
+; CHECK:       pp7: preds=
 ; CHECK-EMPTY:
-; CHECK:       va13: site=bb.entry(%exit), guard=any(%v), preds=[], succs=[]
-; CHECK-NEXT:    read ptr %p, 4
+; CHECK:       pp13: site=bb.entry(%exit), guard=any(%v), preds=[], succs=[]
+; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br label %header
 
@@ -89,12 +89,12 @@ exit:
 
 define void @sink_zero_trip_body(ptr %p, i32 %n) {
 ; CHECK-LABEL: mair graph of fn @sink_zero_trip_body {
-; CHECK:       be1: preds=
+; CHECK:       pp1: preds=
 ; CHECK-EMPTY:
-; CHECK:       ma5: preds=
+; CHECK:       pp5: preds=
 ; CHECK-EMPTY:
-; CHECK:       va9: site=bb.entry(%exit), guard=any(%v), preds=[], succs=[]
-; CHECK-NEXT:    read ptr %p, 4
+; CHECK:       pp9: site=bb.entry(%exit), guard=any(%v), preds=[], succs=[]
+; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br label %header
 
@@ -115,10 +115,10 @@ exit:
 define void @sink_branch_to_shared_exit(ptr %p, i32 %n, i1 %cond,
                                         i1 %bypass) {
 ; CHECK-LABEL: mair graph of fn @sink_branch_to_shared_exit {
-; CHECK:       ma9: preds=
+; CHECK:       pp9: preds=
 ; CHECK-EMPTY:
-; CHECK:       ve15: site=edge(%header -> %exit), guard=any(%v), preds=[], succs=[]
-; CHECK-NEXT:    read ptr %p, 4
+; CHECK:       pp15: site=edge(%header -> %exit), guard=any(%v), preds=[], succs=[]
+; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br i1 %bypass, label %exit, label %preheader
 
@@ -147,9 +147,9 @@ exit:
 
 define void @hoist_with_multiple_exits(ptr %p, i32 %n, i1 %early) {
 ; CHECK-LABEL: mair graph of fn @hoist_with_multiple_exits {
-; CHECK:       be1: preds=
-; CHECK-NEXT:    read ptr %p, 4
-; CHECK:       ma3: preds=
+; CHECK:       pp1: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK:       pp3: preds=
 ; CHECK-EMPTY:
 entry:
   br label %header
@@ -173,10 +173,10 @@ exit.normal:
 
 define void @sink_without_preheader(ptr %p, i1 %path, i32 %n) {
 ; CHECK-LABEL: mair graph of fn @sink_without_preheader {
-; CHECK:       ma7: preds=
+; CHECK:       pp7: preds=
 ; CHECK-EMPTY:
-; CHECK:       va13: site=bb.entry(%exit), guard=any(%v), preds=[], succs=[]
-; CHECK-NEXT:    read ptr %p, 4
+; CHECK:       pp13: site=bb.entry(%exit), guard=any(%v), preds=[], succs=[]
+; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br i1 %path, label %left, label %right
 

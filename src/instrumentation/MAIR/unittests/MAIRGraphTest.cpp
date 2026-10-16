@@ -4,7 +4,7 @@
 #include "MAIR/MAIRBarrierAnalysis.h"
 #include "MAIR/MAIRDump.h"
 #include "MAIR/MAOpt.h"
-#include "MAIR/Transforms/CommonMAMotionPass.h"
+#include "MAIR/Transforms/CommonObservationMotionPass.h"
 #include "MAIR/Transforms/LocationMergePass.h"
 #include "MAIR/Transforms/LoopInvariantObservationMotionPass.h"
 #include "MAIR/Transforms/LoopPeriodicObservationCombinePass.h"
@@ -32,13 +32,13 @@ using namespace mair;
 
 namespace {
 static_assert(
-    std::is_same_v<decltype(std::declval<MemoryAccess &>().getMemoryObject()),
+    std::is_same_v<decltype(std::declval<Observation &>().getMemoryObject()),
                    MemoryObject &>);
 static_assert(std::is_same_v<
-              decltype(std::declval<const MemoryAccess &>().getMemoryObject()),
+              decltype(std::declval<const Observation &>().getMemoryObject()),
               const MemoryObject &>);
-static_assert(!std::is_default_constructible_v<ObservationSite>);
-static_assert(!std::is_default_constructible_v<Observation>);
+static_assert(!std::is_default_constructible_v<ProgramPointSite>);
+static_assert(!std::is_default_constructible_v<ProgramPoint>);
 
 std::unique_ptr<llvm::Module> parseModule(llvm::StringRef IR,
                                           llvm::LLVMContext &Ctx) {
@@ -56,7 +56,7 @@ MAIRGraph createGraphWithExplicitAnalyses(Function &F) {
                                         std::move(LI));
 }
 
-bool compareTestAccesses(const MemoryAccess &LHS, const MemoryAccess &RHS) {
+bool compareTestObservations(const Observation &LHS, const Observation &RHS) {
   const AbstractAccess *LRegion = LHS.getContiguousRegion();
   const AbstractAccess *RRegion = RHS.getContiguousRegion();
   assert(LRegion && RRegion && LRegion->getOffset().isConstant() &&
@@ -70,7 +70,7 @@ bool compareTestAccesses(const MemoryAccess &LHS, const MemoryAccess &RHS) {
   return LHS.getLevel() > RHS.getLevel();
 }
 
-TEST(MAOpt, BuildsOptimizesAndExposesObservationAccesses) {
+TEST(MAOpt, BuildsOptimizesAndExposesProgramPointObservations) {
   llvm::LLVMContext Ctx;
   std::unique_ptr<llvm::Module> M = parseModule(R"(
     define void @f(ptr %p, ptr %q) {
@@ -101,12 +101,13 @@ TEST(MAOpt, BuildsOptimizesAndExposesObservationAccesses) {
   ASSERT_FALSE(Opt.optimize());
 
   size_t NumMappedAccesses = 0;
-  for (const auto &Entry : Opt.getObservationMAs()) {
+  for (const auto &Entry : Opt.getProgramPointObservations()) {
     ASSERT_NE(Entry.first, nullptr);
-    EXPECT_EQ(Entry.second.size(), Opt.getObservationMAs(*Entry.first).size());
-    for (const MemoryAccess *Access : Entry.second) {
-      ASSERT_NE(Access, nullptr);
-      EXPECT_EQ(Access->getInstructions().size(), 1u);
+    EXPECT_EQ(Entry.second.size(),
+              Opt.getProgramPointObservations(*Entry.first).size());
+    for (const Observation *Obs : Entry.second) {
+      ASSERT_NE(Obs, nullptr);
+      EXPECT_EQ(Obs->getInstructions().size(), 1u);
       ++NumMappedAccesses;
     }
   }
@@ -118,7 +119,7 @@ TEST(MAOpt, BuildsOptimizesAndExposesObservationAccesses) {
   EXPECT_TRUE(O1.getGraph().verify());
 }
 
-TEST(MAOpt, RetainsSelectedAccesses) {
+TEST(MAOpt, RetainsSelectedObservations) {
   llvm::LLVMContext Ctx;
   std::unique_ptr<llvm::Module> M = parseModule(R"(
     define void @f(ptr %p, ptr %q) {
@@ -155,81 +156,82 @@ TEST(MAOpt, RetainsSelectedAccesses) {
   EXPECT_EQ(llvm::range_size(QObject->users()), 1u);
 
   ASSERT_FALSE(Opt.optimize());
-  const MemoryAccess *Target = nullptr;
-  for (const Observation &Obs : Graph) {
-    if (!Obs.empty()) {
-      Target = &*Obs.begin();
+  const Observation *Target = nullptr;
+  for (const ProgramPoint &PP : Graph) {
+    if (!PP.empty()) {
+      Target = &*PP.begin();
       break;
     }
   }
   ASSERT_NE(Target, nullptr);
-  llvm::SmallPtrSet<const MemoryAccess *, 1> Targets;
+  llvm::SmallPtrSet<const Observation *, 1> Targets;
   Targets.insert(Target);
-  Opt.retainAccesses(Targets);
+  Opt.retainObservations(Targets);
 
-  size_t NumAccesses = 0;
-  for (const Observation &Obs : Graph)
-    NumAccesses += Obs.size();
-  EXPECT_EQ(NumAccesses, 1u);
+  size_t NumObservations = 0;
+  for (const ProgramPoint &PP : Graph)
+    NumObservations += PP.size();
+  EXPECT_EQ(NumObservations, 1u);
   EXPECT_EQ(llvm::range_size(PObject->users()), 1u);
   EXPECT_EQ(llvm::range_size(QObject->users()), 0u);
   EXPECT_TRUE(Graph.verify());
 }
 
-bool hasSuccessor(const MAIRGraph &Graph, const Observation &From,
-                  const Observation &To) {
+bool hasSuccessor(const MAIRGraph &Graph, const ProgramPoint &From,
+                  const ProgramPoint &To) {
   (void)Graph;
-  for (const ObservationEdge &Edge : From.children())
+  for (const ProgramPointEdge &Edge : From.children())
     if (&Edge.getNode() == &To)
       return true;
   return false;
 }
 
-bool hasSuccessor(const MAIRGraph &Graph, const Observation &From,
-                  const Observation &To, ObsEdgeKind Kind) {
+bool hasSuccessor(const MAIRGraph &Graph, const ProgramPoint &From,
+                  const ProgramPoint &To, PPEdgeKind Kind) {
   return Graph.hasEdge(From, To, Kind);
 }
 
-const Observation *findBlockEntry(const MAIRGraph &Graph,
+const ProgramPoint *findBlockEntry(const MAIRGraph &Graph,
+                                   llvm::StringRef Name) {
+  for (const ProgramPoint &PP : Graph)
+    if (PP.isBasicBlockEntrySite() && PP.getBasicBlock() &&
+        PP.getBasicBlock()->getName() == Name)
+      return &PP;
+  return nullptr;
+}
+
+const ProgramPoint *findBlockExit(const MAIRGraph &Graph,
                                   llvm::StringRef Name) {
-  for (const Observation &Obs : Graph)
-    if (Obs.isBasicBlockEntrySite() && Obs.getBasicBlock() &&
-        Obs.getBasicBlock()->getName() == Name)
-      return &Obs;
+  for (const ProgramPoint &PP : Graph)
+    if (PP.isBasicBlockExitSite() && PP.getBasicBlock() &&
+        PP.getBasicBlock()->getName() == Name)
+      return &PP;
   return nullptr;
 }
 
-const Observation *findBlockExit(const MAIRGraph &Graph, llvm::StringRef Name) {
-  for (const Observation &Obs : Graph)
-    if (Obs.isBasicBlockExitSite() && Obs.getBasicBlock() &&
-        Obs.getBasicBlock()->getName() == Name)
-      return &Obs;
+const ProgramPoint *findMemoryProgramPoint(const MAIRGraph &Graph,
+                                           llvm::StringRef BlockName) {
+  for (const ProgramPoint &PP : Graph)
+    if (PP.isMemoryInstSite() && PP.getBasicBlock() &&
+        PP.getBasicBlock()->getName() == BlockName)
+      return &PP;
   return nullptr;
 }
 
-const Observation *findMemoryObservation(const MAIRGraph &Graph,
-                                         llvm::StringRef BlockName) {
-  for (const Observation &Obs : Graph)
-    if (Obs.isMemoryInstSite() && Obs.getBasicBlock() &&
-        Obs.getBasicBlock()->getName() == BlockName)
-      return &Obs;
-  return nullptr;
-}
-
-Observation *findMutableMemoryObservation(MAIRGraph &Graph,
-                                          llvm::StringRef BlockName) {
-  for (Observation &Obs : Graph)
-    if (Obs.isMemoryInstSite() && Obs.getBasicBlock() &&
-        Obs.getBasicBlock()->getName() == BlockName)
-      return &Obs;
+ProgramPoint *findMutableMemoryProgramPoint(MAIRGraph &Graph,
+                                            llvm::StringRef BlockName) {
+  for (ProgramPoint &PP : Graph)
+    if (PP.isMemoryInstSite() && PP.getBasicBlock() &&
+        PP.getBasicBlock()->getName() == BlockName)
+      return &PP;
   return nullptr;
 }
 
 void expectSimplifyGraphPreservesMutualPair(MAIRGraph &Graph,
-                                            Observation &Earlier,
-                                            Observation &Later) {
-  Graph.addEdge(Earlier, Later, ObsEdgeKind::Dom);
-  Graph.addEdge(Later, Earlier, ObsEdgeKind::PostDom);
+                                            ProgramPoint &Earlier,
+                                            ProgramPoint &Later) {
+  Graph.addEdge(Earlier, Later, PPEdgeKind::Dom);
+  Graph.addEdge(Later, Earlier, PPEdgeKind::PostDom);
   const size_t InitialSize = Graph.size();
   const std::string EarlierName = Earlier.getName().str();
   const std::string LaterName = Later.getName().str();
@@ -245,10 +247,10 @@ void expectSimplifyGraphPreservesMutualPair(MAIRGraph &Graph,
 }
 
 void expectSimplifyGraphContractsMutualPair(MAIRGraph &Graph,
-                                            Observation &Earlier,
-                                            Observation &Later) {
-  Graph.addEdge(Earlier, Later, ObsEdgeKind::Dom);
-  Graph.addEdge(Later, Earlier, ObsEdgeKind::PostDom);
+                                            ProgramPoint &Earlier,
+                                            ProgramPoint &Later) {
+  Graph.addEdge(Earlier, Later, PPEdgeKind::Dom);
+  Graph.addEdge(Later, Earlier, PPEdgeKind::PostDom);
   const size_t InitialSize = Graph.size();
   const std::string EarlierName = Earlier.getName().str();
   const std::string LaterName = Later.getName().str();
@@ -263,21 +265,20 @@ void expectSimplifyGraphContractsMutualPair(MAIRGraph &Graph,
   EXPECT_TRUE(Graph.verify());
 }
 
-void moveMemoryObservationAccessesTo(MAIRGraph &Graph,
-                                     llvm::StringRef BlockName,
-                                     Observation &Target) {
-  Observation *Source = nullptr;
-  for (Observation &Obs : Graph)
-    if (Obs.isMemoryInstSite() && Obs.getBasicBlock() &&
-        Obs.getBasicBlock()->getName() == BlockName) {
-      Source = &Obs;
+void moveProgramPointObservationsTo(MAIRGraph &Graph, llvm::StringRef BlockName,
+                                    ProgramPoint &Target) {
+  ProgramPoint *Source = nullptr;
+  for (ProgramPoint &PP : Graph)
+    if (PP.isMemoryInstSite() && PP.getBasicBlock() &&
+        PP.getBasicBlock()->getName() == BlockName) {
+      Source = &PP;
       break;
     }
   ASSERT_NE(Source, nullptr);
   while (!Source->empty()) {
-    MemoryAccess &Access = *Source->begin();
-    Target.addAccess(Access);
-    Source->erase(Access);
+    Observation &Obs = *Source->begin();
+    Target.addObservation(Obs);
+    Source->erase(Obs);
   }
 }
 
@@ -463,31 +464,31 @@ entry:
   const llvm::Instruction &Load = *BB.begin();
 
   MAIRGraph Graph(F);
-  auto &Entry = Graph.createBBObservation(BB, true);
-  auto &Obs = Graph.createBBObservation(BB, true);
-  Obs.addAccess(MemoryAccess::fromInstruction(Load, M->getDataLayout()));
-  Observation Other("o1", Obs.getSite(), Obs.getGuard());
-  Other.addAccess(MemoryAccess::fromInstruction(Load, M->getDataLayout()));
-  Obs.mergeAccessesFrom(Other);
-  Graph.addEdge(Entry, Obs, ObsEdgeKind::Dom);
+  auto &Entry = Graph.createBBProgramPoint(BB, true);
+  auto &PP = Graph.createBBProgramPoint(BB, true);
+  PP.addObservation(Observation::fromInstruction(Load, M->getDataLayout()));
+  ProgramPoint Other("o1", PP.getSite(), PP.getGuard());
+  Other.addObservation(Observation::fromInstruction(Load, M->getDataLayout()));
+  PP.mergeObservationsFrom(Other);
+  Graph.addEdge(Entry, PP, PPEdgeKind::Dom);
 
   EXPECT_TRUE(Graph.verify());
   ASSERT_EQ(Graph.size(), 2u);
   EXPECT_TRUE(Entry.isBasicBlockEntrySite());
-  EXPECT_TRUE(Obs.isBasicBlockEntrySite());
+  EXPECT_TRUE(PP.isBasicBlockEntrySite());
   ASSERT_EQ(Entry.children().size(), 1u);
-  EXPECT_EQ(&Entry.children()[0].getNode(), &Obs);
-  EXPECT_EQ(&Obs.parents()[0].getNode(), &Entry);
-  ASSERT_EQ(Obs.accesses().size(), 2u);
-  for (const MemoryAccess &Access : Obs)
-    EXPECT_EQ(Access.getParent(), &Obs);
+  EXPECT_EQ(&Entry.children()[0].getNode(), &PP);
+  EXPECT_EQ(&PP.parents()[0].getNode(), &Entry);
+  ASSERT_EQ(PP.observations().size(), 2u);
+  for (const Observation &Obs : PP)
+    EXPECT_EQ(Obs.getParent(), &PP);
 
   unsigned ObsCount = 0;
   unsigned AccessCount = 0;
-  for (const Observation &Node : Graph) {
+  for (const ProgramPoint &Node : Graph) {
     ++ObsCount;
-    for (const MemoryAccess &Access : Node) {
-      (void)Access;
+    for (const Observation &Obs : Node) {
+      (void)Obs;
       ++AccessCount;
     }
   }
@@ -499,15 +500,15 @@ entry:
   dumpMAIR(Graph, OS);
   OS.flush();
   EXPECT_NE(Dump.find("mair graph of fn @f {"), std::string::npos);
-  EXPECT_NE(Dump.find("bs0: preds=[]"), std::string::npos);
-  EXPECT_NE(Dump.find("bs1: preds=[bs0(dom)]"), std::string::npos);
+  EXPECT_NE(Dump.find("pp0: preds=[]"), std::string::npos);
+  EXPECT_NE(Dump.find("pp1: preds=[pp0(dom)]"), std::string::npos);
   EXPECT_NE(Dump.find("read ptr %p, 4"), std::string::npos);
-  EXPECT_NE(Dump.find("succs=[bs1(dom)]"), std::string::npos);
+  EXPECT_NE(Dump.find("succs=[pp1(dom)]"), std::string::npos);
   EXPECT_EQ(Dump.find("site="), std::string::npos);
   EXPECT_EQ(Dump.find("guard="), std::string::npos);
 }
 
-TEST(MAIRSchema, EveryObservationDerivesItsBlockFromItsAnchor) {
+TEST(MAIRSchema, EveryProgramPointDerivesItsBlockFromItsAnchor) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -527,21 +528,21 @@ exit:
   llvm::Instruction &Load = Entry.front();
   llvm::Instruction &Terminator = *Entry.getTerminator();
   MAIRGraph Graph(F);
-  Observation &EntryObs = Graph.createBBObservation(Entry, true);
-  Observation &MemoryObs = Graph.createInstObservation(Entry, Load);
-  Observation &ExitObs = Graph.createBBObservation(Entry, false);
-  Observation &EdgeObs = Graph.createEdgeObservation(Entry, Exit);
+  ProgramPoint &EntryPP = Graph.createBBProgramPoint(Entry, true);
+  ProgramPoint &MemoryPP = Graph.createInstProgramPoint(Entry, Load);
+  ProgramPoint &ExitPP = Graph.createBBProgramPoint(Entry, false);
+  ProgramPoint &EdgePP = Graph.createEdgeProgramPoint(Entry, Exit);
 
-  EXPECT_EQ(&EntryObs.getAnchor(), &Load);
-  EXPECT_EQ(&MemoryObs.getAnchor(), &Load);
-  EXPECT_EQ(&ExitObs.getAnchor(), &Terminator);
-  EXPECT_EQ(&EdgeObs.getAnchor(), &Terminator);
-  for (const Observation *Obs : {&EntryObs, &MemoryObs, &ExitObs, &EdgeObs})
-    EXPECT_EQ(Obs->getBasicBlock(), Obs->getAnchor().getParent());
+  EXPECT_EQ(&EntryPP.getAnchor(), &Load);
+  EXPECT_EQ(&MemoryPP.getAnchor(), &Load);
+  EXPECT_EQ(&ExitPP.getAnchor(), &Terminator);
+  EXPECT_EQ(&EdgePP.getAnchor(), &Terminator);
+  for (const ProgramPoint *PP : {&EntryPP, &MemoryPP, &ExitPP, &EdgePP})
+    EXPECT_EQ(PP->getBasicBlock(), PP->getAnchor().getParent());
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(MAIRGraph, FindsTypedObservationAncestors) {
+TEST(MAIRGraph, FindsTypedProgramPointAncestors) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -557,19 +558,19 @@ entry:
   llvm::BasicBlock &BB = F.getEntryBlock();
   llvm::Instruction &Load = BB.front();
   MAIRGraph Graph(F);
-  Observation &Entry = Graph.createBBObservation(BB, true);
-  Observation &Memory = Graph.createInstObservation(BB, Load);
-  Observation &Exit = Graph.createBBObservation(BB, false);
-  Graph.addEdge(Entry, Memory, ObsEdgeKind::Dom);
-  Graph.addEdge(Memory, Exit, ObsEdgeKind::Dom);
-  Graph.addEdge(Exit, Memory, ObsEdgeKind::PostDom);
-  Graph.addEdge(Memory, Entry, ObsEdgeKind::PostDom);
+  ProgramPoint &Entry = Graph.createBBProgramPoint(BB, true);
+  ProgramPoint &Memory = Graph.createInstProgramPoint(BB, Load);
+  ProgramPoint &Exit = Graph.createBBProgramPoint(BB, false);
+  Graph.addEdge(Entry, Memory, PPEdgeKind::Dom);
+  Graph.addEdge(Memory, Exit, PPEdgeKind::Dom);
+  Graph.addEdge(Exit, Memory, PPEdgeKind::PostDom);
+  Graph.addEdge(Memory, Entry, PPEdgeKind::PostDom);
 
-  EXPECT_TRUE(Graph.isAncestor(Entry, Exit, ObsEdgeKind::Dom));
-  EXPECT_TRUE(Graph.isAncestor(Exit, Entry, ObsEdgeKind::PostDom));
-  EXPECT_FALSE(Graph.isAncestor(Entry, Exit, ObsEdgeKind::PostDom));
-  EXPECT_FALSE(Graph.isAncestor(Exit, Entry, ObsEdgeKind::Dom));
-  EXPECT_FALSE(Graph.isAncestor(Memory, Memory, ObsEdgeKind::Dom));
+  EXPECT_TRUE(Graph.isAncestor(Entry, Exit, PPEdgeKind::Dom));
+  EXPECT_TRUE(Graph.isAncestor(Exit, Entry, PPEdgeKind::PostDom));
+  EXPECT_FALSE(Graph.isAncestor(Entry, Exit, PPEdgeKind::PostDom));
+  EXPECT_FALSE(Graph.isAncestor(Exit, Entry, PPEdgeKind::Dom));
+  EXPECT_FALSE(Graph.isAncestor(Memory, Memory, PPEdgeKind::Dom));
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -598,7 +599,7 @@ entry:
   EXPECT_FALSE(A.contains(*Merged));
 }
 
-TEST(MAIRGraph, GraphTraitsExposeObservationGraph) {
+TEST(MAIRGraph, GraphTraitsExposeProgramPointGraph) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -615,53 +616,52 @@ entry:
   MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
   ASSERT_TRUE(Graph.verify());
 
-  const Observation *Entry = Graph.find("bs0");
-  const Observation *Load = Graph.find("ma1");
-  const Observation *Store = Graph.find("ma2");
-  const Observation *Exit = Graph.find("be3");
+  const ProgramPoint *Entry = Graph.find("pp0");
+  const ProgramPoint *Load = Graph.find("pp1");
+  const ProgramPoint *Store = Graph.find("pp2");
+  const ProgramPoint *Exit = Graph.find("pp3");
   ASSERT_NE(Entry, nullptr);
   ASSERT_NE(Load, nullptr);
   ASSERT_NE(Store, nullptr);
   ASSERT_NE(Exit, nullptr);
 
-  llvm::SmallVector<const Observation *, 4> Nodes;
-  for (const Observation *Obs : llvm::nodes<const MAIRGraph *>(&Graph))
-    Nodes.push_back(Obs);
+  llvm::SmallVector<const ProgramPoint *, 4> Nodes;
+  for (const ProgramPoint *PP : llvm::nodes<const MAIRGraph *>(&Graph))
+    Nodes.push_back(PP);
   ASSERT_EQ(Nodes.size(), 4u);
   EXPECT_EQ(Nodes[0], Entry);
   EXPECT_EQ(Nodes[1], Load);
   EXPECT_EQ(Nodes[2], Store);
   EXPECT_EQ(Nodes[3], Exit);
 
-  llvm::SmallVector<const Observation *, 2> EntryChildren;
-  for (const Observation *Obs : llvm::children<const Observation *>(Entry))
-    EntryChildren.push_back(Obs);
+  llvm::SmallVector<const ProgramPoint *, 2> EntryChildren;
+  for (const ProgramPoint *PP : llvm::children<const ProgramPoint *>(Entry))
+    EntryChildren.push_back(PP);
   ASSERT_EQ(EntryChildren.size(), 1u);
   EXPECT_EQ(EntryChildren[0], Load);
 
-  llvm::SmallVector<const Observation *, 2> LoadParents;
-  for (const Observation *Obs :
-       llvm::inverse_children<const Observation *>(Load))
-    LoadParents.push_back(Obs);
+  llvm::SmallVector<const ProgramPoint *, 2> LoadParents;
+  for (const ProgramPoint *PP :
+       llvm::inverse_children<const ProgramPoint *>(Load))
+    LoadParents.push_back(PP);
   ASSERT_EQ(LoadParents.size(), 2u);
   EXPECT_EQ(LoadParents[0], Entry);
   EXPECT_EQ(LoadParents[1], Store);
 
-  llvm::SmallVector<ObsEdgeKind, 2> LoadChildEdgeKinds;
-  for (ObservationEdge Edge : llvm::children_edges<const Observation *>(Load))
+  llvm::SmallVector<PPEdgeKind, 2> LoadChildEdgeKinds;
+  for (ProgramPointEdge Edge : llvm::children_edges<const ProgramPoint *>(Load))
     LoadChildEdgeKinds.push_back(Edge.getKind());
   ASSERT_EQ(LoadChildEdgeKinds.size(), 2u);
-  EXPECT_EQ(LoadChildEdgeKinds[0], ObsEdgeKind::PostDom);
-  EXPECT_EQ(LoadChildEdgeKinds[1], ObsEdgeKind::Dom);
+  EXPECT_EQ(LoadChildEdgeKinds[0], PPEdgeKind::PostDom);
+  EXPECT_EQ(LoadChildEdgeKinds[1], PPEdgeKind::Dom);
 
-  const MemoryAccess *Access = &Load->accesses().front();
-  EXPECT_EQ(llvm::GraphTraits<const MemoryAccess *>::getEntryNode(Access),
-            Access);
-  EXPECT_EQ(llvm::GraphTraits<const MemoryAccess *>::child_begin(Access),
-            llvm::GraphTraits<const MemoryAccess *>::child_end(Access));
+  const Observation *Obs = &Load->observations().front();
+  EXPECT_EQ(llvm::GraphTraits<const Observation *>::getEntryNode(Obs), Obs);
+  EXPECT_EQ(llvm::GraphTraits<const Observation *>::child_begin(Obs),
+            llvm::GraphTraits<const Observation *>::child_end(Obs));
 }
 
-TEST(MAIRGraph, TracksMemoryAccessesByBasePointer) {
+TEST(MAIRGraph, TracksObservationsByBasePointer) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p, ptr %q) {
@@ -691,18 +691,18 @@ entry:
 
   unsigned PUses = 0;
   for (MemoryUse &Use : PObject->uses()) {
-    MemoryAccess *Access = Use.getUser();
-    ASSERT_NE(Access, nullptr);
+    Observation *Obs = Use.getUser();
+    ASSERT_NE(Obs, nullptr);
     EXPECT_EQ(Use.get(), PObject);
-    EXPECT_EQ(Access->getBase(), &P);
-    EXPECT_EQ(&Access->getMemoryObject(), PObject);
+    EXPECT_EQ(Obs->getBase(), &P);
+    EXPECT_EQ(&Obs->getMemoryObject(), PObject);
     ++PUses;
   }
   EXPECT_EQ(PUses, 2u);
 
   unsigned PUsers = 0;
-  for (MemoryAccess &Access : PObject->users()) {
-    EXPECT_EQ(&Access.getMemoryObject(), PObject);
+  for (Observation &Obs : PObject->users()) {
+    EXPECT_EQ(&Obs.getMemoryObject(), PObject);
     ++PUsers;
   }
   EXPECT_EQ(PUsers, 2u);
@@ -711,30 +711,30 @@ entry:
   const MemoryObject *ConstQObject = ConstGraph.getMemoryObject(Q);
   ASSERT_EQ(ConstQObject, QObject);
   unsigned QUses = 0;
-  for (const MemoryAccess &Access : ConstQObject->users()) {
-    EXPECT_EQ(Access.getBase(), &Q);
-    EXPECT_EQ(&Access.getMemoryObject(), QObject);
+  for (const Observation &Obs : ConstQObject->users()) {
+    EXPECT_EQ(Obs.getBase(), &Q);
+    EXPECT_EQ(&Obs.getMemoryObject(), QObject);
     ++QUses;
   }
   EXPECT_EQ(QUses, 1u);
 
-  Observation *Store = Graph.find("ma2");
+  ProgramPoint *Store = Graph.find("pp2");
   ASSERT_NE(Store, nullptr);
   Graph.erase(*Store);
 
   ASSERT_TRUE(Graph.verify());
   PUses = 0;
-  for (MemoryAccess &Access : PObject->users()) {
-    EXPECT_EQ(Access.getBase(), &P);
-    EXPECT_EQ(&Access.getMemoryObject(), PObject);
+  for (Observation &Obs : PObject->users()) {
+    EXPECT_EQ(Obs.getBase(), &P);
+    EXPECT_EQ(&Obs.getMemoryObject(), PObject);
     ++PUses;
   }
   EXPECT_EQ(PUses, 1u);
 
-  Observation *QLoad = Graph.find("ma3");
+  ProgramPoint *QLoad = Graph.find("pp3");
   ASSERT_NE(QLoad, nullptr);
   ASSERT_FALSE(QLoad->empty());
-  MemoryAccess &QAccess = *QLoad->begin();
+  Observation &QAccess = *QLoad->begin();
   QAccess.eraseFromParent();
 
   ASSERT_TRUE(Graph.verify());
@@ -767,8 +767,8 @@ entry:
   MemoryObject *ObjectAfterMove = Moved.getMemoryObject(P);
   ASSERT_EQ(ObjectAfterMove, ObjectBeforeMove);
   unsigned Users = 0;
-  for (MemoryAccess &Access : ObjectAfterMove->users()) {
-    EXPECT_EQ(&Access.getMemoryObject(), ObjectAfterMove);
+  for (Observation &Obs : ObjectAfterMove->users()) {
+    EXPECT_EQ(&Obs.getMemoryObject(), ObjectAfterMove);
     ++Users;
   }
   EXPECT_EQ(Users, 2u);
@@ -790,14 +790,12 @@ entry:
   const llvm::Argument &P = *F.arg_begin();
   const auto &Load = cast<llvm::LoadInst>(*std::next(F.begin()->begin()));
 
-  MemoryAccess Access = MemoryAccess::fromInstruction(Load, M->getDataLayout());
+  Observation Obs = Observation::fromInstruction(Load, M->getDataLayout());
 
-  ASSERT_NE(Access.getContiguousRegion(), nullptr);
-  EXPECT_EQ(Access.getContiguousRegion()->getBase(), &P);
-  EXPECT_EQ(Access.getContiguousRegion()->getOffset(),
-            AbstractValue::constant(8));
-  EXPECT_EQ(Access.getContiguousRegion()->getSize(),
-            AbstractValue::constant(4));
+  ASSERT_NE(Obs.getContiguousRegion(), nullptr);
+  EXPECT_EQ(Obs.getContiguousRegion()->getBase(), &P);
+  EXPECT_EQ(Obs.getContiguousRegion()->getOffset(), AbstractValue::constant(8));
+  EXPECT_EQ(Obs.getContiguousRegion()->getSize(), AbstractValue::constant(4));
 }
 
 TEST(MAIRGraph, AbstractAccessKeepsSymbolicGEPOffset) {
@@ -817,17 +815,15 @@ entry:
   const auto &GEP = *F.begin()->begin();
   const auto &Load = cast<llvm::LoadInst>(*std::next(F.begin()->begin()));
 
-  MemoryAccess Access = MemoryAccess::fromInstruction(Load, M->getDataLayout());
+  Observation Obs = Observation::fromInstruction(Load, M->getDataLayout());
 
-  ASSERT_NE(Access.getContiguousRegion(), nullptr);
-  EXPECT_EQ(Access.getContiguousRegion()->getBase(), &P);
-  EXPECT_EQ(Access.getContiguousRegion()->getOffset(),
-            AbstractValue::symbol(GEP));
-  EXPECT_EQ(Access.getContiguousRegion()->getSize(),
-            AbstractValue::constant(4));
+  ASSERT_NE(Obs.getContiguousRegion(), nullptr);
+  EXPECT_EQ(Obs.getContiguousRegion()->getBase(), &P);
+  EXPECT_EQ(Obs.getContiguousRegion()->getOffset(), AbstractValue::symbol(GEP));
+  EXPECT_EQ(Obs.getContiguousRegion()->getSize(), AbstractValue::constant(4));
 }
 
-TEST(MAIRGraph, EraseObservationMaintainsEdges) {
+TEST(MAIRGraph, EraseProgramPointMaintainsEdges) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(i32* %p) {
@@ -844,12 +840,12 @@ entry:
   const llvm::Instruction &LoadInst = *BB.begin();
 
   MAIRGraph Graph(F);
-  auto &Entry = Graph.createBBObservation(BB, true);
-  auto &Load = Graph.createInstObservation(BB, LoadInst);
-  Graph.addEdge(Entry, Load, ObsEdgeKind::Dom);
-  Graph.addEdge(Entry, Load, ObsEdgeKind::PostDom);
-  Graph.addEdge(Load, Load, ObsEdgeKind::Dom);
-  Graph.addEdge(Load, Load, ObsEdgeKind::PostDom);
+  auto &Entry = Graph.createBBProgramPoint(BB, true);
+  auto &Load = Graph.createInstProgramPoint(BB, LoadInst);
+  Graph.addEdge(Entry, Load, PPEdgeKind::Dom);
+  Graph.addEdge(Entry, Load, PPEdgeKind::PostDom);
+  Graph.addEdge(Load, Load, PPEdgeKind::Dom);
+  Graph.addEdge(Load, Load, PPEdgeKind::PostDom);
 
   Graph.erase(Load);
 
@@ -858,7 +854,7 @@ entry:
   EXPECT_EQ(Graph.size(), 1u);
 }
 
-TEST(MAIRGraph, FunctionLocalObservationKindsVerify) {
+TEST(MAIRGraph, FunctionLocalProgramPointKindsVerify) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(i32* %p) {
@@ -876,19 +872,19 @@ entry:
   const llvm::Instruction &Load = *BB.begin();
 
   MAIRGraph Graph(F);
-  auto &Entry = Graph.createBBObservation(BB, true);
-  auto &LoadObs = Graph.createInstObservation(BB, Load);
-  Graph.addEdge(Entry, LoadObs, ObsEdgeKind::Dom);
+  auto &Entry = Graph.createBBProgramPoint(BB, true);
+  auto &LoadPP = Graph.createInstProgramPoint(BB, Load);
+  Graph.addEdge(Entry, LoadPP, PPEdgeKind::Dom);
 
   EXPECT_TRUE(Graph.verify());
   EXPECT_TRUE(Entry.isBasicBlockEntrySite());
-  EXPECT_TRUE(LoadObs.isMemoryInstSite());
-  ASSERT_EQ(LoadObs.accesses().size(), 1u);
-  EXPECT_EQ(LoadObs.accesses().front().getParent(), &LoadObs);
-  EXPECT_EQ(&Entry.children().front().getNode(), &LoadObs);
+  EXPECT_TRUE(LoadPP.isMemoryInstSite());
+  ASSERT_EQ(LoadPP.observations().size(), 1u);
+  EXPECT_EQ(LoadPP.observations().front().getParent(), &LoadPP);
+  EXPECT_EQ(&Entry.children().front().getNode(), &LoadPP);
 }
 
-TEST(MAIRGraph, CreateFromBuildsLinearMemoryObservationChain) {
+TEST(MAIRGraph, BuildCreatesLinearMemoryProgramPointChain) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -908,10 +904,10 @@ entry:
 
   ASSERT_TRUE(Graph.verify());
   EXPECT_EQ(Graph.size(), 4u);
-  const Observation *Entry = Graph.find("bs0");
-  const Observation *Load = Graph.find("ma1");
-  const Observation *Store = Graph.find("ma2");
-  const Observation *Exit = Graph.find("be3");
+  const ProgramPoint *Entry = Graph.find("pp0");
+  const ProgramPoint *Load = Graph.find("pp1");
+  const ProgramPoint *Store = Graph.find("pp2");
+  const ProgramPoint *Exit = Graph.find("pp3");
   ASSERT_NE(Entry, nullptr);
   ASSERT_NE(Load, nullptr);
   ASSERT_NE(Store, nullptr);
@@ -920,16 +916,16 @@ entry:
   EXPECT_TRUE(Load->isMemoryInstSite());
   EXPECT_TRUE(Store->isMemoryInstSite());
   EXPECT_TRUE(Exit->isBasicBlockExitSite());
-  ASSERT_EQ(Load->accesses().size(), 1u);
-  ASSERT_EQ(Store->accesses().size(), 1u);
-  EXPECT_EQ(Load->accesses().front().getKind(), AccessKind::Read);
-  EXPECT_EQ(Store->accesses().front().getKind(), AccessKind::Write);
+  ASSERT_EQ(Load->observations().size(), 1u);
+  ASSERT_EQ(Store->observations().size(), 1u);
+  EXPECT_EQ(Load->observations().front().getKind(), AccessKind::Read);
+  EXPECT_EQ(Store->observations().front().getKind(), AccessKind::Write);
   EXPECT_TRUE(hasSuccessor(Graph, *Entry, *Load));
-  EXPECT_TRUE(hasSuccessor(Graph, *Entry, *Load, ObsEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *Entry, *Load, PPEdgeKind::Dom));
   EXPECT_TRUE(hasSuccessor(Graph, *Load, *Store));
   EXPECT_TRUE(hasSuccessor(Graph, *Store, *Exit));
   EXPECT_TRUE(hasSuccessor(Graph, *Load, *Entry));
-  EXPECT_TRUE(hasSuccessor(Graph, *Load, *Entry, ObsEdgeKind::PostDom));
+  EXPECT_TRUE(hasSuccessor(Graph, *Load, *Entry, PPEdgeKind::PostDom));
   EXPECT_TRUE(hasSuccessor(Graph, *Store, *Load));
   EXPECT_TRUE(hasSuccessor(Graph, *Exit, *Store));
   EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Exit));
@@ -963,14 +959,14 @@ merge:
   MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
 
   ASSERT_TRUE(Graph.verify());
-  const Observation *Entry = findBlockEntry(Graph, "entry");
-  const Observation *Then = findBlockEntry(Graph, "then");
-  const Observation *Else = findBlockEntry(Graph, "else");
-  const Observation *Merge = findBlockEntry(Graph, "merge");
-  const Observation *EntryExit = findBlockExit(Graph, "entry");
-  const Observation *ThenExit = findBlockExit(Graph, "then");
-  const Observation *ElseExit = findBlockExit(Graph, "else");
-  const Observation *MergeExit = findBlockExit(Graph, "merge");
+  const ProgramPoint *Entry = findBlockEntry(Graph, "entry");
+  const ProgramPoint *Then = findBlockEntry(Graph, "then");
+  const ProgramPoint *Else = findBlockEntry(Graph, "else");
+  const ProgramPoint *Merge = findBlockEntry(Graph, "merge");
+  const ProgramPoint *EntryExit = findBlockExit(Graph, "entry");
+  const ProgramPoint *ThenExit = findBlockExit(Graph, "then");
+  const ProgramPoint *ElseExit = findBlockExit(Graph, "else");
+  const ProgramPoint *MergeExit = findBlockExit(Graph, "merge");
   ASSERT_NE(Entry, nullptr);
   ASSERT_NE(Then, nullptr);
   ASSERT_NE(Else, nullptr);
@@ -980,20 +976,18 @@ merge:
   ASSERT_NE(ElseExit, nullptr);
   ASSERT_NE(MergeExit, nullptr);
 
-  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Then, ObsEdgeKind::Dom));
-  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Else, ObsEdgeKind::Dom));
-  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Merge, ObsEdgeKind::Dom));
-  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Then, ObsEdgeKind::Dom));
-  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Else, ObsEdgeKind::Dom));
-  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Merge, ObsEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Then, PPEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Else, PPEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Merge, PPEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Then, PPEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Else, PPEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Merge, PPEdgeKind::Dom));
 
-  EXPECT_TRUE(hasSuccessor(Graph, *Merge, *ThenExit, ObsEdgeKind::PostDom));
-  EXPECT_TRUE(hasSuccessor(Graph, *Merge, *ElseExit, ObsEdgeKind::PostDom));
-  EXPECT_TRUE(hasSuccessor(Graph, *Merge, *EntryExit, ObsEdgeKind::PostDom));
-  EXPECT_FALSE(
-      hasSuccessor(Graph, *MergeExit, *ThenExit, ObsEdgeKind::PostDom));
-  EXPECT_FALSE(
-      hasSuccessor(Graph, *MergeExit, *ElseExit, ObsEdgeKind::PostDom));
+  EXPECT_TRUE(hasSuccessor(Graph, *Merge, *ThenExit, PPEdgeKind::PostDom));
+  EXPECT_TRUE(hasSuccessor(Graph, *Merge, *ElseExit, PPEdgeKind::PostDom));
+  EXPECT_TRUE(hasSuccessor(Graph, *Merge, *EntryExit, PPEdgeKind::PostDom));
+  EXPECT_FALSE(hasSuccessor(Graph, *MergeExit, *ThenExit, PPEdgeKind::PostDom));
+  EXPECT_FALSE(hasSuccessor(Graph, *MergeExit, *ElseExit, PPEdgeKind::PostDom));
 }
 
 TEST(MAIRGraph, CreateFromBlocksForwardBarrierTerminatorAtDominatorExit) {
@@ -1019,25 +1013,25 @@ merge:
 
   llvm::Function &F = *M->getFunction("f");
   MAIRGraph Graph = createGraphWithExplicitAnalyses<ForwardCallBarrierTrait>(F);
-  const Observation *Entry = findBlockEntry(Graph, "entry");
-  const Observation *EntryExit = findBlockExit(Graph, "entry");
-  const Observation *Normal = findBlockEntry(Graph, "normal");
-  const Observation *Unwind = findBlockEntry(Graph, "unwind");
-  const Observation *Merge = findBlockEntry(Graph, "merge");
+  const ProgramPoint *Entry = findBlockEntry(Graph, "entry");
+  const ProgramPoint *EntryExit = findBlockExit(Graph, "entry");
+  const ProgramPoint *Normal = findBlockEntry(Graph, "normal");
+  const ProgramPoint *Unwind = findBlockEntry(Graph, "unwind");
+  const ProgramPoint *Merge = findBlockEntry(Graph, "merge");
   ASSERT_NE(Entry, nullptr);
   ASSERT_NE(EntryExit, nullptr);
   ASSERT_NE(Normal, nullptr);
   ASSERT_NE(Unwind, nullptr);
   ASSERT_NE(Merge, nullptr);
 
-  EXPECT_TRUE(hasSuccessor(Graph, *Entry, *EntryExit, ObsEdgeKind::Dom));
-  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Normal, ObsEdgeKind::Dom));
-  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Unwind, ObsEdgeKind::Dom));
-  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Merge, ObsEdgeKind::Dom));
-  EXPECT_FALSE(hasSuccessor(Graph, *EntryExit, *Normal, ObsEdgeKind::Dom));
-  EXPECT_FALSE(hasSuccessor(Graph, *EntryExit, *Unwind, ObsEdgeKind::Dom));
-  EXPECT_FALSE(hasSuccessor(Graph, *EntryExit, *Merge, ObsEdgeKind::Dom));
-  EXPECT_TRUE(hasSuccessor(Graph, *Merge, *EntryExit, ObsEdgeKind::PostDom));
+  EXPECT_TRUE(hasSuccessor(Graph, *Entry, *EntryExit, PPEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Normal, PPEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Unwind, PPEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *Entry, *Merge, PPEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *EntryExit, *Normal, PPEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *EntryExit, *Unwind, PPEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *EntryExit, *Merge, PPEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *Merge, *EntryExit, PPEdgeKind::PostDom));
 }
 
 TEST(MAIRGraph, CreateFromBlocksBackwardBarrierTerminatorAtPostDominatorExit) {
@@ -1061,22 +1055,22 @@ merge:
   llvm::Function &F = *M->getFunction("f");
   MAIRGraph Graph =
       createGraphWithExplicitAnalyses<BackwardCallBarrierTrait>(F);
-  const Observation *Entry = findBlockEntry(Graph, "entry");
-  const Observation *EntryExit = findBlockExit(Graph, "entry");
-  const Observation *Left = findBlockEntry(Graph, "left");
-  const Observation *Right = findBlockEntry(Graph, "right");
-  const Observation *Merge = findBlockEntry(Graph, "merge");
+  const ProgramPoint *Entry = findBlockEntry(Graph, "entry");
+  const ProgramPoint *EntryExit = findBlockExit(Graph, "entry");
+  const ProgramPoint *Left = findBlockEntry(Graph, "left");
+  const ProgramPoint *Right = findBlockEntry(Graph, "right");
+  const ProgramPoint *Merge = findBlockEntry(Graph, "merge");
   ASSERT_NE(Entry, nullptr);
   ASSERT_NE(EntryExit, nullptr);
   ASSERT_NE(Left, nullptr);
   ASSERT_NE(Right, nullptr);
   ASSERT_NE(Merge, nullptr);
 
-  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Entry, ObsEdgeKind::PostDom));
-  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Left, ObsEdgeKind::Dom));
-  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Right, ObsEdgeKind::Dom));
-  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Merge, ObsEdgeKind::Dom));
-  EXPECT_FALSE(hasSuccessor(Graph, *Merge, *EntryExit, ObsEdgeKind::PostDom));
+  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Entry, PPEdgeKind::PostDom));
+  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Left, PPEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Right, PPEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *EntryExit, *Merge, PPEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, *Merge, *EntryExit, PPEdgeKind::PostDom));
 }
 
 TEST(MAIRGraph, CreateFromHonorsBarrierTraitInsideBlock) {
@@ -1101,8 +1095,8 @@ entry:
   MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
 
   ASSERT_TRUE(Graph.verify());
-  const Observation *Load = Graph.find("ma1");
-  const Observation *Store = Graph.find("ma2");
+  const ProgramPoint *Load = Graph.find("pp1");
+  const ProgramPoint *Store = Graph.find("pp2");
   ASSERT_NE(Load, nullptr);
   ASSERT_NE(Store, nullptr);
   EXPECT_FALSE(hasSuccessor(Graph, *Load, *Store));
@@ -1131,9 +1125,9 @@ entry:
   MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
 
   ASSERT_TRUE(Graph.verify());
-  const Observation *Load = Graph.find("ma1");
-  const Observation *Store = Graph.find("ma2");
-  const Observation *Exit = Graph.find("be3");
+  const ProgramPoint *Load = Graph.find("pp1");
+  const ProgramPoint *Store = Graph.find("pp2");
+  const ProgramPoint *Exit = Graph.find("pp3");
   ASSERT_NE(Load, nullptr);
   ASSERT_NE(Store, nullptr);
   ASSERT_NE(Exit, nullptr);
@@ -1164,15 +1158,15 @@ entry:
   MAIRGraph Graph = createGraphWithExplicitAnalyses<UnmatchedBarrierTrait>(F);
 
   ASSERT_TRUE(Graph.verify());
-  const Observation *Load = Graph.find("ma1");
-  const Observation *Store = Graph.find("ma2");
+  const ProgramPoint *Load = Graph.find("pp1");
+  const ProgramPoint *Store = Graph.find("pp2");
   ASSERT_NE(Load, nullptr);
   ASSERT_NE(Store, nullptr);
   EXPECT_TRUE(hasSuccessor(Graph, *Load, *Store));
   EXPECT_TRUE(hasSuccessor(Graph, *Store, *Load));
 }
 
-TEST(MAIRGraph, ModelsMemoryAccessPropertiesAndMemoryIntrinsics) {
+TEST(MAIRGraph, ModelsObservationPropertiesAndMemoryIntrinsics) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
@@ -1208,30 +1202,30 @@ entry:
   MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
   ASSERT_TRUE(Graph.verify());
 
+  unsigned NumProgramPoints = 0;
   unsigned NumObservations = 0;
-  unsigned NumAccesses = 0;
   unsigned NumAtomic = 0;
   unsigned NumVolatile = 0;
   unsigned NumCallLike = 0;
   unsigned NumMasked = 0;
-  const Observation *Memcpy = nullptr;
-  for (const Observation &Obs : Graph) {
-    if (!Obs.isMemoryInstSite())
+  const ProgramPoint *Memcpy = nullptr;
+  for (const ProgramPoint &PP : Graph) {
+    if (!PP.isMemoryInstSite())
       continue;
-    ++NumObservations;
-    NumAccesses += Obs.size();
-    if (const auto *MI = llvm::dyn_cast<llvm::MemCpyInst>(&Obs.getAnchor()))
-      Memcpy = &Obs;
-    for (const MemoryAccess &Access : Obs) {
-      NumAtomic += Access.isAtomic();
-      NumVolatile += Access.isVolatile();
-      NumCallLike += Access.isCallLike();
-      NumMasked += Access.isMasked();
+    ++NumProgramPoints;
+    NumObservations += PP.size();
+    if (const auto *MI = llvm::dyn_cast<llvm::MemCpyInst>(&PP.getAnchor()))
+      Memcpy = &PP;
+    for (const Observation &Obs : PP) {
+      NumAtomic += Obs.isAtomic();
+      NumVolatile += Obs.isVolatile();
+      NumCallLike += Obs.isCallLike();
+      NumMasked += Obs.isMasked();
     }
   }
 
-  EXPECT_EQ(NumObservations, 10u);
-  EXPECT_EQ(NumAccesses, 13u);
+  EXPECT_EQ(NumProgramPoints, 10u);
+  EXPECT_EQ(NumObservations, 13u);
   EXPECT_EQ(NumAtomic, 5u);
   EXPECT_EQ(NumVolatile, 3u);
   EXPECT_EQ(NumCallLike, 7u);
@@ -1240,8 +1234,8 @@ entry:
   ASSERT_NE(Memcpy, nullptr);
   ASSERT_EQ(Memcpy->size(), 2u);
   auto It = Memcpy->begin();
-  const MemoryAccess &Dest = *It++;
-  const MemoryAccess &Source = *It;
+  const Observation &Dest = *It++;
+  const Observation &Source = *It;
   EXPECT_TRUE(Dest.isWrite());
   EXPECT_EQ(Dest.getBase(), F.getArg(0));
   EXPECT_TRUE(Source.isRead());
@@ -1269,9 +1263,9 @@ entry:
   llvm::Function &F = *M->getFunction("f");
   MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
   ASSERT_TRUE(Graph.verify());
-  const Observation *Load = Graph.find("ma1");
-  const Observation *Memcpy = Graph.find("ma2");
-  const Observation *Store = Graph.find("ma3");
+  const ProgramPoint *Load = Graph.find("pp1");
+  const ProgramPoint *Memcpy = Graph.find("pp2");
+  const ProgramPoint *Store = Graph.find("pp3");
   ASSERT_NE(Load, nullptr);
   ASSERT_NE(Memcpy, nullptr);
   ASSERT_NE(Store, nullptr);
@@ -1281,7 +1275,7 @@ entry:
   EXPECT_TRUE(hasSuccessor(Graph, *Store, *Memcpy));
 }
 
-TEST(MAIRGraph, AtomicAccessObservationRemainsABarrierEndpoint) {
+TEST(MAIRGraph, AtomicObservationProgramPointRemainsABarrierEndpoint) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -1298,9 +1292,9 @@ entry:
   llvm::Function &F = *M->getFunction("f");
   MAIRGraph Graph = createGraphWithExplicitAnalyses<AtomicBarrierTrait>(F);
   ASSERT_TRUE(Graph.verify());
-  const Observation *Load = Graph.find("ma1");
-  const Observation *Atomic = Graph.find("ma2");
-  const Observation *Store = Graph.find("ma3");
+  const ProgramPoint *Load = Graph.find("pp1");
+  const ProgramPoint *Atomic = Graph.find("pp2");
+  const ProgramPoint *Store = Graph.find("pp3");
   ASSERT_NE(Load, nullptr);
   ASSERT_NE(Atomic, nullptr);
   ASSERT_NE(Store, nullptr);
@@ -1310,7 +1304,7 @@ entry:
   EXPECT_FALSE(hasSuccessor(Graph, *Store, *Atomic));
 }
 
-TEST(MAIRGraphPass, SpecialAccessesRemainAtTheirOriginalObservation) {
+TEST(MAIRGraphPass, SpecialObservationsRemainAtTheirOriginalProgramPoint) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
@@ -1326,7 +1320,7 @@ entry:
 
   llvm::Function &F = *M->getFunction("f");
   MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
-  Observation *Memset = Graph.find("ma1");
+  ProgramPoint *Memset = Graph.find("pp1");
   ASSERT_NE(Memset, nullptr);
   ASSERT_EQ(Memset->size(), 1u);
   EXPECT_TRUE(Memset->begin()->isCallLike());
@@ -1336,13 +1330,13 @@ entry:
   registerMAIRGraphAnalyses(AM, &PIC);
   SimplifyGraphPass Pass;
   EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(Graph.find("ma1"), Memset);
+  EXPECT_EQ(Graph.find("pp1"), Memset);
   ASSERT_EQ(Memset->size(), 1u);
   EXPECT_TRUE(Memset->begin()->isCallLike());
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(MAIRGraph, CreateFromHandlesFunctionWithoutMemoryAccesses) {
+TEST(MAIRGraph, CreateFromHandlesFunctionWithoutObservations) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define i32 @f(i32 %x) {
@@ -1361,13 +1355,13 @@ entry:
 
   EXPECT_TRUE(Graph.verify());
   EXPECT_EQ(Graph.size(), 2u);
-  const Observation *Entry = Graph.find("bs0");
-  const Observation *Exit = Graph.find("be1");
+  const ProgramPoint *Entry = Graph.find("pp0");
+  const ProgramPoint *Exit = Graph.find("pp1");
   ASSERT_NE(Entry, nullptr);
   ASSERT_NE(Exit, nullptr);
   EXPECT_TRUE(Entry->isBasicBlockEntrySite());
   EXPECT_TRUE(Exit->isBasicBlockExitSite());
-  EXPECT_TRUE(Entry->accesses().empty());
+  EXPECT_TRUE(Entry->observations().empty());
 }
 
 TEST(MAIRGraph, CreateFromFAMMatchesExplicitAnalysisEntry) {
@@ -1430,7 +1424,7 @@ merge:
   EXPECT_EQ(&Assigned.getLoopInfo(), OwnedLI);
 }
 
-TEST(MAIRLoopAnalysis, MapsObservationsToLoopsAndRepresentatives) {
+TEST(MAIRLoopAnalysis, MapsProgramPointsToLoopsAndRepresentatives) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p, i32 %n) {
@@ -1462,13 +1456,13 @@ exit:
   const MAIRLoopInfo &Loops = AM.getResult<mair::LoopAnalysis>(Graph);
   ASSERT_TRUE(Loops.isAvailable());
 
-  const Observation *BodyObs = findMemoryObservation(Graph, "body");
-  ASSERT_NE(BodyObs, nullptr);
-  ASSERT_EQ(BodyObs->size(), 1u);
-  llvm::Loop *L = Loops.getLoopFor(*BodyObs);
+  const ProgramPoint *BodyPP = findMemoryProgramPoint(Graph, "body");
+  ASSERT_NE(BodyPP, nullptr);
+  ASSERT_EQ(BodyPP->size(), 1u);
+  llvm::Loop *L = Loops.getLoopFor(*BodyPP);
   ASSERT_NE(L, nullptr);
   EXPECT_EQ(L->getHeader()->getName(), "header");
-  EXPECT_TRUE(Loops.isLoopInvariant(*BodyObs->begin(), *L));
+  EXPECT_TRUE(Loops.isLoopInvariant(*BodyPP->begin(), *L));
   EXPECT_EQ(Loops.getPreheaderExit(*L), findBlockExit(Graph, "entry"));
   EXPECT_EQ(Loops.getUniqueExitEntry(*L), findBlockEntry(Graph, "exit"));
 }
@@ -1530,9 +1524,9 @@ exit:
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
   const MAIRLoopInfo &Loops = AM.getResult<mair::LoopAnalysis>(Graph);
 
-  const Observation *ThenObs = findMemoryObservation(Graph, "then");
-  ASSERT_NE(ThenObs, nullptr);
-  llvm::Loop *L = Loops.getLoopFor(*ThenObs);
+  const ProgramPoint *ThenPP = findMemoryProgramPoint(Graph, "then");
+  ASSERT_NE(ThenPP, nullptr);
+  llvm::Loop *L = Loops.getLoopFor(*ThenPP);
   ASSERT_NE(L, nullptr);
 }
 
@@ -1576,18 +1570,18 @@ exit:
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
   const MAIRLoopInfo &Loops = AM.getResult<mair::LoopAnalysis>(Graph);
 
-  const MemoryAccess *OutermostAccess = nullptr;
-  const MemoryAccess *InnerOnlyAccess = nullptr;
-  const MemoryAccess *VariantAccess = nullptr;
-  for (const Observation &Obs : Graph)
-    for (const MemoryAccess &Access : Obs)
-      for (const llvm::Instruction *I : Access.getInstructions()) {
+  const Observation *OutermostAccess = nullptr;
+  const Observation *InnerOnlyAccess = nullptr;
+  const Observation *VariantAccess = nullptr;
+  for (const ProgramPoint &PP : Graph)
+    for (const Observation &Obs : PP)
+      for (const llvm::Instruction *I : Obs.getInstructions()) {
         if (I->getName() == "outermost")
-          OutermostAccess = &Access;
+          OutermostAccess = &Obs;
         else if (I->getName() == "inner.only")
-          InnerOnlyAccess = &Access;
+          InnerOnlyAccess = &Obs;
         else if (I->getName() == "variant")
-          VariantAccess = &Access;
+          VariantAccess = &Obs;
       }
   ASSERT_NE(OutermostAccess, nullptr);
   ASSERT_NE(InnerOnlyAccess, nullptr);
@@ -1606,7 +1600,7 @@ exit:
       *OutermostAccess->getParent(), *Outer));
 }
 
-TEST(MAIRLoopAnalysis, RejectsNonLoopAndMultiExitObservations) {
+TEST(MAIRLoopAnalysis, RejectsNonLoopAndMultiExitProgramPoints) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p, i32 %n, i1 %early) {
@@ -1640,17 +1634,17 @@ exit.normal:
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
   const MAIRLoopInfo &Loops = AM.getResult<mair::LoopAnalysis>(Graph);
 
-  const Observation *Outside = findMemoryObservation(Graph, "entry");
+  const ProgramPoint *Outside = findMemoryProgramPoint(Graph, "entry");
   ASSERT_NE(Outside, nullptr);
   EXPECT_EQ(Loops.getLoopFor(*Outside), nullptr);
 
-  const Observation *Inside = findMemoryObservation(Graph, "header");
+  const ProgramPoint *Inside = findMemoryProgramPoint(Graph, "header");
   ASSERT_NE(Inside, nullptr);
   llvm::Loop *L = Loops.getLoopFor(*Inside);
   ASSERT_NE(L, nullptr);
 }
 
-TEST(MAIRLoopAnalysis, ComputesExactObservationExecutionCounts) {
+TEST(MAIRLoopAnalysis, ComputesExactProgramPointExecutionCounts) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -1678,8 +1672,8 @@ exit:
   registerLoopTestAnalyses(FAM, PIC);
   MAIRGraph Graph = MAIRGraph::build(F, FAM);
   MAIRLoopInfo Loops(Graph, FAM);
-  const Observation *Header = findMemoryObservation(Graph, "header");
-  const Observation *Body = findMemoryObservation(Graph, "body");
+  const ProgramPoint *Header = findMemoryProgramPoint(Graph, "header");
+  const ProgramPoint *Body = findMemoryProgramPoint(Graph, "body");
   ASSERT_NE(Header, nullptr);
   ASSERT_NE(Body, nullptr);
   llvm::Loop *L = Loops.getLoopFor(*Header);
@@ -1731,7 +1725,7 @@ exit:
     if (BB.getName() == "latch")
       Latch = &BB;
   ASSERT_NE(Latch, nullptr);
-  const Observation &LatchEntry = Graph.getBBEntryRepresentative(*Latch);
+  const ProgramPoint &LatchEntry = Graph.getBBEntryRepresentative(*Latch);
   llvm::Loop *L = Loops.getLoopFor(LatchEntry);
   ASSERT_NE(L, nullptr);
 
@@ -1765,7 +1759,7 @@ exit:
   registerLoopTestAnalyses(FAM, PIC);
   MAIRGraph Graph = MAIRGraph::build(F, FAM);
   MAIRLoopInfo Loops(Graph, FAM);
-  const Observation *Header = findMemoryObservation(Graph, "header");
+  const ProgramPoint *Header = findMemoryProgramPoint(Graph, "header");
   ASSERT_NE(Header, nullptr);
   llvm::Loop *L = Loops.getLoopFor(*Header);
   ASSERT_NE(L, nullptr);
@@ -1807,7 +1801,7 @@ exit:
     registerLoopTestAnalyses(FAM, PIC);
     MAIRGraph Graph = MAIRGraph::build(F, FAM);
     MAIRLoopInfo Loops(Graph, FAM);
-    const Observation *Header = findBlockEntry(Graph, "header");
+    const ProgramPoint *Header = findBlockEntry(Graph, "header");
     ASSERT_NE(Header, nullptr);
     llvm::Loop *L = Loops.getLoopFor(*Header);
     ASSERT_NE(L, nullptr);
@@ -1869,15 +1863,15 @@ merge:
   ASSERT_NE(Merge, nullptr);
   ASSERT_NE(LeftValue, nullptr);
   ASSERT_NE(MergedValue, nullptr);
-  const Observation &MergeEntry = Graph.getBBEntryRepresentative(*Merge);
+  const ProgramPoint &MergeEntry = Graph.getBBEntryRepresentative(*Merge);
 
   EXPECT_TRUE(Loops.isValueAvailableAt(*F.getArg(0), MergeEntry.getSite()));
   EXPECT_TRUE(Loops.isValueAvailableAt(*MergedValue, MergeEntry.getSite()));
   EXPECT_FALSE(Loops.isValueAvailableAt(*LeftValue, MergeEntry.getSite()));
   EXPECT_TRUE(Loops.isValueAvailableAt(*LeftValue,
-                                       ObservationSite::edge(*Left, *Merge)));
-  EXPECT_FALSE(Loops.isValueAvailableAt(*LeftValue,
-                                        ObservationSite::edge(*Right, *Merge)));
+                                       ProgramPointSite::edge(*Left, *Merge)));
+  EXPECT_FALSE(Loops.isValueAvailableAt(
+      *LeftValue, ProgramPointSite::edge(*Right, *Merge)));
 }
 
 TEST(MAIRGraphPass, PeriodicCombineRejectsMismatchedProvenanceRecurrences) {
@@ -1903,23 +1897,23 @@ exit:
   ASSERT_TRUE(M);
 
   llvm::Function &F = *M->getFunction("f");
-  Observation *Source = nullptr;
-  Observation *OtherSource = nullptr;
+  ProgramPoint *Source = nullptr;
+  ProgramPoint *OtherSource = nullptr;
   llvm::Instruction *PLoad = nullptr;
   llvm::Instruction *QLoad = nullptr;
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
   MAIRGraph Graph = MAIRGraph::build(F, FAM);
-  for (Observation &Obs : Graph) {
-    if (!Obs.isMemoryInstSite() || Obs.getBasicBlock()->getName() != "header")
+  for (ProgramPoint &PP : Graph) {
+    if (!PP.isMemoryInstSite() || PP.getBasicBlock()->getName() != "header")
       continue;
-    const llvm::Instruction *I = &Obs.getAnchor();
+    const llvm::Instruction *I = &PP.getAnchor();
     if (I->getName() == "pv") {
-      Source = &Obs;
+      Source = &PP;
       PLoad = const_cast<llvm::Instruction *>(I);
     } else if (I->getName() == "qv") {
-      OtherSource = &Obs;
+      OtherSource = &PP;
       QLoad = const_cast<llvm::Instruction *>(I);
     }
   }
@@ -1933,11 +1927,11 @@ exit:
     OtherSource->erase(OtherSource->begin());
 
   const llvm::Argument *P = F.getArg(0);
-  MemoryAccess Combined(
+  Observation Combined(
       {PLoad, QLoad},
       AbstractAccess(P, AbstractValue::constant(0), AbstractValue::constant(1)),
       AccessKind::Read);
-  Source->addAccess(Combined);
+  Source->addObservation(Combined);
 
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
@@ -1945,7 +1939,7 @@ exit:
   Pass.run(Graph, AM);
 
   EXPECT_EQ(Source->size(), 1u);
-  const Observation *Exit = findBlockEntry(Graph, "exit");
+  const ProgramPoint *Exit = findBlockEntry(Graph, "exit");
   ASSERT_NE(Exit, nullptr);
   EXPECT_TRUE(Exit->empty());
   EXPECT_TRUE(Graph.verify());
@@ -1981,18 +1975,19 @@ exit:
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
 
-  LoopInvariantObservationMotionPass Pass(/*MergeEquivalentAccesses=*/false);
+  LoopInvariantObservationMotionPass Pass(
+      /*MergeEquivalentObservations=*/false);
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
 
-  const Observation *EntryExit = findBlockExit(Graph, "entry");
+  const ProgramPoint *EntryExit = findBlockExit(Graph, "entry");
   ASSERT_NE(EntryExit, nullptr);
   ASSERT_EQ(EntryExit->size(), 2u);
-  for (const MemoryAccess &Access : *EntryExit)
-    EXPECT_EQ(Access.getInstructions().size(), 1u);
+  for (const Observation &Obs : *EntryExit)
+    EXPECT_EQ(Obs.getInstructions().size(), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(MAIRGraphPass, InvariantMotionDoesNotReprocessEdgeObservations) {
+TEST(MAIRGraphPass, InvariantMotionDoesNotReprocessEdgeProgramPoints) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -2016,16 +2011,16 @@ exit:
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
   MAIRGraph Graph = MAIRGraph::build(F, FAM);
-  Observation *Source = findMutableMemoryObservation(Graph, "header");
-  Observation &Preheader = Graph.getBBExitRepresentative(F.getEntryBlock());
+  ProgramPoint *Source = findMutableMemoryProgramPoint(Graph, "header");
+  ProgramPoint &Preheader = Graph.getBBExitRepresentative(F.getEntryBlock());
   ASSERT_NE(Source, nullptr);
   ASSERT_EQ(Source->size(), 1u);
 
-  Observation &Edge = Graph.createEdgeObservation(Header, Exit);
-  Edge.addAccess(*Source->begin());
+  ProgramPoint &Edge = Graph.createEdgeProgramPoint(Header, Exit);
+  Edge.addObservation(*Source->begin());
   Source->erase(Source->begin());
-  Graph.addEdge(Preheader, Edge, ObsEdgeKind::Dom);
-  Graph.addEdge(Edge, Preheader, ObsEdgeKind::PostDom);
+  Graph.addEdge(Preheader, Edge, PPEdgeKind::Dom);
+  Graph.addEdge(Edge, Preheader, PPEdgeKind::PostDom);
 
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
@@ -2070,8 +2065,8 @@ exit:
   LoopInvariantObservationMotionPass Pass;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
 
-  const Observation *Source = findMemoryObservation(Graph, "header");
-  const Observation *EntryExit = findBlockExit(Graph, "entry");
+  const ProgramPoint *Source = findMemoryProgramPoint(Graph, "header");
+  const ProgramPoint *EntryExit = findBlockExit(Graph, "entry");
   ASSERT_NE(Source, nullptr);
   ASSERT_NE(EntryExit, nullptr);
   EXPECT_TRUE(Source->empty());
@@ -2106,15 +2101,15 @@ exit:
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
   MAIRGraph Graph = MAIRGraph::build<BackwardCallBarrierTrait>(F, FAM);
-  const Observation *Source = findMemoryObservation(Graph, "header");
-  const Observation *Preheader = findBlockExit(Graph, "entry");
-  const Observation *ExitEntry = findBlockEntry(Graph, "exit");
+  const ProgramPoint *Source = findMemoryProgramPoint(Graph, "header");
+  const ProgramPoint *Preheader = findBlockExit(Graph, "entry");
+  const ProgramPoint *ExitEntry = findBlockEntry(Graph, "exit");
   ASSERT_NE(Source, nullptr);
   ASSERT_NE(Preheader, nullptr);
   ASSERT_NE(ExitEntry, nullptr);
-  EXPECT_TRUE(Graph.isAncestor(*Preheader, *Source, ObsEdgeKind::Dom));
-  EXPECT_FALSE(Graph.isAncestor(*Source, *Preheader, ObsEdgeKind::PostDom));
-  EXPECT_TRUE(Graph.isAncestor(*ExitEntry, *Source, ObsEdgeKind::PostDom));
+  EXPECT_TRUE(Graph.isAncestor(*Preheader, *Source, PPEdgeKind::Dom));
+  EXPECT_FALSE(Graph.isAncestor(*Source, *Preheader, PPEdgeKind::PostDom));
+  EXPECT_TRUE(Graph.isAncestor(*ExitEntry, *Source, PPEdgeKind::PostDom));
 
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
@@ -2125,11 +2120,11 @@ exit:
   EXPECT_TRUE(Source->empty());
   EXPECT_TRUE(Preheader->empty());
   EXPECT_TRUE(ExitEntry->empty());
-  const Observation *GuardedExit = nullptr;
-  for (const Observation &Obs : Graph)
-    if (Obs.hasExecutionGuard() &&
-        Obs.getBasicBlock() == ExitEntry->getBasicBlock()) {
-      GuardedExit = &Obs;
+  const ProgramPoint *GuardedExit = nullptr;
+  for (const ProgramPoint &PP : Graph)
+    if (PP.hasExecutionGuard() &&
+        PP.getBasicBlock() == ExitEntry->getBasicBlock()) {
+      GuardedExit = &PP;
       break;
     }
   ASSERT_NE(GuardedExit, nullptr);
@@ -2171,8 +2166,8 @@ exit:
   LoopInvariantObservationMotionPass Pass;
   EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
 
-  const Observation *Source = findMemoryObservation(Graph, "header");
-  const Observation *EntryExit = findBlockExit(Graph, "entry");
+  const ProgramPoint *Source = findMemoryProgramPoint(Graph, "header");
+  const ProgramPoint *EntryExit = findBlockExit(Graph, "entry");
   ASSERT_NE(Source, nullptr);
   ASSERT_NE(EntryExit, nullptr);
   EXPECT_EQ(Source->size(), 1u);
@@ -2213,17 +2208,17 @@ exit:
   LoopInvariantObservationMotionPass Pass;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
 
-  const Observation *Source = findMemoryObservation(Graph, "header");
-  const Observation *ExitEntry = findBlockEntry(Graph, "exit");
+  const ProgramPoint *Source = findMemoryProgramPoint(Graph, "header");
+  const ProgramPoint *ExitEntry = findBlockEntry(Graph, "exit");
   ASSERT_NE(Source, nullptr);
   ASSERT_NE(ExitEntry, nullptr);
   EXPECT_TRUE(Source->empty());
   EXPECT_TRUE(ExitEntry->empty());
-  const Observation *GuardedExit = nullptr;
-  for (const Observation &Obs : Graph)
-    if (Obs.hasExecutionGuard() && Obs.getBasicBlock() &&
-        Obs.getBasicBlock()->getName() == "exit") {
-      GuardedExit = &Obs;
+  const ProgramPoint *GuardedExit = nullptr;
+  for (const ProgramPoint &PP : Graph)
+    if (PP.hasExecutionGuard() && PP.getBasicBlock() &&
+        PP.getBasicBlock()->getName() == "exit") {
+      GuardedExit = &PP;
       break;
     }
   ASSERT_NE(GuardedExit, nullptr);
@@ -2272,9 +2267,9 @@ exit:
   LoopInvariantObservationMotionPass Pass;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
 
-  const Observation *Source = findMemoryObservation(Graph, "inner.header");
-  const Observation *OuterPreheader = findBlockExit(Graph, "entry");
-  const Observation *InnerPreheader = findBlockExit(Graph, "outer.header");
+  const ProgramPoint *Source = findMemoryProgramPoint(Graph, "inner.header");
+  const ProgramPoint *OuterPreheader = findBlockExit(Graph, "entry");
+  const ProgramPoint *InnerPreheader = findBlockExit(Graph, "outer.header");
   ASSERT_NE(Source, nullptr);
   ASSERT_NE(OuterPreheader, nullptr);
   ASSERT_NE(InnerPreheader, nullptr);
@@ -2314,14 +2309,14 @@ exit:
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
 
   LoopPeriodicObservationCombinePass Pass(
-      /*MergeEquivalentAccesses=*/false);
+      /*MergeEquivalentObservations=*/false);
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
 
-  const Observation *ExitEntry = findBlockEntry(Graph, "exit");
+  const ProgramPoint *ExitEntry = findBlockEntry(Graph, "exit");
   ASSERT_NE(ExitEntry, nullptr);
   ASSERT_EQ(ExitEntry->size(), 2u);
-  for (const MemoryAccess &Access : *ExitEntry)
-    EXPECT_EQ(Access.getInstructions().size(), 1u);
+  for (const Observation &Obs : *ExitEntry)
+    EXPECT_EQ(Obs.getInstructions().size(), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -2359,8 +2354,8 @@ exit:
   LoopPeriodicObservationCombinePass Pass;
   EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
 
-  const Observation *Source = findMemoryObservation(Graph, "header");
-  const Observation *ExitEntry = findBlockEntry(Graph, "exit");
+  const ProgramPoint *Source = findMemoryProgramPoint(Graph, "header");
+  const ProgramPoint *ExitEntry = findBlockEntry(Graph, "exit");
   ASSERT_NE(Source, nullptr);
   ASSERT_NE(ExitEntry, nullptr);
   EXPECT_EQ(Source->size(), 1u);
@@ -2402,8 +2397,8 @@ exit:
   LoopPeriodicObservationCombinePass Pass;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
 
-  const Observation *Source = findMemoryObservation(Graph, "header");
-  const Observation *ExitEntry = findBlockEntry(Graph, "exit");
+  const ProgramPoint *Source = findMemoryProgramPoint(Graph, "header");
+  const ProgramPoint *ExitEntry = findBlockEntry(Graph, "exit");
   ASSERT_NE(Source, nullptr);
   ASSERT_NE(ExitEntry, nullptr);
   EXPECT_TRUE(Source->empty());
@@ -2427,8 +2422,8 @@ entry:
   const llvm::BasicBlock &BB = *F.begin();
   const llvm::Instruction &LoadInst = *BB.begin();
   MAIRGraph Graph(F);
-  auto &Load = Graph.createInstObservation(BB, LoadInst);
-  Graph.addEdge(Load, Load, ObsEdgeKind::Dom);
+  auto &Load = Graph.createInstProgramPoint(BB, LoadInst);
+  Graph.addEdge(Load, Load, PPEdgeKind::Dom);
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
@@ -2441,7 +2436,7 @@ entry:
   EXPECT_EQ(Load.size(), 1u);
 }
 
-TEST(MAIRGraphPass, RedundantObservationEliminatesWithinObservation) {
+TEST(MAIRGraphPass, RedundantObservationEliminatesWithinProgramPoint) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(i32* %p) {
@@ -2460,11 +2455,11 @@ entry:
   const llvm::Instruction &FirstLoad = *InstIt++;
   const llvm::Instruction &SecondLoad = *InstIt++;
   MAIRGraph Graph(F);
-  auto &Obs = Graph.createInstObservation(BB, FirstLoad);
-  MemoryAccess Second =
-      MemoryAccess::fromInstruction(SecondLoad, M->getDataLayout());
-  Obs.addAccess(Second);
-  Graph.addEdge(Obs, Obs, ObsEdgeKind::Dom);
+  auto &PP = Graph.createInstProgramPoint(BB, FirstLoad);
+  Observation Second =
+      Observation::fromInstruction(SecondLoad, M->getDataLayout());
+  PP.addObservation(Second);
+  Graph.addEdge(PP, PP, PPEdgeKind::Dom);
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
@@ -2474,7 +2469,7 @@ entry:
 
   EXPECT_FALSE(PA.areAllPreserved());
   ASSERT_TRUE(Graph.verify());
-  EXPECT_EQ(Obs.size(), 1u);
+  EXPECT_EQ(PP.size(), 1u);
 }
 
 TEST(MAIRGraphPass, RedundantObservationUsesCoverageOrderForWitness) {
@@ -2496,8 +2491,8 @@ entry:
   const llvm::Instruction &NarrowLoad = *InstIt++;
   const llvm::Instruction &WideLoad = *InstIt++;
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createInstObservation(BB, NarrowLoad);
-  Obs.addAccess(MemoryAccess::fromInstruction(WideLoad, M->getDataLayout()));
+  ProgramPoint &PP = Graph.createInstProgramPoint(BB, NarrowLoad);
+  PP.addObservation(Observation::fromInstruction(WideLoad, M->getDataLayout()));
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
@@ -2507,8 +2502,8 @@ entry:
 
   EXPECT_FALSE(PA.areAllPreserved());
   ASSERT_TRUE(Graph.verify());
-  ASSERT_EQ(Obs.size(), 1u);
-  const AbstractAccess *Region = Obs.begin()->getContiguousRegion();
+  ASSERT_EQ(PP.size(), 1u);
+  const AbstractAccess *Region = PP.begin()->getContiguousRegion();
   ASSERT_NE(Region, nullptr);
   ASSERT_TRUE(Region->getSize().isConstant());
   EXPECT_EQ(Region->getSize().getConstant(), 8u);
@@ -2533,9 +2528,9 @@ entry:
   const llvm::Instruction &Read = *InstIt++;
   const llvm::Instruction &Write = *InstIt++;
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createInstObservation(BB, Read);
-  Obs.addAccess(MemoryAccess::fromInstruction(Write, M->getDataLayout()));
-  ASSERT_LT(Obs.begin()->getLevel(), std::next(Obs.begin())->getLevel());
+  ProgramPoint &PP = Graph.createInstProgramPoint(BB, Read);
+  PP.addObservation(Observation::fromInstruction(Write, M->getDataLayout()));
+  ASSERT_LT(PP.begin()->getLevel(), std::next(PP.begin())->getLevel());
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
@@ -2545,8 +2540,8 @@ entry:
 
   EXPECT_FALSE(PA.areAllPreserved());
   ASSERT_TRUE(Graph.verify());
-  ASSERT_EQ(Obs.size(), 1u);
-  EXPECT_TRUE(Obs.begin()->isWrite());
+  ASSERT_EQ(PP.size(), 1u);
+  EXPECT_TRUE(PP.begin()->isWrite());
 }
 
 TEST(MAIRGraphPass, RedundantObservationUsesNonAdjacentLocalWitness) {
@@ -2574,13 +2569,13 @@ entry:
   ++InstIt;
   const llvm::Instruction &NarrowLoad = *InstIt++;
   MAIRGraph Graph(F);
-  auto &Obs = Graph.createInstObservation(BB, WideLoad);
-  MemoryAccess Atomic =
-      MemoryAccess::fromInstruction(AtomicLoad, M->getDataLayout());
-  MemoryAccess Narrow =
-      MemoryAccess::fromInstruction(NarrowLoad, M->getDataLayout());
-  Obs.addAccess(Atomic);
-  Obs.addAccess(Narrow);
+  auto &PP = Graph.createInstProgramPoint(BB, WideLoad);
+  Observation Atomic =
+      Observation::fromInstruction(AtomicLoad, M->getDataLayout());
+  Observation Narrow =
+      Observation::fromInstruction(NarrowLoad, M->getDataLayout());
+  PP.addObservation(Atomic);
+  PP.addObservation(Narrow);
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
@@ -2590,9 +2585,9 @@ entry:
 
   EXPECT_FALSE(PA.areAllPreserved());
   ASSERT_TRUE(Graph.verify());
-  ASSERT_EQ(Obs.size(), 2u);
-  EXPECT_FALSE(Obs.begin()->isAtomic());
-  EXPECT_TRUE(std::next(Obs.begin())->isAtomic());
+  ASSERT_EQ(PP.size(), 2u);
+  EXPECT_FALSE(PP.begin()->isAtomic());
+  EXPECT_TRUE(std::next(PP.begin())->isAtomic());
 }
 
 TEST(MAIRGraphPass, RedundantObservationLocalCoverageRespectsLevelDirection) {
@@ -2614,12 +2609,12 @@ entry:
   const llvm::Instruction &WideLoad = *InstIt++;
   const llvm::Instruction &NarrowStore = *InstIt++;
   MAIRGraph Graph(F);
-  auto &Obs = Graph.createInstObservation(BB, WideLoad);
-  MemoryAccess Store =
-      MemoryAccess::fromInstruction(NarrowStore, M->getDataLayout());
-  Obs.addAccess(Store);
+  auto &PP = Graph.createInstProgramPoint(BB, WideLoad);
+  Observation Store =
+      Observation::fromInstruction(NarrowStore, M->getDataLayout());
+  PP.addObservation(Store);
 
-  EXPECT_LT(Obs.begin()->getLevel(), std::next(Obs.begin())->getLevel());
+  EXPECT_LT(PP.begin()->getLevel(), std::next(PP.begin())->getLevel());
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC);
@@ -2628,7 +2623,7 @@ entry:
 
   EXPECT_TRUE(PA.areAllPreserved());
   ASSERT_TRUE(Graph.verify());
-  EXPECT_EQ(Obs.size(), 2u);
+  EXPECT_EQ(PP.size(), 2u);
 }
 
 TEST(MAIRGraphPass, RedundantObservationUnionsAllPredecessorFacts) {
@@ -2652,11 +2647,11 @@ entry:
   const llvm::Instruction &QLoad = *InstIt++;
   const llvm::Instruction &RedundantPLoad = *InstIt++;
   MAIRGraph Graph(F);
-  auto &P = Graph.createInstObservation(BB, PLoad);
-  auto &Q = Graph.createInstObservation(BB, QLoad);
-  auto &Merge = Graph.createInstObservation(BB, RedundantPLoad);
-  Graph.addEdge(P, Merge, ObsEdgeKind::Dom);
-  Graph.addEdge(Q, Merge, ObsEdgeKind::PostDom);
+  auto &P = Graph.createInstProgramPoint(BB, PLoad);
+  auto &Q = Graph.createInstProgramPoint(BB, QLoad);
+  auto &Merge = Graph.createInstProgramPoint(BB, RedundantPLoad);
+  Graph.addEdge(P, Merge, PPEdgeKind::Dom);
+  Graph.addEdge(Q, Merge, PPEdgeKind::PostDom);
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
@@ -2692,14 +2687,14 @@ entry:
   const llvm::Instruction &SecondLoad = *InstIt++;
   const llvm::Instruction &StoreInst = *InstIt++;
   MAIRGraph Graph(F);
-  auto &ReadWrite = Graph.createInstObservation(BB, FirstLoad);
+  auto &ReadWrite = Graph.createInstProgramPoint(BB, FirstLoad);
   ReadWrite.begin()->mergeKind(AccessKind::Write);
-  auto &Read = Graph.createInstObservation(BB, SecondLoad);
-  auto &Write = Graph.createInstObservation(BB, StoreInst);
+  auto &Read = Graph.createInstProgramPoint(BB, SecondLoad);
+  auto &Write = Graph.createInstProgramPoint(BB, StoreInst);
   EXPECT_GT(ReadWrite.begin()->getLevel(), Write.begin()->getLevel());
   EXPECT_GT(Write.begin()->getLevel(), Read.begin()->getLevel());
-  Graph.addEdge(ReadWrite, Read, ObsEdgeKind::Dom);
-  Graph.addEdge(Read, Write, ObsEdgeKind::Dom);
+  Graph.addEdge(ReadWrite, Read, PPEdgeKind::Dom);
+  Graph.addEdge(Read, Write, PPEdgeKind::Dom);
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
@@ -2733,11 +2728,11 @@ entry:
   const llvm::Instruction &Load = *InstIt++;
   const llvm::Instruction &Store = *InstIt++;
   MAIRGraph Graph(F);
-  auto &Read = Graph.createInstObservation(BB, Load);
-  auto &Write = Graph.createInstObservation(BB, Store);
-  Graph.addEdge(Read, Write, ObsEdgeKind::Dom);
+  auto &Read = Graph.createInstProgramPoint(BB, Load);
+  auto &Write = Graph.createInstProgramPoint(BB, Store);
+  Graph.addEdge(Read, Write, PPEdgeKind::Dom);
 
-  MemoryAccess Copy = MemoryAccess::fromInstruction(Load, M->getDataLayout());
+  Observation Copy = Observation::fromInstruction(Load, M->getDataLayout());
   EXPECT_FALSE(Copy.mergeWith(*Write.begin()));
   EXPECT_EQ(Copy.getLevel(), 1u);
   Copy.mergeKind(AccessKind::Write);
@@ -2775,12 +2770,12 @@ entry:
   const llvm::Instruction &PlainLoad = *InstIt++;
   const llvm::Instruction &AtomicLoad = *InstIt++;
   MAIRGraph Graph(F);
-  auto &Plain = Graph.createInstObservation(BB, PlainLoad);
-  auto &Atomic = Graph.createInstObservation(BB, AtomicLoad);
-  Graph.addEdge(Plain, Atomic, ObsEdgeKind::Dom);
+  auto &Plain = Graph.createInstProgramPoint(BB, PlainLoad);
+  auto &Atomic = Graph.createInstProgramPoint(BB, AtomicLoad);
+  Graph.addEdge(Plain, Atomic, PPEdgeKind::Dom);
 
-  MemoryAccess Copy =
-      MemoryAccess::fromInstruction(PlainLoad, M->getDataLayout());
+  Observation Copy =
+      Observation::fromInstruction(PlainLoad, M->getDataLayout());
   EXPECT_FALSE(Copy.mergeWith(*Atomic.begin()));
 
   llvm::PassInstrumentationCallbacks PIC;
@@ -2815,14 +2810,14 @@ entry:
   const llvm::Instruction &StoreInst = *InstIt++;
 
   MAIRGraph Graph(F);
-  auto &Entry = Graph.createBBObservation(BB, true);
-  auto &Load = Graph.createInstObservation(BB, LoadInst);
-  auto &Store = Graph.createInstObservation(BB, StoreInst);
-  auto &Exit = Graph.createBBObservation(BB, false);
-  Graph.addEdge(Entry, Load, ObsEdgeKind::Dom);
-  Graph.addEdge(Load, Store, ObsEdgeKind::Dom);
-  Graph.addEdge(Store, Load, ObsEdgeKind::PostDom);
-  Graph.addEdge(Store, Exit, ObsEdgeKind::Dom);
+  auto &Entry = Graph.createBBProgramPoint(BB, true);
+  auto &Load = Graph.createInstProgramPoint(BB, LoadInst);
+  auto &Store = Graph.createInstProgramPoint(BB, StoreInst);
+  auto &Exit = Graph.createBBProgramPoint(BB, false);
+  Graph.addEdge(Entry, Load, PPEdgeKind::Dom);
+  Graph.addEdge(Load, Store, PPEdgeKind::Dom);
+  Graph.addEdge(Store, Load, PPEdgeKind::PostDom);
+  Graph.addEdge(Store, Exit, PPEdgeKind::Dom);
 
   MAIRGraphAnalysisManager AM;
   SimplifyGraphPass Pass;
@@ -2831,12 +2826,12 @@ entry:
   EXPECT_FALSE(PA.areAllPreserved());
   ASSERT_TRUE(Graph.verify());
   EXPECT_EQ(Graph.size(), 3u);
-  EXPECT_EQ(Graph.find("ma1"), nullptr);
-  const Observation *Merged = Graph.find("ma2");
+  EXPECT_EQ(Graph.find("pp1"), nullptr);
+  const ProgramPoint *Merged = Graph.find("pp2");
   ASSERT_NE(Merged, nullptr);
-  EXPECT_EQ(Merged->accesses().size(), 2u);
-  EXPECT_TRUE(hasSuccessor(Graph, Entry, *Merged, ObsEdgeKind::Dom));
-  EXPECT_TRUE(hasSuccessor(Graph, *Merged, Exit, ObsEdgeKind::Dom));
+  EXPECT_EQ(Merged->observations().size(), 2u);
+  EXPECT_TRUE(hasSuccessor(Graph, Entry, *Merged, PPEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, *Merged, Exit, PPEdgeKind::Dom));
 }
 
 TEST(MAIRGraphPass, SimplifyGraphSinksPastSymbolicPointerDefinition) {
@@ -2862,14 +2857,14 @@ entry:
   MAIRGraphAnalysisManager AM;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
 
-  EXPECT_EQ(Graph.find("ma1"), nullptr);
-  const Observation *Merged = Graph.find("ma2");
+  EXPECT_EQ(Graph.find("pp1"), nullptr);
+  const ProgramPoint *Merged = Graph.find("pp2");
   ASSERT_NE(Merged, nullptr);
   EXPECT_EQ(&Merged->getAnchor(), Second);
   ASSERT_EQ(Merged->size(), 2u);
-  auto Access = Merged->begin();
-  EXPECT_EQ(Access->getInstruction(), First);
-  EXPECT_EQ((++Access)->getInstruction(), Second);
+  auto Obs = Merged->begin();
+  EXPECT_EQ(Obs->getInstruction(), First);
+  EXPECT_EQ((++Obs)->getInstruction(), Second);
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -2893,10 +2888,10 @@ entry:
   const llvm::Instruction &StoreInst = *InstIt++;
 
   MAIRGraph Graph(F);
-  auto &Load = Graph.createInstObservation(BB, LoadInst);
-  auto &Store = Graph.createInstObservation(BB, StoreInst);
-  Graph.addEdge(Load, Store, ObsEdgeKind::Dom);
-  Graph.addEdge(Store, Load, ObsEdgeKind::Dom);
+  auto &Load = Graph.createInstProgramPoint(BB, LoadInst);
+  auto &Store = Graph.createInstProgramPoint(BB, StoreInst);
+  Graph.addEdge(Load, Store, PPEdgeKind::Dom);
+  Graph.addEdge(Store, Load, PPEdgeKind::Dom);
 
   MAIRGraphAnalysisManager AM;
   SimplifyGraphPass Pass;
@@ -2905,8 +2900,8 @@ entry:
   EXPECT_TRUE(PA.areAllPreserved());
   ASSERT_TRUE(Graph.verify());
   EXPECT_EQ(Graph.size(), 2u);
-  EXPECT_NE(Graph.find("ma0"), nullptr);
-  EXPECT_NE(Graph.find("ma1"), nullptr);
+  EXPECT_NE(Graph.find("pp0"), nullptr);
+  EXPECT_NE(Graph.find("pp1"), nullptr);
 }
 
 TEST(MAIRGraphPass, SimplifyGraphRewiresExternalPostDomEdges) {
@@ -2928,16 +2923,16 @@ entry:
   const llvm::Instruction &StoreInst = *std::next(BB.begin());
 
   MAIRGraph Graph(F);
-  auto &A = Graph.createInstObservation(BB, LoadInst);
-  auto &B = Graph.createInstObservation(BB, StoreInst);
-  auto &C = Graph.createBBObservation(BB, false);
-  auto &D = Graph.createBBObservation(BB, false);
-  auto &E = Graph.createBBObservation(BB, false);
-  Graph.addEdge(A, B, ObsEdgeKind::Dom);
-  Graph.addEdge(B, A, ObsEdgeKind::PostDom);
-  Graph.addEdge(C, B, ObsEdgeKind::PostDom);
-  Graph.addEdge(B, D, ObsEdgeKind::Dom);
-  Graph.addEdge(B, E, ObsEdgeKind::PostDom);
+  auto &A = Graph.createInstProgramPoint(BB, LoadInst);
+  auto &B = Graph.createInstProgramPoint(BB, StoreInst);
+  auto &C = Graph.createBBProgramPoint(BB, false);
+  auto &D = Graph.createBBProgramPoint(BB, false);
+  auto &E = Graph.createBBProgramPoint(BB, false);
+  Graph.addEdge(A, B, PPEdgeKind::Dom);
+  Graph.addEdge(B, A, PPEdgeKind::PostDom);
+  Graph.addEdge(C, B, PPEdgeKind::PostDom);
+  Graph.addEdge(B, D, PPEdgeKind::Dom);
+  Graph.addEdge(B, E, PPEdgeKind::PostDom);
 
   MAIRGraphAnalysisManager AM;
   SimplifyGraphPass Pass;
@@ -2945,12 +2940,12 @@ entry:
 
   EXPECT_FALSE(PA.areAllPreserved());
   ASSERT_TRUE(Graph.verify());
-  EXPECT_EQ(Graph.find("ma0"), nullptr);
-  EXPECT_TRUE(hasSuccessor(Graph, C, B, ObsEdgeKind::PostDom));
-  EXPECT_TRUE(hasSuccessor(Graph, B, D, ObsEdgeKind::Dom));
-  EXPECT_TRUE(hasSuccessor(Graph, B, E, ObsEdgeKind::PostDom));
+  EXPECT_EQ(Graph.find("pp0"), nullptr);
+  EXPECT_TRUE(hasSuccessor(Graph, C, B, PPEdgeKind::PostDom));
+  EXPECT_TRUE(hasSuccessor(Graph, B, D, PPEdgeKind::Dom));
+  EXPECT_TRUE(hasSuccessor(Graph, B, E, PPEdgeKind::PostDom));
   EXPECT_FALSE(hasSuccessor(Graph, B, C));
-  EXPECT_FALSE(hasSuccessor(Graph, B, E, ObsEdgeKind::Dom));
+  EXPECT_FALSE(hasSuccessor(Graph, B, E, PPEdgeKind::Dom));
   EXPECT_FALSE(hasSuccessor(Graph, D, B));
 }
 
@@ -2972,21 +2967,21 @@ entry:
   llvm::Instruction &LoadInst = *BB.begin();
   llvm::Instruction &StoreInst = *std::next(BB.begin());
   MAIRGraph Graph(F);
-  Observation &Earlier = Graph.createInstObservation(BB, LoadInst);
-  Observation &Later = Graph.createInstObservation(BB, StoreInst);
-  Observation &External = Graph.createBBObservation(BB, false);
-  Graph.addEdge(Earlier, Later, ObsEdgeKind::Dom);
-  Graph.addEdge(Later, Earlier, ObsEdgeKind::PostDom);
-  Graph.addEdge(Later, External, ObsEdgeKind::Dom);
-  Graph.addEdge(Later, External, ObsEdgeKind::PostDom);
+  ProgramPoint &Earlier = Graph.createInstProgramPoint(BB, LoadInst);
+  ProgramPoint &Later = Graph.createInstProgramPoint(BB, StoreInst);
+  ProgramPoint &External = Graph.createBBProgramPoint(BB, false);
+  Graph.addEdge(Earlier, Later, PPEdgeKind::Dom);
+  Graph.addEdge(Later, Earlier, PPEdgeKind::PostDom);
+  Graph.addEdge(Later, External, PPEdgeKind::Dom);
+  Graph.addEdge(Later, External, PPEdgeKind::PostDom);
   SimplifyGraphPass Pass;
   MAIRGraphAnalysisManager AM;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
 
   ASSERT_TRUE(Graph.verify());
   ASSERT_EQ(Graph.size(), 2u);
-  EXPECT_TRUE(Graph.hasEdge(Later, External, ObsEdgeKind::Dom));
-  EXPECT_TRUE(Graph.hasEdge(Later, External, ObsEdgeKind::PostDom));
+  EXPECT_TRUE(Graph.hasEdge(Later, External, PPEdgeKind::Dom));
+  EXPECT_TRUE(Graph.hasEdge(Later, External, PPEdgeKind::PostDom));
 }
 
 TEST(MAIRGraph, TypedEdgeQueriesAndRemovalPreserveOtherKind) {
@@ -3004,22 +2999,22 @@ entry:
   llvm::Function &F = *M->begin();
   llvm::BasicBlock &BB = F.getEntryBlock();
   MAIRGraph Graph(F);
-  Observation &Source = Graph.createInstObservation(BB, BB.front());
-  Observation &Target = Graph.createBBObservation(BB, false);
-  Graph.addEdge(Source, Target, ObsEdgeKind::Dom);
-  Graph.addEdge(Source, Target, ObsEdgeKind::PostDom);
+  ProgramPoint &Source = Graph.createInstProgramPoint(BB, BB.front());
+  ProgramPoint &Target = Graph.createBBProgramPoint(BB, false);
+  Graph.addEdge(Source, Target, PPEdgeKind::Dom);
+  Graph.addEdge(Source, Target, PPEdgeKind::PostDom);
 
-  EXPECT_TRUE(Source.hasChild(Target, ObsEdgeKind::Dom));
-  EXPECT_TRUE(Source.hasChild(Target, ObsEdgeKind::PostDom));
-  EXPECT_TRUE(Target.hasParent(Source, ObsEdgeKind::Dom));
-  EXPECT_TRUE(Target.hasParent(Source, ObsEdgeKind::PostDom));
+  EXPECT_TRUE(Source.hasChild(Target, PPEdgeKind::Dom));
+  EXPECT_TRUE(Source.hasChild(Target, PPEdgeKind::PostDom));
+  EXPECT_TRUE(Target.hasParent(Source, PPEdgeKind::Dom));
+  EXPECT_TRUE(Target.hasParent(Source, PPEdgeKind::PostDom));
 
-  Graph.removeEdge(Source, Target, ObsEdgeKind::Dom);
-  EXPECT_FALSE(Source.hasChild(Target, ObsEdgeKind::Dom));
-  EXPECT_TRUE(Source.hasChild(Target, ObsEdgeKind::PostDom));
-  EXPECT_FALSE(Target.hasParent(Source, ObsEdgeKind::Dom));
-  EXPECT_TRUE(Target.hasParent(Source, ObsEdgeKind::PostDom));
-  EXPECT_TRUE(Graph.hasEdge(Source, Target, ObsEdgeKind::PostDom));
+  Graph.removeEdge(Source, Target, PPEdgeKind::Dom);
+  EXPECT_FALSE(Source.hasChild(Target, PPEdgeKind::Dom));
+  EXPECT_TRUE(Source.hasChild(Target, PPEdgeKind::PostDom));
+  EXPECT_FALSE(Target.hasParent(Source, PPEdgeKind::Dom));
+  EXPECT_TRUE(Target.hasParent(Source, PPEdgeKind::PostDom));
+  EXPECT_TRUE(Graph.hasEdge(Source, Target, PPEdgeKind::PostDom));
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -3048,8 +3043,8 @@ right:
 
   ASSERT_TRUE(Graph.verify());
   for (const llvm::BasicBlock &BB : F) {
-    const Observation &Entry = Graph.getBBEntryRepresentative(BB);
-    const Observation &Exit = Graph.getBBExitRepresentative(BB);
+    const ProgramPoint &Entry = Graph.getBBEntryRepresentative(BB);
+    const ProgramPoint &Exit = Graph.getBBExitRepresentative(BB);
     EXPECT_TRUE(Entry.isBasicBlockEntrySite());
     EXPECT_TRUE(Exit.isBasicBlockExitSite());
     EXPECT_TRUE(Entry.representsBlock(BB));
@@ -3076,8 +3071,8 @@ exit:
 
   llvm::Function &F = *M->getFunction("f");
   MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
-  Observation *Outside = findMutableMemoryObservation(Graph, "entry");
-  Observation *Inside = findMutableMemoryObservation(Graph, "loop");
+  ProgramPoint *Outside = findMutableMemoryProgramPoint(Graph, "entry");
+  ProgramPoint *Inside = findMutableMemoryProgramPoint(Graph, "loop");
   ASSERT_NE(Outside, nullptr);
   ASSERT_NE(Inside, nullptr);
   expectSimplifyGraphPreservesMutualPair(Graph, *Outside, *Inside);
@@ -3104,8 +3099,8 @@ exit:
 
   llvm::Function &F = *M->getFunction("f");
   MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
-  Observation *Before = findMutableMemoryObservation(Graph, "entry");
-  Observation *After = findMutableMemoryObservation(Graph, "exit");
+  ProgramPoint *Before = findMutableMemoryProgramPoint(Graph, "entry");
+  ProgramPoint *After = findMutableMemoryProgramPoint(Graph, "exit");
   ASSERT_NE(Before, nullptr);
   ASSERT_NE(After, nullptr);
   expectSimplifyGraphContractsMutualPair(Graph, *Before, *After);
@@ -3140,8 +3135,8 @@ exit:
 
   llvm::Function &F = *M->getFunction("f");
   MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
-  Observation *Outer = findMutableMemoryObservation(Graph, "outer.header");
-  Observation *Inner = findMutableMemoryObservation(Graph, "inner.header");
+  ProgramPoint *Outer = findMutableMemoryProgramPoint(Graph, "outer.header");
+  ProgramPoint *Inner = findMutableMemoryProgramPoint(Graph, "inner.header");
   ASSERT_NE(Outer, nullptr);
   ASSERT_NE(Inner, nullptr);
   expectSimplifyGraphPreservesMutualPair(Graph, *Outer, *Inner);
@@ -3176,8 +3171,8 @@ exit:
 
   llvm::Function &F = *M->getFunction("f");
   MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
-  Observation *Before = findMutableMemoryObservation(Graph, "outer.header");
-  Observation *After = findMutableMemoryObservation(Graph, "outer.latch");
+  ProgramPoint *Before = findMutableMemoryProgramPoint(Graph, "outer.header");
+  ProgramPoint *After = findMutableMemoryProgramPoint(Graph, "outer.latch");
   ASSERT_NE(Before, nullptr);
   ASSERT_NE(After, nullptr);
   expectSimplifyGraphContractsMutualPair(Graph, *Before, *After);
@@ -3204,12 +3199,12 @@ exit:
 
   llvm::Function &F = *M->getFunction("f");
   MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
-  Observation *First = findMutableMemoryObservation(Graph, "loop.header");
-  Observation *Second = findMutableMemoryObservation(Graph, "loop.latch");
+  ProgramPoint *First = findMutableMemoryProgramPoint(Graph, "loop.header");
+  ProgramPoint *Second = findMutableMemoryProgramPoint(Graph, "loop.latch");
   ASSERT_NE(First, nullptr);
   ASSERT_NE(Second, nullptr);
-  Graph.addEdge(*First, *Second, ObsEdgeKind::Dom);
-  Graph.addEdge(*Second, *First, ObsEdgeKind::PostDom);
+  Graph.addEdge(*First, *Second, PPEdgeKind::Dom);
+  Graph.addEdge(*Second, *First, PPEdgeKind::PostDom);
   const size_t InitialSize = Graph.size();
   const std::string FirstName = First->getName().str();
   ASSERT_TRUE(Graph.verify());
@@ -3241,8 +3236,8 @@ entry:
   llvm::Instruction &MovableInst = BB.front();
   llvm::Instruction &PinnedInst = *std::next(BB.begin());
   MAIRGraph Graph(F);
-  Observation &Movable = Graph.createInstObservation(BB, MovableInst);
-  Observation &Pinned = Graph.createInstObservation(BB, PinnedInst);
+  ProgramPoint &Movable = Graph.createInstProgramPoint(BB, MovableInst);
+  ProgramPoint &Pinned = Graph.createInstProgramPoint(BB, PinnedInst);
   ASSERT_TRUE(Movable.begin()->isMovable());
   ASSERT_FALSE(Pinned.begin()->isMovable());
 
@@ -3268,8 +3263,8 @@ entry:
   llvm::Instruction &PinnedInst = BB.front();
   llvm::Instruction &MovableInst = *std::next(BB.begin());
   MAIRGraph Graph(F);
-  Observation &Pinned = Graph.createInstObservation(BB, PinnedInst);
-  Observation &Movable = Graph.createInstObservation(BB, MovableInst);
+  ProgramPoint &Pinned = Graph.createInstProgramPoint(BB, PinnedInst);
+  ProgramPoint &Movable = Graph.createInstProgramPoint(BB, MovableInst);
   ASSERT_FALSE(Pinned.begin()->isMovable());
   ASSERT_TRUE(Movable.begin()->isMovable());
 
@@ -3290,8 +3285,8 @@ entry:
   llvm::Function &F = *M->begin();
   llvm::BasicBlock &BB = F.getEntryBlock();
   MAIRGraph Graph(F);
-  Observation &Entry = Graph.createBBObservation(BB, true);
-  Observation &Exit = Graph.createBBObservation(BB, false);
+  ProgramPoint &Entry = Graph.createBBProgramPoint(BB, true);
+  ProgramPoint &Exit = Graph.createBBProgramPoint(BB, false);
   ASSERT_EQ(&Graph.getBBEntryRepresentative(BB), &Entry);
   ASSERT_EQ(&Graph.getBBExitRepresentative(BB), &Exit);
   const MAIRGraph &ConstGraph = Graph;
@@ -3316,7 +3311,7 @@ entry:
   ASSERT_TRUE(Graph.verify());
 }
 
-TEST(MAIRGraphPass, CommonMAMotionDoesNotSearchNeighborDescendants) {
+TEST(MAIRGraphPass, CommonObservationMotionDoesNotSearchNeighborDescendants) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(i1 %cond) {
@@ -3340,26 +3335,26 @@ right:
   const MemoryObject *Object = Graph.getMemoryObject(Alloca);
   ASSERT_NE(Object, nullptr);
   EXPECT_EQ(llvm::range_size(Object->users()), 2u);
-  Observation &TargetBefore = Graph.getBBExitRepresentative(F.getEntryBlock());
-  Observation &LeftBoundary =
+  ProgramPoint &TargetBefore = Graph.getBBExitRepresentative(F.getEntryBlock());
+  ProgramPoint &LeftBoundary =
       Graph.getBBEntryRepresentative(*std::next(F.begin()));
-  const Observation *LeftAccess = findMemoryObservation(Graph, "left");
+  const ProgramPoint *LeftAccess = findMemoryProgramPoint(Graph, "left");
   ASSERT_NE(LeftAccess, nullptr);
-  EXPECT_TRUE(LeftBoundary.hasParent(TargetBefore, ObsEdgeKind::Dom));
-  EXPECT_FALSE(LeftAccess->hasParent(TargetBefore, ObsEdgeKind::Dom));
+  EXPECT_TRUE(LeftBoundary.hasParent(TargetBefore, PPEdgeKind::Dom));
+  EXPECT_FALSE(LeftAccess->hasParent(TargetBefore, PPEdgeKind::Dom));
 
   MAIRGraphAnalysisManager AM;
-  CommonMAMotionPass Pass;
+  CommonObservationMotionPass Pass;
   EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
   ASSERT_TRUE(Graph.verify());
-  const Observation *Target = findBlockExit(Graph, "entry");
+  const ProgramPoint *Target = findBlockExit(Graph, "entry");
   ASSERT_NE(Target, nullptr);
   EXPECT_TRUE(Target->empty());
   EXPECT_EQ(llvm::range_size(Object->users()), 2u);
 }
 
 TEST(MAIRGraphPass,
-     CommonMAMotionHoistsBoundaryAccessesAndPreservesProvenance) {
+     CommonObservationMotionHoistsBoundaryAccessesAndPreservesProvenance) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(i1 %cond) {
@@ -3383,21 +3378,21 @@ right:
   const llvm::Instruction *LeftLoad = &Left.front();
   const llvm::Instruction *RightLoad = &Right.front();
   MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
-  moveMemoryObservationAccessesTo(Graph, "left",
-                                  Graph.getBBEntryRepresentative(Left));
-  moveMemoryObservationAccessesTo(Graph, "right",
-                                  Graph.getBBEntryRepresentative(Right));
+  moveProgramPointObservationsTo(Graph, "left",
+                                 Graph.getBBEntryRepresentative(Left));
+  moveProgramPointObservationsTo(Graph, "right",
+                                 Graph.getBBEntryRepresentative(Right));
   const llvm::Value &Alloca = *F.getEntryBlock().begin();
   const MemoryObject *Object = Graph.getMemoryObject(Alloca);
   ASSERT_NE(Object, nullptr);
   EXPECT_EQ(llvm::range_size(Object->users()), 2u);
 
   MAIRGraphAnalysisManager AM;
-  CommonMAMotionPass Pass;
+  CommonObservationMotionPass Pass;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
 
   ASSERT_TRUE(Graph.verify());
-  const Observation *Target = findBlockExit(Graph, "entry");
+  const ProgramPoint *Target = findBlockExit(Graph, "entry");
   ASSERT_NE(Target, nullptr);
   ASSERT_EQ(Target->size(), 1u);
   EXPECT_EQ(Target->begin()->getInstructions().size(), 2u);
@@ -3408,7 +3403,7 @@ right:
   EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
 }
 
-TEST(MAIRGraphPass, CommonMAMotionRequiresCommonTargetParent) {
+TEST(MAIRGraphPass, CommonObservationMotionRequiresCommonTargetParent) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p, i1 %outer, i1 %inner) {
@@ -3433,29 +3428,29 @@ right:
   llvm::BasicBlock &Left = *std::next(F.begin(), 2);
   llvm::BasicBlock &Right = *std::next(F.begin(), 3);
   MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
-  Observation &Target = Graph.getBBExitRepresentative(Dispatch);
-  Observation &EntryExit = Graph.getBBExitRepresentative(Entry);
-  Observation &LeftBoundary = Graph.getBBEntryRepresentative(Left);
-  Observation &RightBoundary = Graph.getBBEntryRepresentative(Right);
-  moveMemoryObservationAccessesTo(Graph, "left", LeftBoundary);
-  moveMemoryObservationAccessesTo(Graph, "right", RightBoundary);
-  ASSERT_TRUE(LeftBoundary.hasParent(Target, ObsEdgeKind::Dom));
-  ASSERT_FALSE(RightBoundary.hasParent(Target, ObsEdgeKind::Dom));
-  ASSERT_TRUE(RightBoundary.hasParent(EntryExit, ObsEdgeKind::Dom));
+  ProgramPoint &Target = Graph.getBBExitRepresentative(Dispatch);
+  ProgramPoint &EntryExit = Graph.getBBExitRepresentative(Entry);
+  ProgramPoint &LeftBoundary = Graph.getBBEntryRepresentative(Left);
+  ProgramPoint &RightBoundary = Graph.getBBEntryRepresentative(Right);
+  moveProgramPointObservationsTo(Graph, "left", LeftBoundary);
+  moveProgramPointObservationsTo(Graph, "right", RightBoundary);
+  ASSERT_TRUE(LeftBoundary.hasParent(Target, PPEdgeKind::Dom));
+  ASSERT_FALSE(RightBoundary.hasParent(Target, PPEdgeKind::Dom));
+  ASSERT_TRUE(RightBoundary.hasParent(EntryExit, PPEdgeKind::Dom));
   const MemoryObject *Object = Graph.getMemoryObject(*F.getArg(0));
   ASSERT_NE(Object, nullptr);
   ASSERT_EQ(llvm::range_size(Object->users()), 2u);
   ASSERT_TRUE(Graph.verify());
 
   MAIRGraphAnalysisManager AM;
-  CommonMAMotionPass Pass;
+  CommonObservationMotionPass Pass;
   EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
   EXPECT_TRUE(Target.empty());
   EXPECT_EQ(llvm::range_size(Object->users()), 2u);
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(MAIRGraphPass, CommonMAMotionRequiresCommonTargetParentForSink) {
+TEST(MAIRGraphPass, CommonObservationMotionRequiresCommonTargetParentForSink) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p, i1 %path, i1 %escape) {
@@ -3485,27 +3480,27 @@ exit:
   llvm::BasicBlock &Right = *std::next(F.begin(), 4);
   llvm::BasicBlock &Merge = *std::next(F.begin(), 5);
   MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
-  Observation &Target = Graph.getBBEntryRepresentative(Merge);
-  Observation &LeftBoundary = Graph.getBBExitRepresentative(Left);
-  Observation &RightBoundary = Graph.getBBExitRepresentative(Right);
-  moveMemoryObservationAccessesTo(Graph, "left", LeftBoundary);
-  moveMemoryObservationAccessesTo(Graph, "right", RightBoundary);
-  ASSERT_TRUE(LeftBoundary.hasParent(Target, ObsEdgeKind::PostDom));
-  ASSERT_FALSE(RightBoundary.hasParent(Target, ObsEdgeKind::PostDom));
+  ProgramPoint &Target = Graph.getBBEntryRepresentative(Merge);
+  ProgramPoint &LeftBoundary = Graph.getBBExitRepresentative(Left);
+  ProgramPoint &RightBoundary = Graph.getBBExitRepresentative(Right);
+  moveProgramPointObservationsTo(Graph, "left", LeftBoundary);
+  moveProgramPointObservationsTo(Graph, "right", RightBoundary);
+  ASSERT_TRUE(LeftBoundary.hasParent(Target, PPEdgeKind::PostDom));
+  ASSERT_FALSE(RightBoundary.hasParent(Target, PPEdgeKind::PostDom));
   const MemoryObject *Object = Graph.getMemoryObject(*F.getArg(0));
   ASSERT_NE(Object, nullptr);
   ASSERT_EQ(llvm::range_size(Object->users()), 2u);
   ASSERT_TRUE(Graph.verify());
 
   MAIRGraphAnalysisManager AM;
-  CommonMAMotionPass Pass;
+  CommonObservationMotionPass Pass;
   EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
   EXPECT_TRUE(Target.empty());
   EXPECT_EQ(llvm::range_size(Object->users()), 2u);
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(MAIRGraphPass, CommonMAMotionHoistsPointerFromDominatingBlock) {
+TEST(MAIRGraphPass, CommonObservationMotionHoistsPointerFromDominatingBlock) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p, i64 %i, i1 %cond) {
@@ -3529,22 +3524,22 @@ right:
   MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
   llvm::BasicBlock &Left = *std::next(F.begin(), 2);
   llvm::BasicBlock &Right = *std::next(F.begin(), 3);
-  moveMemoryObservationAccessesTo(Graph, "left",
-                                  Graph.getBBEntryRepresentative(Left));
-  moveMemoryObservationAccessesTo(Graph, "right",
-                                  Graph.getBBEntryRepresentative(Right));
-  CommonMAMotionPass Pass;
+  moveProgramPointObservationsTo(Graph, "left",
+                                 Graph.getBBEntryRepresentative(Left));
+  moveProgramPointObservationsTo(Graph, "right",
+                                 Graph.getBBEntryRepresentative(Right));
+  CommonObservationMotionPass Pass;
   MAIRGraphAnalysisManager AM;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
 
-  const Observation *Target = findBlockExit(Graph, "dispatch");
+  const ProgramPoint *Target = findBlockExit(Graph, "dispatch");
   ASSERT_NE(Target, nullptr);
   ASSERT_EQ(Target->size(), 1u);
   EXPECT_EQ(Target->begin()->getInstructions().size(), 2u);
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(MAIRGraphPass, CommonMAMotionAssertsUnavailableCommonAccess) {
+TEST(MAIRGraphPass, CommonObservationMotionAssertsUnavailableCommonAccess) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p, i1 %cond) {
@@ -3565,22 +3560,22 @@ right:
   llvm::BasicBlock &Left = *std::next(F.begin());
   llvm::BasicBlock &Right = *std::next(F.begin(), 2);
   MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
-  Observation &LeftBoundary = Graph.getBBEntryRepresentative(Left);
-  Observation &RightBoundary = Graph.getBBEntryRepresentative(Right);
-  moveMemoryObservationAccessesTo(Graph, "left", LeftBoundary);
+  ProgramPoint &LeftBoundary = Graph.getBBEntryRepresentative(Left);
+  ProgramPoint &RightBoundary = Graph.getBBEntryRepresentative(Right);
+  moveProgramPointObservationsTo(Graph, "left", LeftBoundary);
   ASSERT_EQ(LeftBoundary.size(), 1u);
-  RightBoundary.addAccess(*LeftBoundary.begin());
+  RightBoundary.addObservation(*LeftBoundary.begin());
   ASSERT_TRUE(Graph.verify());
 
   MAIRGraphAnalysisManager AM;
-  CommonMAMotionPass Pass;
+  CommonObservationMotionPass Pass;
 #ifndef NDEBUG
   EXPECT_DEATH_IF_SUPPORTED((void)Pass.run(Graph, AM),
-                            "common access operands must be available");
+                            "common observation operands must be available");
 #endif
 }
 
-TEST(MAIRGraphPass, CommonMAMotionSinksToEntryAndPreservesProvenance) {
+TEST(MAIRGraphPass, CommonObservationMotionSinksToEntryAndPreservesProvenance) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p, i1 %cond) {
@@ -3609,21 +3604,21 @@ merge:
   MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
   llvm::BasicBlock &Left = *std::next(F.begin(), 3);
   llvm::BasicBlock &Right = *std::next(F.begin(), 4);
-  moveMemoryObservationAccessesTo(Graph, "left",
-                                  Graph.getBBExitRepresentative(Left));
-  moveMemoryObservationAccessesTo(Graph, "right",
-                                  Graph.getBBExitRepresentative(Right));
+  moveProgramPointObservationsTo(Graph, "left",
+                                 Graph.getBBExitRepresentative(Left));
+  moveProgramPointObservationsTo(Graph, "right",
+                                 Graph.getBBExitRepresentative(Right));
   const MemoryObject *Object = Graph.getMemoryObject(*F.getArg(0));
   ASSERT_NE(Object, nullptr);
   EXPECT_EQ(llvm::range_size(Object->users()), 2u);
 
   MAIRGraphAnalysisManager AM;
-  CommonMAMotionPass Pass;
+  CommonObservationMotionPass Pass;
   llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
 
   EXPECT_FALSE(PA.areAllPreserved());
   ASSERT_TRUE(Graph.verify());
-  const Observation *Target = findBlockEntry(Graph, "merge");
+  const ProgramPoint *Target = findBlockEntry(Graph, "merge");
   ASSERT_NE(Target, nullptr);
   ASSERT_EQ(Target->size(), 1u);
   EXPECT_EQ(Target->begin()->getInstructions().size(), 2u);
@@ -3634,7 +3629,8 @@ merge:
   EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
 }
 
-TEST(MAIRGraphPass, CommonMAMotionDoesNotSearchPredecessorDescendants) {
+TEST(MAIRGraphPass,
+     CommonObservationMotionDoesNotSearchPredecessorDescendants) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p, i1 %cond) {
@@ -3660,14 +3656,14 @@ merge:
   ASSERT_EQ(llvm::range_size(Object->users()), 2u);
 
   MAIRGraphAnalysisManager AM;
-  CommonMAMotionPass Pass;
+  CommonObservationMotionPass Pass;
   EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
   EXPECT_TRUE(Graph.getBBEntryRepresentative(*std::next(F.begin(), 3)).empty());
   EXPECT_EQ(llvm::range_size(Object->users()), 2u);
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(MAIRGraphPass, CommonMAMotionHoistsAfterForwardBarrierInTarget) {
+TEST(MAIRGraphPass, CommonObservationMotionHoistsAfterForwardBarrierInTarget) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 declare void @barrier()
@@ -3690,21 +3686,22 @@ right:
   MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
   llvm::BasicBlock &Left = *std::next(F.begin());
   llvm::BasicBlock &Right = *std::next(F.begin(), 2);
-  moveMemoryObservationAccessesTo(Graph, "left",
-                                  Graph.getBBEntryRepresentative(Left));
-  moveMemoryObservationAccessesTo(Graph, "right",
-                                  Graph.getBBEntryRepresentative(Right));
+  moveProgramPointObservationsTo(Graph, "left",
+                                 Graph.getBBEntryRepresentative(Left));
+  moveProgramPointObservationsTo(Graph, "right",
+                                 Graph.getBBEntryRepresentative(Right));
   MAIRGraphAnalysisManager AM;
-  CommonMAMotionPass Pass;
+  CommonObservationMotionPass Pass;
 
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
   ASSERT_TRUE(Graph.verify());
-  const Observation *Target = findBlockExit(Graph, "entry");
+  const ProgramPoint *Target = findBlockExit(Graph, "entry");
   ASSERT_NE(Target, nullptr);
   EXPECT_EQ(Target->size(), 1u);
 }
 
-TEST(MAIRGraphPass, CommonMAMotionHoistsBeforeForwardBarrierInNeighbor) {
+TEST(MAIRGraphPass,
+     CommonObservationMotionHoistsBeforeForwardBarrierInNeighbor) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 declare void @barrier()
@@ -3727,19 +3724,20 @@ right:
   llvm::BasicBlock &Left = *std::next(F.begin());
   llvm::BasicBlock &Right = *std::next(F.begin(), 2);
   MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
-  moveMemoryObservationAccessesTo(Graph, "left",
-                                  Graph.getBBEntryRepresentative(Left));
-  moveMemoryObservationAccessesTo(Graph, "right",
-                                  Graph.getBBEntryRepresentative(Right));
+  moveProgramPointObservationsTo(Graph, "left",
+                                 Graph.getBBEntryRepresentative(Left));
+  moveProgramPointObservationsTo(Graph, "right",
+                                 Graph.getBBEntryRepresentative(Right));
 
   MAIRGraphAnalysisManager AM;
-  CommonMAMotionPass Pass;
+  CommonObservationMotionPass Pass;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
   EXPECT_EQ(Graph.getBBExitRepresentative(F.getEntryBlock()).size(), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(MAIRGraphPass, CommonMAMotionSinksAfterBackwardBarrierInPredecessor) {
+TEST(MAIRGraphPass,
+     CommonObservationMotionSinksAfterBackwardBarrierInPredecessor) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 declare void @barrier()
@@ -3765,13 +3763,13 @@ merge:
   llvm::BasicBlock &Right = *std::next(F.begin(), 2);
   llvm::BasicBlock &Merge = *std::next(F.begin(), 3);
   MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
-  moveMemoryObservationAccessesTo(Graph, "left",
-                                  Graph.getBBExitRepresentative(Left));
-  moveMemoryObservationAccessesTo(Graph, "right",
-                                  Graph.getBBExitRepresentative(Right));
+  moveProgramPointObservationsTo(Graph, "left",
+                                 Graph.getBBExitRepresentative(Left));
+  moveProgramPointObservationsTo(Graph, "right",
+                                 Graph.getBBExitRepresentative(Right));
 
   MAIRGraphAnalysisManager AM;
-  CommonMAMotionPass Pass;
+  CommonObservationMotionPass Pass;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
   EXPECT_EQ(Graph.getBBEntryRepresentative(Merge).size(), 1u);
   EXPECT_TRUE(Graph.verify());
@@ -3796,9 +3794,9 @@ exit:
   llvm::BasicBlock &Exit = *std::next(F.begin());
   llvm::Instruction &Load = Entry.front();
   MAIRGraph Graph(F);
-  Observation &EntryRep = Graph.createBBObservation(Entry, true);
-  Observation &ExitRep = Graph.createBBObservation(Exit, true);
-  Observation &Edge = Graph.createEdgeObservation(
+  ProgramPoint &EntryRep = Graph.createBBProgramPoint(Entry, true);
+  ProgramPoint &ExitRep = Graph.createBBProgramPoint(Exit, true);
+  ProgramPoint &Edge = Graph.createEdgeProgramPoint(
       Entry, Exit, AnyProvenanceExecutedGuard({&Load}));
 
   ASSERT_TRUE(Graph.verify());
@@ -3836,7 +3834,7 @@ entry:
   llvm::BasicBlock &Right = *std::next(F.begin(), 2);
 
   MAIRGraph CrossFunction(F);
-  CrossFunction.createEdgeObservation(FEntry, G.getEntryBlock());
+  CrossFunction.createEdgeProgramPoint(FEntry, G.getEntryBlock());
   std::string CrossFunctionError;
   llvm::raw_string_ostream CrossFunctionOS(CrossFunctionError);
   EXPECT_FALSE(CrossFunction.verify(&CrossFunctionOS));
@@ -3844,7 +3842,7 @@ entry:
             std::string::npos);
 
   MAIRGraph MissingEdge(F);
-  MissingEdge.createEdgeObservation(Left, Right);
+  MissingEdge.createEdgeProgramPoint(Left, Right);
   std::string MissingEdgeError;
   llvm::raw_string_ostream MissingEdgeOS(MissingEdgeError);
   EXPECT_FALSE(MissingEdge.verify(&MissingEdgeOS));
@@ -3868,16 +3866,16 @@ entry:
   llvm::BasicBlock &BB = M->getFunction("f")->getEntryBlock();
   llvm::Instruction *A = &BB.front();
   llvm::Instruction *B = &*std::next(BB.begin());
-  ObservationGuard AB = AnyProvenanceExecutedGuard({A, B});
-  ObservationGuard BA = AnyProvenanceExecutedGuard({B, A});
-  ObservationGuard AOnly = AnyProvenanceExecutedGuard({A});
-  ObservationGuard DuplicateA = AnyProvenanceExecutedGuard({A, A});
+  ProgramPointGuard AB = AnyProvenanceExecutedGuard({A, B});
+  ProgramPointGuard BA = AnyProvenanceExecutedGuard({B, A});
+  ProgramPointGuard AOnly = AnyProvenanceExecutedGuard({A});
+  ProgramPointGuard DuplicateA = AnyProvenanceExecutedGuard({A, A});
 
   EXPECT_EQ(AB, BA);
   EXPECT_NE(AB, AOnly);
   EXPECT_NE(DuplicateA, AB);
   EXPECT_NE(AB, DuplicateA);
-  EXPECT_NE(AB, ObservationGuard(AlwaysGuard{}));
+  EXPECT_NE(AB, ProgramPointGuard(AlwaysGuard{}));
 }
 
 TEST(MAIRSchema, VerifierRejectsNonEmptyFunctionlessGraph) {
@@ -3896,11 +3894,11 @@ entry:
   llvm::GlobalVariable &Base = *M->getGlobalVariable("base");
   llvm::Type &I64 = *llvm::Type::getInt64Ty(Ctx);
   MAIRGraph Graph;
-  Observation &Obs = Graph.createBBObservation(F.getEntryBlock(), false);
+  ProgramPoint &PP = Graph.createBBProgramPoint(F.getEntryBlock(), false);
   MAIRScalarExpr Start = Graph.createValueExpr(Base);
   MAIRScalarExpr One = Graph.createConstantExpr(I64, llvm::APInt(64, 1));
-  Obs.addAccess(MemoryAccess({}, PeriodicRegion(&Base, Start, One, One, One),
-                             AccessKind::Read));
+  PP.addObservation(Observation({}, PeriodicRegion(&Base, Start, One, One, One),
+                                AccessKind::Read));
 
   std::string Error;
   llvm::raw_string_ostream OS(Error);
@@ -3923,10 +3921,10 @@ entry:
   llvm::Function &F = *M->getFunction("f");
   llvm::Instruction &Load = F.getEntryBlock().front();
   MAIRGraph Graph(F);
-  Observation &Anchor = Graph.createBBObservation(F.getEntryBlock(), true);
-  Graph.createObservation(Anchor.getSite(),
-                          AnyProvenanceExecutedGuard({&Load, &Load}));
-  Graph.createObservation(
+  ProgramPoint &Anchor = Graph.createBBProgramPoint(F.getEntryBlock(), true);
+  Graph.createProgramPoint(Anchor.getSite(),
+                           AnyProvenanceExecutedGuard({&Load, &Load}));
+  Graph.createProgramPoint(
       Anchor.getSite(),
       AnyProvenanceExecutedGuard(llvm::ArrayRef<llvm::Instruction *>()));
 
@@ -3955,8 +3953,8 @@ entry:
   llvm::BasicBlock &BB = F.getEntryBlock();
   llvm::Instruction &Load = BB.front();
   MAIRGraph Graph(F);
-  Observation &Representative = Graph.createBBObservation(BB, true);
-  Observation &Guarded = Graph.createObservation(
+  ProgramPoint &Representative = Graph.createBBProgramPoint(BB, true);
+  ProgramPoint &Guarded = Graph.createProgramPoint(
       Representative.getSite(), AnyProvenanceExecutedGuard({&Load}));
 
   ASSERT_TRUE(Graph.verify());
@@ -3965,7 +3963,7 @@ entry:
   EXPECT_EQ(&Graph.getBBEntryRepresentative(BB), &Representative);
 }
 
-TEST(MAIRSchema, ObservationSortCacheInvalidatesWhenAccessIsAdded) {
+TEST(MAIRSchema, ProgramPointSortCacheInvalidatesWhenAccessIsAdded) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -3982,10 +3980,10 @@ entry:
   llvm::Instruction &Load = BB.front();
   llvm::Argument &P = *F.arg_begin();
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createBBObservation(BB, true);
+  ProgramPoint &PP = Graph.createBBProgramPoint(BB, true);
 
   auto MakeAccess = [&](uint64_t Offset) {
-    return MemoryAccess(
+    return Observation(
         {&Load},
         MemoryRegion(AbstractAccess(&P, AbstractValue::constant(Offset),
                                     AbstractValue::constant(4))),
@@ -3993,26 +3991,26 @@ entry:
   };
   auto CollectOffsets = [&]() {
     llvm::SmallVector<uint64_t, 4> Offsets;
-    for (const MemoryAccess &Access : Obs) {
-      const AbstractAccess *Region = Access.getContiguousRegion();
+    for (const Observation &Obs : PP) {
+      const AbstractAccess *Region = Obs.getContiguousRegion();
       assert(Region && Region->getOffset().isConstant());
       Offsets.push_back(Region->getOffset().getConstant());
     }
     return Offsets;
   };
 
-  Obs.addAccess(MakeAccess(8));
-  Obs.addAccess(MakeAccess(0));
-  Obs.sort(compareTestAccesses);
+  PP.addObservation(MakeAccess(8));
+  PP.addObservation(MakeAccess(0));
+  PP.sort(compareTestObservations);
 
   llvm::SmallVector<uint64_t, 4> Offsets = CollectOffsets();
   ASSERT_EQ(Offsets.size(), 2u);
   EXPECT_EQ(Offsets[0], 0u);
   EXPECT_EQ(Offsets[1], 8u);
 
-  Obs.sort(compareTestAccesses);
-  Obs.addAccess(MakeAccess(4));
-  Obs.sort(compareTestAccesses);
+  PP.sort(compareTestObservations);
+  PP.addObservation(MakeAccess(4));
+  PP.sort(compareTestObservations);
 
   Offsets = CollectOffsets();
   ASSERT_EQ(Offsets.size(), 3u);
@@ -4020,15 +4018,15 @@ entry:
   EXPECT_EQ(Offsets[1], 4u);
   EXPECT_EQ(Offsets[2], 8u);
 
-  auto ReverseCompare = [](const MemoryAccess &LHS, const MemoryAccess &RHS) {
-    return compareTestAccesses(RHS, LHS);
+  auto ReverseCompare = [](const Observation &LHS, const Observation &RHS) {
+    return compareTestObservations(RHS, LHS);
   };
-  Obs.sort(ReverseCompare);
+  PP.sort(ReverseCompare);
   Offsets = CollectOffsets();
   EXPECT_EQ(Offsets[0], 8u);
   EXPECT_EQ(Offsets[1], 4u);
   EXPECT_EQ(Offsets[2], 0u);
-  Obs.sort(compareTestAccesses);
+  PP.sort(compareTestObservations);
   Offsets = CollectOffsets();
   EXPECT_EQ(Offsets[0], 0u);
   EXPECT_EQ(Offsets[1], 4u);
@@ -4036,7 +4034,7 @@ entry:
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(MAIRSchema, ObservationSortCacheInvalidatesWhenAccessKeyChanges) {
+TEST(MAIRSchema, ProgramPointSortCacheInvalidatesWhenAccessKeyChanges) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -4053,28 +4051,28 @@ entry:
   llvm::Instruction &Load = BB.front();
   llvm::Argument &P = *F.arg_begin();
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createBBObservation(BB, true);
+  ProgramPoint &PP = Graph.createBBProgramPoint(BB, true);
 
   auto MakeAccess = [&](uint64_t Offset, uint64_t Size) {
-    return MemoryAccess(
+    return Observation(
         {&Load},
         MemoryRegion(AbstractAccess(&P, AbstractValue::constant(Offset),
                                     AbstractValue::constant(Size))),
         AccessKind::Read);
   };
 
-  MemoryAccess &Left = Obs.addAccess(MakeAccess(0, 4));
-  MemoryAccess &Right = Obs.addAccess(MakeAccess(4, 4));
-  Obs.sort(compareTestAccesses);
-  ASSERT_EQ(&*Obs.begin(), &Left);
+  Observation &Left = PP.addObservation(MakeAccess(0, 4));
+  Observation &Right = PP.addObservation(MakeAccess(4, 4));
+  PP.sort(compareTestObservations);
+  ASSERT_EQ(&*PP.begin(), &Left);
   ASSERT_TRUE(Right.mergeWith(Left));
 
-  Obs.sort(compareTestAccesses);
-  EXPECT_EQ(&*Obs.begin(), &Right);
+  PP.sort(compareTestObservations);
+  EXPECT_EQ(&*PP.begin(), &Right);
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(MAIRSchema, ObservationSortCacheInvalidatesWhenAccessLevelChanges) {
+TEST(MAIRSchema, ProgramPointSortCacheInvalidatesWhenAccessLevelChanges) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -4091,20 +4089,20 @@ entry:
   llvm::Instruction &Load = BB.front();
   llvm::Argument &P = *F.arg_begin();
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createBBObservation(BB, true);
+  ProgramPoint &PP = Graph.createBBProgramPoint(BB, true);
   AbstractAccess Region(&P, AbstractValue::constant(0),
                         AbstractValue::constant(4));
 
-  MemoryAccess &Read =
-      Obs.addAccess(MemoryAccess({&Load}, Region, AccessKind::Read));
-  MemoryAccess &Write =
-      Obs.addAccess(MemoryAccess({&Load}, Region, AccessKind::Write));
-  Obs.sort(compareTestAccesses);
-  ASSERT_EQ(&*Obs.begin(), &Write);
+  Observation &Read =
+      PP.addObservation(Observation({&Load}, Region, AccessKind::Read));
+  Observation &Write =
+      PP.addObservation(Observation({&Load}, Region, AccessKind::Write));
+  PP.sort(compareTestObservations);
+  ASSERT_EQ(&*PP.begin(), &Write);
 
   Read.mergeKind(AccessKind::Write);
-  Obs.sort(compareTestAccesses);
-  EXPECT_EQ(&*Obs.begin(), &Read);
+  PP.sort(compareTestObservations);
+  EXPECT_EQ(&*PP.begin(), &Read);
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -4125,7 +4123,7 @@ entry:
   llvm::BasicBlock &BB = F.getEntryBlock();
   llvm::Instruction &Load = BB.front();
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createBBObservation(BB, true);
+  ProgramPoint &PP = Graph.createBBProgramPoint(BB, true);
   MAIRScalarExpr Start = Graph.createValueExpr(P);
   MAIRScalarExpr Stride = Graph.createConstantExpr(*llvm::Type::getInt64Ty(Ctx),
                                                    llvm::APInt(64, 8));
@@ -4134,12 +4132,13 @@ entry:
   MAIRScalarExpr ZeroTrips = Graph.createConstantExpr(
       *llvm::Type::getInt64Ty(Ctx), llvm::APInt(64, 0));
   PeriodicRegion Region(&P, Start, Stride, AccessSize, ZeroTrips);
-  Obs.addAccess(MemoryAccess({&Load}, MemoryRegion(Region), AccessKind::Read));
+  PP.addObservation(
+      Observation({&Load}, MemoryRegion(Region), AccessKind::Read));
 
   ASSERT_TRUE(Graph.verify());
-  ASSERT_TRUE(Obs.begin()->isPeriodic());
-  ASSERT_NE(Obs.begin()->getPeriodicRegion(), nullptr);
-  EXPECT_EQ(Obs.begin()->getBase(), &P);
+  ASSERT_TRUE(PP.begin()->isPeriodic());
+  ASSERT_NE(PP.begin()->getPeriodicRegion(), nullptr);
+  EXPECT_EQ(PP.begin()->getBase(), &P);
 
   const void *StartNode = Start.getOpaqueNode();
   MAIRGraph Moved(std::move(Graph));
@@ -4176,7 +4175,7 @@ entry:
   llvm::Type &I64 = *llvm::Type::getInt64Ty(Ctx);
   llvm::Type &PtrTy = *P.getType();
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createBBObservation(F.getEntryBlock(), true);
+  ProgramPoint &PP = Graph.createBBProgramPoint(F.getEntryBlock(), true);
 
   MAIRScalarExpr PExpr = Graph.createValueExpr(P);
   MAIRScalarExpr NExpr = Graph.createValueExpr(N);
@@ -4203,7 +4202,7 @@ entry:
       Graph.createUnaryExpr(MAIRScalarExpr::Kind::SignExtend, I64, Truncated);
   MAIRScalarExpr Trips =
       Graph.createUnaryExpr(MAIRScalarExpr::Kind::ZeroExtend, I64, NExpr);
-  Obs.addAccess(MemoryAccess(
+  PP.addObservation(Observation(
       {&Load}, MemoryRegion(PeriodicRegion(&P, Start, Stride, Size, Trips)),
       AccessKind::Read));
 
@@ -4234,14 +4233,15 @@ entry:
 
   MAIRGraph Graph(F);
   MAIRGraph Other(F);
-  Observation &Obs = Graph.createBBObservation(F.getEntryBlock(), true);
+  ProgramPoint &PP = Graph.createBBProgramPoint(F.getEntryBlock(), true);
   MAIRScalarExpr Start = Graph.createValueExpr(P);
   MAIRScalarExpr ZeroStride = Graph.createConstantExpr(I64, llvm::APInt(64, 0));
   MAIRScalarExpr Size = Graph.createConstantExpr(I64, llvm::APInt(64, 4));
   MAIRScalarExpr ForeignTrips =
       Other.createConstantExpr(I64, llvm::APInt(64, 3));
   PeriodicRegion Region(&P, Start, ZeroStride, Size, ForeignTrips);
-  Obs.addAccess(MemoryAccess({&Load}, MemoryRegion(Region), AccessKind::Read));
+  PP.addObservation(
+      Observation({&Load}, MemoryRegion(Region), AccessKind::Read));
 
   std::string Error;
   llvm::raw_string_ostream OS(Error);
@@ -4268,7 +4268,7 @@ entry:
   llvm::Instruction &Load = F.getEntryBlock().front();
   llvm::Type &I64 = *llvm::Type::getInt64Ty(Ctx);
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createBBObservation(F.getEntryBlock(), true);
+  ProgramPoint &PP = Graph.createBBProgramPoint(F.getEntryBlock(), true);
   MAIRScalarExpr IntegerStart =
       Graph.createConstantExpr(I64, llvm::APInt(64, 0));
   MAIRScalarExpr PointerStride = Graph.createValueExpr(P);
@@ -4276,11 +4276,11 @@ entry:
   MAIRScalarExpr TripSource = Graph.createConstantExpr(I64, llvm::APInt(64, 2));
   MAIRScalarExpr Trips =
       Graph.createUnaryExpr(MAIRScalarExpr::Kind::Truncate, I64, TripSource);
-  Obs.addAccess(
-      MemoryAccess({&Load},
-                   MemoryRegion(PeriodicRegion(&P, IntegerStart, PointerStride,
-                                               ZeroSize, Trips)),
-                   AccessKind::Read));
+  PP.addObservation(
+      Observation({&Load},
+                  MemoryRegion(PeriodicRegion(&P, IntegerStart, PointerStride,
+                                              ZeroSize, Trips)),
+                  AccessKind::Read));
 
   std::string Error;
   llvm::raw_string_ostream OS(Error);
@@ -4311,12 +4311,12 @@ entry:
   llvm::Instruction &Load = F.getEntryBlock().front();
   llvm::Type &I64 = *llvm::Type::getInt64Ty(Ctx);
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createBBObservation(F.getEntryBlock(), true);
+  ProgramPoint &PP = Graph.createBBProgramPoint(F.getEntryBlock(), true);
   MAIRScalarExpr Start = Graph.createValueExpr(P);
   MAIRScalarExpr C4 = Graph.createConstantExpr(I64, llvm::APInt(64, 4));
   MAIRScalarExpr InvalidStride = Graph.createBinaryExpr(
       MAIRScalarExpr::Kind::Add, I64, MAIRScalarExpr(), C4);
-  Obs.addAccess(MemoryAccess(
+  PP.addObservation(Observation(
       {&Load}, MemoryRegion(PeriodicRegion(&P, Start, InvalidStride, C4, C4)),
       AccessKind::Read));
 
@@ -4354,10 +4354,10 @@ entry:
   MAIRScalarExpr SizeB = Graph.createConstantExpr(I64, llvm::APInt(64, 4));
   MAIRScalarExpr TripsA = Graph.createConstantExpr(I64, llvm::APInt(64, 3));
   MAIRScalarExpr TripsB = Graph.createConstantExpr(I64, llvm::APInt(64, 3));
-  MemoryAccess A(
+  Observation A(
       {AInst}, MemoryRegion(PeriodicRegion(&P, StartA, StrideA, SizeA, TripsA)),
       AccessKind::Read);
-  MemoryAccess B(
+  Observation B(
       {BInst}, MemoryRegion(PeriodicRegion(&P, StartB, StrideB, SizeB, TripsB)),
       AccessKind::Write);
 
@@ -4384,13 +4384,12 @@ entry:
   MaskedRegion Region(AbstractAccess(F.getArg(0), AbstractValue::constant(0),
                                      AbstractValue::constant(4)),
                       std::move(Mask), 4);
-  MemoryAccess Access({&Load}, MemoryRegion(std::move(Region)),
-                      AccessKind::Read);
+  Observation Obs({&Load}, MemoryRegion(std::move(Region)), AccessKind::Read);
 
-  EXPECT_TRUE(Access.isMasked());
+  EXPECT_TRUE(Obs.isMasked());
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createBBObservation(F.getEntryBlock(), true);
-  MemoryAccess &Inserted = Obs.addAccess(Access);
+  ProgramPoint &PP = Graph.createBBProgramPoint(F.getEntryBlock(), true);
+  Observation &Inserted = PP.addObservation(Obs);
   EXPECT_TRUE(Inserted.isMasked());
   EXPECT_TRUE(Graph.verify());
 }
@@ -4414,12 +4413,12 @@ entry:
   llvm::BasicBlock &BB = F.getEntryBlock();
   llvm::Instruction *Wide = &BB.front();
   llvm::Instruction *Narrow = &*std::next(BB.begin(), 2);
-  MemoryAccess WideAccess(
+  Observation WideAccess(
       {Wide},
       MemoryRegion(AbstractAccess(&P, AbstractValue::constant(0),
                                   AbstractValue::constant(8))),
       AccessKind::Read);
-  MemoryAccess NarrowAccess(
+  Observation NarrowAccess(
       {Narrow},
       MemoryRegion(AbstractAccess(&P, AbstractValue::constant(4),
                                   AbstractValue::constant(4))),
@@ -4430,12 +4429,12 @@ entry:
   EXPECT_EQ(WideAccess.getInstructions().front(), Wide);
   EXPECT_EQ(WideAccess.getInstructions().back(), Narrow);
 
-  MemoryAccess Reversed(
+  Observation Reversed(
       {Narrow},
       MemoryRegion(AbstractAccess(&P, AbstractValue::constant(4),
                                   AbstractValue::constant(4))),
       AccessKind::Read);
-  MemoryAccess Covering(
+  Observation Covering(
       {Wide},
       MemoryRegion(AbstractAccess(&P, AbstractValue::constant(0),
                                   AbstractValue::constant(8))),
@@ -4465,8 +4464,9 @@ exit:
   llvm::BasicBlock &Exit = *std::next(F.begin());
   llvm::Instruction &Load = Entry.front();
   MAIRGraph Graph(F);
-  Graph.createBBObservation(Entry, true);
-  Graph.createEdgeObservation(Entry, Exit, AnyProvenanceExecutedGuard({&Load}));
+  Graph.createBBProgramPoint(Entry, true);
+  Graph.createEdgeProgramPoint(Entry, Exit,
+                               AnyProvenanceExecutedGuard({&Load}));
 
   std::string Text = Graph.toString();
   EXPECT_NE(Text.find("site=edge(%entry -> %exit)"), std::string::npos);
@@ -4499,8 +4499,8 @@ entry:
   const MAIROptimizationConfig Config =
       MAIROptimizationConfig::forAddressSanitizer();
   MAIRGraph Graph(F, Config);
-  MemoryAccess &ReadAccess = *Graph.createInstObservation(BB, Read).begin();
-  MemoryAccess &WriteAccess = *Graph.createInstObservation(BB, Write).begin();
+  Observation &ReadAccess = *Graph.createInstProgramPoint(BB, Read).begin();
+  Observation &WriteAccess = *Graph.createInstProgramPoint(BB, Write).begin();
 
   EXPECT_EQ(ReadAccess.getLevel(), WriteAccess.getLevel());
   EXPECT_TRUE(ReadAccess.isMergeable());
@@ -4535,10 +4535,10 @@ entry:
   llvm::BasicBlock &BB = F.getEntryBlock();
   auto It = BB.begin();
   MAIRGraph Graph(F);
-  MemoryAccess &Normal = *Graph.createInstObservation(BB, *It++).begin();
-  MemoryAccess &Atomic = *Graph.createInstObservation(BB, *It++).begin();
-  MemoryAccess &Volatile = *Graph.createInstObservation(BB, *It++).begin();
-  MemoryAccess &CallLike = *Graph.createInstObservation(BB, *It++).begin();
+  Observation &Normal = *Graph.createInstProgramPoint(BB, *It++).begin();
+  Observation &Atomic = *Graph.createInstProgramPoint(BB, *It++).begin();
+  Observation &Volatile = *Graph.createInstProgramPoint(BB, *It++).begin();
+  Observation &CallLike = *Graph.createInstProgramPoint(BB, *It++).begin();
 
   EXPECT_TRUE(Normal.isMergeable());
   EXPECT_TRUE(Normal.isMovable());
@@ -4577,8 +4577,8 @@ entry:
   const MAIROptimizationConfig Config =
       MAIROptimizationConfig::forThreadSanitizer();
   MAIRGraph Graph(F, Config);
-  MemoryAccess &ReadAccess = *Graph.createInstObservation(BB, Read).begin();
-  MemoryAccess &WriteAccess = *Graph.createInstObservation(BB, Write).begin();
+  Observation &ReadAccess = *Graph.createInstProgramPoint(BB, Read).begin();
+  Observation &WriteAccess = *Graph.createInstProgramPoint(BB, Write).begin();
 
   EXPECT_GT(WriteAccess.getLevel(), ReadAccess.getLevel());
   EXPECT_TRUE(ReadAccess.isMergeable());
@@ -4610,9 +4610,9 @@ entry:
   const MAIROptimizationConfig Config =
       MAIROptimizationConfig::forThreadSanitizer();
   MAIRGraph Graph(F, Config);
-  Observation &Available = Graph.createInstObservation(BB, First);
-  Observation &Required = Graph.createInstObservation(BB, Second);
-  Graph.addEdge(Available, Required, ObsEdgeKind::Dom);
+  ProgramPoint &Available = Graph.createInstProgramPoint(BB, First);
+  ProgramPoint &Required = Graph.createInstProgramPoint(BB, Second);
+  Graph.addEdge(Available, Required, PPEdgeKind::Dom);
 
   EXPECT_FALSE(Available.begin()->mergeWith(*Required.begin()));
   EXPECT_FALSE(Available.begin()->covers(*Required.begin()));
@@ -4661,9 +4661,9 @@ entry:
     llvm::Instruction &First = BB.front();
     llvm::Instruction &Second = *std::next(BB.begin());
     MAIRGraph Graph(F, Config);
-    Observation &Available = Graph.createInstObservation(BB, First);
-    Observation &Required = Graph.createInstObservation(BB, Second);
-    Graph.addEdge(Available, Required, ObsEdgeKind::Dom);
+    ProgramPoint &Available = Graph.createInstProgramPoint(BB, First);
+    ProgramPoint &Required = Graph.createInstProgramPoint(BB, Second);
+    Graph.addEdge(Available, Required, PPEdgeKind::Dom);
 
     llvm::PassInstrumentationCallbacks PIC;
     MAIRGraphAnalysisManager AM;
@@ -4700,9 +4700,9 @@ entry:
   llvm::Instruction &First = BB.front();
   llvm::Instruction &Second = *std::next(BB.begin());
   MAIRGraph Graph(F, MAIROptimizationConfig::forAddressSanitizer());
-  Observation &Earlier = Graph.createInstObservation(BB, First);
-  Observation &Later = Graph.createInstObservation(BB, Second);
-  Graph.addEdge(Later, Earlier, ObsEdgeKind::PostDom);
+  ProgramPoint &Earlier = Graph.createInstProgramPoint(BB, First);
+  ProgramPoint &Later = Graph.createInstProgramPoint(BB, Second);
+  Graph.addEdge(Later, Earlier, PPEdgeKind::PostDom);
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
@@ -4732,9 +4732,9 @@ entry:
   llvm::BasicBlock &BB = F.getEntryBlock();
   auto CheckConfig = [&](const MAIROptimizationConfig &Config) {
     MAIRGraph Graph(F, Config);
-    MemoryAccess &First = *Graph.createInstObservation(BB, BB.front()).begin();
-    MemoryAccess &Second =
-        *Graph.createInstObservation(BB, *std::next(BB.begin())).begin();
+    Observation &First = *Graph.createInstProgramPoint(BB, BB.front()).begin();
+    Observation &Second =
+        *Graph.createInstProgramPoint(BB, *std::next(BB.begin())).begin();
     EXPECT_TRUE(First.isCallLike());
     EXPECT_TRUE(Second.isCallLike());
     EXPECT_FALSE(First.isMergeable());
@@ -4770,9 +4770,9 @@ entry:
   const MAIROptimizationConfig Config =
       MAIROptimizationConfig::forAddressSanitizer();
   MAIRGraph Graph(F, Config);
-  MemoryAccess &Wide = *Graph.createInstObservation(BB, BB.front()).begin();
-  MemoryAccess &Narrow =
-      *Graph.createInstObservation(BB, *std::next(BB.begin())).begin();
+  Observation &Wide = *Graph.createInstProgramPoint(BB, BB.front()).begin();
+  Observation &Narrow =
+      *Graph.createInstProgramPoint(BB, *std::next(BB.begin())).begin();
 
   EXPECT_TRUE(Wide.isMasked());
   EXPECT_FALSE(Wide.isCallLike());
@@ -4808,9 +4808,9 @@ entry:
   const MAIROptimizationConfig Config =
       MAIROptimizationConfig::forAddressSanitizer();
   MAIRGraph Graph(F, Config);
-  MemoryAccess &First = *Graph.createInstObservation(BB, *It++).begin();
-  MemoryAccess &Same = *Graph.createInstObservation(BB, *It++).begin();
-  MemoryAccess &Different = *Graph.createInstObservation(BB, *It).begin();
+  Observation &First = *Graph.createInstProgramPoint(BB, *It++).begin();
+  Observation &Same = *Graph.createInstProgramPoint(BB, *It++).begin();
+  Observation &Different = *Graph.createInstProgramPoint(BB, *It).begin();
 
   EXPECT_TRUE(First.covers(Same));
   EXPECT_FALSE(First.covers(Different))
@@ -4837,28 +4837,28 @@ entry:
   llvm::Instruction &Load = BB.front();
   llvm::Argument &P = *F.arg_begin();
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createBBObservation(BB, true);
+  ProgramPoint &PP = Graph.createBBProgramPoint(BB, true);
 
   auto MakeAccess = [&](uint64_t Offset) {
-    return MemoryAccess(
+    return Observation(
         {&Load},
         MemoryRegion(AbstractAccess(&P, AbstractValue::constant(Offset),
                                     AbstractValue::unknown())),
         AccessKind::Read);
   };
 
-  Obs.addAccess(MakeAccess(8));
-  Obs.addAccess(MakeAccess(0));
-  Obs.addAccess(MakeAccess(8));
+  PP.addObservation(MakeAccess(8));
+  PP.addObservation(MakeAccess(0));
+  PP.addObservation(MakeAccess(8));
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC);
   LocationMergePass Pass;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
-  ASSERT_EQ(Obs.size(), 2u);
+  ASSERT_EQ(PP.size(), 2u);
 
-  auto It = Obs.begin();
+  auto It = PP.begin();
   ASSERT_NE(It->getContiguousRegion(), nullptr);
   EXPECT_EQ(It->getContiguousRegion()->getOffset(), AbstractValue::constant(0));
   ++It;
@@ -4896,10 +4896,10 @@ entry:
   ++It;
   llvm::Instruction &GappedStore = *It;
 
-  MemoryAccess Lower =
-      MemoryAccess::fromInstruction(LowerStore, M->getDataLayout());
-  MemoryAccess Upper =
-      MemoryAccess::fromInstruction(UpperStore, M->getDataLayout());
+  Observation Lower =
+      Observation::fromInstruction(LowerStore, M->getDataLayout());
+  Observation Upper =
+      Observation::fromInstruction(UpperStore, M->getDataLayout());
 
   ASSERT_EQ(Lower.getBase(), &P);
   ASSERT_EQ(Upper.getBase(), &P);
@@ -4910,20 +4910,20 @@ entry:
   EXPECT_EQ(Merged->getSize(), AbstractValue::constant(8));
   EXPECT_TRUE(Lower.isWrite());
 
-  MemoryAccess ReversedUpper =
-      MemoryAccess::fromInstruction(UpperStore, M->getDataLayout());
-  MemoryAccess ReversedLower =
-      MemoryAccess::fromInstruction(LowerStore, M->getDataLayout());
+  Observation ReversedUpper =
+      Observation::fromInstruction(UpperStore, M->getDataLayout());
+  Observation ReversedLower =
+      Observation::fromInstruction(LowerStore, M->getDataLayout());
   ASSERT_TRUE(ReversedUpper.mergeWith(ReversedLower));
   Merged = ReversedUpper.getContiguousRegion();
   ASSERT_NE(Merged, nullptr);
   EXPECT_EQ(Merged->getOffset(), AbstractValue::symbol(PX));
   EXPECT_EQ(Merged->getSize(), AbstractValue::constant(8));
 
-  MemoryAccess GappedLower =
-      MemoryAccess::fromInstruction(LowerStore, M->getDataLayout());
-  MemoryAccess GappedUpper =
-      MemoryAccess::fromInstruction(GappedStore, M->getDataLayout());
+  Observation GappedLower =
+      Observation::fromInstruction(LowerStore, M->getDataLayout());
+  Observation GappedUpper =
+      Observation::fromInstruction(GappedStore, M->getDataLayout());
   EXPECT_FALSE(GappedLower.mergeWith(GappedUpper));
 }
 
@@ -4951,22 +4951,24 @@ entry:
   ++It;
   llvm::Instruction &UpperStore = *It;
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createBBObservation(BB, true);
-  Obs.addAccess(MemoryAccess::fromInstruction(LowerStore, M->getDataLayout()));
-  Obs.addAccess(MemoryAccess::fromInstruction(UpperStore, M->getDataLayout()));
+  ProgramPoint &PP = Graph.createBBProgramPoint(BB, true);
+  PP.addObservation(
+      Observation::fromInstruction(LowerStore, M->getDataLayout()));
+  PP.addObservation(
+      Observation::fromInstruction(UpperStore, M->getDataLayout()));
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC);
   LocationMergePass Pass;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
-  ASSERT_EQ(Obs.size(), 1u);
+  ASSERT_EQ(PP.size(), 1u);
 
-  const AbstractAccess *Merged = Obs.begin()->getContiguousRegion();
+  const AbstractAccess *Merged = PP.begin()->getContiguousRegion();
   ASSERT_NE(Merged, nullptr);
   EXPECT_EQ(Merged->getBase(), F.arg_begin());
   EXPECT_EQ(Merged->getSize(), AbstractValue::constant(8));
-  EXPECT_TRUE(Obs.begin()->isWrite());
+  EXPECT_TRUE(PP.begin()->isWrite());
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -4987,32 +4989,32 @@ entry:
   llvm::Instruction &Load = BB.front();
   llvm::Argument &P = *F.arg_begin();
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createBBObservation(BB, true);
+  ProgramPoint &PP = Graph.createBBProgramPoint(BB, true);
 
-  Obs.addAccess(
-      MemoryAccess({&Load},
-                   MemoryRegion(AbstractAccess(&P, AbstractValue::constant(0),
-                                               AbstractValue::constant(8))),
-                   AccessKind::Read));
-  Obs.addAccess(
-      MemoryAccess({&Load},
-                   MemoryRegion(AbstractAccess(&P, AbstractValue::constant(4),
-                                               AbstractValue::unknown())),
-                   AccessKind::Read));
-  Obs.addAccess(
-      MemoryAccess({&Load},
-                   MemoryRegion(AbstractAccess(&P, AbstractValue::constant(8),
-                                               AbstractValue::constant(4))),
-                   AccessKind::Read));
+  PP.addObservation(
+      Observation({&Load},
+                  MemoryRegion(AbstractAccess(&P, AbstractValue::constant(0),
+                                              AbstractValue::constant(8))),
+                  AccessKind::Read));
+  PP.addObservation(
+      Observation({&Load},
+                  MemoryRegion(AbstractAccess(&P, AbstractValue::constant(4),
+                                              AbstractValue::unknown())),
+                  AccessKind::Read));
+  PP.addObservation(
+      Observation({&Load},
+                  MemoryRegion(AbstractAccess(&P, AbstractValue::constant(8),
+                                              AbstractValue::constant(4))),
+                  AccessKind::Read));
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC);
   LocationMergePass Pass;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
-  ASSERT_EQ(Obs.size(), 2u);
+  ASSERT_EQ(PP.size(), 2u);
 
-  auto It = Obs.begin();
+  auto It = PP.begin();
   ASSERT_NE(It->getContiguousRegion(), nullptr);
   EXPECT_EQ(It->getContiguousRegion()->getOffset(), AbstractValue::constant(0));
   EXPECT_EQ(It->getContiguousRegion()->getSize(), AbstractValue::constant(12));
@@ -5047,22 +5049,22 @@ entry:
   llvm::Instruction &Barrier = *It++;
   llvm::Instruction &Right = *It;
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createBBObservation(BB, true);
-  Obs.addAccess(MemoryAccess::fromInstruction(Left, M->getDataLayout()));
-  Obs.addAccess(MemoryAccess::fromInstruction(Barrier, M->getDataLayout()));
-  Obs.addAccess(MemoryAccess::fromInstruction(Right, M->getDataLayout()));
+  ProgramPoint &PP = Graph.createBBProgramPoint(BB, true);
+  PP.addObservation(Observation::fromInstruction(Left, M->getDataLayout()));
+  PP.addObservation(Observation::fromInstruction(Barrier, M->getDataLayout()));
+  PP.addObservation(Observation::fromInstruction(Right, M->getDataLayout()));
 
-  ASSERT_EQ(Obs.begin()->getLevel(), std::prev(Obs.end())->getLevel());
-  ASSERT_NE(Obs.begin()->getLevel(), std::next(Obs.begin())->getLevel());
+  ASSERT_EQ(PP.begin()->getLevel(), std::prev(PP.end())->getLevel());
+  ASSERT_NE(PP.begin()->getLevel(), std::next(PP.begin())->getLevel());
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC);
   LocationMergePass Pass;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
-  ASSERT_EQ(Obs.size(), 2u);
+  ASSERT_EQ(PP.size(), 2u);
 
-  const MemoryAccess &Merged = *Obs.begin();
+  const Observation &Merged = *PP.begin();
   ASSERT_NE(Merged.getContiguousRegion(), nullptr);
   EXPECT_EQ(Merged.getLevel(), 1u);
   EXPECT_EQ(Merged.getContiguousRegion()->getOffset(),
@@ -5096,25 +5098,25 @@ entry:
   llvm::Instruction &Barrier = *It++;
   llvm::Instruction &Right = *It;
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createBBObservation(BB, true);
-  Obs.addAccess(MemoryAccess::fromInstruction(Left, M->getDataLayout()));
-  Obs.addAccess(MemoryAccess::fromInstruction(Barrier, M->getDataLayout()));
-  Obs.addAccess(MemoryAccess::fromInstruction(Right, M->getDataLayout()));
+  ProgramPoint &PP = Graph.createBBProgramPoint(BB, true);
+  PP.addObservation(Observation::fromInstruction(Left, M->getDataLayout()));
+  PP.addObservation(Observation::fromInstruction(Barrier, M->getDataLayout()));
+  PP.addObservation(Observation::fromInstruction(Right, M->getDataLayout()));
 
-  ASSERT_TRUE(Obs.begin()->isMergeable());
-  ASSERT_FALSE(std::next(Obs.begin())->isMergeable());
-  ASSERT_TRUE(std::prev(Obs.end())->isMergeable());
+  ASSERT_TRUE(PP.begin()->isMergeable());
+  ASSERT_FALSE(std::next(PP.begin())->isMergeable());
+  ASSERT_TRUE(std::prev(PP.end())->isMergeable());
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC);
   LocationMergePass Pass;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
-  ASSERT_EQ(Obs.size(), 2u);
+  ASSERT_EQ(PP.size(), 2u);
 
   auto Merged = llvm::find_if(
-      Obs, [](const MemoryAccess &Access) { return Access.isMergeable(); });
-  ASSERT_NE(Merged, Obs.end());
+      PP, [](const Observation &Obs) { return Obs.isMergeable(); });
+  ASSERT_NE(Merged, PP.end());
   ASSERT_NE(Merged->getContiguousRegion(), nullptr);
   EXPECT_EQ(Merged->getContiguousRegion()->getOffset(),
             AbstractValue::constant(0));
@@ -5153,22 +5155,22 @@ entry:
   const MAIROptimizationConfig Config =
       MAIROptimizationConfig::forAddressSanitizer();
   MAIRGraph Graph(F, Config);
-  Observation &Obs = Graph.createInstObservation(BB, Low);
-  Obs.addAccess(MemoryAccess::fromInstruction(High, M->getDataLayout()));
-  Obs.addAccess(MemoryAccess::fromInstruction(Opaque, M->getDataLayout()));
+  ProgramPoint &PP = Graph.createInstProgramPoint(BB, Low);
+  PP.addObservation(Observation::fromInstruction(High, M->getDataLayout()));
+  PP.addObservation(Observation::fromInstruction(Opaque, M->getDataLayout()));
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC);
   LocationMergePass Pass;
   EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
-  ASSERT_EQ(Obs.size(), 2u);
-  const MaskedRegion *Merged = Obs.begin()->getMaskedRegion();
+  ASSERT_EQ(PP.size(), 2u);
+  const MaskedRegion *Merged = PP.begin()->getMaskedRegion();
   ASSERT_NE(Merged, nullptr);
   ASSERT_TRUE(Merged->isConstantMask());
   EXPECT_TRUE(Merged->getConstantMask().test(0));
   EXPECT_TRUE(Merged->getConstantMask().test(2));
-  const MaskedRegion *Unmerged = std::next(Obs.begin())->getMaskedRegion();
+  const MaskedRegion *Unmerged = std::next(PP.begin())->getMaskedRegion();
   ASSERT_NE(Unmerged, nullptr);
   EXPECT_FALSE(Unmerged->isComparable());
   EXPECT_TRUE(Graph.verify());
@@ -5193,14 +5195,14 @@ exit:
   llvm::BasicBlock &Exit = *std::next(F.begin());
   llvm::Instruction &Load = Entry.front();
   MAIRGraph Graph(F);
-  Observation &Anchored = Graph.createBBObservation(Entry, true);
-  Observation &DifferentGuard = Graph.createObservation(
+  ProgramPoint &Anchored = Graph.createBBProgramPoint(Entry, true);
+  ProgramPoint &DifferentGuard = Graph.createProgramPoint(
       Anchored.getSite(), AnyProvenanceExecutedGuard({&Load}));
-  Observation &Edge = Graph.createEdgeObservation(Entry, Exit);
-  Graph.addEdge(Anchored, DifferentGuard, ObsEdgeKind::Dom);
-  Graph.addEdge(DifferentGuard, Anchored, ObsEdgeKind::PostDom);
-  Graph.addEdge(Anchored, Edge, ObsEdgeKind::Dom);
-  Graph.addEdge(Edge, Anchored, ObsEdgeKind::PostDom);
+  ProgramPoint &Edge = Graph.createEdgeProgramPoint(Entry, Exit);
+  Graph.addEdge(Anchored, DifferentGuard, PPEdgeKind::Dom);
+  Graph.addEdge(DifferentGuard, Anchored, PPEdgeKind::PostDom);
+  Graph.addEdge(Anchored, Edge, PPEdgeKind::Dom);
+  Graph.addEdge(Edge, Anchored, PPEdgeKind::PostDom);
 
   SimplifyGraphPass Pass;
   MAIRGraphAnalysisManager AM;
@@ -5229,10 +5231,10 @@ right:
   llvm::BasicBlock &Left = *std::next(F.begin());
   llvm::BasicBlock &Right = *std::next(F.begin(), 2);
   MAIRGraph Graph(F);
-  Observation &LeftEdge = Graph.createEdgeObservation(Entry, Left);
-  Observation &RightEdge = Graph.createEdgeObservation(Entry, Right);
-  Graph.addEdge(LeftEdge, RightEdge, ObsEdgeKind::Dom);
-  Graph.addEdge(RightEdge, LeftEdge, ObsEdgeKind::PostDom);
+  ProgramPoint &LeftEdge = Graph.createEdgeProgramPoint(Entry, Left);
+  ProgramPoint &RightEdge = Graph.createEdgeProgramPoint(Entry, Right);
+  Graph.addEdge(LeftEdge, RightEdge, PPEdgeKind::Dom);
+  Graph.addEdge(RightEdge, LeftEdge, PPEdgeKind::PostDom);
 
   SimplifyGraphPass Pass;
   MAIRGraphAnalysisManager AM;
@@ -5257,13 +5259,13 @@ entry:
   llvm::BasicBlock &BB = F.getEntryBlock();
   llvm::Instruction &Load = BB.front();
   MAIRGraph Graph(F);
-  Observation &Entry = Graph.createBBObservation(BB, true);
-  Observation &Memory = Graph.createInstObservation(BB, Load);
-  Observation &Exit = Graph.createBBObservation(BB, false);
-  Graph.addEdge(Entry, Memory, ObsEdgeKind::Dom);
-  Graph.addEdge(Memory, Entry, ObsEdgeKind::PostDom);
-  Graph.addEdge(Memory, Exit, ObsEdgeKind::Dom);
-  Graph.addEdge(Exit, Memory, ObsEdgeKind::PostDom);
+  ProgramPoint &Entry = Graph.createBBProgramPoint(BB, true);
+  ProgramPoint &Memory = Graph.createInstProgramPoint(BB, Load);
+  ProgramPoint &Exit = Graph.createBBProgramPoint(BB, false);
+  Graph.addEdge(Entry, Memory, PPEdgeKind::Dom);
+  Graph.addEdge(Memory, Entry, PPEdgeKind::PostDom);
+  Graph.addEdge(Memory, Exit, PPEdgeKind::Dom);
+  Graph.addEdge(Exit, Memory, PPEdgeKind::PostDom);
 
   SimplifyGraphPass Pass;
   MAIRGraphAnalysisManager AM;
@@ -5292,11 +5294,11 @@ entry:
   llvm::BasicBlock &BB = F.getEntryBlock();
   llvm::Instruction &Load = BB.front();
   MAIRGraph Graph(F);
-  Observation &Entry = Graph.createBBObservation(BB, true);
-  ObservationGuard Guard = AnyProvenanceExecutedGuard({&Load});
-  Graph.createObservation(Entry.getSite(), Guard);
-  Graph.createObservation(
-      ObservationSite::anchored(Load, Observation::SiteKind::MemoryInst),
+  ProgramPoint &Entry = Graph.createBBProgramPoint(BB, true);
+  ProgramPointGuard Guard = AnyProvenanceExecutedGuard({&Load});
+  Graph.createProgramPoint(Entry.getSite(), Guard);
+  Graph.createProgramPoint(
+      ProgramPointSite::anchored(Load, ProgramPoint::SiteKind::MemoryInst),
       Guard);
 
   ASSERT_TRUE(Graph.verify());

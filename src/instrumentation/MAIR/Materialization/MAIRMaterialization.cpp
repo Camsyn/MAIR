@@ -71,9 +71,9 @@ bool instructionPrecedes(const Instruction &Before, const Instruction &After) {
   return Before.comesBefore(&After);
 }
 
-bool validateGuard(const Observation &Obs, const Instruction &Target,
+bool validateGuard(const ProgramPoint &PP, const Instruction &Target,
                    std::string &Failure) {
-  const auto *Guard = std::get_if<AnyProvenanceExecutedGuard>(&Obs.getGuard());
+  const auto *Guard = std::get_if<AnyProvenanceExecutedGuard>(&PP.getGuard());
   if (!Guard)
     return true;
 
@@ -91,8 +91,8 @@ bool validateGuard(const Observation &Obs, const Instruction &Target,
   return true;
 }
 
-bool validateAccess(const MemoryAccess &Access, const Instruction &Target,
-                    DominatorTree &DT, std::string &Failure) {
+bool validateObservation(const Observation &Obs, const Instruction &Target,
+                         DominatorTree &DT, std::string &Failure) {
   auto ValidateBounds = [&](const AbstractAccess &Region) {
     const Value *Base = Region.getBase();
     const AbstractValue &Offset = Region.getOffset();
@@ -115,10 +115,10 @@ bool validateAccess(const MemoryAccess &Access, const Instruction &Target,
     return true;
   };
 
-  if (const AbstractAccess *Region = Access.getContiguousRegion())
+  if (const AbstractAccess *Region = Obs.getContiguousRegion())
     return ValidateBounds(*Region);
 
-  if (const MaskedRegion *Region = Access.getMaskedRegion()) {
+  if (const MaskedRegion *Region = Obs.getMaskedRegion()) {
     if (!ValidateBounds(Region->getBounds()))
       return false;
     if (const Value *Mask = Region->getDynamicMask())
@@ -129,7 +129,7 @@ bool validateAccess(const MemoryAccess &Access, const Instruction &Target,
     return true;
   }
 
-  const PeriodicRegion *Region = Access.getPeriodicRegion();
+  const PeriodicRegion *Region = Obs.getPeriodicRegion();
   if (!Region || !Region->getBase() ||
       !expressionAvailableAt(Region->getStart(), Target, DT) ||
       !expressionAvailableAt(Region->getStride(), Target, DT) ||
@@ -149,14 +149,14 @@ Expected<MAIRMaterializationPlan> buildPlan(const MAIRGraph &Graph, Function &F,
   if (!Graph.verify())
     return materializationError("cannot instantiate an invalid MAIRGraph");
 
-  for (const Observation &Obs : Graph) {
-    if (Obs.empty())
+  for (const ProgramPoint &PP : Graph) {
+    if (PP.empty())
       continue;
 
     const Instruction *Target = nullptr;
-    if (Obs.isEdgeSite()) {
-      const BasicBlock *From = Obs.getEdgeFrom();
-      const BasicBlock *To = Obs.getEdgeTo();
+    if (PP.isEdgeSite()) {
+      const BasicBlock *From = PP.getEdgeFrom();
+      const BasicBlock *To = PP.getEdgeTo();
       if (!From || !To || From->getParent() != &F || To->getParent() != &F)
         return materializationError("edge site is outside the graph function");
       unsigned SuccNo = GetSuccessorNumber(From, To);
@@ -165,32 +165,33 @@ Expected<MAIRMaterializationPlan> buildPlan(const MAIRGraph &Graph, Function &F,
           !isPatchBLoopExit(*From, *To, LI))
         return materializationError(
             "unsupported edge site: expected a critical Patch B loop exit");
-      Target = &Obs.getAnchor();
+      Target = &PP.getAnchor();
     } else {
-      const BasicBlock *BB = Obs.getBasicBlock();
-      const Instruction &Anchor = Obs.getAnchor();
+      const BasicBlock *BB = PP.getBasicBlock();
+      const Instruction &Anchor = PP.getAnchor();
       if (!BB || BB->getParent() != &F || Anchor.getParent() != BB)
-        return materializationError("anchored observation has a stale anchor");
+        return materializationError(
+            "anchored program point has a stale anchor");
       BasicBlock::const_iterator FirstInsertion = BB->getFirstInsertionPt();
       if (FirstInsertion == BB->end() ||
           (&Anchor != &*FirstInsertion &&
            !FirstInsertion->comesBefore(&Anchor)))
         return materializationError(
-            "anchored observation has no legal insertion point");
+            "anchored program point has no legal insertion point");
       Target = &Anchor;
     }
 
     std::string Failure;
-    if (!validateGuard(Obs, *Target, Failure))
+    if (!validateGuard(PP, *Target, Failure))
       return materializationError(Failure);
-    for (const MemoryAccess &Access : Obs)
-      if (!validateAccess(Access, *Target, DT, Failure))
+    for (const Observation &Obs : PP)
+      if (!validateObservation(Obs, *Target, DT, Failure))
         return materializationError(Failure);
 
-    MaterializationUnit Unit{&Obs, Obs.getSite(), Obs.getGuard(), {}};
-    for (const MemoryAccess &Access : Obs)
-      Unit.Accesses.push_back({&Access, Access.getKind(),
-                               Access.getProperties(), Access.getRegion()});
+    MaterializationUnit Unit{&PP, PP.getSite(), PP.getGuard(), {}};
+    for (const Observation &Obs : PP)
+      Unit.Observations.push_back(
+          {&Obs, Obs.getKind(), Obs.getProperties(), Obs.getRegion()});
     Plan.addUnit(std::move(Unit));
   }
   return Plan;
@@ -297,13 +298,13 @@ Value *lowerContiguous(const AbstractAccess &Region, IRBuilder<> &Builder) {
     return const_cast<Value *>(Region.getOffset().getSymbol());
   Value *Offset = lowerAbstractValue(Region.getOffset(), Builder);
   return Builder.CreateGEP(Type::getInt8Ty(Builder.getContext()), Base, Offset,
-                           "mair.access.gep");
+                           "mair.observation.gep");
 }
 
 // A basic block has no internal control flow. If every provenance instruction
 // is in the insertion block, that block's execution is exactly the guard, so
 // the branch would be constant true and should not be created.
-bool provenanceExecutesWithTarget(const ObservationGuard &Guard,
+bool provenanceExecutesWithTarget(const ProgramPointGuard &Guard,
                                   const BasicBlock *Target) {
   const auto *Executed = std::get_if<AnyProvenanceExecutedGuard>(&Guard);
   if (!Executed || !Target)
@@ -316,13 +317,13 @@ bool provenanceExecutesWithTarget(const ObservationGuard &Guard,
   });
 }
 
-Value *materializeGuard(const ObservationGuard &ObservationGuard,
-                        BasicBlock *Target, Function &F) {
+Value *materializeGuard(const ProgramPointGuard &PPGuard, BasicBlock *Target,
+                        Function &F) {
   SmallVector<PHINode *, 8> InsertedPhis;
   SSAUpdater Updater(&InsertedPhis);
   Updater.Initialize(Type::getInt1Ty(F.getContext()), "mair.executed");
   SmallPtrSet<BasicBlock *, 8> Seen;
-  const auto &Guard = std::get<AnyProvenanceExecutedGuard>(ObservationGuard);
+  const auto &Guard = std::get<AnyProvenanceExecutedGuard>(PPGuard);
   bool EntryHasProvenance = false;
   for (Instruction *I : Guard.getProvenance())
     if (I->getParent() == &F.getEntryBlock())
@@ -423,20 +424,18 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
       Result.CFGChanged = true;
     }
 
-    SmallVector<MaterializedAccess, 4> Lowered;
+    SmallVector<MaterializedObservation, 4> Lowered;
     DenseMap<const void *, Value *> ExprCache;
-    for (const PlannedAccess &Access : Unit.Accesses) {
-      MaterializedAccess Materialized;
-      Materialized.Source = Access.Source;
-      Materialized.Kind = Access.Kind;
-      Materialized.Properties = Access.Properties;
-      if (const auto *Contiguous =
-              std::get_if<AbstractAccess>(&Access.Region)) {
+    for (const PlannedObservation &Obs : Unit.Observations) {
+      MaterializedObservation Materialized;
+      Materialized.Source = Obs.Source;
+      Materialized.Kind = Obs.Kind;
+      Materialized.Properties = Obs.Properties;
+      if (const auto *Contiguous = std::get_if<AbstractAccess>(&Obs.Region)) {
         Materialized.Address = lowerContiguous(*Contiguous, *BuilderPtr);
         Materialized.AccessSize =
             lowerAbstractValue(Contiguous->getSize(), *BuilderPtr);
-      } else if (const auto *Masked =
-                     std::get_if<MaskedRegion>(&Access.Region)) {
+      } else if (const auto *Masked = std::get_if<MaskedRegion>(&Obs.Region)) {
         Materialized.Address =
             lowerContiguous(Masked->getBounds(), *BuilderPtr);
         Materialized.AccessSize =
@@ -453,8 +452,7 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
           Materialized.Mask = const_cast<Value *>(Masked->getDynamicMask());
         }
       } else {
-        const PeriodicRegion &Periodic =
-            std::get<PeriodicRegion>(Access.Region);
+        const PeriodicRegion &Periodic = std::get<PeriodicRegion>(Obs.Region);
         Materialized.Address =
             lowerExpr(Periodic.getStart(), *BuilderPtr, ExprCache);
         Materialized.Stride =
@@ -467,10 +465,10 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
       Lowered.push_back(Materialized);
     }
 
-    MaterializedObservation Materialized{Unit.Source, Unit.Site.getKind(),
-                                         IsGuarded, Lowered};
-    Backend.emit(Materialized, *BuilderPtr);
-    ++Result.LoweredObservations;
+    MaterializedProgramPoint PP{Unit.Source, Unit.Site.getKind(), IsGuarded,
+                                Lowered};
+    Backend.emit(PP, *BuilderPtr);
+    ++Result.LoweredProgramPoints;
   }
 
   if (verifyFunction(F, &errs()))

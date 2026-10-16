@@ -7,20 +7,20 @@
 
 namespace mair {
 
-struct PlannedAccess {
-  const MemoryAccess *Source = nullptr;
+struct PlannedObservation {
+  const Observation *Source = nullptr;
   AccessKind Kind = AccessKind::Read;
   AccessProperty Properties = AccessProperty::None;
   MemoryRegion Region;
 };
 
-/// One self-contained semantic event in a materialization plan. The source is
+/// One self-contained program point in a materialization plan. The source is
 /// retained only as identity; apply and backends consume the copied recipes.
 struct MaterializationUnit {
-  const Observation *Source = nullptr;
-  ObservationSite Site;
-  ObservationGuard Guard;
-  SmallVector<PlannedAccess, 2> Accesses;
+  const ProgramPoint *Source = nullptr;
+  ProgramPointSite Site;
+  ProgramPointGuard Guard;
+  SmallVector<PlannedObservation, 2> Observations;
 };
 
 /// The read-only plan passed to a backend before LLVM IR is mutated.
@@ -34,8 +34,8 @@ public:
   void addUnit(MaterializationUnit Unit) { Units.push_back(std::move(Unit)); }
 };
 
-struct MaterializedAccess {
-  const MemoryAccess *Source = nullptr;
+struct MaterializedObservation {
+  const Observation *Source = nullptr;
   AccessKind Kind = AccessKind::Read;
   AccessProperty Properties = AccessProperty::None;
   llvm::Value *Address = nullptr;
@@ -49,17 +49,17 @@ struct MaterializedAccess {
   bool isMasked() const { return Mask != nullptr; }
 };
 
-struct MaterializedObservation {
-  const Observation *Source = nullptr;
-  Observation::SiteKind SiteKind = Observation::SiteKind::MemoryInst;
+struct MaterializedProgramPoint {
+  const ProgramPoint *Source = nullptr;
+  ProgramPoint::SiteKind SiteKind = ProgramPoint::SiteKind::MemoryInst;
   bool Guarded = false;
-  ArrayRef<MaterializedAccess> Accesses;
+  ArrayRef<MaterializedObservation> Observations;
 };
 
 struct MAIRInstantiationResult {
   unsigned SplitEdges = 0;
   unsigned GuardBranches = 0;
-  unsigned LoweredObservations = 0;
+  unsigned LoweredProgramPoints = 0;
   bool CFGChanged = false;
 };
 
@@ -70,7 +70,7 @@ public:
   virtual ~MAIRObservationBackend() = default;
 
   virtual llvm::Error prepare(const MAIRMaterializationPlan &Plan) = 0;
-  virtual void emit(const MaterializedObservation &Observation,
+  virtual void emit(const MaterializedProgramPoint &PP,
                     llvm::IRBuilderBase &Builder) = 0;
 };
 

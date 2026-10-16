@@ -57,7 +57,7 @@ static cl::opt<std::string> PassPipeline("passes",
                                          cl::cat(MAIROptions));
 static cl::extrahelp MAIRGraphPassHelp(R"(
 MAIRGraph pass names for -passes:
-  cmm                           - Common MA Motion
+  com                           - Common Observation Motion
   liom                          - Loop Invariant Observation Motion
   lpoc                          - Loop Periodic Observation Combine
   locationmerge                 - Location Merge

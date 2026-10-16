@@ -24,10 +24,18 @@ struct MAIRVerifierSupport {
 
   explicit MAIRVerifierSupport(raw_ostream *Out) : OS(Out) {}
 
-  void Write(const Observation *Obs) {
-    if (!Obs)
+  void Write(const ProgramPoint *PP) {
+    if (!PP)
       return;
-    Write(*Obs);
+    Write(*PP);
+  }
+
+  void Write(const ProgramPoint &PP) {
+    if (!OS)
+      return;
+    *OS << "  program point: ";
+    PP.print(*OS);
+    *OS << "\n";
   }
 
   void Write(const Observation &Obs) {
@@ -35,14 +43,6 @@ struct MAIRVerifierSupport {
       return;
     *OS << "  observation: ";
     Obs.print(*OS);
-    *OS << "\n";
-  }
-
-  void Write(const MemoryAccess &Access) {
-    if (!OS)
-      return;
-    *OS << "  access: ";
-    Access.print(*OS);
     *OS << "\n";
   }
 
@@ -72,7 +72,7 @@ struct MAIRVerifierSupport {
     *OS << "\n";
   }
 
-  void Write(const Observation &From, const ObservationEdge &Edge) {
+  void Write(const ProgramPoint &From, const ProgramPointEdge &Edge) {
     if (!OS)
       return;
     *OS << "  edge: ";
@@ -124,21 +124,21 @@ class MAIRVerifier : public MAIRVerifierSupport {
     unsigned Dom = 0;
     unsigned PostDom = 0;
 
-    void add(ObsEdgeKind Kind) {
-      if (Kind == ObsEdgeKind::Dom)
+    void add(PPEdgeKind Kind) {
+      if (Kind == PPEdgeKind::Dom)
         ++Dom;
       else
         ++PostDom;
     }
-    unsigned get(ObsEdgeKind Kind) const {
-      return Kind == ObsEdgeKind::Dom ? Dom : PostDom;
+    unsigned get(PPEdgeKind Kind) const {
+      return Kind == PPEdgeKind::Dom ? Dom : PostDom;
     }
   };
 
-  using EdgeKey = std::pair<const Observation *, const Observation *>;
+  using EdgeKey = std::pair<const ProgramPoint *, const ProgramPoint *>;
 
   const MAIRGraph *Graph = nullptr;
-  DenseSet<const Observation *> LiveObservations;
+  DenseSet<const ProgramPoint *> LiveProgramPoints;
   DenseMap<EdgeKey, EdgeCounts> ChildEdgeCounts;
   DenseMap<EdgeKey, EdgeCounts> ParentEdgeCounts;
 
@@ -148,38 +148,38 @@ public:
   bool verify(const MAIRGraph &G);
 
 private:
-  void verifyObservation(const Observation &Obs);
-  void verifyMemoryAccess(const Observation &Obs, const MemoryAccess &Access);
-  void verifyGuard(const Observation &Obs);
-  void verifyScalarExpr(const MAIRScalarExpr &Expr, const MemoryAccess &Access,
-                        const Observation &Obs);
+  void verifyProgramPoint(const ProgramPoint &PP);
+  void verifyObservation(const ProgramPoint &PP, const Observation &Obs);
+  void verifyGuard(const ProgramPoint &PP);
+  void verifyScalarExpr(const MAIRScalarExpr &Expr, const Observation &Obs,
+                        const ProgramPoint &PP);
   void verifyPeriodicRegion(const PeriodicRegion &Region,
-                            const MemoryAccess &Access, const Observation &Obs);
-  void verifyChildEdge(const Observation &From, const ObservationEdge &Edge);
-  void verifyParentEdge(const Observation &To, const ObservationEdge &Edge);
+                            const Observation &Obs, const ProgramPoint &PP);
+  void verifyChildEdge(const ProgramPoint &From, const ProgramPointEdge &Edge);
+  void verifyParentEdge(const ProgramPoint &To, const ProgramPointEdge &Edge);
   void verifyCounters();
   void verifyBoundaryRepresentatives();
   void verifyBoundaryRepresentative(const BasicBlock *BB,
-                                    const Observation *Representative,
+                                    const ProgramPoint *Representative,
                                     bool IsEntry);
   void buildEdgeIndex();
 
-  unsigned countChildEdge(const Observation &From, const Observation &To,
-                          ObsEdgeKind Kind) const;
-  unsigned countParentEdge(const Observation &To, const Observation &From,
-                           ObsEdgeKind Kind) const;
+  unsigned countChildEdge(const ProgramPoint &From, const ProgramPoint &To,
+                          PPEdgeKind Kind) const;
+  unsigned countParentEdge(const ProgramPoint &To, const ProgramPoint &From,
+                           PPEdgeKind Kind) const;
 };
 
 bool MAIRVerifier::verify(const MAIRGraph &G) {
   Graph = &G;
   Broken = false;
-  if (!G.Observations.empty() &&
+  if (!G.ProgramPoints.empty() &&
       !CheckRequired(G.getFunction(), "non-empty graph has no function"))
     return false;
   buildEdgeIndex();
 
-  for (const Observation &Obs : G.Observations)
-    verifyObservation(Obs);
+  for (const ProgramPoint &PP : G.ProgramPoints)
+    verifyProgramPoint(PP);
   verifyBoundaryRepresentatives();
   verifyCounters();
 
@@ -187,15 +187,15 @@ bool MAIRVerifier::verify(const MAIRGraph &G) {
 }
 
 void MAIRVerifier::buildEdgeIndex() {
-  LiveObservations.clear();
+  LiveProgramPoints.clear();
   ChildEdgeCounts.clear();
   ParentEdgeCounts.clear();
-  for (const Observation &Obs : Graph->Observations) {
-    LiveObservations.insert(&Obs);
-    for (const ObservationEdge &Edge : Obs.Children)
-      ChildEdgeCounts[{&Obs, &Edge.getNode()}].add(Edge.getKind());
-    for (const ObservationEdge &Edge : Obs.Parents)
-      ParentEdgeCounts[{&Edge.getNode(), &Obs}].add(Edge.getKind());
+  for (const ProgramPoint &PP : Graph->ProgramPoints) {
+    LiveProgramPoints.insert(&PP);
+    for (const ProgramPointEdge &Edge : PP.Children)
+      ChildEdgeCounts[{&PP, &Edge.getNode()}].add(Edge.getKind());
+    for (const ProgramPointEdge &Edge : PP.Parents)
+      ParentEdgeCounts[{&Edge.getNode(), &PP}].add(Edge.getKind());
   }
 }
 
@@ -207,12 +207,12 @@ void MAIRVerifier::verifyBoundaryRepresentatives() {
 }
 
 void MAIRVerifier::verifyBoundaryRepresentative(
-    const BasicBlock *BB, const Observation *Representative, bool IsEntry) {
+    const BasicBlock *BB, const ProgramPoint *Representative, bool IsEntry) {
   const char *Kind = IsEntry ? "entry" : "exit";
   if (!CheckRequired(BB && Representative,
                      Twine("invalid BB-") + Kind + " representative"))
     return;
-  if (!CheckRequired(LiveObservations.contains(Representative),
+  if (!CheckRequired(LiveProgramPoints.contains(Representative),
                      Twine("BB-") + Kind + " representative is not live",
                      Representative, BB))
     return;
@@ -232,203 +232,198 @@ void MAIRVerifier::verifyBoundaryRepresentative(
         Representative, BB);
 }
 
-void MAIRVerifier::verifyObservation(const Observation &Obs) {
-  if (!CheckRequired(Obs.getParent() == Graph,
-                     "observation parent does not match graph", Obs))
+void MAIRVerifier::verifyProgramPoint(const ProgramPoint &PP) {
+  if (!CheckRequired(PP.getParent() == Graph,
+                     "program point parent does not match graph", PP))
     return;
 
-  if (Obs.isEdgeSite()) {
-    const BasicBlock *From = Obs.getEdgeFrom();
-    const BasicBlock *To = Obs.getEdgeTo();
-    if (!CheckRequired(From && To, "edge site has a null endpoint", Obs))
+  if (PP.isEdgeSite()) {
+    const BasicBlock *From = PP.getEdgeFrom();
+    const BasicBlock *To = PP.getEdgeTo();
+    if (!CheckRequired(From && To, "edge site has a null endpoint", PP))
       return;
-    Check(From != To, "edge site is a self edge", Obs, From, To);
+    Check(From != To, "edge site is a self edge", PP, From, To);
     if (!CheckRequired(From->getParent() && To->getParent(),
-                       "edge site endpoint has no function", Obs, From, To))
+                       "edge site endpoint has no function", PP, From, To))
       return;
     Check(From->getParent() == To->getParent(), "edge site crosses functions",
-          Obs, From, To);
+          PP, From, To);
     Check(From->getParent() == Graph->getFunction(),
-          "edge site is outside graph function", Obs, From, To);
+          "edge site is outside graph function", PP, From, To);
     Check(llvm::is_contained(successors(From), To),
-          "edge site is not a current CFG edge", Obs, From, To);
-    Check(&Obs.getAnchor() == From->getTerminator(),
-          "edge observation is not anchored at its source terminator", Obs,
-          From, &Obs.getAnchor());
+          "edge site is not a current CFG edge", PP, From, To);
+    Check(&PP.getAnchor() == From->getTerminator(),
+          "edge program point is not anchored at its source terminator", PP,
+          From, &PP.getAnchor());
   } else {
-    const BasicBlock *BB = Obs.getBasicBlock();
-    if (!CheckRequired(BB, "observation has no basic block", Obs))
+    const BasicBlock *BB = PP.getBasicBlock();
+    if (!CheckRequired(BB, "program point has no basic block", PP))
       return;
     Check(BB->getParent() == Graph->getFunction(),
-          "observation block is outside graph function", Obs, BB);
+          "program point block is outside graph function", PP, BB);
 
-    const Instruction &Anchor = Obs.getAnchor();
+    const Instruction &Anchor = PP.getAnchor();
     if (!CheckRequired(Anchor.getParent() == BB,
-                       "observation anchor is outside its block", Obs, Anchor,
+                       "program point anchor is outside its block", PP, Anchor,
                        BB))
       return;
 
-    if (Obs.isBasicBlockEntrySite()) {
+    if (PP.isBasicBlockEntrySite()) {
       Check(&Anchor == &*BB->getFirstNonPHIIt(),
-            "basic-block entry observation is not anchored at first non-PHI",
-            Obs, &Anchor, BB);
+            "basic-block entry program point is not anchored at first non-PHI",
+            PP, &Anchor, BB);
     }
 
-    if (Obs.isBasicBlockExitSite()) {
+    if (PP.isBasicBlockExitSite()) {
       Check(&Anchor == BB->getTerminator(),
-            "basic-block exit observation is not anchored at terminator", Obs,
+            "basic-block exit program point is not anchored at terminator", PP,
             &Anchor, BB);
     }
   }
 
-  verifyGuard(Obs);
+  verifyGuard(PP);
 
-  for (const MemoryAccess &Access : Obs)
-    verifyMemoryAccess(Obs, Access);
+  for (const Observation &Obs : PP)
+    verifyObservation(PP, Obs);
 
-  for (const ObservationEdge &Edge : Obs.children())
-    verifyChildEdge(Obs, Edge);
-  for (const ObservationEdge &Edge : Obs.parents())
-    verifyParentEdge(Obs, Edge);
+  for (const ProgramPointEdge &Edge : PP.children())
+    verifyChildEdge(PP, Edge);
+  for (const ProgramPointEdge &Edge : PP.parents())
+    verifyParentEdge(PP, Edge);
 }
 
-void MAIRVerifier::verifyGuard(const Observation &Obs) {
-  const auto *Guard = std::get_if<AnyProvenanceExecutedGuard>(&Obs.getGuard());
+void MAIRVerifier::verifyGuard(const ProgramPoint &PP) {
+  const auto *Guard = std::get_if<AnyProvenanceExecutedGuard>(&PP.getGuard());
   if (!Guard)
     return;
 
   ArrayRef<Instruction *> Provenance = Guard->getProvenance();
-  Check(!Provenance.empty(), "execution guard has empty provenance", Obs);
+  Check(!Provenance.empty(), "execution guard has empty provenance", PP);
   SmallPtrSet<const Instruction *, 8> Seen;
   for (const Instruction *I : Provenance) {
-    if (!CheckRequired(I, "execution guard has null provenance", Obs))
+    if (!CheckRequired(I, "execution guard has null provenance", PP))
       return;
     Check(I->getFunction() == Graph->getFunction(),
-          "execution guard provenance is outside graph function", Obs, I);
+          "execution guard provenance is outside graph function", PP, I);
     Check(Seen.insert(I).second,
-          "execution guard contains duplicate provenance", Obs, I);
+          "execution guard contains duplicate provenance", PP, I);
   }
 }
 
-void MAIRVerifier::verifyMemoryAccess(const Observation &Obs,
-                                      const MemoryAccess &Access) {
-  Check(Access.getParent() == &Obs,
-        "memory access parent does not match containing observation", Access,
-        Obs);
+void MAIRVerifier::verifyObservation(const ProgramPoint &PP,
+                                     const Observation &Obs) {
+  Check(Obs.getParent() == &PP,
+        "observation parent does not match containing program point", Obs, PP);
 
-  if (Obs.isMemoryInstSite()) {
-    const Instruction *AccessI = Access.getInstruction();
-    if (!CheckRequired(AccessI,
-                       "memory observation has access without instruction",
-                       Access, Obs))
+  if (PP.isMemoryInstSite()) {
+    const Instruction *Origin = Obs.getInstruction();
+    if (!CheckRequired(Origin,
+                       "memory-instruction program point has observation "
+                       "without instruction",
+                       Obs, PP))
       return;
-    Check(AccessI->getFunction() == Obs.getAnchor().getFunction(),
-          "memory access instruction is outside observation function", Access,
-          Obs, AccessI, &Obs.getAnchor());
+    Check(Origin->getFunction() == PP.getAnchor().getFunction(),
+          "observation instruction is outside program point function", Obs, PP,
+          Origin, &PP.getAnchor());
   }
 
-  for (const Instruction *AccessI : Access.getInstructions()) {
-    if (!CheckRequired(AccessI, "memory access has null provenance", Access,
-                       Obs))
+  for (const Instruction *Origin : Obs.getInstructions()) {
+    if (!CheckRequired(Origin, "observation has null provenance", Obs, PP))
       return;
-    Check(AccessI->getFunction() == Graph->getFunction(),
-          "memory access provenance is outside graph function", Access, Obs,
-          AccessI);
+    Check(Origin->getFunction() == Graph->getFunction(),
+          "observation provenance is outside graph function", Obs, PP, Origin);
   }
 
-  const Value *Base = Access.getBase();
-  if (!CheckRequired(Base, "memory access has no base", Access, Obs))
+  const Value *Base = Obs.getBase();
+  if (!CheckRequired(Base, "observation has no base", Obs, PP))
     return;
-  if (!CheckRequired(Access.getBaseUse().get(),
-                     "memory access is not linked to a memory object", Access,
-                     Obs, Base))
+  if (!CheckRequired(Obs.getBaseUse().get(),
+                     "observation is not linked to a memory object", Obs, PP,
+                     Base))
     return;
-  const MemoryObject &Object = Access.getMemoryObject();
+  const MemoryObject &Object = Obs.getMemoryObject();
   Check(Object.getBase() == Base,
-        "memory access is linked to an object for a different base", Access,
-        Obs, Base);
+        "observation is linked to an object for a different base", Obs, PP,
+        Base);
   Check(Graph->getMemoryObject(*Base) == &Object,
-        "memory access is not linked to the graph's canonical object", Access,
-        Obs, Base);
+        "observation is not linked to the graph's canonical object", Obs, PP,
+        Base);
   bool FoundUse = false;
-  for (const MemoryAccess &User : Object.users())
-    if (&User == &Access) {
+  for (const Observation &User : Object.users())
+    if (&User == &Obs) {
       FoundUse = true;
       break;
     }
-  Check(FoundUse, "memory object use-list does not contain this access", Access,
-        Obs, Base);
+  Check(FoundUse, "memory object use-list does not contain this observation",
+        Obs, PP, Base);
 
-  if (const PeriodicRegion *Region = Access.getPeriodicRegion())
-    verifyPeriodicRegion(*Region, Access, Obs);
-  if (const MaskedRegion *Region = Access.getMaskedRegion()) {
+  if (const PeriodicRegion *Region = Obs.getPeriodicRegion())
+    verifyPeriodicRegion(*Region, Obs, PP);
+  if (const MaskedRegion *Region = Obs.getMaskedRegion()) {
     Check(Region->getElementSize() != 0,
-          "masked region has zero-sized elements", Access, Obs);
+          "masked region has zero-sized elements", Obs, PP);
     if (const Value *Mask = Region->getDynamicMask()) {
       const auto *MaskType = dyn_cast<VectorType>(Mask->getType());
       if (!CheckRequired(MaskType && MaskType->getElementType()->isIntegerTy(1),
-                         "masked region mask is not an i1 vector", Access, Obs,
+                         "masked region mask is not an i1 vector", Obs, PP,
                          Mask))
         return;
       Check(MaskType->getElementCount().getKnownMinValue() ==
                 Region->getNumLanes(),
-            "masked region lane count does not match mask", Access, Obs, Mask);
+            "masked region lane count does not match mask", Obs, PP, Mask);
     } else {
       Check(Region->isConstantMask(),
-            "masked region has neither dynamic nor constant mask", Access, Obs);
+            "masked region has neither dynamic nor constant mask", Obs, PP);
     }
   }
 }
 
 void MAIRVerifier::verifyScalarExpr(const MAIRScalarExpr &Expr,
-                                    const MemoryAccess &Access,
-                                    const Observation &Obs) {
-  if (!CheckRequired(Expr.isValid(), "invalid scalar expression", Access, Obs))
+                                    const Observation &Obs,
+                                    const ProgramPoint &PP) {
+  if (!CheckRequired(Expr.isValid(), "invalid scalar expression", Obs, PP))
     return;
   Check(Graph->ownsScalarExpr(Expr),
-        "scalar expression belongs to another graph", Access, Obs);
+        "scalar expression belongs to another graph", Obs, PP);
   Type *Ty = Expr.getType();
-  if (!CheckRequired(Ty, "scalar expression has no type", Access, Obs))
+  if (!CheckRequired(Ty, "scalar expression has no type", Obs, PP))
     return;
 
   ArrayRef<MAIRScalarExpr> Operands = Expr.operands();
   using Kind = MAIRScalarExpr::Kind;
   switch (Expr.getKind()) {
   case Kind::Constant:
-    Check(Operands.empty(), "constant scalar expression has operands", Access,
-          Obs);
-    Check(Ty->isIntegerTy(), "scalar constant is not integer typed", Access,
-          Obs);
+    Check(Operands.empty(), "constant scalar expression has operands", Obs, PP);
+    Check(Ty->isIntegerTy(), "scalar constant is not integer typed", Obs, PP);
     if (Ty->isIntegerTy())
       Check(cast<IntegerType>(Ty)->getBitWidth() ==
                 Expr.getConstant().getBitWidth(),
-            "scalar constant bit width does not match its type", Access, Obs);
+            "scalar constant bit width does not match its type", Obs, PP);
     break;
   case Kind::LLVMValue: {
-    Check(Operands.empty(), "LLVM-value scalar expression has operands", Access,
-          Obs);
+    Check(Operands.empty(), "LLVM-value scalar expression has operands", Obs,
+          PP);
     const Value *V = Expr.getLLVMValue();
-    if (!CheckRequired(V, "LLVM-value scalar expression is null", Access, Obs))
+    if (!CheckRequired(V, "LLVM-value scalar expression is null", Obs, PP))
       return;
     Check(V->getType() == Ty,
-          "LLVM-value scalar expression type does not match value", Access, Obs,
-          V);
+          "LLVM-value scalar expression type does not match value", Obs, PP, V);
     if (const auto *I = dyn_cast<Instruction>(V))
       Check(I->getFunction() == Graph->getFunction(),
-            "scalar LLVM value is outside graph function", Access, Obs, V);
+            "scalar LLVM value is outside graph function", Obs, PP, V);
     if (const auto *A = dyn_cast<Argument>(V))
       Check(A->getParent() == Graph->getFunction(),
-            "scalar LLVM argument is outside graph function", Access, Obs, V);
+            "scalar LLVM argument is outside graph function", Obs, PP, V);
     if (const auto *GV = dyn_cast<GlobalValue>(V))
       Check(GV->getParent() == Graph->getFunction()->getParent(),
-            "scalar global is outside graph module", Access, Obs, V);
+            "scalar global is outside graph module", Obs, PP, V);
     break;
   }
   case Kind::Truncate:
   case Kind::ZeroExtend:
   case Kind::SignExtend:
     Check(Operands.size() == 1,
-          "scalar cast expression does not have one operand", Access, Obs);
+          "scalar cast expression does not have one operand", Obs, PP);
     break;
   case Kind::Add:
   case Kind::Mul:
@@ -438,12 +433,12 @@ void MAIRVerifier::verifyScalarExpr(const MAIRScalarExpr &Expr,
   case Kind::SMax:
   case Kind::UMax:
     Check(Operands.size() == 2,
-          "scalar binary expression does not have two operands", Access, Obs);
+          "scalar binary expression does not have two operands", Obs, PP);
     break;
   }
 
   for (const MAIRScalarExpr &Operand : Operands)
-    verifyScalarExpr(Operand, Access, Obs);
+    verifyScalarExpr(Operand, Obs, PP);
 
   if (llvm::any_of(Operands, [](const MAIRScalarExpr &Operand) {
         return !Operand.isValid() || !Operand.getType();
@@ -454,69 +449,69 @@ void MAIRVerifier::verifyScalarExpr(const MAIRScalarExpr &Expr,
   if (Expr.getKind() == Kind::Truncate || Expr.getKind() == Kind::ZeroExtend ||
       Expr.getKind() == Kind::SignExtend) {
     Check(Ty->isIntegerTy() && Operands.front().getType()->isIntegerTy(),
-          "scalar cast operands are not integer typed", Access, Obs);
+          "scalar cast operands are not integer typed", Obs, PP);
     if (Ty->isIntegerTy() && Operands.front().getType()->isIntegerTy()) {
       unsigned ResultWidth = cast<IntegerType>(Ty)->getBitWidth();
       unsigned OperandWidth =
           cast<IntegerType>(Operands.front().getType())->getBitWidth();
       if (Expr.getKind() == Kind::Truncate)
         Check(ResultWidth < OperandWidth, "scalar truncate does not narrow",
-              Access, Obs);
+              Obs, PP);
       else
         Check(ResultWidth > OperandWidth, "scalar extension does not widen",
-              Access, Obs);
+              Obs, PP);
     }
     return;
   }
   if (Expr.getKind() == Kind::Add && Ty->isPointerTy()) {
     Check(Operands.size() == 2 && Operands[0].getType() == Ty &&
               Operands[1].getType()->isIntegerTy(),
-          "pointer add must use pointer plus integer byte offset", Access, Obs);
+          "pointer add must use pointer plus integer byte offset", Obs, PP);
     return;
   }
-  Check(Ty->isIntegerTy(), "scalar arithmetic result is not integer typed",
-        Access, Obs);
+  Check(Ty->isIntegerTy(), "scalar arithmetic result is not integer typed", Obs,
+        PP);
   for (const MAIRScalarExpr &Operand : Operands)
     Check(Operand.getType() == Ty,
-          "scalar arithmetic operand type does not match result", Access, Obs);
+          "scalar arithmetic operand type does not match result", Obs, PP);
 }
 
 void MAIRVerifier::verifyPeriodicRegion(const PeriodicRegion &Region,
-                                        const MemoryAccess &Access,
-                                        const Observation &Obs) {
-  if (!CheckRequired(Region.getBase(), "periodic region has no base", Access,
-                     Obs))
+                                        const Observation &Obs,
+                                        const ProgramPoint &PP) {
+  if (!CheckRequired(Region.getBase(), "periodic region has no base", Obs, PP))
     return;
-  verifyScalarExpr(Region.getStart(), Access, Obs);
-  verifyScalarExpr(Region.getStride(), Access, Obs);
-  verifyScalarExpr(Region.getAccessSize(), Access, Obs);
-  verifyScalarExpr(Region.getTripCount(), Access, Obs);
+  verifyScalarExpr(Region.getStart(), Obs, PP);
+  verifyScalarExpr(Region.getStride(), Obs, PP);
+  verifyScalarExpr(Region.getAccessSize(), Obs, PP);
+  verifyScalarExpr(Region.getTripCount(), Obs, PP);
 
   if (!Region.getStart().isValid() || !Region.getStride().isValid() ||
       !Region.getAccessSize().isValid() || !Region.getTripCount().isValid())
     return;
   Check(Region.getStart().getType()->isPointerTy(),
-        "periodic region start is not pointer typed", Access, Obs);
+        "periodic region start is not pointer typed", Obs, PP);
   Check(Region.getStride().getType()->isIntegerTy(),
-        "periodic region stride is not integer typed", Access, Obs);
+        "periodic region stride is not integer typed", Obs, PP);
   Check(Region.getAccessSize().getType()->isIntegerTy(),
-        "periodic region access size is not integer typed", Access, Obs);
+        "periodic region access size is not integer typed", Obs, PP);
   Check(Region.getTripCount().getType()->isIntegerTy(),
-        "periodic region trip count is not integer typed", Access, Obs);
+        "periodic region trip count is not integer typed", Obs, PP);
   if (Region.getStride().getKind() == MAIRScalarExpr::Kind::Constant)
     Check(!Region.getStride().getConstant().isZero(),
-          "periodic region has zero stride", Access, Obs);
+          "periodic region has zero stride", Obs, PP);
   if (Region.getAccessSize().getKind() == MAIRScalarExpr::Kind::Constant)
     Check(!Region.getAccessSize().getConstant().isZero(),
-          "periodic region has zero access size", Access, Obs);
+          "periodic region has zero access size", Obs, PP);
 }
 
-void MAIRVerifier::verifyChildEdge(const Observation &From,
-                                   const ObservationEdge &Edge) {
-  const Observation &To = Edge.getNode();
+void MAIRVerifier::verifyChildEdge(const ProgramPoint &From,
+                                   const ProgramPointEdge &Edge) {
+  const ProgramPoint &To = Edge.getNode();
   if (!CheckRequired(
           To.getParent() == Graph,
-          "child edge destination observation does not belong to graph", From))
+          "child edge destination program point does not belong to graph",
+          From))
     return;
   Check(countChildEdge(From, To, Edge.getKind()) == 1,
         "child edge appears more than once", From);
@@ -524,12 +519,12 @@ void MAIRVerifier::verifyChildEdge(const Observation &From,
         "child edge is missing from destination parent list", From);
 }
 
-void MAIRVerifier::verifyParentEdge(const Observation &To,
-                                    const ObservationEdge &Edge) {
-  const Observation &From = Edge.getNode();
-  if (!CheckRequired(From.getParent() == Graph,
-                     "parent edge source observation does not belong to graph",
-                     To))
+void MAIRVerifier::verifyParentEdge(const ProgramPoint &To,
+                                    const ProgramPointEdge &Edge) {
+  const ProgramPoint &From = Edge.getNode();
+  if (!CheckRequired(
+          From.getParent() == Graph,
+          "parent edge source program point does not belong to graph", To))
     return;
   Check(countParentEdge(To, From, Edge.getKind()) == 1,
         "parent edge appears more than once", To);
@@ -538,41 +533,42 @@ void MAIRVerifier::verifyParentEdge(const Observation &To,
 }
 
 void MAIRVerifier::verifyCounters() {
-  unsigned ObservedNodes = 0;
+  unsigned ObservedProgramPoints = 0;
   unsigned ObservedChildEdges = 0;
   unsigned ObservedParentEdges = 0;
-  for (const Observation &Obs : Graph->Observations) {
-    ++ObservedNodes;
-    ObservedChildEdges += Obs.Children.size();
-    ObservedParentEdges += Obs.Parents.size();
+  for (const ProgramPoint &PP : Graph->ProgramPoints) {
+    ++ObservedProgramPoints;
+    ObservedChildEdges += PP.Children.size();
+    ObservedParentEdges += PP.Parents.size();
 
-    unsigned ObservedAccesses = 0;
-    for (const MemoryAccess &Access : Obs) {
-      (void)Access;
-      ++ObservedAccesses;
+    unsigned ObservedObservations = 0;
+    for (const Observation &Obs : PP) {
+      (void)Obs;
+      ++ObservedObservations;
     }
-    Check(ObservedAccesses == Obs.size(),
-          "observation access count does not match access list", Obs);
+    Check(ObservedObservations == PP.size(),
+          "program point observation count does not match observation list",
+          PP);
   }
 
-  Check(ObservedNodes == Graph->NumObservations,
-        "graph observation count does not match observation list");
+  Check(ObservedProgramPoints == Graph->NumProgramPoints,
+        "graph program point count does not match program point list");
   Check(ObservedChildEdges == Graph->NumEdges,
         "graph edge count does not match child edge lists");
   Check(ObservedParentEdges == Graph->NumEdges,
         "graph edge count does not match parent edge lists");
 }
 
-unsigned MAIRVerifier::countChildEdge(const Observation &From,
-                                      const Observation &To,
-                                      ObsEdgeKind Kind) const {
+unsigned MAIRVerifier::countChildEdge(const ProgramPoint &From,
+                                      const ProgramPoint &To,
+                                      PPEdgeKind Kind) const {
   auto It = ChildEdgeCounts.find({&From, &To});
   return It == ChildEdgeCounts.end() ? 0 : It->second.get(Kind);
 }
 
-unsigned MAIRVerifier::countParentEdge(const Observation &To,
-                                       const Observation &From,
-                                       ObsEdgeKind Kind) const {
+unsigned MAIRVerifier::countParentEdge(const ProgramPoint &To,
+                                       const ProgramPoint &From,
+                                       PPEdgeKind Kind) const {
   auto It = ParentEdgeCounts.find({&From, &To});
   return It == ParentEdgeCounts.end() ? 0 : It->second.get(Kind);
 }

@@ -8,12 +8,12 @@ namespace mair {
 
 class LoopInvariantObservationMotionPass
     : public llvm::PassInfoMixin<LoopInvariantObservationMotionPass> {
-  bool MergeEquivalentAccesses;
+  bool MergeEquivalentObservations;
 
 public:
   explicit LoopInvariantObservationMotionPass(
-      bool MergeEquivalentAccesses = true)
-      : MergeEquivalentAccesses(MergeEquivalentAccesses) {}
+      bool MergeEquivalentObservations = true)
+      : MergeEquivalentObservations(MergeEquivalentObservations) {}
 
   llvm::PreservedAnalyses run(MAIRGraph &G, MAIRGraphAnalysisManager &AM);
 };

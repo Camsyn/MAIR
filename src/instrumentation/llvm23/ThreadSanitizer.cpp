@@ -200,8 +200,8 @@ struct XsanThreadSanitizer : public ThreadSanitizer {
 #ifndef XSAN_PASS
   bool sanitizeFunctionViaMAIR(Function &F, FunctionAnalysisManager &FAM,
                                const TargetLibraryInfo &TLI);
-  bool instrumentMAIRAccess(const mair::MaterializedAccess &Access,
-                            IRBuilderBase &Builder, const DataLayout &DL);
+  bool instrumentMAIRObservation(const mair::MaterializedObservation &Obs,
+                                 IRBuilderBase &Builder, const DataLayout &DL);
 #endif
   bool collectTargetsToIntrument(Function &F, const TargetLibraryInfo &TLI,
                                  __xsan::TsanToInstrument &Targets);
@@ -1026,15 +1026,15 @@ bool XsanThreadSanitizer::collectTargetsToIntrument(
 }
 
 #ifndef XSAN_PASS
-bool XsanThreadSanitizer::instrumentMAIRAccess(
-    const mair::MaterializedAccess &Access, IRBuilderBase &Builder,
+bool XsanThreadSanitizer::instrumentMAIRObservation(
+    const mair::MaterializedObservation &Obs, IRBuilderBase &Builder,
     const DataLayout &DL) {
-  if (!Access.Source)
-    report_fatal_error("TSan MAIR access has no source");
+  if (!Obs.Source)
+    report_fatal_error("TSan MAIR observation has no source");
 
-  ArrayRef<Instruction *> SelectedSources = Access.Source->getInstructions();
+  ArrayRef<Instruction *> SelectedSources = Obs.Source->getInstructions();
   if (SelectedSources.empty())
-    report_fatal_error("TSan MAIR access has no source instruction");
+    report_fatal_error("TSan MAIR observation has no source instruction");
 
   auto InstrumentAtSource = [&](Instruction &Source) {
     return instrumentLoadOrStore(InstructionInfo(&Source), DL);
@@ -1042,20 +1042,20 @@ bool XsanThreadSanitizer::instrumentMAIRAccess(
 
   Instruction *Source = SelectedSources.front();
   if (isa<AnyMemIntrinsic>(Source)) {
-    if (!Access.Address || !Access.AccessSize)
+    if (!Obs.Address || !Obs.AccessSize)
       return false;
     __xsan::InstrumentationIRBuilder IRB(Builder);
-    Value *Size = Access.AccessSize;
+    Value *Size = Obs.AccessSize;
     if (Size->getType() != IntptrTy)
       Size = IRB.CreateIntCast(Size, IntptrTy, /*isSigned=*/false);
-    const bool IsWrite = Access.Kind != mair::AccessKind::Read;
+    const bool IsWrite = Obs.Kind != mair::AccessKind::Read;
     IRB.CreateCall(IsWrite ? TsanWriteRange : TsanReadRange,
-                   {Access.Address, Size});
-    if (Access.Kind == mair::AccessKind::ReadWrite)
-      IRB.CreateCall(TsanReadRange, {Access.Address, Size});
+                   {Obs.Address, Size});
+    if (Obs.Kind == mair::AccessKind::ReadWrite)
+      IRB.CreateCall(TsanReadRange, {Obs.Address, Size});
     if (IsWrite)
       NumInstrumentedWrites++;
-    if (Access.Kind != mair::AccessKind::Write)
+    if (Obs.Kind != mair::AccessKind::Write)
       NumInstrumentedReads++;
     return true;
   }
@@ -1064,16 +1064,15 @@ bool XsanThreadSanitizer::instrumentMAIRAccess(
       isa<LoadInst>(Source)
           ? cast<LoadInst>(Source)->getType()
           : cast<StoreInst>(Source)->getValueOperand()->getType();
-  const auto *Size = dyn_cast_or_null<ConstantInt>(Access.AccessSize);
+  const auto *Size = dyn_cast_or_null<ConstantInt>(Obs.AccessSize);
   bool IsVolatile = isa<LoadInst>(Source)
                         ? cast<LoadInst>(Source)->isVolatile()
                         : cast<StoreInst>(Source)->isVolatile();
   TypeSize SourceSize = DL.getTypeStoreSize(SourceType);
   bool CanUseOptimizedSite =
       SelectedSources.size() == 1 &&
-      Access.Source->getInstructions().size() == 1 &&
-      Access.Source->isContiguous() && !SourceType->isVectorTy() &&
-      !SourceSize.isScalable() && Size &&
+      Obs.Source->getInstructions().size() == 1 && Obs.Source->isContiguous() &&
+      !SourceType->isVectorTy() && !SourceSize.isScalable() && Size &&
       Size->getValue().getActiveBits() < 32 &&
       Size->getZExtValue() == SourceSize.getFixedValue() &&
       !isVtableAccess(Source) && !IsVolatile;
@@ -1084,9 +1083,9 @@ bool XsanThreadSanitizer::instrumentMAIRAccess(
     return Changed;
   }
 
-  if (Access.Address->isSwiftError())
+  if (Obs.Address->isSwiftError())
     return false;
-  int Idx = getMemoryAccessFuncIndex(SourceType, Access.Address, DL);
+  int Idx = getMemoryAccessFuncIndex(SourceType, Obs.Address, DL);
   // TODO: TSan MAIR lowering does not yet support a nonstandard width, such
   // as an i24 store. Returning here drops that access. If an earlier pass used
   // it to cover a smaller standard access, that smaller access is not
@@ -1097,8 +1096,8 @@ bool XsanThreadSanitizer::instrumentMAIRAccess(
   Align Alignment = isa<LoadInst>(Source) ? cast<LoadInst>(Source)->getAlign()
                                           : cast<StoreInst>(Source)->getAlign();
   uint32_t TypeSizeInBits = DL.getTypeStoreSizeInBits(SourceType);
-  bool IsCompoundRW = Access.Kind == mair::AccessKind::ReadWrite;
-  bool IsWrite = Access.Kind != mair::AccessKind::Read;
+  bool IsCompoundRW = Obs.Kind == mair::AccessKind::ReadWrite;
+  bool IsWrite = Obs.Kind != mair::AccessKind::Read;
   FunctionCallee OnAccessFunc;
   if (Alignment >= Align(8) ||
       (Alignment.value() % (TypeSizeInBits / 8)) == 0) {
@@ -1113,7 +1112,7 @@ bool XsanThreadSanitizer::instrumentMAIRAccess(
   }
 
   __xsan::InstrumentationIRBuilder IRB(Builder);
-  IRB.CreateCall(OnAccessFunc, Access.Address);
+  IRB.CreateCall(OnAccessFunc, Obs.Address);
   if (IsCompoundRW || IsWrite)
     NumInstrumentedWrites++;
   if (IsCompoundRW || !IsWrite)
@@ -1132,7 +1131,7 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
   bool SanitizeFunction = F.hasFnAttribute(Attribute::SanitizeThread);
   const DataLayout &DL = F.getParent()->getDataLayout();
   SmallPtrSet<const Instruction *, 32> MAIRHandledSources;
-  SmallPtrSet<const mair::MemoryAccess *, 32> MAIRTargets;
+  SmallPtrSet<const mair::Observation *, 32> MAIRTargets;
   std::unique_ptr<mair::MAOpt<TsanMAIRBarrierTrait>> Opt;
 
   if (ClInstrumentMemoryAccesses && SanitizeFunction) {
@@ -1143,10 +1142,10 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
     Opt->build();
 
     SmallPtrSet<const Instruction *, 32> MAIRModeledSources;
-    for (const auto &[Observation, Accesses] : Opt->getObservationMAs()) {
-      (void)Observation;
-      for (const mair::MemoryAccess *Access : Accesses)
-        for (const Instruction *Source : Access->getInstructions())
+    for (const auto &[PP, Observations] : Opt->getProgramPointObservations()) {
+      (void)PP;
+      for (const mair::Observation *Obs : Observations)
+        for (const Instruction *Source : Obs->getInstructions())
           MAIRModeledSources.insert(Source);
     }
 
@@ -1163,23 +1162,23 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
       return false;
     };
 
-    auto CanInstrumentViaMAIR = [&](const mair::MemoryAccess &Access) {
-      if (!Access.isContiguous() || Access.isVolatile() || Access.isAtomic() ||
-          Access.getInstructions().size() != 1)
+    auto CanInstrumentViaMAIR = [&](const mair::Observation &Obs) {
+      if (!Obs.isContiguous() || Obs.isVolatile() || Obs.isAtomic() ||
+          Obs.getInstructions().size() != 1)
         return false;
 
-      Instruction *Source = Access.getInstructions().front();
+      Instruction *Source = Obs.getInstructions().front();
       // memcpy and memmove are one range read plus one range write. memset is
-      // one range write. MAIR already creates those accesses, and the length
-      // may be symbolic.
+      // one range write. MAIR already creates those observations, and the
+      // length may be symbolic.
       const bool IsRangeIntrinsic = isa<AnyMemIntrinsic>(Source);
-      if ((Access.isCallLike() && !IsRangeIntrinsic) ||
-          (!IsRangeIntrinsic && !Access.hasConcreteRange()))
+      if ((Obs.isCallLike() && !IsRangeIntrinsic) ||
+          (!IsRangeIntrinsic && !Obs.hasConcreteRange()))
         return false;
       if (IsRangeIntrinsic) {
         Value *Addr = nullptr;
         if (auto *Transfer = dyn_cast<AnyMemTransferInst>(Source))
-          Addr = Access.getKind() == mair::AccessKind::Read
+          Addr = Obs.getKind() == mair::AccessKind::Read
                      ? Transfer->getRawSource()
                      : Transfer->getRawDest();
         else
@@ -1212,29 +1211,29 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
              PointerMayBeCaptured(AI, /*ReturnCaptures=*/true);
     };
 
-    SmallVector<const mair::MemoryAccess *, 32> MAIRCandidates;
+    SmallVector<const mair::Observation *, 32> MAIRCandidates;
     SmallPtrSet<const Instruction *, 32> MAIRFallbackSources;
-    for (const auto &[Observation, Accesses] : Opt->getObservationMAs()) {
-      (void)Observation;
-      for (const mair::MemoryAccess *Access : Accesses) {
-        if (CanInstrumentViaMAIR(*Access)) {
-          MAIRCandidates.push_back(Access);
+    for (const auto &[PP, Observations] : Opt->getProgramPointObservations()) {
+      (void)PP;
+      for (const mair::Observation *Obs : Observations) {
+        if (CanInstrumentViaMAIR(*Obs)) {
+          MAIRCandidates.push_back(Obs);
           continue;
         }
-        for (const Instruction *Source : Access->getInstructions())
+        for (const Instruction *Source : Obs->getInstructions())
           MAIRFallbackSources.insert(Source);
       }
     }
-    for (const mair::MemoryAccess *Access : MAIRCandidates) {
-      const Instruction *Source = Access->getInstructions().front();
+    for (const mair::Observation *Obs : MAIRCandidates) {
+      const Instruction *Source = Obs->getInstructions().front();
       if (!MAIRFallbackSources.contains(Source))
-        MAIRTargets.insert(Access);
+        MAIRTargets.insert(Obs);
     }
 
     MAIRHandledSources = MAIRModeledSources;
     for (const Instruction *Source : MAIRFallbackSources)
       MAIRHandledSources.erase(Source);
-    Opt->retainAccesses(MAIRTargets);
+    Opt->retainObservations(MAIRTargets);
   }
 
   __xsan::TsanToInstrument Targets;
@@ -1243,7 +1242,7 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
 
   auto &[AllLoadsAndStores, AtomicAccesses, MemIntrinCalls, HasCalls] = Targets;
 
-  // The native load/store list is fallback-only. Optimized MemoryAccess
+  // The native load/store list is fallback-only. Optimized Observation
   // objects from MAOpt own the primary instrumentation target set.
   if (ClInstrumentMemoryAccesses && SanitizeFunction) {
     if (!MAIRTargets.empty()) {
@@ -1261,10 +1260,10 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
           return Error::success();
         }
 
-        void emit(const mair::MaterializedObservation &Observation,
+        void emit(const mair::MaterializedProgramPoint &PP,
                   IRBuilderBase &Builder) override {
-          for (const mair::MaterializedAccess &Access : Observation.Accesses)
-            Changed |= TSan.instrumentMAIRAccess(Access, Builder, DL);
+          for (const mair::MaterializedObservation &Obs : PP.Observations)
+            Changed |= TSan.instrumentMAIRObservation(Obs, Builder, DL);
         }
 
         bool changed() const { return Changed; }

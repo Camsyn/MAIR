@@ -12,14 +12,14 @@ using namespace llvm;
 
 #define DEBUG_TYPE "mair-loop-periodic-combine"
 
-STATISTIC(NumAggregatedAccesses,
-          "Number of accesses aggregated across loop iterations");
-STATISTIC(NumInputAccesses,
-          "Number of memory accesses entering loop periodic combination");
+STATISTIC(NumAggregatedObservations,
+          "Number of observations aggregated across loop iterations");
+STATISTIC(NumInputObservations,
+          "Number of observations entering loop periodic combination");
 STATISTIC(NumRangeAggregates,
-          "Number of loop accesses aggregated into contiguous ranges");
+          "Number of loop observations aggregated into contiguous ranges");
 STATISTIC(NumPeriodicAggregates,
-          "Number of loop accesses aggregated into periodic regions");
+          "Number of loop observations aggregated into periodic regions");
 
 namespace mair {
 
@@ -33,8 +33,8 @@ const Value *getPointerOperand(const Instruction &I) {
   return nullptr;
 }
 
-std::optional<uint64_t> getConstantAccessSize(const MemoryAccess &Access) {
-  const AbstractAccess *Region = Access.getContiguousRegion();
+std::optional<uint64_t> getConstantAccessSize(const Observation &Obs) {
+  const AbstractAccess *Region = Obs.getContiguousRegion();
   if (!Region)
     return std::nullopt;
   const AbstractValue &Size = Region->getSize();
@@ -83,7 +83,7 @@ std::optional<uint64_t> matchStartOffset(const SCEV *Start,
 class SCEVExprConverter {
   MAIRGraph &Graph;
   const MAIRLoopInfo &Loops;
-  const ObservationSite &Site;
+  const ProgramPointSite &Site;
 
   bool canConvertNAry(const SCEVNAryExpr &Expr, bool IsAdd) const {
     if (Expr.getNumOperands() < 2)
@@ -153,7 +153,7 @@ class SCEVExprConverter {
 
 public:
   SCEVExprConverter(MAIRGraph &G, const MAIRLoopInfo &L,
-                    const ObservationSite &S)
+                    const ProgramPointSite &S)
       : Graph(G), Loops(L), Site(S) {}
 
   bool canConvert(const SCEV *Expr) const {
@@ -234,34 +234,35 @@ public:
   }
 };
 
-void addOrMergeAccess(Observation &Target, const MemoryAccess &Access,
-                      const MemoryRegion &Region,
-                      bool MergeEquivalentAccesses) {
-  MemoryAccess NewAccess(Access.getInstructions(), Region, Access.getKind(),
-                         Access.getProperties());
-  Target.getParent()->getOptimizationConfig().initializeAccess(NewAccess);
-  if (MergeEquivalentAccesses) {
-    for (MemoryAccess &Existing : Target) {
-      if (&Existing.getMemoryObject() != &Access.getMemoryObject())
+void addOrMergeObservation(ProgramPoint &Target, const Observation &Obs,
+                           const MemoryRegion &Region,
+                           bool MergeEquivalentObservations) {
+  Observation NewObservation(Obs.getInstructions(), Region, Obs.getKind(),
+                             Obs.getProperties());
+  Target.getParent()->getOptimizationConfig().initializeObservation(
+      NewObservation);
+  if (MergeEquivalentObservations) {
+    for (Observation &Existing : Target) {
+      if (&Existing.getMemoryObject() != &Obs.getMemoryObject())
         continue;
-      if (!Existing.isMergeable() || !NewAccess.isMergeable())
+      if (!Existing.isMergeable() || !NewObservation.isMergeable())
         continue;
       if (Existing.getRegion() != Region)
         continue;
-      bool Merged = Existing.mergeWith(NewAccess);
+      bool Merged = Existing.mergeWith(NewObservation);
       if (Merged)
         return;
     }
   }
-  Target.addAccess(NewAccess);
+  Target.addObservation(NewObservation);
 }
 
 std::optional<AbstractAccess> buildContiguousAggregate(
-    const MemoryAccess &Access, const SCEVAddRecExpr &Recurrence,
+    const Observation &Obs, const SCEVAddRecExpr &Recurrence,
     const SCEV *ExecutionCount, uint64_t AccessSize, ScalarEvolution &SE) {
   const auto *Step = dyn_cast<SCEVConstant>(Recurrence.getStepRecurrence(SE));
   const auto *Count = dyn_cast<SCEVConstant>(ExecutionCount);
-  const AbstractAccess *Location = Access.getContiguousRegion();
+  const AbstractAccess *Location = Obs.getContiguousRegion();
   if (!Step || !Count || !Location)
     return std::nullopt;
 
@@ -300,8 +301,8 @@ std::optional<AbstractAccess> buildContiguousAggregate(
 }
 
 struct AggregateTarget {
-  ObservationSite Site;
-  Observation *Event = nullptr;
+  ProgramPointSite Site;
+  ProgramPoint *Point = nullptr;
 };
 
 struct AggregatePlan {
@@ -316,34 +317,34 @@ getAggregateTarget(MAIRGraph &G, const MAIRLoopInfo &Loops, const Loop &L) {
   if (!Exit)
     return std::nullopt;
   if (Exit->IsDedicated) {
-    Observation &Event = G.getBBEntryRepresentative(*Exit->Exit);
-    if (!Event.hasAlwaysGuard())
+    ProgramPoint &PP = G.getBBEntryRepresentative(*Exit->Exit);
+    if (!PP.hasAlwaysGuard())
       return std::nullopt;
-    return AggregateTarget{Event.getSite(), &Event};
+    return AggregateTarget{PP.getSite(), &PP};
   }
 
-  ObservationSite Site = ObservationSite::edge(*Exit->Exiting, *Exit->Exit);
-  for (Observation &Obs : G)
-    if (Obs.getSite() == Site && Obs.hasAlwaysGuard())
-      return AggregateTarget{Site, &Obs};
+  ProgramPointSite Site = ProgramPointSite::edge(*Exit->Exiting, *Exit->Exit);
+  for (ProgramPoint &PP : G)
+    if (PP.getSite() == Site && PP.hasAlwaysGuard())
+      return AggregateTarget{Site, &PP};
   return AggregateTarget{Site, nullptr};
 }
 
 std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
                                                 MAIRLoopInfo &Loops,
-                                                Observation &Obs,
-                                                MemoryAccess &Access) {
-  const AbstractAccess *Location = Access.getContiguousRegion();
-  std::optional<uint64_t> AccessSize = getConstantAccessSize(Access);
-  if (!Access.isMovable() || !Location || !Location->getBase() || !AccessSize ||
-      *AccessSize == 0 || Access.getInstructions().empty())
+                                                ProgramPoint &PP,
+                                                Observation &Obs) {
+  const AbstractAccess *Location = Obs.getContiguousRegion();
+  std::optional<uint64_t> AccessSize = getConstantAccessSize(Obs);
+  if (!Obs.isMovable() || !Location || !Location->getBase() || !AccessSize ||
+      *AccessSize == 0 || Obs.getInstructions().empty())
     return std::nullopt;
 
-  // First bind the access to the loop described by its pointer recurrence,
-  // then prove that this MAIR event executes exactly once in that loop.
+  // First bind the observation to the loop described by its pointer recurrence,
+  // then prove that its program point executes exactly once in that loop.
   ScalarEvolution &SE = Loops.getSE();
   const SCEVAddRecExpr *Recurrence = nullptr;
-  for (Instruction *I : Access.getInstructions()) {
+  for (Instruction *I : Obs.getInstructions()) {
     const Value *Pointer = I ? getPointerOperand(*I) : nullptr;
     if (!Pointer)
       return std::nullopt;
@@ -359,11 +360,11 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
 
   const Loop &RelevantLoop = *Recurrence->getLoop();
   const SCEV *ExecutionCount =
-      Loops.getExactExecutionCountSCEV(Obs, RelevantLoop);
+      Loops.getExactExecutionCountSCEV(PP, RelevantLoop);
   if (!ExecutionCount)
     return std::nullopt;
-  Observation *ExitAncestor = Loops.getUniqueExitEntry(RelevantLoop);
-  if (!ExitAncestor || !G.isAncestor(*ExitAncestor, Obs, ObsEdgeKind::PostDom))
+  ProgramPoint *ExitAncestor = Loops.getUniqueExitEntry(RelevantLoop);
+  if (!ExitAncestor || !G.isAncestor(*ExitAncestor, PP, PPEdgeKind::PostDom))
     return std::nullopt;
   std::optional<AggregateTarget> Target =
       getAggregateTarget(G, Loops, RelevantLoop);
@@ -376,7 +377,7 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
   // region with no later dependence on LLVM SCEV objects.
   bool IsRangeAggregate = false;
   if (std::optional<AbstractAccess> Range = buildContiguousAggregate(
-          Access, *Recurrence, ExecutionCount, *AccessSize, SE)) {
+          Obs, *Recurrence, ExecutionCount, *AccessSize, SE)) {
     Aggregate = *Range;
     IsRangeAggregate = true;
   } else {
@@ -408,14 +409,15 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
                        IsRangeAggregate};
 }
 
-void commitAggregate(MAIRGraph &G, MemoryAccess &Access, AggregatePlan Plan,
-                     bool MergeEquivalentAccesses) {
-  Observation *TargetEvent = Plan.Target.Event;
-  if (!TargetEvent)
-    TargetEvent = &G.createObservation(Plan.Target.Site);
-  addOrMergeAccess(*TargetEvent, Access, Plan.Region, MergeEquivalentAccesses);
-  Access.getParent()->erase(Access);
-  ++NumAggregatedAccesses;
+void commitAggregate(MAIRGraph &G, Observation &Obs, AggregatePlan Plan,
+                     bool MergeEquivalentObservations) {
+  ProgramPoint *TargetPP = Plan.Target.Point;
+  if (!TargetPP)
+    TargetPP = &G.createProgramPoint(Plan.Target.Site);
+  addOrMergeObservation(*TargetPP, Obs, Plan.Region,
+                        MergeEquivalentObservations);
+  Obs.getParent()->erase(Obs);
+  ++NumAggregatedObservations;
   if (Plan.IsRange)
     ++NumRangeAggregates;
   else
@@ -423,27 +425,26 @@ void commitAggregate(MAIRGraph &G, MemoryAccess &Access, AggregatePlan Plan,
 }
 
 bool aggregateObservations(MAIRGraph &G, MAIRLoopInfo &Loops,
-                           bool MergeEquivalentAccesses) {
+                           bool MergeEquivalentObservations) {
   if (!Loops.isAvailable())
     return false;
 
-  SmallVector<Observation *, 16> Worklist;
-  for (Observation &Obs : G)
-    Worklist.push_back(&Obs);
+  SmallVector<ProgramPoint *, 16> Worklist;
+  for (ProgramPoint &PP : G)
+    Worklist.push_back(&PP);
 
   bool Changed = false;
-  // Snapshot the original observations. Aggregates are placed outside their
+  // Snapshot the original program points. Aggregates are placed outside their
   // relevant loop (or on its exit edge), so they are not candidates for a
   // second aggregation of the same recurrence.
-  for (Observation *ObsPtr : Worklist) {
-    Observation &Obs = *ObsPtr;
-    for (auto It = Obs.begin(); It != Obs.end();) {
-      MemoryAccess &Access = *It++;
-      std::optional<AggregatePlan> Plan =
-          buildAggregatePlan(G, Loops, Obs, Access);
+  for (ProgramPoint *PPPtr : Worklist) {
+    ProgramPoint &PP = *PPPtr;
+    for (auto It = PP.begin(); It != PP.end();) {
+      Observation &Obs = *It++;
+      std::optional<AggregatePlan> Plan = buildAggregatePlan(G, Loops, PP, Obs);
       if (!Plan)
         continue;
-      commitAggregate(G, Access, std::move(*Plan), MergeEquivalentAccesses);
+      commitAggregate(G, Obs, std::move(*Plan), MergeEquivalentObservations);
       Changed = true;
     }
   }
@@ -456,10 +457,10 @@ PreservedAnalyses
 LoopPeriodicObservationCombinePass::run(MAIRGraph &G,
                                         MAIRGraphAnalysisManager &AM) {
 #if LLVM_ENABLE_STATS
-  NumInputAccesses += MAIRStat::compute(G).getNumMemoryAccesses();
+  NumInputObservations += MAIRStat::compute(G).getNumObservations();
 #endif
   MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
-  bool Changed = aggregateObservations(G, Loops, MergeEquivalentAccesses);
+  bool Changed = aggregateObservations(G, Loops, MergeEquivalentObservations);
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 

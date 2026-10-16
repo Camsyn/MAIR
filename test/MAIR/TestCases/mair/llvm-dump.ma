@@ -1,44 +1,44 @@
 mair graph of fn @f {
-bs0: preds=[ma1(pdom)], succs=[ma1(dom)]
+pp0: preds=[pp1(pdom)], succs=[pp1(dom)]
 
-ma1: preds=[bs0(dom), ma2(pdom)], succs=[bs0(pdom), ma2(dom)]
-  read ptr %p, 4
+pp1: preds=[pp0(dom), pp2(pdom)], succs=[pp0(pdom), pp2(dom)]
+  o: read ptr %p, 4
 
-ma2: preds=[ma1(dom), be3(pdom)], succs=[ma1(pdom), be3(dom)]
-  write ptr %p, 4
+pp2: preds=[pp1(dom), pp3(pdom)], succs=[pp1(pdom), pp3(dom)]
+  o: write ptr %p, 4
 
-be3: preds=[ma2(dom)], succs=[ma2(pdom)]
+pp3: preds=[pp2(dom)], succs=[pp2(pdom)]
 
 }
 
 mair graph of fn @branch_loop {
-bs0: preds=[be1(pdom)], succs=[be1(dom)]
+pp0: preds=[pp1(pdom)], succs=[pp1(dom)]
 
-be1: preds=[bs0(dom), bs6(pdom)], succs=[bs0(pdom), bs2(dom), bs6(dom)]
+pp1: preds=[pp0(dom), pp6(pdom)], succs=[pp0(pdom), pp2(dom), pp6(dom)]
 
-bs2: preds=[ma3(pdom), be1(dom)], succs=[ma3(dom)]
+pp2: preds=[pp3(pdom), pp1(dom)], succs=[pp3(dom)]
 
-ma3: preds=[bs2(dom), ma4(pdom)], succs=[bs2(pdom), ma4(dom)]
-  read ptr %p, 4
+pp3: preds=[pp2(dom), pp4(pdom)], succs=[pp2(pdom), pp4(dom)]
+  o: read ptr %p, 4
 
-ma4: preds=[ma3(dom), be5(pdom)], succs=[ma3(pdom), be5(dom)]
-  write ptr %q, 4
+pp4: preds=[pp3(dom), pp5(pdom)], succs=[pp3(pdom), pp5(dom)]
+  o: write ptr %q, 4
 
-be5: preds=[ma4(dom), bs6(pdom)], succs=[ma4(pdom)]
+pp5: preds=[pp4(dom), pp6(pdom)], succs=[pp4(pdom)]
 
-bs6: preds=[ma7(pdom), be1(dom)], succs=[ma7(dom), be1(pdom), be5(pdom)]
+pp6: preds=[pp7(pdom), pp1(dom)], succs=[pp7(dom), pp1(pdom), pp5(pdom)]
 
-ma7: preds=[bs6(dom), ma8(pdom)], succs=[bs6(pdom), ma8(dom)]
-  read ptr %p, 4
+pp7: preds=[pp6(dom), pp8(pdom)], succs=[pp6(pdom), pp8(dom)]
+  o: read ptr %p, 4
 
-ma8: preds=[ma7(dom), be9(pdom)], succs=[ma7(pdom), be9(dom)]
-  write ptr %q, 4
+pp8: preds=[pp7(dom), pp9(pdom)], succs=[pp7(pdom), pp9(dom)]
+  o: write ptr %q, 4
 
-be9: preds=[ma8(dom), bs10(pdom)], succs=[ma8(pdom), bs10(dom)]
+pp9: preds=[pp8(dom), pp10(pdom)], succs=[pp8(pdom), pp10(dom)]
 
-bs10: preds=[be11(pdom), be9(dom)], succs=[be11(dom), be9(pdom)]
+pp10: preds=[pp11(pdom), pp9(dom)], succs=[pp11(dom), pp9(pdom)]
 
-be11: preds=[bs10(dom)], succs=[bs10(pdom)]
+pp11: preds=[pp10(dom)], succs=[pp10(pdom)]
 
 }
 

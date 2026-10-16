@@ -36,8 +36,8 @@ exit:
   MAIRGraphAnalysisManager AM;
   EXPECT_TRUE(
       RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(accessCount(Graph, "body"), 1u);
-  EXPECT_EQ(accessCount(Graph, "exit"), 1u);
+  EXPECT_EQ(observationCount(Graph, "body"), 1u);
+  EXPECT_EQ(observationCount(Graph, "exit"), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -69,8 +69,8 @@ exit:
   MAIRGraphAnalysisManager AM;
   EXPECT_FALSE(
       RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(accessCount(Graph, "loop"), 1u);
-  EXPECT_EQ(accessCount(Graph, "exit"), 0u);
+  EXPECT_EQ(observationCount(Graph, "loop"), 1u);
+  EXPECT_EQ(observationCount(Graph, "exit"), 0u);
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -100,12 +100,12 @@ exit:
   MAIRGraphAnalysisManager AM;
   EXPECT_FALSE(
       RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(accessCount(Graph, "loop"), 1u);
-  const Observation *Kept = nullptr;
-  for (const Observation &Obs : Graph)
-    if (Obs.isMemoryInstSite() && Obs.getBasicBlock() &&
-        Obs.getBasicBlock()->getName() == "loop" && !Obs.empty())
-      Kept = &Obs;
+  EXPECT_EQ(observationCount(Graph, "loop"), 1u);
+  const ProgramPoint *Kept = nullptr;
+  for (const ProgramPoint &PP : Graph)
+    if (PP.isMemoryInstSite() && PP.getBasicBlock() &&
+        PP.getBasicBlock()->getName() == "loop" && !PP.empty())
+      Kept = &PP;
   ASSERT_NE(Kept, nullptr);
   EXPECT_EQ(Kept->begin()->getInstructions().front()->getName(), "second");
   EXPECT_TRUE(Graph.verify());
@@ -133,8 +133,8 @@ exit:
   MAIRGraphAnalysisManager AM;
   EXPECT_FALSE(
       RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(accessCount(Graph, "then"), 0u);
-  EXPECT_EQ(accessCount(Graph, "exit"), 1u);
+  EXPECT_EQ(observationCount(Graph, "then"), 0u);
+  EXPECT_EQ(observationCount(Graph, "exit"), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -160,8 +160,8 @@ exit:
   MAIRGraphAnalysisManager AM;
   EXPECT_TRUE(
       RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(accessCount(Graph, "then"), 1u);
-  EXPECT_EQ(accessCount(Graph, "exit"), 1u);
+  EXPECT_EQ(observationCount(Graph, "then"), 1u);
+  EXPECT_EQ(observationCount(Graph, "exit"), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -183,11 +183,11 @@ entry:
   MAIRGraphAnalysisManager AM;
   EXPECT_FALSE(
       RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(accessCount(Graph, "entry"), 1u);
-  const Observation *Kept = nullptr;
-  for (const Observation &Obs : Graph)
-    if (!Obs.empty())
-      Kept = &Obs;
+  EXPECT_EQ(observationCount(Graph, "entry"), 1u);
+  const ProgramPoint *Kept = nullptr;
+  for (const ProgramPoint &PP : Graph)
+    if (!PP.empty())
+      Kept = &PP;
   ASSERT_NE(Kept, nullptr);
   EXPECT_EQ(Kept->begin()->getKind(), AccessKind::Write);
   EXPECT_TRUE(Graph.verify());
@@ -211,11 +211,11 @@ entry:
   MAIRGraphAnalysisManager AM;
   EXPECT_FALSE(
       RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(accessCount(Graph, "entry"), 1u);
-  const Observation *Kept = nullptr;
-  for (const Observation &Obs : Graph)
-    if (!Obs.empty())
-      Kept = &Obs;
+  EXPECT_EQ(observationCount(Graph, "entry"), 1u);
+  const ProgramPoint *Kept = nullptr;
+  for (const ProgramPoint &PP : Graph)
+    if (!PP.empty())
+      Kept = &PP;
   ASSERT_NE(Kept, nullptr);
   EXPECT_EQ(Kept->begin()->getKind(), AccessKind::Read);
   EXPECT_TRUE(Graph.verify());

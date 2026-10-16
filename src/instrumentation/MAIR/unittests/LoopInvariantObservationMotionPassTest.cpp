@@ -40,8 +40,8 @@ TEST(LoopInvariantObservationMotionPass, HoistsAnInvariantLoad) {
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
   EXPECT_FALSE(
       LoopInvariantObservationMotionPass().run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(accessCount(Graph, "entry"), 1u);
-  EXPECT_EQ(accessCount(Graph, "header"), 0u);
+  EXPECT_EQ(observationCount(Graph, "entry"), 1u);
+  EXPECT_EQ(observationCount(Graph, "header"), 0u);
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -57,8 +57,8 @@ TEST(LoopInvariantObservationMotionPass, AddressSanitizerDoesNotHoist) {
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
   EXPECT_TRUE(
       LoopInvariantObservationMotionPass().run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(accessCount(Graph, "entry"), 0u);
-  EXPECT_EQ(accessCount(Graph, "header"), 1u);
+  EXPECT_EQ(observationCount(Graph, "entry"), 0u);
+  EXPECT_EQ(observationCount(Graph, "header"), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -81,7 +81,7 @@ entry:
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
   EXPECT_TRUE(
       LoopInvariantObservationMotionPass().run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(accessCount(Graph, "entry"), 1u);
+  EXPECT_EQ(observationCount(Graph, "entry"), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 

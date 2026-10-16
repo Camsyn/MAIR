@@ -4,11 +4,11 @@
 ; RUN: not mair-opt -passes="unknown" %s 2>&1 | FileCheck %s --check-prefix=UNKNOWN
 
 ; STAT: MAIRStat for function: f
-; STAT-NEXT:   observations: 4
-; STAT-NEXT:   memory-accesses: 2
-; STAT: MAIRStat for function: no_access
+; STAT-NEXT:   program-points: 4
 ; STAT-NEXT:   observations: 2
-; STAT-NEXT:   memory-accesses: 0
+; STAT: MAIRStat for function: no_access
+; STAT-NEXT:   program-points: 2
+; STAT-NEXT:   observations: 0
 
 define void @f(i32* %p) {
 entry:

@@ -52,9 +52,9 @@ class RecordingBackend final : public MAIRObservationBackend {
 public:
   bool Reject = false;
   unsigned PreparedUnits = 0;
+  unsigned EmittedProgramPoints = 0;
   unsigned EmittedObservations = 0;
-  unsigned EmittedAccesses = 0;
-  unsigned EmittedMaskedAccesses = 0;
+  unsigned EmittedMaskedObservations = 0;
   bool SawCompletePlan = true;
   SmallVector<AccessProperty, 4> PlannedProperties;
   SmallVector<AccessProperty, 4> EmittedProperties;
@@ -62,14 +62,14 @@ public:
   Error prepare(const MAIRMaterializationPlan &Plan) override {
     PreparedUnits = Plan.units().size();
     for (const MaterializationUnit &Unit : Plan.units()) {
-      SawCompletePlan &= Unit.Source && !Unit.Accesses.empty();
+      SawCompletePlan &= Unit.Source && !Unit.Observations.empty();
       SawCompletePlan &=
           Unit.Site.getBasicBlock() == Unit.Site.getAnchor().getParent();
       if (Unit.Site.isEdge())
         SawCompletePlan &= Unit.Site.getEdgeFrom() && Unit.Site.getEdgeTo();
-      for (const PlannedAccess &Access : Unit.Accesses) {
-        SawCompletePlan &= Access.Source != nullptr;
-        PlannedProperties.push_back(Access.Properties);
+      for (const PlannedObservation &Obs : Unit.Observations) {
+        SawCompletePlan &= Obs.Source != nullptr;
+        PlannedProperties.push_back(Obs.Properties);
       }
     }
     if (Reject)
@@ -78,28 +78,28 @@ public:
     return Error::success();
   }
 
-  void emit(const MaterializedObservation &Observation,
+  void emit(const MaterializedProgramPoint &ProgramPoint,
             IRBuilderBase &Builder) override {
-    ++EmittedObservations;
-    EmittedAccesses += Observation.Accesses.size();
-    for (const MaterializedAccess &Access : Observation.Accesses) {
-      EmittedProperties.push_back(Access.Properties);
-      Builder.CreateFreeze(Access.Address, "mair.test.address");
-      Builder.CreateFreeze(Access.AccessSize, "mair.test.size");
-      if (Access.Stride)
-        Builder.CreateFreeze(Access.Stride, "mair.test.stride");
-      if (Access.TripCount)
-        Builder.CreateFreeze(Access.TripCount, "mair.test.trips");
-      if (Access.Mask) {
-        ++EmittedMaskedAccesses;
-        SawCompletePlan &= Access.MaskElementSize != 0;
-        Builder.CreateFreeze(Access.Mask, "mair.test.mask");
+    ++EmittedProgramPoints;
+    EmittedObservations += ProgramPoint.Observations.size();
+    for (const MaterializedObservation &Obs : ProgramPoint.Observations) {
+      EmittedProperties.push_back(Obs.Properties);
+      Builder.CreateFreeze(Obs.Address, "mair.test.address");
+      Builder.CreateFreeze(Obs.AccessSize, "mair.test.size");
+      if (Obs.Stride)
+        Builder.CreateFreeze(Obs.Stride, "mair.test.stride");
+      if (Obs.TripCount)
+        Builder.CreateFreeze(Obs.TripCount, "mair.test.trips");
+      if (Obs.Mask) {
+        ++EmittedMaskedObservations;
+        SawCompletePlan &= Obs.MaskElementSize != 0;
+        Builder.CreateFreeze(Obs.Mask, "mair.test.mask");
       }
     }
   }
 };
 
-TEST(MAIRMaterialization, PreservesMemoryAccessProperties) {
+TEST(MAIRMaterialization, PreservesObservationProperties) {
   LLVMContext Ctx;
   auto M = parseMaterializationModule(R"IR(
 define void @f(ptr %p) {
@@ -161,7 +161,7 @@ entry:
     return;
   }
 
-  EXPECT_EQ(Backend.EmittedMaskedAccesses, 2u);
+  EXPECT_EQ(Backend.EmittedMaskedObservations, 2u);
   EXPECT_TRUE(Backend.SawCompletePlan);
   EXPECT_FALSE(verifyModule(*M, &errs()));
   EXPECT_NE(printModule(*M).find("mair.test.mask"), std::string::npos);
@@ -212,7 +212,7 @@ entry:
   const Function &F = *M->getFunction("f");
   MAIRGraph Graph(F);
   const BasicBlock &Entry = F.getEntryBlock();
-  Graph.createInstObservation(Entry, Entry.front());
+  Graph.createInstProgramPoint(Entry, Entry.front());
   ASSERT_TRUE(Graph.verify());
 
   PassInstrumentationCallbacks PIC;
@@ -247,8 +247,8 @@ exit:
   BasicBlock &Exit = F.back();
   Instruction &Load = Entry.front();
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createEdgeObservation(Entry, Exit);
-  Obs.addAccess(MemoryAccess::fromInstruction(Load, M->getDataLayout()));
+  ProgramPoint &PP = Graph.createEdgeProgramPoint(Entry, Exit);
+  PP.addObservation(Observation::fromInstruction(Load, M->getDataLayout()));
   ASSERT_TRUE(Graph.verify());
 
   PassInstrumentationCallbacks PIC;
@@ -298,13 +298,13 @@ merge:
   ASSERT_TRUE(Left && Merge && Bad);
 
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createObservation(ObservationSite::anchored(
-      *Merge->getTerminator(), Observation::SiteKind::BasicBlockExit));
+  ProgramPoint &PP = Graph.createProgramPoint(ProgramPointSite::anchored(
+      *Merge->getTerminator(), ProgramPoint::SiteKind::BasicBlockExit));
   MAIRScalarExpr P = Graph.createValueExpr(*F.getArg(0));
   MAIRScalarExpr BadExpr = Graph.createValueExpr(*Bad);
   MAIRScalarExpr One =
       Graph.createConstantExpr(*Type::getInt64Ty(Ctx), APInt(64, 1));
-  Obs.addAccess(MemoryAccess(
+  PP.addObservation(Observation(
       {}, PeriodicRegion(F.getArg(0), P, BadExpr, One, One), AccessKind::Read));
   ASSERT_TRUE(Graph.verify());
 
@@ -351,12 +351,12 @@ merge:
   ASSERT_TRUE(Bad && Merge);
 
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createObservation(ObservationSite::anchored(
-      *Merge->getTerminator(), Observation::SiteKind::BasicBlockExit));
-  Obs.addAccess(MemoryAccess({},
-                             AbstractAccess(Bad, AbstractValue::constant(0),
-                                            AbstractValue::constant(4)),
-                             AccessKind::Read));
+  ProgramPoint &PP = Graph.createProgramPoint(ProgramPointSite::anchored(
+      *Merge->getTerminator(), ProgramPoint::SiteKind::BasicBlockExit));
+  PP.addObservation(Observation({},
+                                AbstractAccess(Bad, AbstractValue::constant(0),
+                                               AbstractValue::constant(4)),
+                                AccessKind::Read));
   ASSERT_TRUE(Graph.verify());
 
   PassInstrumentationCallbacks PIC;
@@ -424,11 +424,12 @@ exit:
   ASSERT_TRUE(Header && Exit && LoadA && LoadB);
 
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createEdgeObservation(
+  ProgramPoint &PP = Graph.createEdgeProgramPoint(
       *Header, *Exit, AnyProvenanceExecutedGuard({LoadA, LoadB}));
-  Obs.addAccess(MemoryAccess::fromInstruction(*LoadA, M->getDataLayout()));
-  Observation &Second = Graph.createEdgeObservation(*Header, *Exit);
-  Second.addAccess(MemoryAccess::fromInstruction(*LoadB, M->getDataLayout()));
+  PP.addObservation(Observation::fromInstruction(*LoadA, M->getDataLayout()));
+  ProgramPoint &Second = Graph.createEdgeProgramPoint(*Header, *Exit);
+  Second.addObservation(
+      Observation::fromInstruction(*LoadB, M->getDataLayout()));
   ASSERT_TRUE(Graph.verify());
 
   PassInstrumentationCallbacks PIC;
@@ -443,11 +444,11 @@ exit:
 
   EXPECT_EQ(Result->SplitEdges, 1u);
   EXPECT_EQ(Result->GuardBranches, 1u);
-  EXPECT_EQ(Result->LoweredObservations, 2u);
+  EXPECT_EQ(Result->LoweredProgramPoints, 2u);
   EXPECT_TRUE(Result->CFGChanged);
   EXPECT_EQ(Backend.PreparedUnits, 2u);
   EXPECT_TRUE(Backend.SawCompletePlan);
-  EXPECT_EQ(Backend.EmittedObservations, 2u);
+  EXPECT_EQ(Backend.EmittedProgramPoints, 2u);
   EXPECT_TRUE(Graph.isConsumed());
   EXPECT_FALSE(verifyModule(*M, &errs()));
 
@@ -478,8 +479,8 @@ entry:
   Type &I64 = *Type::getInt64Ty(Ctx);
 
   MAIRGraph Graph(F);
-  Observation &Obs = Graph.createObservation(
-      ObservationSite::anchored(Return, Observation::SiteKind::BasicBlockExit));
+  ProgramPoint &PP = Graph.createProgramPoint(ProgramPointSite::anchored(
+      Return, ProgramPoint::SiteKind::BasicBlockExit));
   MAIRScalarExpr PExpr = Graph.createValueExpr(P);
   MAIRScalarExpr NExpr = Graph.createValueExpr(N);
   MAIRScalarExpr DenomExpr = Graph.createValueExpr(Denom);
@@ -507,8 +508,8 @@ entry:
   MAIRScalarExpr Stride =
       Graph.createUnaryExpr(MAIRScalarExpr::Kind::SignExtend, I64, Trunc);
   PeriodicRegion Region(&P, Pointer, Stride, C2, WideN);
-  Obs.addAccess(MemoryAccess({}, MemoryRegion(Region), AccessKind::Read));
-  Obs.addAccess(MemoryAccess({}, MemoryRegion(Region), AccessKind::Write));
+  PP.addObservation(Observation({}, MemoryRegion(Region), AccessKind::Read));
+  PP.addObservation(Observation({}, MemoryRegion(Region), AccessKind::Write));
   ASSERT_TRUE(Graph.verify());
 
   PassInstrumentationCallbacks PIC;
@@ -549,7 +550,7 @@ entry:
   EXPECT_EQ(NumUMaxCmps, 1u);
 }
 
-TEST(MAIRMaterialization, RetargetsMultipleObservationsAtOneAnchor) {
+TEST(MAIRMaterialization, RetargetsMultipleProgramPointsAtOneAnchor) {
   LLVMContext Ctx;
   auto M = parseMaterializationModule(R"IR(
 define void @f(ptr %p) {
@@ -564,15 +565,16 @@ entry:
   BasicBlock &Entry = F.getEntryBlock();
   Instruction &Load = Entry.front();
   Instruction &Return = *Entry.getTerminator();
-  ObservationSite Site =
-      ObservationSite::anchored(Return, Observation::SiteKind::BasicBlockExit);
+  ProgramPointSite Site = ProgramPointSite::anchored(
+      Return, ProgramPoint::SiteKind::BasicBlockExit);
 
   MAIRGraph Graph(F);
-  Observation &Guarded =
-      Graph.createObservation(Site, AnyProvenanceExecutedGuard({&Load}));
-  Guarded.addAccess(MemoryAccess::fromInstruction(Load, M->getDataLayout()));
-  Observation &Always = Graph.createObservation(Site);
-  Always.addAccess(MemoryAccess::fromInstruction(Load, M->getDataLayout()));
+  ProgramPoint &Guarded =
+      Graph.createProgramPoint(Site, AnyProvenanceExecutedGuard({&Load}));
+  Guarded.addObservation(
+      Observation::fromInstruction(Load, M->getDataLayout()));
+  ProgramPoint &Always = Graph.createProgramPoint(Site);
+  Always.addObservation(Observation::fromInstruction(Load, M->getDataLayout()));
   ASSERT_TRUE(Graph.verify());
 
   PassInstrumentationCallbacks PIC;
@@ -587,9 +589,9 @@ entry:
 
   EXPECT_EQ(Result->SplitEdges, 0u);
   EXPECT_EQ(Result->GuardBranches, 0u);
-  EXPECT_EQ(Result->LoweredObservations, 2u);
+  EXPECT_EQ(Result->LoweredProgramPoints, 2u);
   EXPECT_FALSE(Result->CFGChanged);
-  EXPECT_EQ(Backend.EmittedObservations, 2u);
+  EXPECT_EQ(Backend.EmittedProgramPoints, 2u);
   EXPECT_TRUE(Graph.isConsumed());
   EXPECT_FALSE(verifyModule(*M, &errs()));
   std::string Text = printModule(*M);
@@ -629,7 +631,7 @@ entry:
   }
   EXPECT_EQ(Result->SplitEdges, 0u);
   EXPECT_EQ(Result->GuardBranches, 0u);
-  EXPECT_EQ(Result->LoweredObservations, 1u);
+  EXPECT_EQ(Result->LoweredProgramPoints, 1u);
   EXPECT_FALSE(Result->CFGChanged);
   EXPECT_EQ(FAM.getCachedResult<DominatorTreeAnalysis>(F), nullptr);
   EXPECT_TRUE(Graph.isConsumed());

@@ -7,13 +7,13 @@
 ; DOT: label="MAIRGraph for f";
 ; DOT-DAG: [label="dom", color=blue];
 ; DOT-DAG: [label="pdom", color=red];
-; DOT-DAG: bs0
+; DOT-DAG: pp0
 ; DOT-DAG: bb.entry in entry
-; DOT-DAG: ma1
-; DOT-DAG: read ptr %p, 4
-; DOT-DAG: ma2
-; DOT-DAG: write ptr %p, 4
-; DOT-DAG: be3
+; DOT-DAG: pp1
+; DOT-DAG: o: read ptr %p, 4
+; DOT-DAG: pp2
+; DOT-DAG: o: write ptr %p, 4
+; DOT-DAG: pp3
 ; CONFLICT: -emit-llvm and -emit-dot cannot be used together
 
 define void @f(ptr %p) {

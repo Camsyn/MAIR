@@ -20,16 +20,16 @@ entry:
                        Ctx);
   ASSERT_TRUE(M);
   MAIRGraph Graph = buildGraph(*M->getFunction("f"));
-  Observation *First = findMutableMemoryObservation(Graph, "entry");
+  ProgramPoint *First = findMutableMemoryProgramPoint(Graph, "entry");
   ASSERT_NE(First, nullptr);
-  SmallVector<Observation *, 4> Sources;
-  for (Observation &Obs : Graph)
-    if (Obs.isMemoryInstSite() && &Obs != First)
-      Sources.push_back(&Obs);
+  SmallVector<ProgramPoint *, 4> Sources;
+  for (ProgramPoint &PP : Graph)
+    if (PP.isMemoryInstSite() && &PP != First)
+      Sources.push_back(&PP);
   ASSERT_EQ(Sources.size(), 2u);
-  Observation *Read = nullptr;
-  Observation *Write = nullptr;
-  for (Observation *Source : Sources) {
+  ProgramPoint *Read = nullptr;
+  ProgramPoint *Write = nullptr;
+  for (ProgramPoint *Source : Sources) {
     ASSERT_EQ(Source->size(), 1u);
     if (Source->begin()->getKind() == AccessKind::Read)
       Read = Source;
@@ -38,7 +38,7 @@ entry:
   }
   ASSERT_NE(Read, nullptr);
   ASSERT_NE(Write, nullptr);
-  First->addAccess(*Read->begin());
+  First->addObservation(*Read->begin());
   Read->erase(Read->begin());
 
   MAIRGraphAnalysisManager AM;
@@ -65,15 +65,15 @@ entry:
                        Ctx);
   ASSERT_TRUE(M);
   MAIRGraph Graph = buildGraph(*M->getFunction("f"));
-  Observation *Read = findMutableMemoryObservation(Graph, "entry");
+  ProgramPoint *Read = findMutableMemoryProgramPoint(Graph, "entry");
   ASSERT_NE(Read, nullptr);
-  Observation *Write = nullptr;
-  for (Observation &Obs : Graph)
-    if (Obs.isMemoryInstSite() && &Obs != Read)
-      Write = &Obs;
+  ProgramPoint *Write = nullptr;
+  for (ProgramPoint &PP : Graph)
+    if (PP.isMemoryInstSite() && &PP != Read)
+      Write = &PP;
   ASSERT_NE(Write, nullptr);
   ASSERT_EQ(Write->begin()->getKind(), AccessKind::Write);
-  Read->addAccess(*Write->begin());
+  Read->addObservation(*Write->begin());
   Write->erase(Write->begin());
 
   MAIRGraphAnalysisManager AM;
@@ -96,14 +96,14 @@ entry:
                        Ctx);
   ASSERT_TRUE(M);
   MAIRGraph Graph = buildGraph(*M->getFunction("f"));
-  Observation *First = findMutableMemoryObservation(Graph, "entry");
+  ProgramPoint *First = findMutableMemoryProgramPoint(Graph, "entry");
   ASSERT_NE(First, nullptr);
-  Observation *Second = nullptr;
-  for (Observation &Obs : Graph)
-    if (Obs.isMemoryInstSite() && &Obs != First)
-      Second = &Obs;
+  ProgramPoint *Second = nullptr;
+  for (ProgramPoint &PP : Graph)
+    if (PP.isMemoryInstSite() && &PP != First)
+      Second = &PP;
   ASSERT_NE(Second, nullptr);
-  First->addAccess(*Second->begin());
+  First->addObservation(*Second->begin());
   Second->erase(Second->begin());
 
   MAIRGraphAnalysisManager AM;

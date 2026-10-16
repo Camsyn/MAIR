@@ -57,36 +57,36 @@ entry:
   ret void
 }
 ; CHECK-LABEL: mair graph of fn @merge_adjacent_out_of_order {
-; CHECK:         read ptr %p, 12
-; CHECK-NOT:     read ptr %p +
+; CHECK:         o: read ptr %p, 12
+; CHECK-NOT:     o: read ptr %p +
 ;
 ; CHECK-LABEL: mair graph of fn @keep_different_objects_and_gaps {
-; CHECK:         read ptr %p, 4
-; CHECK:         read ptr %p + 8, 4
-; CHECK:         read ptr %q, 4
+; CHECK:         o: read ptr %p, 4
+; CHECK:         o: read ptr %p + 8, 4
+; CHECK:         o: read ptr %q, 4
 ;
 ; CHECK-LABEL: mair graph of fn @keep_symbolic_locations {
-; CHECK:         read ptr %p + %pi, 4
-; CHECK:         read ptr %p + %pj, 4
+; CHECK:         o: read ptr %p + %pi, 4
+; CHECK:         o: read ptr %p + %pj, 4
 ;
 ; CHECK-LABEL: mair graph of fn @merge_identical_symbolic_location {
-; CHECK:         read ptr %p + %pi, 4
-; CHECK-NOT:     read ptr
+; CHECK:         o: read ptr %p + %pi, 4
+; CHECK-NOT:     o: read ptr
 ;
 ; CHECK-LABEL: mair graph of fn @merge_adjacent_symbolic_location {
-; CHECK:         write ptr %p + %pi, 8
-; CHECK-NOT:     write ptr
+; CHECK:         o: write ptr %p + %pi, 8
+; CHECK-NOT:     o: write ptr
 ;
 ; CHECK-LABEL: mair graph of fn @merge_overlapping_and_contained {
-; CHECK:         read ptr %p, 8
-; CHECK-NOT:     read ptr
-; CHECK:         write ptr %p + 4, 8
+; CHECK:         o: read ptr %p, 8
+; CHECK-NOT:     o: read ptr
+; CHECK:         o: write ptr %p + 4, 8
 
 ; LOCAL-LABEL: mair graph of fn @merge_adjacent_out_of_order {
-; LOCAL:         read ptr %p + 8, 4
-; LOCAL:         read ptr %p, 4
-; LOCAL:         read ptr %p + 4, 4
+; LOCAL:         o: read ptr %p + 8, 4
+; LOCAL:         o: read ptr %p, 4
+; LOCAL:         o: read ptr %p + 4, 4
 ;
 ; LOCAL-LABEL: mair graph of fn @merge_adjacent_symbolic_location {
-; LOCAL:         write ptr %p + %pi, 4
-; LOCAL:         write ptr %p + %pi4, 4
+; LOCAL:         o: write ptr %p + %pi, 4
+; LOCAL:         o: write ptr %p + %pi4, 4

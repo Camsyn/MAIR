@@ -3,7 +3,7 @@
 #include "MAIR/Analysis/LoopAnalysis.h"
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/Analysis/RedundantObservationAnalysis.h"
-#include "MAIR/Transforms/CommonMAMotionPass.h"
+#include "MAIR/Transforms/CommonObservationMotionPass.h"
 #include "MAIR/Transforms/LocationMergePass.h"
 #include "MAIR/Transforms/LoopInvariantObservationMotionPass.h"
 #include "MAIR/Transforms/LoopPeriodicObservationCombinePass.h"
@@ -51,9 +51,9 @@ void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
 void buildMAIRGraphOgPipeline(MAIRGraphPassManager &PM) {
   PM.addPass(SimplifyGraphPass());
   PM.addPass(LoopInvariantObservationMotionPass(
-      /*MergeEquivalentAccesses=*/false));
+      /*MergeEquivalentObservations=*/false));
   PM.addPass(LoopPeriodicObservationCombinePass(
-      /*MergeEquivalentAccesses=*/false));
+      /*MergeEquivalentObservations=*/false));
   PM.addPass(RedundantObservationEliminationPass());
   PM.addPass(SimplifyGraphPass());
 }
@@ -61,13 +61,14 @@ void buildMAIRGraphOgPipeline(MAIRGraphPassManager &PM) {
 void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
   // Normalize topology before motion, combine loop and location opportunities,
   // then alternate global motion with local merging/elimination. The final
-  // simplification removes observations emptied by those access transforms.
+  // simplification removes program points emptied by those observation
+  // transforms.
   PM.addPass(SimplifyGraphPass());
   PM.addPass(LoopInvariantObservationMotionPass());
   PM.addPass(LoopPeriodicObservationCombinePass());
   PM.addPass(LocationMergePass());
   PM.addPass(RedundantObservationEliminationPass());
-  PM.addPass(CommonMAMotionPass());
+  PM.addPass(CommonObservationMotionPass());
   PM.addPass(LocationMergePass());
   PM.addPass(RedundantObservationEliminationPass());
   PM.addPass(SimplifyGraphPass());

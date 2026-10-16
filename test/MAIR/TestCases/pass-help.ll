@@ -3,6 +3,9 @@
 ; RUN:   --implicit-check-not="General options:" \
 ; RUN:   --implicit-check-not="IR2Vec Options:" \
 ; RUN:   --implicit-check-not="--enable-vtable-profile-use"
+; RUN: not mair-opt -passes=cmm --disable-output %S/common-observation-motion.ll 2>&1 | FileCheck %s --check-prefix=OLD-NAME
+
+; OLD-NAME: unknown MAIRGraph pass 'cmm'
 
 ; HELP: MAIR Options:
 ; HELP: --O1{{[[:space:]]+}}- Run the standard MAIR O1 optimization pipeline
@@ -13,7 +16,7 @@
 ; HELP: -o <filename>{{[[:space:]]+}}- Write output to <file>
 ; HELP: --passes=<pipeline>{{[[:space:]]+}}- MAIRGraph pass pipeline
 ; HELP: MAIRGraph pass names for -passes:
-; HELP: cmm{{[[:space:]]+}}- Common MA Motion
+; HELP: com{{[[:space:]]+}}- Common Observation Motion
 ; HELP: liom{{[[:space:]]+}}- Loop Invariant Observation Motion
 ; HELP: lpoc{{[[:space:]]+}}- Loop Periodic Observation Combine
 ; HELP: locationmerge{{[[:space:]]+}}- Location Merge

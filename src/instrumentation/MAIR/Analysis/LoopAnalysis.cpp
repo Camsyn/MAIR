@@ -143,7 +143,7 @@ bool MAIRLoopInfo::canHoistToPreheader(const ProgramPoint &PP,
 bool MAIRLoopInfo::canSinkToExit(const ProgramPoint &PP, const Loop &L) const {
   if (!isAvailable() || PP.getParent() != Graph || Graph->getLoop() != &L ||
       !PP.hasAlwaysGuard() || !PP.getSite().isAnchored() ||
-      Graph->hasBackwardBarrier())
+      Graph->hasForwardBarrier() || Graph->hasBackwardBarrier())
     return false;
 
   const BasicBlock *Source = PP.getBasicBlock();

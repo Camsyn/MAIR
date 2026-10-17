@@ -643,4 +643,133 @@ entry:
             std::string::npos);
 }
 
+TEST(MAIRMaterialization, NestedGuardResetsAtEachInnerLoopInvocation) {
+  LLVMContext Ctx;
+  auto M = parseMaterializationModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  br label %outer
+outer:
+  %oi = phi i32 [ 0, %entry ], [ %onext, %outer.latch ]
+  br label %inner.preheader
+inner.preheader:
+  br label %inner
+inner:
+  %ii = phi i32 [ 0, %inner.preheader ], [ %inext, %inner.latch ]
+  %more = icmp ult i32 %ii, 2
+  br i1 %more, label %dispatch, label %inner.exit
+dispatch:
+  %first = icmp eq i32 %oi, 0
+  br i1 %first, label %access, label %inner.latch
+access:
+  %value = load i32, ptr %p, align 4
+  br label %inner.latch
+inner.latch:
+  %inext = add i32 %ii, 1
+  br label %inner
+inner.exit:
+  br label %outer.latch
+outer.latch:
+  %onext = add i32 %oi, 1
+  %done = icmp eq i32 %onext, 2
+  br i1 %done, label %exit, label %outer
+exit:
+  ret void
+}
+)IR",
+                                      Ctx);
+  ASSERT_TRUE(M);
+  Function &F = *M->getFunction("f");
+  BasicBlock *Reset = nullptr;
+  BasicBlock *Target = nullptr;
+  Instruction *Load = nullptr;
+  for (BasicBlock &Block : F) {
+    if (Block.getName() == "inner.preheader")
+      Reset = &Block;
+    if (Block.getName() == "inner.exit")
+      Target = &Block;
+    if (Block.getName() == "access")
+      Load = &Block.front();
+  }
+  ASSERT_TRUE(Reset && Target && Load);
+  MAIRGraph Graph = buildMaterializationGraph(F);
+  for (ProgramPoint &Existing : Graph)
+    while (!Existing.empty())
+      Existing.erase(Existing.begin());
+  ProgramPoint &Point = Graph.createProgramPoint(
+      ProgramPointSite::anchored(Target->front(),
+                                 ProgramPoint::SiteKind::BasicBlockEntry),
+      AnyProvenanceExecutedGuard({Load}, Reset));
+  Point.addObservation(Observation::fromInstruction(*Load, M->getDataLayout()));
+  ASSERT_TRUE(Graph.verify());
+  PassInstrumentationCallbacks PIC;
+  FunctionAnalysisManager FAM;
+  registerMaterializationAnalyses(FAM, PIC);
+  RecordingBackend Backend;
+  auto Result = Graph.instantiate(FAM, Backend);
+  if (!Result) {
+    ADD_FAILURE() << toString(Result.takeError());
+    return;
+  }
+  EXPECT_EQ(Result->GuardBranches, 1u);
+  bool SawResetIncoming = false;
+  for (const BasicBlock &Block : F)
+    for (const PHINode &Phi : Block.phis()) {
+      if (!Phi.getName().starts_with("mair.executed"))
+        continue;
+      int Index = Phi.getBasicBlockIndex(Reset);
+      if (Index < 0)
+        continue;
+      const auto *Initial = dyn_cast<ConstantInt>(Phi.getIncomingValue(Index));
+      ASSERT_NE(Initial, nullptr);
+      EXPECT_TRUE(Initial->isZero());
+      SawResetIncoming = true;
+    }
+  EXPECT_TRUE(SawResetIncoming);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST(MAIRMaterialization, ExplicitEntryResetHasOneInitialSSAValue) {
+  LLVMContext Ctx;
+  auto M = parseMaterializationModule(R"IR(
+define void @f(ptr %p, i1 %take) {
+entry:
+  br i1 %take, label %access, label %exit
+access:
+  %value = load i32, ptr %p, align 4
+  br label %exit
+exit:
+  ret void
+}
+)IR",
+                                      Ctx);
+  ASSERT_TRUE(M);
+  Function &F = *M->getFunction("f");
+  BasicBlock &Access = *std::next(F.begin());
+  BasicBlock &Exit = *std::next(F.begin(), 2);
+  Instruction &Load = Access.front();
+  MAIRGraph Graph = buildMaterializationGraph(F);
+  for (ProgramPoint &Existing : Graph)
+    while (!Existing.empty())
+      Existing.erase(Existing.begin());
+  ProgramPoint &Point = Graph.createProgramPoint(
+      ProgramPointSite::anchored(Exit.front(),
+                                 ProgramPoint::SiteKind::BasicBlockEntry),
+      AnyProvenanceExecutedGuard({&Load}, &F.getEntryBlock()));
+  Point.addObservation(Observation::fromInstruction(Load, M->getDataLayout()));
+  ASSERT_TRUE(Graph.verify());
+  PassInstrumentationCallbacks PIC;
+  FunctionAnalysisManager FAM;
+  registerMaterializationAnalyses(FAM, PIC);
+  RecordingBackend Backend;
+  auto Result = Graph.instantiate(FAM, Backend);
+  if (!Result) {
+    ADD_FAILURE() << toString(Result.takeError());
+    return;
+  }
+  EXPECT_EQ(Result->GuardBranches, 1u);
+  EXPECT_EQ(Backend.EmittedObservations, 1u);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 } // namespace

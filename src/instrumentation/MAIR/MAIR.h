@@ -265,13 +265,18 @@ struct AlwaysGuard {
 /// instruction list has set semantics; storage order is retained for dumps.
 class AnyProvenanceExecutedGuard {
   SmallVector<Instruction *, 2> Provenance;
+  const BasicBlock *ResetBlock = nullptr;
 
 public:
   AnyProvenanceExecutedGuard() = default;
   explicit AnyProvenanceExecutedGuard(ArrayRef<Instruction *> Instructions)
       : Provenance(Instructions) {}
+  AnyProvenanceExecutedGuard(ArrayRef<Instruction *> Instructions,
+                             const BasicBlock *Reset)
+      : Provenance(Instructions), ResetBlock(Reset) {}
 
   ArrayRef<Instruction *> getProvenance() const { return Provenance; }
+  const BasicBlock *getResetBlock() const { return ResetBlock; }
   bool operator==(const AnyProvenanceExecutedGuard &Other) const;
   bool operator!=(const AnyProvenanceExecutedGuard &Other) const {
     return !(*this == Other);

@@ -141,6 +141,7 @@ class MAIRVerifier : public MAIRVerifierSupport {
   DenseSet<const ProgramPoint *> LiveProgramPoints;
   DenseMap<EdgeKey, EdgeCounts> ChildEdgeCounts;
   DenseMap<EdgeKey, EdgeCounts> ParentEdgeCounts;
+  std::optional<DominatorTree> GuardDominance;
 
 public:
   explicit MAIRVerifier(raw_ostream *OS) : MAIRVerifierSupport(OS) {}
@@ -300,13 +301,36 @@ void MAIRVerifier::verifyGuard(const ProgramPoint &PP) {
   ArrayRef<Instruction *> Provenance = Guard->getProvenance();
   Check(!Provenance.empty(), "execution guard has empty provenance", PP);
   SmallPtrSet<const Instruction *, 8> Seen;
+  const BasicBlock *Reset = Guard->getResetBlock();
+  const DominatorTree *DT = Graph->Analyses.DT;
+  if (Reset) {
+    if (!CheckRequired(Reset->getParent() == Graph->getFunction(),
+                       "execution guard reset block is outside graph function",
+                       PP, Reset))
+      return;
+    if (!DT) {
+      if (!GuardDominance)
+        GuardDominance.emplace(*const_cast<Function *>(Graph->getFunction()));
+      DT = &*GuardDominance;
+    }
+    Check(DT->dominates(Reset, PP.getBasicBlock()),
+          "execution guard reset block does not dominate its site", PP, Reset);
+  }
   for (const Instruction *I : Provenance) {
     if (!CheckRequired(I, "execution guard has null provenance", PP))
       return;
-    Check(I->getFunction() == Graph->getFunction(),
-          "execution guard provenance is outside graph function", PP, I);
+    if (!CheckRequired(I->getFunction() == Graph->getFunction(),
+                       "execution guard provenance is outside graph function",
+                       PP, I))
+      return;
     Check(Seen.insert(I).second,
           "execution guard contains duplicate provenance", PP, I);
+    if (Reset) {
+      Check(I->getParent() != Reset,
+            "execution guard provenance is in its reset block", PP, I);
+      Check(DT->dominates(Reset, I->getParent()),
+            "execution guard reset block does not dominate provenance", PP, I);
+    }
   }
 }
 

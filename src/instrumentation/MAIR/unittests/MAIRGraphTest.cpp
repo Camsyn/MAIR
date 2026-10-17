@@ -3870,12 +3870,76 @@ entry:
   ProgramPointGuard BA = AnyProvenanceExecutedGuard({B, A});
   ProgramPointGuard AOnly = AnyProvenanceExecutedGuard({A});
   ProgramPointGuard DuplicateA = AnyProvenanceExecutedGuard({A, A});
+  ProgramPointGuard ResetAB = AnyProvenanceExecutedGuard({A, B}, &BB);
+  ProgramPointGuard ResetBA = AnyProvenanceExecutedGuard({B, A}, &BB);
 
   EXPECT_EQ(AB, BA);
   EXPECT_NE(AB, AOnly);
   EXPECT_NE(DuplicateA, AB);
   EXPECT_NE(AB, DuplicateA);
   EXPECT_NE(AB, ProgramPointGuard(AlwaysGuard{}));
+  EXPECT_EQ(ResetAB, ResetBA);
+  EXPECT_NE(ResetAB, AB);
+}
+
+TEST(MAIRSchema, VerifierRejectsExecutionGuardResetOutsideItsFunction) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %value = load i32, ptr %p, align 4
+  ret void
+}
+define void @other() {
+entry:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &Other = M->getFunction("other")->getEntryBlock();
+  MAIRGraph Graph(F);
+  Graph.createProgramPoint(
+      ProgramPointSite::anchored(*F.getEntryBlock().getTerminator(),
+                                 ProgramPoint::SiteKind::BasicBlockExit),
+      AnyProvenanceExecutedGuard({&F.getEntryBlock().front()}, &Other));
+  std::string Error;
+  llvm::raw_string_ostream OS(Error);
+  EXPECT_FALSE(Graph.verify(&OS));
+  EXPECT_NE(Error.find("reset"), std::string::npos);
+}
+
+TEST(MAIRSchema, VerifierRejectsExecutionGuardResetOutsideItsProvenancePath) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i1 %take) {
+entry:
+  br i1 %take, label %access, label %other
+access:
+  %value = load i32, ptr %p, align 4
+  br label %exit
+other:
+  br label %exit
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &Access = *std::next(F.begin());
+  llvm::BasicBlock &Other = *std::next(F.begin(), 2);
+  llvm::BasicBlock &Exit = *std::next(F.begin(), 3);
+  MAIRGraph Graph = createGraphWithExplicitAnalyses(F);
+  Graph.createProgramPoint(
+      ProgramPointSite::anchored(Exit.front(),
+                                 ProgramPoint::SiteKind::BasicBlockEntry),
+      AnyProvenanceExecutedGuard({&Access.front()}, &Other));
+  std::string Error;
+  llvm::raw_string_ostream OS(Error);
+  EXPECT_FALSE(Graph.verify(&OS));
+  EXPECT_NE(Error.find("reset"), std::string::npos);
 }
 
 TEST(MAIRSchema, VerifierRejectsNonEmptyFunctionlessGraph) {

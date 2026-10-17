@@ -76,6 +76,11 @@ bool validateGuard(const ProgramPoint &PP, const Instruction &Target,
   const auto *Guard = std::get_if<AnyProvenanceExecutedGuard>(&PP.getGuard());
   if (!Guard)
     return true;
+  if (const BasicBlock *Reset = Guard->getResetBlock())
+    if (Reset->getParent() != Target.getFunction()) {
+      Failure = "execution guard reset is outside the target function";
+      return false;
+    }
 
   for (Instruction *I : Guard->getProvenance()) {
     if (!I || I->getFunction() != Target.getFunction()) {
@@ -324,6 +329,11 @@ Value *materializeGuard(const ProgramPointGuard &PPGuard, BasicBlock *Target,
   Updater.Initialize(Type::getInt1Ty(F.getContext()), "mair.executed");
   SmallPtrSet<BasicBlock *, 8> Seen;
   const auto &Guard = std::get<AnyProvenanceExecutedGuard>(PPGuard);
+  BasicBlock *Reset = const_cast<BasicBlock *>(Guard.getResetBlock());
+  if (Reset) {
+    Updater.AddAvailableValue(Reset, ConstantInt::getFalse(F.getContext()));
+    Seen.insert(Reset);
+  }
   bool EntryHasProvenance = false;
   for (Instruction *I : Guard.getProvenance())
     if (I->getParent() == &F.getEntryBlock())
@@ -331,10 +341,11 @@ Value *materializeGuard(const ProgramPointGuard &PPGuard, BasicBlock *Target,
     else if (Seen.insert(I->getParent()).second)
       Updater.AddAvailableValue(I->getParent(),
                                 ConstantInt::getTrue(F.getContext()));
-  Updater.AddAvailableValue(&F.getEntryBlock(),
-                            EntryHasProvenance
-                                ? ConstantInt::getTrue(F.getContext())
-                                : ConstantInt::getFalse(F.getContext()));
+  if (Reset != &F.getEntryBlock())
+    Updater.AddAvailableValue(&F.getEntryBlock(),
+                              EntryHasProvenance
+                                  ? ConstantInt::getTrue(F.getContext())
+                                  : ConstantInt::getFalse(F.getContext()));
   return Updater.GetValueInMiddleOfBlock(Target);
 }
 

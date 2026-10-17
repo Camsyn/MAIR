@@ -360,7 +360,8 @@ void ProgramPointSite::print(raw_ostream &OS) const {
 
 bool AnyProvenanceExecutedGuard::operator==(
     const AnyProvenanceExecutedGuard &Other) const {
-  if (Provenance.size() != Other.Provenance.size())
+  if (ResetBlock != Other.ResetBlock ||
+      Provenance.size() != Other.Provenance.size())
     return false;
   return llvm::all_of(Provenance,
                       [&](const Instruction *I) {
@@ -1150,6 +1151,10 @@ void ProgramPoint::print(raw_ostream &OS) const {
         First = false;
       }
       OS << ")";
+      if (const BasicBlock *Reset = ExecutionGuard->getResetBlock()) {
+        OS << ", reset=";
+        Reset->printAsOperand(OS, false);
+      }
     }
     OS << ", ";
   }

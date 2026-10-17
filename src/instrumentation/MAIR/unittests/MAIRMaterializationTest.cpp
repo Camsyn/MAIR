@@ -656,6 +656,59 @@ entry:
             std::string::npos);
 }
 
+TEST(MAIRMaterialization, NestedGraphsPrepareOnceAndConsumeEveryBody) {
+  LLVMContext Ctx;
+  auto M = parseMaterializationModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %before = load i32, ptr %p, align 4
+  br label %outer
+outer:
+  %oi = phi i32 [ 0, %entry ], [ %onext, %outer.latch ]
+  %outside.inner = load i32, ptr %p, align 4
+  br label %inner
+inner:
+  %ii = phi i32 [ 0, %outer ], [ %inext, %inner ]
+  %inside = load i32, ptr %p, align 4
+  %inext = add i32 %ii, 1
+  %idone = icmp eq i32 %inext, 2
+  br i1 %idone, label %outer.latch, label %inner
+outer.latch:
+  %after.inner = load i32, ptr %p, align 4
+  %onext = add i32 %oi, 1
+  %odone = icmp eq i32 %onext, 2
+  br i1 %odone, label %exit, label %outer
+exit:
+  %after = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                                      Ctx);
+  ASSERT_TRUE(M);
+  Function &F = *M->getFunction("f");
+  MAIRGraph Graph = buildMaterializationGraph(F);
+  auto Graphs = Graph.graphs();
+  ASSERT_EQ(Graphs.size(), 3u);
+  PassInstrumentationCallbacks PIC;
+  FunctionAnalysisManager FAM;
+  registerMaterializationAnalyses(FAM, PIC);
+  RecordingBackend Backend;
+  auto Result = Graph.instantiate(FAM, Backend);
+  if (!Result) {
+    ADD_FAILURE() << toString(Result.takeError());
+    return;
+  }
+  EXPECT_EQ(Backend.PrepareCalls, 1u);
+  EXPECT_EQ(Backend.PreparedUnits, 5u);
+  EXPECT_EQ(Backend.EmittedProgramPoints, 5u);
+  EXPECT_EQ(Backend.EmittedObservations, 5u);
+  EXPECT_EQ(Result->LoweredProgramPoints, 5u);
+  EXPECT_TRUE(Backend.SawCompletePlan);
+  for (const MAIRGraph *Current : Graphs)
+    EXPECT_TRUE(Current->isConsumed());
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST(MAIRMaterialization, NestedGuardResetsAtEachInnerLoopInvocation) {
   LLVMContext Ctx;
   auto M = parseMaterializationModule(R"IR(

@@ -87,6 +87,7 @@ class ProgramPoint;
 class MAIRScalarExpr;
 struct MAIRScalarExprNode;
 struct MAIRScalarExprOwner;
+struct MAIRGraphResources;
 struct MAIRInstantiationResult;
 
 enum class AccessKind : uint8_t { Read = 1, Write = 2, ReadWrite = 3 };
@@ -845,17 +846,14 @@ private:
   State GraphState = State::Live;
   MAIROptimizationConfig OptimizationConfig;
   SpecificBumpPtrAllocator<ProgramPoint> GraphAllocator;
-  SpecificBumpPtrAllocator<MemoryObject> MemoryObjectAllocator;
-  std::unique_ptr<MAIRScalarExprOwner> ScalarExprOwner;
-  SpecificBumpPtrAllocator<MAIRScalarExprNode> ScalarExprAllocator;
+  std::unique_ptr<MAIRGraphResources> OwnedResources;
+  MAIRGraphResources *Resources = nullptr;
   FunctionAnalysisState Analyses;
-  DenseMap<const Value *, MemoryObject *> MemoryObjects;
   DenseMap<const BasicBlock *, ProgramPoint *> BBEntryRepresentatives;
   DenseMap<const BasicBlock *, ProgramPoint *> BBExitRepresentatives;
   ProgramPointListType ProgramPoints;
   unsigned NumProgramPoints = 0;
   unsigned NumEdges = 0;
-  unsigned NextProgramPointID = 0;
 
 public:
   explicit MAIRGraph(

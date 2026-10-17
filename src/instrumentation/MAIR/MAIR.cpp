@@ -37,6 +37,14 @@ struct MAIRScalarExprNode {
         Operands(Ops) {}
 };
 
+struct MAIRGraphResources {
+  SpecificBumpPtrAllocator<MemoryObject> MemoryObjectAllocator;
+  MAIRScalarExprOwner ScalarExprOwner;
+  SpecificBumpPtrAllocator<MAIRScalarExprNode> ScalarExprAllocator;
+  DenseMap<const Value *, MemoryObject *> MemoryObjects;
+  unsigned NextProgramPointID = 0;
+};
+
 namespace {
 const Instruction *getBarrierRangeStart(const ProgramPoint &PP) {
   return PP.isBasicBlockEntrySite() ? nullptr : &PP.getAnchor();
@@ -1172,7 +1180,8 @@ void ProgramPoint::print(raw_ostream &OS) const {
 
 MAIRGraph::MAIRGraph(MAIROptimizationConfig Config)
     : OptimizationConfig(Config),
-      ScalarExprOwner(std::make_unique<MAIRScalarExprOwner>()) {}
+      OwnedResources(std::make_unique<MAIRGraphResources>()),
+      Resources(OwnedResources.get()) {}
 
 void MAIRGraph::assertLive(StringRef Operation) const {
   if (!isLive())
@@ -1180,31 +1189,30 @@ void MAIRGraph::assertLive(StringRef Operation) const {
 }
 
 MAIRGraph::MAIRGraph(const Function &Func, MAIROptimizationConfig Config)
-    : F(&Func), OptimizationConfig(Config),
-      ScalarExprOwner(std::make_unique<MAIRScalarExprOwner>()) {}
+    : MAIRGraph(Config) {
+  F = &Func;
+}
 
 MAIRGraph::MAIRGraph(Function &Func, MAIROptimizationConfig Config)
-    : F(&Func), MutableF(&Func), OptimizationConfig(Config),
-      ScalarExprOwner(std::make_unique<MAIRScalarExprOwner>()) {}
+    : MAIRGraph(std::as_const(Func), Config) {
+  MutableF = &Func;
+}
 
 MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
     : F(Other.F), MutableF(Other.MutableF), GraphState(Other.GraphState),
       OptimizationConfig(Other.OptimizationConfig),
       GraphAllocator(std::move(Other.GraphAllocator)),
-      MemoryObjectAllocator(std::move(Other.MemoryObjectAllocator)),
-      ScalarExprOwner(std::move(Other.ScalarExprOwner)),
-      ScalarExprAllocator(std::move(Other.ScalarExprAllocator)),
-      Analyses(std::move(Other.Analyses)),
-      MemoryObjects(std::move(Other.MemoryObjects)),
+      OwnedResources(std::move(Other.OwnedResources)),
+      Resources(Other.Resources), Analyses(std::move(Other.Analyses)),
       BBEntryRepresentatives(std::move(Other.BBEntryRepresentatives)),
       BBExitRepresentatives(std::move(Other.BBExitRepresentatives)),
       ProgramPoints(std::move(Other.ProgramPoints)),
-      NumProgramPoints(Other.NumProgramPoints), NumEdges(Other.NumEdges),
-      NextProgramPointID(Other.NextProgramPointID) {
+      NumProgramPoints(Other.NumProgramPoints), NumEdges(Other.NumEdges) {
   for (ProgramPoint &PP : ProgramPoints)
     PP.setParent(this);
   Other.F = nullptr;
   Other.MutableF = nullptr;
+  Other.Resources = nullptr;
   Other.Analyses.clearReferences();
   Other.GraphState = State::MovedFrom;
 }
@@ -1218,21 +1226,19 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   GraphState = Other.GraphState;
   OptimizationConfig = Other.OptimizationConfig;
   GraphAllocator = std::move(Other.GraphAllocator);
-  MemoryObjectAllocator = std::move(Other.MemoryObjectAllocator);
-  ScalarExprOwner = std::move(Other.ScalarExprOwner);
-  ScalarExprAllocator = std::move(Other.ScalarExprAllocator);
+  OwnedResources = std::move(Other.OwnedResources);
+  Resources = Other.Resources;
   Analyses = std::move(Other.Analyses);
-  MemoryObjects = std::move(Other.MemoryObjects);
   BBEntryRepresentatives = std::move(Other.BBEntryRepresentatives);
   BBExitRepresentatives = std::move(Other.BBExitRepresentatives);
   ProgramPoints = std::move(Other.ProgramPoints);
   NumProgramPoints = Other.NumProgramPoints;
   NumEdges = Other.NumEdges;
-  NextProgramPointID = Other.NextProgramPointID;
   for (ProgramPoint &PP : ProgramPoints)
     PP.setParent(this);
   Other.F = nullptr;
   Other.MutableF = nullptr;
+  Other.Resources = nullptr;
   Other.Analyses.clearReferences();
   Other.GraphState = State::MovedFrom;
   return *this;
@@ -1246,7 +1252,7 @@ T &MAIRGraph::allocateNode(Args &&...ArgsPack) {
 }
 
 std::string MAIRGraph::createProgramPointName() {
-  return (Twine("pp") + Twine(NextProgramPointID++)).str();
+  return (Twine("pp") + Twine(Resources->NextProgramPointID++)).str();
 }
 
 ProgramPoint &MAIRGraph::addProgramPoint(ProgramPoint &PP) {
@@ -1257,9 +1263,10 @@ ProgramPoint &MAIRGraph::addProgramPoint(ProgramPoint &PP) {
 }
 
 MemoryObject &MAIRGraph::getOrCreateMemoryObject(const Value &Base) {
-  MemoryObject *&Object = MemoryObjects[&Base];
+  MemoryObject *&Object = Resources->MemoryObjects[&Base];
   if (!Object)
-    Object = new (MemoryObjectAllocator.Allocate()) MemoryObject(Base);
+    Object =
+        new (Resources->MemoryObjectAllocator.Allocate()) MemoryObject(Base);
   return *Object;
 }
 
@@ -1325,18 +1332,19 @@ ProgramPoint &MAIRGraph::createEdgeProgramPoint(const BasicBlock &From,
 
 MAIRScalarExpr MAIRGraph::createConstantExpr(Type &Ty, const APInt &Value) {
   assertLive("create an expression on");
-  assert(ScalarExprOwner && "cannot create an expression on a moved graph");
-  auto *Node = new (ScalarExprAllocator.Allocate()) MAIRScalarExprNode(
-      *ScalarExprOwner, MAIRScalarExpr::Kind::Constant, Ty, Value, nullptr, {});
+  auto *Node = new (Resources->ScalarExprAllocator.Allocate())
+      MAIRScalarExprNode(Resources->ScalarExprOwner,
+                         MAIRScalarExpr::Kind::Constant, Ty, Value, nullptr,
+                         {});
   return MAIRScalarExpr(*Node);
 }
 
 MAIRScalarExpr MAIRGraph::createValueExpr(const Value &Value) {
   assertLive("create an expression on");
-  assert(ScalarExprOwner && "cannot create an expression on a moved graph");
-  auto *Node = new (ScalarExprAllocator.Allocate())
-      MAIRScalarExprNode(*ScalarExprOwner, MAIRScalarExpr::Kind::LLVMValue,
-                         *Value.getType(), APInt(1, 0), &Value, {});
+  auto *Node = new (Resources->ScalarExprAllocator.Allocate())
+      MAIRScalarExprNode(Resources->ScalarExprOwner,
+                         MAIRScalarExpr::Kind::LLVMValue, *Value.getType(),
+                         APInt(1, 0), &Value, {});
   return MAIRScalarExpr(*Node);
 }
 
@@ -1344,10 +1352,10 @@ MAIRScalarExpr MAIRGraph::createUnaryExpr(MAIRScalarExpr::Kind Kind,
                                           Type &ResultType,
                                           MAIRScalarExpr Operand) {
   assertLive("create an expression on");
-  assert(ScalarExprOwner && "cannot create an expression on a moved graph");
   MAIRScalarExpr Operands[] = {Operand};
-  auto *Node = new (ScalarExprAllocator.Allocate()) MAIRScalarExprNode(
-      *ScalarExprOwner, Kind, ResultType, APInt(1, 0), nullptr, Operands);
+  auto *Node = new (Resources->ScalarExprAllocator.Allocate())
+      MAIRScalarExprNode(Resources->ScalarExprOwner, Kind, ResultType,
+                         APInt(1, 0), nullptr, Operands);
   return MAIRScalarExpr(*Node);
 }
 
@@ -1355,16 +1363,16 @@ MAIRScalarExpr MAIRGraph::createBinaryExpr(MAIRScalarExpr::Kind Kind,
                                            Type &ResultType, MAIRScalarExpr LHS,
                                            MAIRScalarExpr RHS) {
   assertLive("create an expression on");
-  assert(ScalarExprOwner && "cannot create an expression on a moved graph");
   MAIRScalarExpr Operands[] = {LHS, RHS};
-  auto *Node = new (ScalarExprAllocator.Allocate()) MAIRScalarExprNode(
-      *ScalarExprOwner, Kind, ResultType, APInt(1, 0), nullptr, Operands);
+  auto *Node = new (Resources->ScalarExprAllocator.Allocate())
+      MAIRScalarExprNode(Resources->ScalarExprOwner, Kind, ResultType,
+                         APInt(1, 0), nullptr, Operands);
   return MAIRScalarExpr(*Node);
 }
 
 bool MAIRGraph::ownsScalarExpr(MAIRScalarExpr Expr) const {
   assertLive("query");
-  return ScalarExprOwner && Expr.getOwner() == ScalarExprOwner.get();
+  return Resources && Expr.getOwner() == &Resources->ScalarExprOwner;
 }
 
 MAIRGraph::iterator MAIRGraph::erase(ProgramPoint &PP) {
@@ -1423,15 +1431,17 @@ MAIRGraph::iterator MAIRGraph::erase(ProgramPoint &PP) {
 
 void MAIRGraph::clearStorage() {
   GraphAllocator.DestroyAll();
-  ScalarExprAllocator.DestroyAll();
-  MemoryObjectAllocator.DestroyAll();
   ProgramPoints.clear();
-  MemoryObjects.clear();
+  if (OwnedResources) {
+    Resources->ScalarExprAllocator.DestroyAll();
+    Resources->MemoryObjectAllocator.DestroyAll();
+    Resources->MemoryObjects.clear();
+    Resources->NextProgramPointID = 0;
+  }
   BBEntryRepresentatives.clear();
   BBExitRepresentatives.clear();
   NumProgramPoints = 0;
   NumEdges = 0;
-  NextProgramPointID = 0;
 }
 
 void MAIRGraph::clear() {
@@ -1595,12 +1605,12 @@ bool MAIRGraph::isAncestor(const ProgramPoint &Ancestor,
 
 MemoryObject *MAIRGraph::getMemoryObject(const Value &Base) {
   assertLive("query");
-  return MemoryObjects.lookup(&Base);
+  return Resources->MemoryObjects.lookup(&Base);
 }
 
 const MemoryObject *MAIRGraph::getMemoryObject(const Value &Base) const {
   assertLive("query");
-  return MemoryObjects.lookup(&Base);
+  return Resources->MemoryObjects.lookup(&Base);
 }
 
 std::string MAIRGraph::toString() const {

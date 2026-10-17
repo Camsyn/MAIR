@@ -75,6 +75,7 @@ bool isInterestingMop(const Instruction &I) {
          isMaskedMemoryIntrinsic(I);
 }
 
+
 } // namespace
 
 // Build the initial, unoptimized MAIR graph for one LLVM function.
@@ -1038,6 +1039,13 @@ ProgramPoint::ProgramPoint(StringRef N, ProgramPointSite S, ProgramPointGuard G)
 
 ProgramPoint::~ProgramPoint() { ObservationAllocator.DestroyAll(); }
 
+LoopProgramPoint::LoopProgramPoint(StringRef Name, ProgramPointSite Site,
+                                   BoundaryKind Kind, MAIRGraph &LoopGraph)
+    : ProgramPoint(Name, std::move(Site), AlwaysGuard{}), Boundary(Kind),
+      Body(&LoopGraph) {
+  PointKind = ProgramPoint::Kind::Loop;
+}
+
 Observation &ProgramPoint::createObservation(ArrayRef<Instruction *> Insts,
                                              const MemoryRegion &Region,
                                              AccessKind Kind,
@@ -1072,6 +1080,8 @@ bool ProgramPoint::hasParent(const ProgramPoint &PP, PPEdgeKind Kind) const {
 
 bool ProgramPoint::hasCompatibleMergeSemantics(
     const ProgramPoint &Other) const {
+  if (isLoopProgramPoint() || Other.isLoopProgramPoint())
+    return false;
   if (Guard != Other.Guard)
     return false;
   if (!isEdgeSite() && !Other.isEdgeSite())
@@ -1142,6 +1152,11 @@ std::string ProgramPoint::toString() const {
 
 void ProgramPoint::print(raw_ostream &OS) const {
   OS << Name << ": ";
+  if (const auto *LoopPP = dyn_cast<LoopProgramPoint>(this)) {
+    OS << (LoopPP->isLoopPreheader() ? "loop-preheader=" : "loop-exit=");
+    OS << getPrintedValueName(*LoopPP->getLoopGraph().getLoop()->getHeader());
+    OS << ", ";
+  }
   if (isEdgeSite() || !hasAlwaysGuard()) {
     OS << "site=";
     Site.print(OS);
@@ -1198,18 +1213,34 @@ MAIRGraph::MAIRGraph(Function &Func, MAIROptimizationConfig Config)
   MutableF = &Func;
 }
 
+MAIRGraph::MAIRGraph(MAIRGraph &ParentGraph, const Loop &Loop)
+    : F(ParentGraph.F), MutableF(ParentGraph.MutableF),
+      OptimizationConfig(ParentGraph.OptimizationConfig),
+      Resources(ParentGraph.Resources), Parent(&ParentGraph), ScopeLoop(&Loop) {
+}
+
 MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
     : F(Other.F), MutableF(Other.MutableF), GraphState(Other.GraphState),
       OptimizationConfig(Other.OptimizationConfig),
       GraphAllocator(std::move(Other.GraphAllocator)),
+      LoopPointAllocator(std::move(Other.LoopPointAllocator)),
       OwnedResources(std::move(Other.OwnedResources)),
       Resources(Other.Resources), Analyses(std::move(Other.Analyses)),
+      Parent(Other.Parent), ScopeLoop(Other.ScopeLoop),
+      ChildGraphs(std::move(Other.ChildGraphs)),
+      LoopPreheader(Other.LoopPreheader), LoopExits(std::move(Other.LoopExits)),
+      ForwardBarrier(Other.ForwardBarrier),
+      BackwardBarrier(Other.BackwardBarrier),
       BBEntryRepresentatives(std::move(Other.BBEntryRepresentatives)),
       BBExitRepresentatives(std::move(Other.BBExitRepresentatives)),
       ProgramPoints(std::move(Other.ProgramPoints)),
       NumProgramPoints(Other.NumProgramPoints), NumEdges(Other.NumEdges) {
+  if (Parent)
+    report_fatal_error("cannot move a MAIR loop graph outside its owner");
   for (ProgramPoint &PP : ProgramPoints)
     PP.setParent(this);
+  for (auto &Child : ChildGraphs)
+    Child->Parent = this;
   Other.F = nullptr;
   Other.MutableF = nullptr;
   Other.Resources = nullptr;
@@ -1220,15 +1251,24 @@ MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
 MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   if (this == &Other)
     return *this;
+  if (Parent || Other.Parent)
+    report_fatal_error("cannot move a MAIR loop graph outside its owner");
   clearStorage();
   F = Other.F;
   MutableF = Other.MutableF;
   GraphState = Other.GraphState;
   OptimizationConfig = Other.OptimizationConfig;
   GraphAllocator = std::move(Other.GraphAllocator);
+  LoopPointAllocator = std::move(Other.LoopPointAllocator);
   OwnedResources = std::move(Other.OwnedResources);
   Resources = Other.Resources;
   Analyses = std::move(Other.Analyses);
+  ScopeLoop = Other.ScopeLoop;
+  ChildGraphs = std::move(Other.ChildGraphs);
+  LoopPreheader = Other.LoopPreheader;
+  LoopExits = std::move(Other.LoopExits);
+  ForwardBarrier = Other.ForwardBarrier;
+  BackwardBarrier = Other.BackwardBarrier;
   BBEntryRepresentatives = std::move(Other.BBEntryRepresentatives);
   BBExitRepresentatives = std::move(Other.BBExitRepresentatives);
   ProgramPoints = std::move(Other.ProgramPoints);
@@ -1236,6 +1276,8 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   NumEdges = Other.NumEdges;
   for (ProgramPoint &PP : ProgramPoints)
     PP.setParent(this);
+  for (auto &Child : ChildGraphs)
+    Child->Parent = this;
   Other.F = nullptr;
   Other.MutableF = nullptr;
   Other.Resources = nullptr;
@@ -1246,9 +1288,76 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
 
 MAIRGraph::~MAIRGraph() { clearStorage(); }
 
+SmallVector<MAIRGraph *, 8> MAIRGraph::graphs() {
+  assertLive("iterate");
+  SmallVector<MAIRGraph *, 8> Result;
+  SmallVector<MAIRGraph *, 8> Pending{this};
+  while (!Pending.empty()) {
+    MAIRGraph *Graph = Pending.pop_back_val();
+    Result.push_back(Graph);
+    for (const auto &Child : llvm::reverse(Graph->ChildGraphs))
+      Pending.push_back(Child.get());
+  }
+  return Result;
+}
+
+SmallVector<const MAIRGraph *, 8> MAIRGraph::graphs() const {
+  assertLive("iterate");
+  SmallVector<const MAIRGraph *, 8> Result;
+  SmallVector<const MAIRGraph *, 8> Pending{this};
+  while (!Pending.empty()) {
+    const MAIRGraph *Graph = Pending.pop_back_val();
+    Result.push_back(Graph);
+    for (const auto &Child : llvm::reverse(Graph->ChildGraphs))
+      Pending.push_back(Child.get());
+  }
+  return Result;
+}
+
+SmallVector<ProgramPoint *, 16> MAIRGraph::allProgramPoints() {
+  SmallVector<ProgramPoint *, 16> Result;
+  for (MAIRGraph *Graph : graphs())
+    for (ProgramPoint &PP : *Graph)
+      Result.push_back(&PP);
+  return Result;
+}
+
+SmallVector<const ProgramPoint *, 16> MAIRGraph::allProgramPoints() const {
+  SmallVector<const ProgramPoint *, 16> Result;
+  for (const MAIRGraph *Graph : graphs())
+    for (const ProgramPoint &PP : *Graph)
+      Result.push_back(&PP);
+  return Result;
+}
+
+MAIRGraph *MAIRGraph::getLoopGraph(const Loop &Loop) {
+  return const_cast<MAIRGraph *>(std::as_const(*this).getLoopGraph(Loop));
+}
+
+const MAIRGraph *MAIRGraph::getLoopGraph(const Loop &Loop) const {
+  for (const MAIRGraph *Graph : getRoot().graphs())
+    if (Graph->getLoop() == &Loop)
+      return Graph;
+  return nullptr;
+}
+
+bool MAIRGraph::containsBlock(const BasicBlock &BB) const {
+  assertLive("query");
+  return BB.getParent() == F;
+}
+
+void MAIRGraph::markConsumed() {
+  for (MAIRGraph *Graph : getRoot().graphs())
+    Graph->GraphState = State::ConsumedByInstantiation;
+}
+
 template <class T, class... Args>
 T &MAIRGraph::allocateNode(Args &&...ArgsPack) {
-  return *new (GraphAllocator.Allocate()) T(std::forward<Args>(ArgsPack)...);
+  if constexpr (std::is_same_v<T, LoopProgramPoint>)
+    return *new (LoopPointAllocator.Allocate())
+        T(std::forward<Args>(ArgsPack)...);
+  else
+    return *new (GraphAllocator.Allocate()) T(std::forward<Args>(ArgsPack)...);
 }
 
 std::string MAIRGraph::createProgramPointName() {
@@ -1323,6 +1432,17 @@ ProgramPoint &MAIRGraph::createProgramPoint(ProgramPointSite Site,
       createProgramPointName(), std::move(Site), std::move(Guard)));
 }
 
+LoopProgramPoint &
+MAIRGraph::createLoopProgramPoint(ProgramPointSite Site,
+                                  LoopProgramPoint::BoundaryKind Kind,
+                                  MAIRGraph &LoopGraph) {
+  assertLive("create a loop program point on");
+  auto &PP = allocateNode<LoopProgramPoint>(createProgramPointName(),
+                                            std::move(Site), Kind, LoopGraph);
+  addProgramPoint(PP);
+  return PP;
+}
+
 ProgramPoint &MAIRGraph::createEdgeProgramPoint(const BasicBlock &From,
                                                 const BasicBlock &To,
                                                 ProgramPointGuard Guard) {
@@ -1379,6 +1499,8 @@ MAIRGraph::iterator MAIRGraph::erase(ProgramPoint &PP) {
   assertLive("erase from");
   assert(PP.getParent() == this &&
          "ProgramPoint does not belong to this MAIRGraph");
+  if (PP.isLoopProgramPoint())
+    report_fatal_error("cannot erase a MAIR loop boundary");
   auto It = PP.getIterator();
   unsigned SelfEdges = 0;
   for (const ProgramPointEdge &Edge : PP.Children)
@@ -1430,7 +1552,9 @@ MAIRGraph::iterator MAIRGraph::erase(ProgramPoint &PP) {
 }
 
 void MAIRGraph::clearStorage() {
+  ChildGraphs.clear();
   GraphAllocator.DestroyAll();
+  LoopPointAllocator.DestroyAll();
   ProgramPoints.clear();
   if (OwnedResources) {
     Resources->ScalarExprAllocator.DestroyAll();
@@ -1442,10 +1566,14 @@ void MAIRGraph::clearStorage() {
   BBExitRepresentatives.clear();
   NumProgramPoints = 0;
   NumEdges = 0;
+  LoopPreheader = nullptr;
+  LoopExits.clear();
 }
 
 void MAIRGraph::clear() {
   assertLive("clear");
+  if (Parent)
+    report_fatal_error("cannot clear a MAIR loop graph outside its owner");
   clearStorage();
 }
 
@@ -1494,8 +1622,10 @@ MAIRGraph::getBBExitRepresentative(const BasicBlock &BB) const {
 
 void MAIRGraph::replaceProgramPoint(ProgramPoint &From, ProgramPoint &Into) {
   assertLive("replace program points in");
-  assert(From.getParent() == this && Into.getParent() == this &&
-         "replacement program points must belong to this graph");
+  if (From.getParent() != this || Into.getParent() != this)
+    report_fatal_error("replacement program points must belong to this graph");
+  if (From.isLoopProgramPoint() || Into.isLoopProgramPoint())
+    report_fatal_error("cannot replace a MAIR loop boundary");
   assert(Into.hasCompatibleMergeSemantics(From) &&
          "replacement program points have incompatible semantics");
   Into.mergeRepresentationFrom(From);
@@ -1509,8 +1639,10 @@ void MAIRGraph::replaceProgramPoint(ProgramPoint &From, ProgramPoint &Into) {
 
 void MAIRGraph::contractProgramPoint(ProgramPoint &Into, ProgramPoint &From) {
   assertLive("contract program points in");
-  assert(Into.getParent() == this && From.getParent() == this &&
-         "contracted program points must belong to this graph");
+  if (Into.getParent() != this || From.getParent() != this)
+    report_fatal_error("contracted program points must belong to this graph");
+  if (From.isLoopProgramPoint() || Into.isLoopProgramPoint())
+    report_fatal_error("cannot contract a MAIR loop boundary");
   assert(Into.hasCompatibleMergeSemantics(From) &&
          "contracted program points have incompatible semantics");
   assert(Into.hasChild(From, PPEdgeKind::PostDom) &&
@@ -1537,8 +1669,8 @@ void MAIRGraph::contractProgramPoint(ProgramPoint &Into, ProgramPoint &From) {
 
 void MAIRGraph::addEdge(ProgramPoint &From, ProgramPoint &To, PPEdgeKind Kind) {
   assertLive("add an edge to");
-  assert(From.getParent() == this && To.getParent() == this &&
-         "MAIRGraph edge endpoints must belong to this graph");
+  if (From.getParent() != this || To.getParent() != this)
+    report_fatal_error("MAIRGraph edge endpoints must belong to this graph");
   if (hasEdge(From, To, Kind))
     return;
   From.Children.push_back(ProgramPointEdge(To, Kind));
@@ -1570,6 +1702,8 @@ void MAIRGraph::removeEdge(ProgramPoint &From, ProgramPoint &To,
 bool MAIRGraph::hasEdge(const ProgramPoint &From, const ProgramPoint &To,
                         PPEdgeKind Kind) const {
   assertLive("query");
+  if (From.getParent() != this || To.getParent() != this)
+    return false;
   for (const ProgramPointEdge &Edge : From.children())
     if (&Edge.getNode() == &To && Edge.getKind() == Kind)
       return true;
@@ -1580,8 +1714,8 @@ bool MAIRGraph::isAncestor(const ProgramPoint &Ancestor,
                            const ProgramPoint &Descendant,
                            PPEdgeKind Kind) const {
   assertLive("query ancestry in");
-  assert(Ancestor.getParent() == this && Descendant.getParent() == this &&
-         "ancestry endpoints must belong to this graph");
+  if (Ancestor.getParent() != this || Descendant.getParent() != this)
+    return false;
   if (&Ancestor == &Descendant)
     return false;
 
@@ -1628,12 +1762,16 @@ void MAIRGraph::print(raw_ostream &OS) const {
     OS << " of fn ";
     OS << getPrintedValueName(*F);
   }
+  if (ScopeLoop)
+    OS << " of loop " << getPrintedValueName(*ScopeLoop->getHeader());
   OS << " {\n";
   for (const ProgramPoint &PP : ProgramPoints) {
     PP.print(OS);
     OS << "\n";
   }
   OS << "}\n\n";
+  for (const auto &Child : ChildGraphs)
+    Child->print(OS);
 }
 
 } // namespace mair

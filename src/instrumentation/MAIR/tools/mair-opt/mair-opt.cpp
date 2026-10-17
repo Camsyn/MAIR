@@ -163,8 +163,8 @@ int main(int argc, char **argv) {
         Graph.print(errs());
         return 1;
       }
-      GAM.clear(Graph, Graph.getFunction() ? Graph.getFunction()->getName()
-                                           : StringRef("<unknown>"));
+      for (MAIRGraph *Scope : Graph.graphs())
+        GAM.clear(*Scope, F.getName());
     }
 
     if (!DisableOutput && EmitDOT) {

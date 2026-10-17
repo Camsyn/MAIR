@@ -52,7 +52,8 @@ public:
       const llvm::SmallPtrSetImpl<const Observation *> &Targets) {
     assert(Graph && "MAOpt graph has not been built");
 
-    for (ProgramPoint &PP : *Graph) {
+    for (ProgramPoint *Point : Graph->allProgramPoints()) {
+      ProgramPoint &PP = *Point;
       for (auto It = PP.begin(); It != PP.end();) {
         if (Targets.contains(&*It))
           ++It;
@@ -79,7 +80,8 @@ public:
     if (!Graph->verify())
       return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                      "MAOpt produced an invalid MAIRGraph");
-    GAM.clear(*Graph, F.getName());
+    for (MAIRGraph *Scope : Graph->graphs())
+      GAM.clear(*Scope, F.getName());
     Optimized = true;
     rebuildProgramPointObservations();
     return llvm::Error::success();
@@ -114,6 +116,8 @@ public:
     return ProgramPointToObservations;
   }
 
+  bool hasModifiedIR() const { return ModifiedIR; }
+
   llvm::ArrayRef<const Observation *>
   getProgramPointObservations(const ProgramPoint &PP) const {
     assert(Graph && "MAOpt graph has not been built");
@@ -126,7 +130,8 @@ public:
 private:
   void rebuildProgramPointObservations() {
     ProgramPointToObservations.clear();
-    for (const ProgramPoint &PP : *Graph) {
+    for (const ProgramPoint *Point : Graph->allProgramPoints()) {
+      const ProgramPoint &PP = *Point;
       auto &Observations = ProgramPointToObservations[&PP];
       for (const Observation &Obs : PP)
         Observations.push_back(&Obs);
@@ -138,6 +143,7 @@ private:
   bool KeepFullDebug;
   MAIROptimizationConfig Config;
   bool Optimized = false;
+  bool ModifiedIR = false;
   std::unique_ptr<MAIRGraph> Graph;
   MAIRGraphAnalysisManager GAM;
   MAIRGraphPassManager PM;

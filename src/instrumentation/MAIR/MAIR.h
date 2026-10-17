@@ -84,6 +84,7 @@ class Observation;
 class MemoryObject;
 class MemoryUse;
 class ProgramPoint;
+class LoopProgramPoint;
 class MAIRScalarExpr;
 struct MAIRScalarExprNode;
 struct MAIRScalarExprOwner;
@@ -694,10 +695,10 @@ private:
 
 /// A program point (PP) owns a site, a guard, and a list of observations.
 /// Like a BasicBlock containing Instructions, this models containment only.
-class ProgramPoint final
-    : public ilist_node_with_parent<ProgramPoint, MAIRGraph,
-                                    ilist_parent<MAIRGraph>> {
+class ProgramPoint : public ilist_node_with_parent<ProgramPoint, MAIRGraph,
+                                                   ilist_parent<MAIRGraph>> {
 public:
+  enum class Kind : uint8_t { Ordinary, Loop };
   using SiteKind = ProgramPointSite::Kind;
   using ObservationListType =
       simple_ilist<Observation, ilist_parent<ProgramPoint>>;
@@ -711,6 +712,7 @@ private:
   friend class Observation;
 
   std::string Name;
+  Kind PointKind = Kind::Ordinary;
   ProgramPointSite Site;
   ProgramPointGuard Guard = AlwaysGuard{};
   SpecificBumpPtrAllocator<Observation> ObservationAllocator;
@@ -736,6 +738,8 @@ public:
   ProgramPoint &operator=(ProgramPoint &&) = delete;
 
   StringRef getName() const { return Name; }
+  Kind getKind() const { return PointKind; }
+  bool isLoopProgramPoint() const { return PointKind == Kind::Loop; }
   const ProgramPointSite &getSite() const { return Site; }
   const ProgramPointGuard &getGuard() const { return Guard; }
   const BasicBlock *getBasicBlock() const { return Site.getBasicBlock(); }
@@ -793,6 +797,7 @@ public:
 private:
   friend class MAIRGraph;
   friend class MAIRVerifier;
+  friend class LoopProgramPoint;
 
   static ObservationListType ProgramPoint::*getSublistAccess(Observation *) {
     return &ProgramPoint::Observations;
@@ -801,6 +806,29 @@ private:
                                  const MemoryRegion &Region, AccessKind Kind,
                                  AccessProperty Properties);
   void mergeRepresentationFrom(const ProgramPoint &Other);
+};
+
+class LoopProgramPoint final : public ProgramPoint {
+public:
+  enum class BoundaryKind : uint8_t { LoopPreheader, LoopExit };
+
+private:
+  BoundaryKind Boundary;
+  MAIRGraph *Body = nullptr;
+
+public:
+  LoopProgramPoint(StringRef Name, ProgramPointSite Site, BoundaryKind Kind,
+                   MAIRGraph &LoopGraph);
+  BoundaryKind getBoundaryKind() const { return Boundary; }
+  bool isLoopPreheader() const {
+    return Boundary == BoundaryKind::LoopPreheader;
+  }
+  bool isLoopExit() const { return Boundary == BoundaryKind::LoopExit; }
+  MAIRGraph &getLoopGraph() { return *Body; }
+  const MAIRGraph &getLoopGraph() const { return *Body; }
+  static bool classof(const ProgramPoint *PP) {
+    return PP->isLoopProgramPoint();
+  }
 };
 
 class MAIRGraph final {
@@ -846,9 +874,17 @@ private:
   State GraphState = State::Live;
   MAIROptimizationConfig OptimizationConfig;
   SpecificBumpPtrAllocator<ProgramPoint> GraphAllocator;
+  SpecificBumpPtrAllocator<LoopProgramPoint> LoopPointAllocator;
   std::unique_ptr<MAIRGraphResources> OwnedResources;
   MAIRGraphResources *Resources = nullptr;
   FunctionAnalysisState Analyses;
+  MAIRGraph *Parent = nullptr;
+  const llvm::Loop *ScopeLoop = nullptr;
+  SmallVector<std::unique_ptr<MAIRGraph>, 2> ChildGraphs;
+  LoopProgramPoint *LoopPreheader = nullptr;
+  SmallVector<LoopProgramPoint *, 2> LoopExits;
+  bool ForwardBarrier = false;
+  bool BackwardBarrier = false;
   DenseMap<const BasicBlock *, ProgramPoint *> BBEntryRepresentatives;
   DenseMap<const BasicBlock *, ProgramPoint *> BBExitRepresentatives;
   ProgramPointListType ProgramPoints;
@@ -870,26 +906,48 @@ public:
   ~MAIRGraph();
 
   const Function *getFunction() const { return F; }
+  MAIRGraph *getParent() { return Parent; }
+  const MAIRGraph *getParent() const { return Parent; }
+  MAIRGraph &getRoot() { return Parent ? Parent->getRoot() : *this; }
+  const MAIRGraph &getRoot() const {
+    return Parent ? Parent->getRoot() : *this;
+  }
+  const llvm::Loop *getLoop() const { return ScopeLoop; }
+  ArrayRef<std::unique_ptr<MAIRGraph>> children() const { return ChildGraphs; }
+  SmallVector<MAIRGraph *, 8> graphs();
+  SmallVector<const MAIRGraph *, 8> graphs() const;
+  SmallVector<ProgramPoint *, 16> allProgramPoints();
+  SmallVector<const ProgramPoint *, 16> allProgramPoints() const;
+  MAIRGraph *getLoopGraph(const llvm::Loop &Loop);
+  const MAIRGraph *getLoopGraph(const llvm::Loop &Loop) const;
+  LoopProgramPoint *getLoopPreheader() { return LoopPreheader; }
+  const LoopProgramPoint *getLoopPreheader() const { return LoopPreheader; }
+  ArrayRef<LoopProgramPoint *> getLoopExits() const { return LoopExits; }
+  bool hasForwardBarrier() const { return ForwardBarrier; }
+  bool hasBackwardBarrier() const { return BackwardBarrier; }
+  bool containsBlock(const BasicBlock &BB) const;
   const MAIROptimizationConfig &getOptimizationConfig() const {
     return OptimizationConfig;
   }
   Function *getMutableFunction() { return MutableF; }
   const DominatorTree &getDominatorTree() const {
     assertLive("query dominance analysis");
-    assert(Analyses.DT && "MAIRGraph was constructed without a dominator tree");
-    return *Analyses.DT;
+    assert(getRoot().Analyses.DT &&
+           "MAIRGraph was constructed without a dominator tree");
+    return *getRoot().Analyses.DT;
   }
   const PostDominatorTree &getPostDominatorTree() const {
     assertLive("query post-dominance analysis");
-    assert(Analyses.PDT &&
+    assert(getRoot().Analyses.PDT &&
            "MAIRGraph was constructed without a post-dominator tree");
-    return *Analyses.PDT;
+    return *getRoot().Analyses.PDT;
   }
-  bool hasLoopInfo() const { return Analyses.LI != nullptr; }
+  bool hasLoopInfo() const { return getRoot().Analyses.LI != nullptr; }
   const LoopInfo &getLoopInfo() const {
     assertLive("query loop analysis");
-    assert(Analyses.LI && "MAIRGraph was constructed without loop information");
-    return *Analyses.LI;
+    assert(getRoot().Analyses.LI &&
+           "MAIRGraph was constructed without loop information");
+    return *getRoot().Analyses.LI;
   }
   bool isLive() const { return GraphState == State::Live; }
   bool isConsumed() const {
@@ -1001,8 +1059,12 @@ public:
 
 private:
   void assertLive(StringRef Operation) const;
-  void markConsumed() { GraphState = State::ConsumedByInstantiation; }
+  void markConsumed();
   void clearStorage();
+  MAIRGraph(MAIRGraph &ParentGraph, const llvm::Loop &Loop);
+  LoopProgramPoint &createLoopProgramPoint(ProgramPointSite Site,
+                                           LoopProgramPoint::BoundaryKind Kind,
+                                           MAIRGraph &LoopGraph);
 
   template <class T, class... Args> T &allocateNode(Args &&...ArgsPack);
   std::string createProgramPointName();

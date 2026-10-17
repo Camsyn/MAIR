@@ -22,7 +22,14 @@ MAIRStat MAIRStat::compute(const MAIRGraph &G) {
 }
 
 MAIRStat MAIRStatAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &) {
-  return MAIRStat::compute(G);
+  unsigned NumProgramPoints = 0;
+  unsigned NumObservations = 0;
+  for (const MAIRGraph *Scope : G.graphs()) {
+    MAIRStat Local = MAIRStat::compute(*Scope);
+    NumProgramPoints += Local.getNumProgramPoints();
+    NumObservations += Local.getNumObservations();
+  }
+  return MAIRStat(NumProgramPoints, NumObservations);
 }
 
 PreservedAnalyses MAIRStatPrinterPass::run(MAIRGraph &G,

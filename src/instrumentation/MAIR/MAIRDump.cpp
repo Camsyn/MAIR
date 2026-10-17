@@ -1,5 +1,6 @@
 #include "MAIR/MAIRDump.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/AssemblyAnnotationWriter.h"
@@ -14,6 +15,14 @@
 using namespace llvm;
 
 namespace mair {
+
+struct MAIRGraphDOTView {
+  const MAIRGraph &Graph;
+  SmallVector<const ProgramPoint *, 16> Nodes;
+
+  explicit MAIRGraphDOTView(const MAIRGraph &Graph)
+      : Graph(Graph), Nodes(Graph.allProgramPoints()) {}
+};
 
 static StringRef getProgramPointSiteKindName(ProgramPoint::SiteKind Kind) {
   switch (Kind) {
@@ -41,15 +50,20 @@ static StringRef getProgramPointEdgeKindName(PPEdgeKind Kind) {
 
 namespace {
 class MAIRLLVMWriter final : public AssemblyAnnotationWriter {
-  ArrayRef<const MAIRGraph *> Graphs;
+  DenseMap<const Instruction *, SmallVector<const ProgramPoint *, 2>>
+      AnchoredProgramPoints;
   void emitAnchoredProgramPoints(const Instruction *I,
                                  formatted_raw_ostream &OS) const;
   void emitProgramPointLine(const ProgramPoint &PP,
                             formatted_raw_ostream &OS) const;
-  const MAIRGraph *findGraph(const Function *F) const;
 
 public:
-  explicit MAIRLLVMWriter(ArrayRef<const MAIRGraph *> Gs) : Graphs(Gs) {}
+  explicit MAIRLLVMWriter(ArrayRef<const MAIRGraph *> Graphs) {
+    for (const MAIRGraph *Graph : Graphs)
+      if (Graph)
+        for (const ProgramPoint *PP : Graph->allProgramPoints())
+          AnchoredProgramPoints[&PP->getAnchor()].push_back(PP);
+  }
 
   void emitInstructionAnnot(const Instruction *I,
                             formatted_raw_ostream &OS) override;
@@ -61,25 +75,48 @@ public:
 namespace llvm {
 
 template <>
-struct DOTGraphTraits<const mair::MAIRGraph *> : public DefaultDOTGraphTraits {
+struct GraphTraits<const mair::MAIRGraphDOTView *>
+    : GraphTraits<const mair::ProgramPoint *> {
+  using nodes_iterator =
+      SmallVector<const mair::ProgramPoint *, 16>::const_iterator;
+
+  static NodeRef getEntryNode(const mair::MAIRGraphDOTView *View) {
+    return View->Nodes.empty() ? nullptr : View->Nodes.front();
+  }
+  static nodes_iterator nodes_begin(const mair::MAIRGraphDOTView *View) {
+    return View->Nodes.begin();
+  }
+  static nodes_iterator nodes_end(const mair::MAIRGraphDOTView *View) {
+    return View->Nodes.end();
+  }
+  static size_t size(const mair::MAIRGraphDOTView *View) {
+    return View->Nodes.size();
+  }
+};
+
+template <>
+struct DOTGraphTraits<const mair::MAIRGraphDOTView *>
+    : public DefaultDOTGraphTraits {
   using ChildIteratorType =
       GraphTraits<const mair::ProgramPoint *>::ChildIteratorType;
 
   explicit DOTGraphTraits(bool IsSimple = false)
       : DefaultDOTGraphTraits(IsSimple) {}
 
-  static std::string getGraphName(const mair::MAIRGraph *Graph) {
-    if (Graph && Graph->getFunction())
-      return ("MAIRGraph for " + Graph->getFunction()->getName()).str();
+  static std::string getGraphName(const mair::MAIRGraphDOTView *View) {
+    if (View && View->Graph.getFunction())
+      return ("MAIRGraph for " + View->Graph.getFunction()->getName()).str();
     return "MAIRGraph";
   }
 
   std::string getNodeLabel(const mair::ProgramPoint *PP,
-                           const mair::MAIRGraph *) {
+                           const mair::MAIRGraphDOTView *) {
     std::string Label;
     raw_string_ostream OS(Label);
     OS << PP->getName() << "\\n";
     OS << mair::getProgramPointSiteKindName(PP->getSiteKind());
+    if (const auto *LoopPP = dyn_cast<mair::LoopProgramPoint>(PP))
+      OS << (LoopPP->isLoopPreheader() ? " loop.preheader" : " loop.exit");
     if (const BasicBlock *BB = PP->getBasicBlock())
       OS << " in " << BB->getName();
     if (PP->isEdgeSite() || !PP->hasAlwaysGuard()) {
@@ -107,7 +144,7 @@ struct DOTGraphTraits<const mair::MAIRGraph *> : public DefaultDOTGraphTraits {
   }
 
   static std::string getNodeAttributes(const mair::ProgramPoint *PP,
-                                       const mair::MAIRGraph *) {
+                                       const mair::MAIRGraphDOTView *) {
     switch (PP->getSiteKind()) {
     case mair::ProgramPoint::SiteKind::MemoryInst:
       return "style=filled, fillcolor=lightyellow";
@@ -123,7 +160,7 @@ struct DOTGraphTraits<const mair::MAIRGraph *> : public DefaultDOTGraphTraits {
 
   static std::string getEdgeAttributes(const mair::ProgramPoint *,
                                        ChildIteratorType I,
-                                       const mair::MAIRGraph *) {
+                                       const mair::MAIRGraphDOTView *) {
     std::string Attrs;
     raw_string_ostream OS(Attrs);
     mair::PPEdgeKind Kind = I.getKind();
@@ -139,13 +176,6 @@ struct DOTGraphTraits<const mair::MAIRGraph *> : public DefaultDOTGraphTraits {
 } // namespace llvm
 
 namespace mair {
-
-const MAIRGraph *MAIRLLVMWriter::findGraph(const Function *F) const {
-  for (const MAIRGraph *Graph : Graphs)
-    if (Graph && Graph->getFunction() == F)
-      return Graph;
-  return nullptr;
-}
 
 static const Function &getFunctionForDump(const MAIRGraph &Graph) {
   const Function *F = Graph.getFunction();
@@ -169,12 +199,11 @@ static const Module &getModuleForDump(ArrayRef<const MAIRGraph *> Graphs) {
 
 void MAIRLLVMWriter::emitAnchoredProgramPoints(
     const Instruction *I, formatted_raw_ostream &OS) const {
-  const MAIRGraph *Graph = findGraph(I->getFunction());
-  if (!Graph)
+  auto Points = AnchoredProgramPoints.find(I);
+  if (Points == AnchoredProgramPoints.end())
     return;
-  for (const ProgramPoint &PP : *Graph)
-    if (&PP.getAnchor() == I)
-      emitProgramPointLine(PP, OS);
+  for (const ProgramPoint *PP : Points->second)
+    emitProgramPointLine(*PP, OS);
 }
 
 void MAIRLLVMWriter::emitProgramPointLine(const ProgramPoint &PP,
@@ -195,7 +224,8 @@ void MAIRLLVMWriter::emitInstructionAnnot(const Instruction *I,
 void dumpMAIR(const MAIRGraph &Graph, raw_ostream &OS) { Graph.print(OS); }
 
 void dumpDOT(const MAIRGraph &Graph, raw_ostream &OS) {
-  WriteGraph(OS, &Graph, /*ShortNames=*/false);
+  const MAIRGraphDOTView View(Graph);
+  WriteGraph(OS, &View, /*ShortNames=*/false);
 }
 
 void dumpLLVM(const MAIRGraph &Graph, raw_ostream &OS) {

@@ -28,14 +28,14 @@ bool hasPinnedObservation(const ProgramPoint &PP) {
 
 MergeCandidate findMergeCandidate(MAIRGraph &G) {
   for (ProgramPoint &PP1 : G) {
-    if (hasPinnedObservation(PP1))
+    if (isa<LoopProgramPoint>(PP1) || hasPinnedObservation(PP1))
       continue;
     for (const ProgramPointEdge &Edge : PP1.children()) {
       if (!Edge.isDom())
         continue;
 
       ProgramPoint &PP2 = Edge.getNode();
-      if (&PP1 == &PP2)
+      if (&PP1 == &PP2 || isa<LoopProgramPoint>(PP2))
         continue;
       if (!PP1.hasCompatibleMergeSemantics(PP2))
         continue;

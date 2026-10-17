@@ -154,7 +154,8 @@ Expected<MAIRMaterializationPlan> buildPlan(const MAIRGraph &Graph, Function &F,
   if (!Graph.verify())
     return materializationError("cannot instantiate an invalid MAIRGraph");
 
-  for (const ProgramPoint &PP : Graph) {
+  for (const ProgramPoint *Point : Graph.allProgramPoints()) {
+    const ProgramPoint &PP = *Point;
     if (PP.empty())
       continue;
 
@@ -362,6 +363,8 @@ EdgeCursor *findEdgeCursor(SmallVectorImpl<EdgeCursor> &Cursors,
 Expected<MAIRInstantiationResult>
 MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
                        MAIRObservationBackend &Backend) {
+  if (getParent())
+    return materializationError("instantiate requires the root MAIRGraph");
   if (!isLive())
     return materializationError("graph already consumed");
   if (!MutableF)

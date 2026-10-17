@@ -150,6 +150,8 @@ public:
 
 private:
   void verifyProgramPoint(const ProgramPoint &PP);
+  void verifyLoopHierarchy();
+  void verifyLoopProgramPoint(const LoopProgramPoint &PP);
   void verifyObservation(const ProgramPoint &PP, const Observation &Obs);
   void verifyGuard(const ProgramPoint &PP);
   void verifyScalarExpr(const MAIRScalarExpr &Expr, const Observation &Obs,
@@ -181,10 +183,107 @@ bool MAIRVerifier::verify(const MAIRGraph &G) {
 
   for (const ProgramPoint &PP : G.ProgramPoints)
     verifyProgramPoint(PP);
+  verifyLoopHierarchy();
   verifyBoundaryRepresentatives();
   verifyCounters();
 
   return !Broken;
+}
+
+void MAIRVerifier::verifyLoopHierarchy() {
+  if (Graph->Parent) {
+    Check(Graph->ScopeLoop, "child graph has no loop");
+    Check(Graph->Resources == Graph->Parent->Resources,
+          "child graph does not share its parent's resources");
+    Check(!Graph->OwnedResources, "child graph owns separate resources");
+    Check(Graph->F == Graph->Parent->F,
+          "child graph belongs to another function");
+    if (Graph->ScopeLoop)
+      Check(Graph->ScopeLoop->getParentLoop() == Graph->Parent->ScopeLoop,
+            "child graph loop does not match parent scope");
+    if (CheckRequired(Graph->LoopPreheader,
+                      "loop graph has no preheader boundary")) {
+      Check(Graph->LoopPreheader->getParent() == Graph->Parent,
+            "loop preheader boundary does not belong to parent graph");
+      Check(Graph->LoopPreheader->isLoopPreheader() &&
+                &Graph->LoopPreheader->getLoopGraph() == Graph,
+            "loop graph preheader boundary refers to another loop");
+    }
+    SmallPtrSet<const BasicBlock *, 4> ExitBlocks;
+    for (const LoopProgramPoint *Exit : Graph->LoopExits) {
+      if (!CheckRequired(Exit, "loop graph has a null exit boundary"))
+        continue;
+      Check(Exit->getParent() == Graph->Parent,
+            "loop exit boundary does not belong to parent graph");
+      Check(Exit->isLoopExit() && &Exit->getLoopGraph() == Graph,
+            "loop graph exit boundary refers to another loop");
+      Check(ExitBlocks.insert(Exit->getBasicBlock()).second,
+            "loop graph has duplicate boundaries for an exit block");
+    }
+    if (Graph->ScopeLoop) {
+      SmallVector<BasicBlock *, 4> ExpectedExits;
+      Graph->ScopeLoop->getUniqueExitBlocks(ExpectedExits);
+      Check(ExpectedExits.size() == ExitBlocks.size(),
+            "loop graph exit boundaries do not match loop exits");
+      for (const BasicBlock *Exit : ExpectedExits)
+        Check(ExitBlocks.contains(Exit),
+              "loop graph is missing a loop exit boundary");
+    }
+  } else {
+    Check(!Graph->ScopeLoop, "root graph has a loop scope");
+    Check(Graph->OwnedResources &&
+              Graph->Resources == Graph->OwnedResources.get(),
+          "root graph does not own its resources");
+  }
+  SmallPtrSet<const llvm::Loop *, 4> SeenLoops;
+  for (const auto &Child : Graph->ChildGraphs) {
+    if (!CheckRequired(Child.get(), "graph has a null child graph"))
+      continue;
+    Check(Child->Parent == Graph, "child graph parent does not match owner");
+    Check(SeenLoops.insert(Child->ScopeLoop).second,
+          "graph has duplicate child graphs for one loop");
+    unsigned Preheaders = 0;
+    unsigned Exits = 0;
+    for (const ProgramPoint &PP : Graph->ProgramPoints) {
+      const auto *Boundary = dyn_cast<LoopProgramPoint>(&PP);
+      if (!Boundary || &Boundary->getLoopGraph() != Child.get())
+        continue;
+      Preheaders += Boundary->isLoopPreheader();
+      Exits += Boundary->isLoopExit();
+    }
+    Check(Preheaders == 1, "child graph must have one preheader boundary");
+    Check(Exits == Child->LoopExits.size(),
+          "child graph exit boundary list does not match parent points");
+  }
+}
+
+void MAIRVerifier::verifyLoopProgramPoint(const LoopProgramPoint &PP) {
+  const MAIRGraph &Body = PP.getLoopGraph();
+  Check(Body.getParent() == Graph,
+        "loop boundary body is not a child of its containing graph", PP);
+  Check(llvm::any_of(Graph->ChildGraphs,
+                     [&](const auto &Child) { return Child.get() == &Body; }),
+        "loop boundary body is not owned by its containing graph", PP);
+  const llvm::Loop *Loop = Body.getLoop();
+  if (!CheckRequired(Loop, "loop boundary body has no loop", PP))
+    return;
+  if (PP.isLoopPreheader()) {
+    Check(PP.isBasicBlockExitSite(), "loop preheader is not a BB-exit site",
+          PP);
+    Check(PP.getBasicBlock() == Loop->getLoopPreheader(),
+          "loop preheader is not at its loop's preheader", PP);
+    Check(Body.getLoopPreheader() == &PP,
+          "loop preheader is not registered in its body", PP);
+  } else {
+    Check(PP.isBasicBlockEntrySite(), "loop exit is not a BB-entry site", PP);
+    Check(!Loop->contains(PP.getBasicBlock()) &&
+              llvm::any_of(
+                  predecessors(PP.getBasicBlock()),
+                  [&](const BasicBlock *Pred) { return Loop->contains(Pred); }),
+          "loop exit is not at an exit block of its loop", PP);
+    Check(llvm::is_contained(Body.getLoopExits(), &PP),
+          "loop exit is not registered in its body", PP);
+  }
 }
 
 void MAIRVerifier::buildEdgeIndex() {
@@ -237,6 +336,11 @@ void MAIRVerifier::verifyProgramPoint(const ProgramPoint &PP) {
   if (!CheckRequired(PP.getParent() == Graph,
                      "program point parent does not match graph", PP))
     return;
+  if (const auto *LoopPP = dyn_cast<LoopProgramPoint>(&PP))
+    verifyLoopProgramPoint(*LoopPP);
+  else
+    Check(Graph->containsBlock(*PP.getBasicBlock()),
+          "ordinary program point is outside its graph's loop scope", PP);
 
   if (PP.isEdgeSite()) {
     const BasicBlock *From = PP.getEdgeFrom();
@@ -251,6 +355,8 @@ void MAIRVerifier::verifyProgramPoint(const ProgramPoint &PP) {
           PP, From, To);
     Check(From->getParent() == Graph->getFunction(),
           "edge site is outside graph function", PP, From, To);
+    Check(Graph->containsBlock(*From) && Graph->containsBlock(*To),
+          "edge site crosses graph loop scopes", PP, From, To);
     Check(llvm::is_contained(successors(From), To),
           "edge site is not a current CFG edge", PP, From, To);
     Check(&PP.getAnchor() == From->getTerminator(),
@@ -302,7 +408,7 @@ void MAIRVerifier::verifyGuard(const ProgramPoint &PP) {
   Check(!Provenance.empty(), "execution guard has empty provenance", PP);
   SmallPtrSet<const Instruction *, 8> Seen;
   const BasicBlock *Reset = Guard->getResetBlock();
-  const DominatorTree *DT = Graph->Analyses.DT;
+  const DominatorTree *DT = Graph->getRoot().Analyses.DT;
   if (Reset) {
     if (!CheckRequired(Reset->getParent() == Graph->getFunction(),
                        "execution guard reset block is outside graph function",
@@ -605,8 +711,18 @@ bool MAIRGraph::verify(raw_ostream *OS) const {
   }
   // Keep the no-diagnostics path cheap; printing MAIR objects is relatively
   // expensive and should only happen on explicit request.
-  MAIRVerifier Verifier(OS);
-  return Verifier.verify(*this);
+  bool Valid = true;
+  for (const MAIRGraph *Graph : graphs()) {
+    if (!Graph->isLive()) {
+      if (OS)
+        *OS << "MAIR loop graph is not live\n";
+      Valid = false;
+      continue;
+    }
+    MAIRVerifier Verifier(OS);
+    Valid &= Verifier.verify(*Graph);
+  }
+  return Valid;
 }
 
 } // namespace mair

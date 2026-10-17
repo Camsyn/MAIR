@@ -139,6 +139,10 @@ bool moveOneCommonObservation(MAIRGraph &G, const BasicBlock &BB,
   NeighborBlocks NeighborBBs;
   if (!collectNeighborBlocks(BB, Direction, NeighborBBs))
     return false;
+  if (!all_of(NeighborBBs, [&](const BasicBlock *Neighbor) {
+        return G.containsBlock(*Neighbor);
+      }))
+    return false;
 
   PPEdgeKind Kind = isSink(Direction) ? PPEdgeKind::PostDom : PPEdgeKind::Dom;
 
@@ -180,6 +184,8 @@ bool moveCommonObservationsToFixedPoint(MAIRGraph &G,
   while (true) {
     bool Moved = false;
     for (const BasicBlock &BB : *F) {
+      if (!G.containsBlock(BB))
+        continue;
       if (!moveOneCommonObservation(G, BB, Direction))
         continue;
       Moved = true;

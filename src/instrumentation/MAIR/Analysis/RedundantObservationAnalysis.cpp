@@ -76,6 +76,8 @@ RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
   SmallVector<PendingFact, 32> Worklist;
   for (const ProgramPoint &PP : G) {
     Result.InSets.try_emplace(&PP);
+    if (!PP.hasAlwaysGuard())
+      continue;
     for (const Observation &Obs : PP) {
       if (!Obs.isDeletable())
         continue;

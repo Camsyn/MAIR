@@ -153,8 +153,11 @@ bool moveOneCommonObservation(MAIRGraph &G, const BasicBlock &BB,
   // 3. Require every neighbor boundary to share the typed parent Target.
   ProgramPoint &Target = isSink(Direction) ? G.getBBEntryRepresentative(BB)
                                            : G.getBBExitRepresentative(BB);
+  if (!Target.hasAlwaysGuard())
+    return false;
   if (!all_of(NeighborPPs, [&](ProgramPoint *Neighbor) {
-        return Neighbor != &Target && Neighbor->hasParent(Target, Kind);
+        return Neighbor != &Target && Neighbor->hasAlwaysGuard() &&
+               Neighbor->hasParent(Target, Kind);
       }))
     return false;
 

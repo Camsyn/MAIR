@@ -221,4 +221,42 @@ entry:
   EXPECT_TRUE(Graph.verify());
 }
 
+TEST(RedundantObservationEliminationPass,
+     ConditionalWitnessCannotCoverAnUnconditionalObservation) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i1 %take) {
+entry:
+  br i1 %take, label %access, label %exit
+access:
+  %conditional = load i32, ptr %p, align 4
+  br label %exit
+exit:
+  %unconditional = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  MAIRGraph Graph = buildGraph(*M->getFunction("f"));
+  ProgramPoint *Source = findMutableMemoryProgramPoint(Graph, "access");
+  ProgramPoint *Target = findMutableMemoryProgramPoint(Graph, "exit");
+  ASSERT_NE(Source, nullptr);
+  ASSERT_NE(Target, nullptr);
+  ProgramPoint &Guarded = Graph.createProgramPoint(
+      ProgramPointSite::anchored(Target->getAnchor(),
+                                 ProgramPoint::SiteKind::BasicBlockEntry),
+      AnyProvenanceExecutedGuard(Source->begin()->getInstructions()));
+  Guarded.addObservation(*Source->begin());
+  Source->erase(Source->begin());
+  Graph.addEdge(Guarded, *Target, PPEdgeKind::Dom);
+  ASSERT_TRUE(Graph.verify());
+  MAIRGraphAnalysisManager AM;
+  EXPECT_TRUE(
+      RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
+  EXPECT_EQ(Guarded.size(), 1u);
+  EXPECT_EQ(Target->size(), 1u);
+  EXPECT_TRUE(Graph.verify());
+}
+
 } // namespace

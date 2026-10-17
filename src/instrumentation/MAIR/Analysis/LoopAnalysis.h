@@ -21,11 +21,12 @@ class MAIRLoopInfo {
   llvm::Function *Func = nullptr;
   const llvm::LoopInfo *LI = nullptr;
   const llvm::DominatorTree *DT = nullptr;
+  const llvm::PostDominatorTree *PDT = nullptr;
 
 public:
   MAIRLoopInfo(MAIRGraph &G, llvm::FunctionAnalysisManager &FAM);
 
-  bool isAvailable() const { return Graph && FAM && Func && LI && DT; }
+  bool isAvailable() const { return Graph && FAM && Func && LI && DT && PDT; }
 
   llvm::Loop *getLoopFor(const ProgramPoint &PP) const;
   bool isValueAvailableAt(const llvm::Value &V,
@@ -37,6 +38,8 @@ public:
   bool isLoopInvariant(const Observation &Obs, const llvm::Loop &L) const;
   llvm::Loop *getTopInvariantLoop(const Observation &Obs,
                                   llvm::Loop &Start) const;
+  bool canHoistToPreheader(const ProgramPoint &PP, const llvm::Loop &L) const;
+  bool canSinkToExit(const ProgramPoint &PP, const llvm::Loop &L) const;
   ProgramPoint *getPreheaderExit(const llvm::Loop &L) const;
   std::optional<MAIRLoopExit> describeUniqueExit(const llvm::Loop &L) const;
   ProgramPoint *getUniqueExitEntry(const llvm::Loop &L) const;

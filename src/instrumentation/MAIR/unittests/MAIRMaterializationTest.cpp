@@ -1,8 +1,11 @@
 #include "MAIR/Materialization/MAIRMaterialization.h"
 #include "MAIR/Analysis/LoopAnalysis.h"
 #include "MAIR/MAIR.h"
+#include "MAIRHierarchyTestUtil.h"
 
+#include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/PostDominators.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
@@ -34,6 +37,14 @@ std::string printModule(const Module &M) {
 }
 
 MAIRGraph buildMaterializationGraph(Function &F) {
+  PassInstrumentationCallbacks PIC;
+  FunctionAnalysisManager FAM;
+  FAM.registerPass([&] { return PassInstrumentationAnalysis(&PIC); });
+  FAM.registerPass([] { return DominatorTreeAnalysis(); });
+  FAM.registerPass([] { return llvm::LoopAnalysis(); });
+  FAM.registerPass([] { return AssumptionAnalysis(); });
+  FAM.registerPass([] { return TargetIRAnalysis(); });
+  normalizeMAIRLoops(F, FAM);
   DominatorTree DT(F);
   PostDominatorTree PDT(F);
   LoopInfo LI(DT);
@@ -51,6 +62,7 @@ void registerMaterializationAnalyses(FunctionAnalysisManager &FAM,
 class RecordingBackend final : public MAIRObservationBackend {
 public:
   bool Reject = false;
+  unsigned PrepareCalls = 0;
   unsigned PreparedUnits = 0;
   unsigned EmittedProgramPoints = 0;
   unsigned EmittedObservations = 0;
@@ -60,6 +72,7 @@ public:
   SmallVector<AccessProperty, 4> EmittedProperties;
 
   Error prepare(const MAIRMaterializationPlan &Plan) override {
+    ++PrepareCalls;
     PreparedUnits = Plan.units().size();
     for (const MaterializationUnit &Unit : Plan.units()) {
       SawCompletePlan &= Unit.Source && !Unit.Observations.empty();
@@ -693,10 +706,14 @@ exit:
   }
   ASSERT_TRUE(Reset && Target && Load);
   MAIRGraph Graph = buildMaterializationGraph(F);
-  for (ProgramPoint &Existing : Graph)
-    while (!Existing.empty())
-      Existing.erase(Existing.begin());
-  ProgramPoint &Point = Graph.createProgramPoint(
+  for (ProgramPoint *Point : Graph.allProgramPoints())
+    while (!Point->empty())
+      Point->erase(Point->begin());
+  const llvm::Loop *Loop = Graph.getLoopInfo().getLoopFor(Target);
+  ASSERT_NE(Loop, nullptr);
+  MAIRGraph *Scope = Graph.getLoopGraph(*Loop);
+  ASSERT_NE(Scope, nullptr);
+  ProgramPoint &Point = Scope->createProgramPoint(
       ProgramPointSite::anchored(Target->front(),
                                  ProgramPoint::SiteKind::BasicBlockEntry),
       AnyProvenanceExecutedGuard({Load}, Reset));
@@ -749,9 +766,9 @@ exit:
   BasicBlock &Exit = *std::next(F.begin(), 2);
   Instruction &Load = Access.front();
   MAIRGraph Graph = buildMaterializationGraph(F);
-  for (ProgramPoint &Existing : Graph)
-    while (!Existing.empty())
-      Existing.erase(Existing.begin());
+  for (ProgramPoint *Point : Graph.allProgramPoints())
+    while (!Point->empty())
+      Point->erase(Point->begin());
   ProgramPoint &Point = Graph.createProgramPoint(
       ProgramPointSite::anchored(Exit.front(),
                                  ProgramPoint::SiteKind::BasicBlockEntry),

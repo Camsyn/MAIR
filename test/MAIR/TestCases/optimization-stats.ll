@@ -13,17 +13,17 @@
 ; LOCATION: {{[1-9][0-9]*}} mair-locationmerge - Number of observations merged by location merging
 ; COMMON: 30 mair-common-observation-motion - Number of observations entering common observation motion
 ; PERIODIC: {{[1-9][0-9]*}} mair-loop-periodic-combine - Number of observations aggregated across loop iterations
-; PERIODIC: 13 mair-loop-periodic-combine - Number of observations entering loop periodic combination
-; INVARIANT: 7 mair-loop-invariant-motion - Number of observations entering loop-invariant motion
+; PERIODIC: 21 mair-loop-periodic-combine - Number of observations entering loop periodic combination
+; INVARIANT: 15 mair-loop-invariant-motion - Number of observations entering loop-invariant motion
 ; INVARIANT: {{[1-9][0-9]*}} mair-loop-invariant-motion - Number of invariant observations moved to loop preheaders
-; REDUNDANT-DAG: 13 mair-redundant-observation-elimination - Number of redundant observations eliminated
+; REDUNDANT-DAG: 10 mair-redundant-observation-elimination - Number of redundant observations eliminated
 ; REDUNDANT-DAG: 4 mair-redundant-observation-elimination - Number of intra-program-point redundant observations eliminated
-; REDUNDANT-DAG: 9 mair-redundant-observation-elimination - Number of inter-program-point redundant observations eliminated
-; REDUNDANT: 31 mair-redundant-observation-elimination - Number of observations entering redundant observation elimination
+; REDUNDANT-DAG: 6 mair-redundant-observation-elimination - Number of inter-program-point redundant observations eliminated
+; REDUNDANT: 35 mair-redundant-observation-elimination - Number of observations entering redundant observation elimination
 
-; O1: 2 mair-common-observation-motion - Number of observations entering common observation motion
-; O1: 4 mair-locationmerge - Number of observations entering location merging
+; O1: 1 mair-common-observation-motion - Number of observations entering common observation motion
+; O1: 3 mair-locationmerge - Number of observations entering location merging
 ; O1: 2 mair-loop-invariant-motion - Number of observations entering loop-invariant motion
 ; O1: 2 mair-loop-periodic-combine - Number of observations entering loop periodic combination
-; O1: 4 mair-redundant-observation-elimination - Number of observations entering redundant observation elimination
+; O1: 3 mair-redundant-observation-elimination - Number of observations entering redundant observation elimination
 ; O1: 11 mair-simplifygraph - Number of program points entering graph simplification

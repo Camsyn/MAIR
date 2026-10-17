@@ -35,14 +35,15 @@ exit:
                                MAIROptimizationConfig::forThreadSanitizer());
   MAIRGraphAnalysisManager AM;
   EXPECT_TRUE(
-      RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
+      runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM)
+          .areAllPreserved());
   EXPECT_EQ(observationCount(Graph, "body"), 1u);
   EXPECT_EQ(observationCount(Graph, "exit"), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 
 TEST(RedundantObservationEliminationPass,
-     RedundantEliminationDomStillCoversDominatingLoopExit) {
+     RedundantEliminationKeepsDominatingLoopBodySeparateFromExit) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define i32 @f(ptr %base, i64 %n) {
@@ -62,15 +63,14 @@ exit:
 )IR",
                        Ctx);
   ASSERT_TRUE(M);
-  // The loop block dominates the exit, so Dom coverage still removes the exit
-  // read. The same-loop guard applies only to PostDom edges.
   MAIRGraph Graph = buildGraph(*M->getFunction("f"),
                                MAIROptimizationConfig::forThreadSanitizer());
   MAIRGraphAnalysisManager AM;
-  EXPECT_FALSE(
-      RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
+  EXPECT_TRUE(
+      runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM)
+          .areAllPreserved());
   EXPECT_EQ(observationCount(Graph, "loop"), 1u);
-  EXPECT_EQ(observationCount(Graph, "exit"), 0u);
+  EXPECT_EQ(observationCount(Graph, "exit"), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -99,10 +99,11 @@ exit:
                                MAIROptimizationConfig::forThreadSanitizer());
   MAIRGraphAnalysisManager AM;
   EXPECT_FALSE(
-      RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
+      runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM)
+          .areAllPreserved());
   EXPECT_EQ(observationCount(Graph, "loop"), 1u);
   const ProgramPoint *Kept = nullptr;
-  for (const ProgramPoint &PP : Graph)
+  for (const ProgramPoint &PP : testProgramPoints(Graph))
     if (PP.isMemoryInstSite() && PP.getBasicBlock() &&
         PP.getBasicBlock()->getName() == "loop" && !PP.empty())
       Kept = &PP;
@@ -132,7 +133,8 @@ exit:
                                MAIROptimizationConfig::forThreadSanitizer());
   MAIRGraphAnalysisManager AM;
   EXPECT_FALSE(
-      RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
+      runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM)
+          .areAllPreserved());
   EXPECT_EQ(observationCount(Graph, "then"), 0u);
   EXPECT_EQ(observationCount(Graph, "exit"), 1u);
   EXPECT_TRUE(Graph.verify());
@@ -159,7 +161,8 @@ exit:
                                MAIROptimizationConfig::forAddressSanitizer());
   MAIRGraphAnalysisManager AM;
   EXPECT_TRUE(
-      RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
+      runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM)
+          .areAllPreserved());
   EXPECT_EQ(observationCount(Graph, "then"), 1u);
   EXPECT_EQ(observationCount(Graph, "exit"), 1u);
   EXPECT_TRUE(Graph.verify());
@@ -182,10 +185,11 @@ entry:
                                MAIROptimizationConfig::forThreadSanitizer());
   MAIRGraphAnalysisManager AM;
   EXPECT_FALSE(
-      RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
+      runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM)
+          .areAllPreserved());
   EXPECT_EQ(observationCount(Graph, "entry"), 1u);
   const ProgramPoint *Kept = nullptr;
-  for (const ProgramPoint &PP : Graph)
+  for (const ProgramPoint &PP : testProgramPoints(Graph))
     if (!PP.empty())
       Kept = &PP;
   ASSERT_NE(Kept, nullptr);
@@ -210,10 +214,11 @@ entry:
                                MAIROptimizationConfig::forAddressSanitizer());
   MAIRGraphAnalysisManager AM;
   EXPECT_FALSE(
-      RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
+      runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM)
+          .areAllPreserved());
   EXPECT_EQ(observationCount(Graph, "entry"), 1u);
   const ProgramPoint *Kept = nullptr;
-  for (const ProgramPoint &PP : Graph)
+  for (const ProgramPoint &PP : testProgramPoints(Graph))
     if (!PP.empty())
       Kept = &PP;
   ASSERT_NE(Kept, nullptr);

@@ -317,14 +317,14 @@ getAggregateTarget(MAIRGraph &G, const MAIRLoopInfo &Loops, const Loop &L) {
   if (!Exit)
     return std::nullopt;
   if (Exit->IsDedicated) {
-    ProgramPoint &PP = G.getBBEntryRepresentative(*Exit->Exit);
-    if (!PP.hasAlwaysGuard())
+    ProgramPoint *PP = Loops.getUniqueExitEntry(L);
+    if (!PP || !PP->hasAlwaysGuard())
       return std::nullopt;
-    return AggregateTarget{PP.getSite(), &PP};
+    return AggregateTarget{PP->getSite(), PP};
   }
 
   ProgramPointSite Site = ProgramPointSite::edge(*Exit->Exiting, *Exit->Exit);
-  for (ProgramPoint &PP : G)
+  for (ProgramPoint &PP : *G.getParent())
     if (PP.getSite() == Site && PP.hasAlwaysGuard())
       return AggregateTarget{Site, &PP};
   return AggregateTarget{Site, nullptr};
@@ -355,7 +355,8 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
       return std::nullopt;
     Recurrence = Candidate;
   }
-  if (!Recurrence || !Recurrence->getLoop())
+  if (!Recurrence || !Recurrence->getLoop() ||
+      Recurrence->getLoop() != G.getLoop())
     return std::nullopt;
 
   const Loop &RelevantLoop = *Recurrence->getLoop();
@@ -363,8 +364,8 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
       Loops.getExactExecutionCountSCEV(PP, RelevantLoop);
   if (!ExecutionCount)
     return std::nullopt;
-  ProgramPoint *ExitAncestor = Loops.getUniqueExitEntry(RelevantLoop);
-  if (!ExitAncestor || !G.isAncestor(*ExitAncestor, PP, PPEdgeKind::PostDom))
+  if (!Loops.getUniqueExitEntry(RelevantLoop) ||
+      !Loops.canSinkToExit(PP, RelevantLoop))
     return std::nullopt;
   std::optional<AggregateTarget> Target =
       getAggregateTarget(G, Loops, RelevantLoop);
@@ -390,7 +391,7 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
       if (ConstantStride->getAPInt().isZero())
         return std::nullopt;
 
-    SCEVExprConverter Converter(G, Loops, Target->Site);
+    SCEVExprConverter Converter(*G.getParent(), Loops, Target->Site);
     if (!Converter.canConvert(Start) || !Converter.canConvert(Stride) ||
         !Converter.canConvert(ExecutionCount))
       return std::nullopt;
@@ -399,7 +400,7 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
     MAIRScalarExpr StrideExpr = Converter.convert(Stride);
     Type *SizeType = Type::getInt64Ty(Start->getType()->getContext());
     MAIRScalarExpr SizeExpr =
-        G.createConstantExpr(*SizeType, APInt(64, *AccessSize));
+        G.getParent()->createConstantExpr(*SizeType, APInt(64, *AccessSize));
     MAIRScalarExpr CountExpr = Converter.convert(ExecutionCount);
     Aggregate = PeriodicRegion(Location->getBase(), StartExpr, StrideExpr,
                                SizeExpr, CountExpr);
@@ -413,7 +414,7 @@ void commitAggregate(MAIRGraph &G, Observation &Obs, AggregatePlan Plan,
                      bool MergeEquivalentObservations) {
   ProgramPoint *TargetPP = Plan.Target.Point;
   if (!TargetPP)
-    TargetPP = &G.createProgramPoint(Plan.Target.Site);
+    TargetPP = &G.getParent()->createProgramPoint(Plan.Target.Site);
   addOrMergeObservation(*TargetPP, Obs, Plan.Region,
                         MergeEquivalentObservations);
   Obs.getParent()->erase(Obs);
@@ -426,7 +427,7 @@ void commitAggregate(MAIRGraph &G, Observation &Obs, AggregatePlan Plan,
 
 bool aggregateObservations(MAIRGraph &G, MAIRLoopInfo &Loops,
                            bool MergeEquivalentObservations) {
-  if (!Loops.isAvailable())
+  if (!Loops.isAvailable() || !G.getLoop())
     return false;
 
   SmallVector<ProgramPoint *, 16> Worklist;

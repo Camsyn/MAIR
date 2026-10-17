@@ -1140,6 +1140,7 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
         /*KeepFullDebug=*/true,
         mair::MAIROptimizationConfig::forThreadSanitizer());
     Opt->build();
+    Res |= Opt->hasModifiedIR();
 
     SmallPtrSet<const Instruction *, 32> MAIRModeledSources;
     for (const auto &[PP, Observations] : Opt->getProgramPointObservations()) {
@@ -1238,7 +1239,7 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
 
   __xsan::TsanToInstrument Targets;
   if (!collectTargetsToIntrument(F, TLI, Targets))
-    return false;
+    return Res;
 
   auto &[AllLoadsAndStores, AtomicAccesses, MemIntrinCalls, HasCalls] = Targets;
 

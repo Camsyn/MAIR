@@ -98,9 +98,10 @@ right:
 
 define i32 @hoist_loop_successor_quotient(ptr %p, i32 %n) {
 ; CHECK-LABEL: mair graph of fn @hoist_loop_successor_quotient {
-; CHECK:       pp5: preds=
-; CHECK-NEXT:    o: read ptr %p, 4
 ; CHECK:       pp8: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK-LABEL: mair graph of fn @hoist_loop_successor_quotient of loop %header {
+; CHECK:       pp5: preds=
 ; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br label %header
@@ -245,9 +246,10 @@ final:
 
 define i32 @keep_self_loop(ptr %p, i1 %done) {
 ; CHECK-LABEL: mair graph of fn @keep_self_loop {
-; CHECK:       pp3: preds=
-; CHECK-NEXT:    o: read ptr %p, 4
 ; CHECK:       pp6: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK-LABEL: mair graph of fn @keep_self_loop of loop %header {
+; CHECK:       pp3: preds=
 ; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br label %header

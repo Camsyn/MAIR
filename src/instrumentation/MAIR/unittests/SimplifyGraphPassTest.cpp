@@ -73,8 +73,11 @@ exit:
   ProgramPoint *Inside = findMutableMemoryProgramPoint(Graph, "loop");
   ASSERT_NE(Outside, nullptr);
   ASSERT_NE(Inside, nullptr);
-  Graph.addEdge(*Outside, *Inside, PPEdgeKind::Dom);
-  Graph.addEdge(*Inside, *Outside, PPEdgeKind::PostDom);
+  EXPECT_NE(Outside->getParent(), Inside->getParent());
+  EXPECT_FALSE(Graph.hasEdge(*Outside, *Inside, PPEdgeKind::Dom));
+  EXPECT_FALSE(Graph.hasEdge(*Inside, *Outside, PPEdgeKind::PostDom));
+  EXPECT_DEATH_IF_SUPPORTED(Graph.addEdge(*Outside, *Inside, PPEdgeKind::Dom),
+                            "graph");
   const size_t Before = Graph.size();
   MAIRGraphAnalysisManager AM;
   EXPECT_TRUE(SimplifyGraphPass().run(Graph, AM).areAllPreserved());

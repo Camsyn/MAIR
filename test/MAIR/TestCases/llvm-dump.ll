@@ -45,7 +45,7 @@ define void @branch_loop(i32* %p, i32* %q, i1 %c, i32 %n) {
 ; LLVM-NEXT:  [[ENTRY:.*]]:
 ; LLVM-NEXT:  ; pp0: preds=[pp1(pdom)], succs=[pp1(dom)]
 ; LLVM-NEXT:  ; pp1: preds=[pp0(dom), pp6(pdom)], succs=[pp0(pdom), pp2(dom), pp6(dom)]
-; LLVM-NEXT:    br i1 [[C]], label %[[THEN:.*]], label %[[LOOP:.*]]
+; LLVM-NEXT:    br i1 [[C]], label %[[THEN:.*]], label %[[PREHEADER:.*]]
 ; LLVM:       [[THEN]]:
 ; LLVM-NEXT:  ; pp2: preds=[pp3(pdom), pp1(dom)], succs=[pp3(dom)]
 ; LLVM-NEXT:  ; pp3: preds=[pp2(dom), pp4(pdom)], succs=[pp2(pdom), pp4(dom)]
@@ -55,23 +55,29 @@ define void @branch_loop(i32* %p, i32* %q, i1 %c, i32 %n) {
 ; LLVM-NEXT:  ; o: write ptr [[Q]], 4
 ; LLVM-NEXT:    store i32 [[TV]], ptr [[Q]], align 4
 ; LLVM-NEXT:  ; pp5: preds=[pp4(dom), pp6(pdom)], succs=[pp4(pdom)]
+; LLVM-NEXT:    br label %[[PREHEADER]]
+; LLVM:       [[PREHEADER]]:
+; LLVM-NEXT:  ; pp6: preds=[pp7(pdom), pp1(dom)], succs=[pp7(dom), pp1(pdom), pp5(pdom)]
+; LLVM-NEXT:  ; pp7: preds=[pp6(dom), pp14(pdom)], succs=[pp6(pdom), pp14(dom)]
+; LLVM-NEXT:  ; pp14: loop-preheader=%[[LOOP:.*]], preds=[pp7(dom), pp15(pdom)], succs=[pp7(pdom), pp15(dom)]
 ; LLVM-NEXT:    br label %[[LOOP]]
 ; LLVM:       [[LOOP]]:
-; LLVM-NEXT:    [[I:%.*]] = phi i32 [ 0, %[[ENTRY]] ], [ 0, %[[THEN]] ], [ [[NEXT:%.*]], %[[LOOP]] ]
-; LLVM-NEXT:  ; pp6: preds=[pp7(pdom), pp1(dom)], succs=[pp7(dom), pp1(pdom), pp5(pdom)]
-; LLVM-NEXT:  ; pp7: preds=[pp6(dom), pp8(pdom)], succs=[pp6(pdom), pp8(dom)]
+; LLVM-NEXT:    [[I:%.*]] = phi i32 [ [[NEXT:%.*]], %[[LOOP]] ], [ 0, %[[PREHEADER]] ]
+; LLVM-NEXT:  ; pp8: preds=[pp9(pdom)], succs=[pp9(dom)]
+; LLVM-NEXT:  ; pp9: preds=[pp8(dom), pp10(pdom)], succs=[pp8(pdom), pp10(dom)]
 ; LLVM-NEXT:  ; o: read ptr [[P]], 4
 ; LLVM-NEXT:    [[LV:%.*]] = load i32, ptr [[P]], align 4
 ; LLVM-NEXT:    [[NEXT]] = add i32 [[I]], 1
-; LLVM-NEXT:  ; pp8: preds=[pp7(dom), pp9(pdom)], succs=[pp7(pdom), pp9(dom)]
+; LLVM-NEXT:  ; pp10: preds=[pp9(dom), pp11(pdom)], succs=[pp9(pdom), pp11(dom)]
 ; LLVM-NEXT:  ; o: write ptr [[Q]], 4
 ; LLVM-NEXT:    store i32 [[NEXT]], ptr [[Q]], align 4
 ; LLVM-NEXT:    [[COND:%.*]] = icmp slt i32 [[NEXT]], [[N]]
-; LLVM-NEXT:  ; pp9: preds=[pp8(dom), pp10(pdom)], succs=[pp8(pdom), pp10(dom)]
+; LLVM-NEXT:  ; pp11: preds=[pp10(dom)], succs=[pp10(pdom)]
 ; LLVM-NEXT:    br i1 [[COND]], label %[[LOOP]], label %[[EXIT:.*]]
 ; LLVM:       [[EXIT]]:
-; LLVM-NEXT:  ; pp10: preds=[pp11(pdom), pp9(dom)], succs=[pp11(dom), pp9(pdom)]
-; LLVM-NEXT:  ; pp11: preds=[pp10(dom)], succs=[pp10(pdom)]
+; LLVM-NEXT:  ; pp12: preds=[pp15(dom), pp13(pdom)], succs=[pp15(pdom), pp13(dom)]
+; LLVM-NEXT:  ; pp13: preds=[pp12(dom)], succs=[pp12(pdom)]
+; LLVM-NEXT:  ; pp15: loop-exit=%[[LOOP]], preds=[pp12(pdom), pp14(dom)], succs=[pp12(dom), pp14(pdom)]
 ; LLVM-NEXT:    ret void
 ;
 ; SIMPLIFYLLVM-LABEL: define void @branch_loop(
@@ -79,7 +85,7 @@ define void @branch_loop(i32* %p, i32* %q, i1 %c, i32 %n) {
 ; SIMPLIFYLLVM-NEXT:  [[ENTRY:.*]]:
 ; SIMPLIFYLLVM-NEXT:  ; pp0: preds=[pp1(pdom)], succs=[pp1(dom)]
 ; SIMPLIFYLLVM-NEXT:  ; pp1: preds=[pp0(dom), pp6(pdom)], succs=[pp0(pdom), pp2(dom), pp6(dom)]
-; SIMPLIFYLLVM-NEXT:    br i1 [[C]], label %[[THEN:.*]], label %[[LOOP:.*]]
+; SIMPLIFYLLVM-NEXT:    br i1 [[C]], label %[[THEN:.*]], label %[[PREHEADER:.*]]
 ; SIMPLIFYLLVM:       [[THEN]]:
 ; SIMPLIFYLLVM-NEXT:  ; pp2: preds=[pp1(dom), pp4(pdom)], succs=[pp4(dom)]
 ; SIMPLIFYLLVM-NEXT:    [[TV:%.*]] = load i32, ptr [[P]], align 4
@@ -88,22 +94,28 @@ define void @branch_loop(i32* %p, i32* %q, i1 %c, i32 %n) {
 ; SIMPLIFYLLVM-NEXT:  ; o: write ptr [[Q]], 4
 ; SIMPLIFYLLVM-NEXT:    store i32 [[TV]], ptr [[Q]], align 4
 ; SIMPLIFYLLVM-NEXT:  ; pp5: preds=[pp4(dom), pp6(pdom)], succs=[pp4(pdom)]
+; SIMPLIFYLLVM-NEXT:    br label %[[PREHEADER]]
+; SIMPLIFYLLVM:       [[PREHEADER]]:
+; SIMPLIFYLLVM-NEXT:  ; pp6: preds=[pp7(pdom), pp1(dom)], succs=[pp7(dom), pp1(pdom), pp5(pdom)]
+; SIMPLIFYLLVM-NEXT:  ; pp7: preds=[pp6(dom), pp14(pdom)], succs=[pp6(pdom), pp14(dom)]
+; SIMPLIFYLLVM-NEXT:  ; pp14: loop-preheader=%[[LOOP:.*]], preds=[pp7(dom), pp15(pdom)], succs=[pp7(pdom), pp15(dom)]
 ; SIMPLIFYLLVM-NEXT:    br label %[[LOOP]]
 ; SIMPLIFYLLVM:       [[LOOP]]:
-; SIMPLIFYLLVM-NEXT:    [[I:%.*]] = phi i32 [ 0, %[[ENTRY]] ], [ 0, %[[THEN]] ], [ [[NEXT:%.*]], %[[LOOP]] ]
-; SIMPLIFYLLVM-NEXT:  ; pp6: preds=[pp1(dom), pp8(pdom)], succs=[pp1(pdom), pp5(pdom), pp8(dom)]
+; SIMPLIFYLLVM-NEXT:    [[I:%.*]] = phi i32 [ [[NEXT:%.*]], %[[LOOP]] ], [ 0, %[[PREHEADER]] ]
+; SIMPLIFYLLVM-NEXT:  ; pp8: preds=[pp10(pdom)], succs=[pp10(dom)]
 ; SIMPLIFYLLVM-NEXT:    [[LV:%.*]] = load i32, ptr [[P]], align 4
 ; SIMPLIFYLLVM-NEXT:    [[NEXT]] = add i32 [[I]], 1
-; SIMPLIFYLLVM-NEXT:  ; pp8: preds=[pp9(pdom), pp6(dom)], succs=[pp9(dom), pp6(pdom)]
+; SIMPLIFYLLVM-NEXT:  ; pp10: preds=[pp11(pdom), pp8(dom)], succs=[pp11(dom), pp8(pdom)]
 ; SIMPLIFYLLVM-NEXT:  ; o: read ptr [[P]], 4
 ; SIMPLIFYLLVM-NEXT:  ; o: write ptr [[Q]], 4
 ; SIMPLIFYLLVM-NEXT:    store i32 [[NEXT]], ptr [[Q]], align 4
 ; SIMPLIFYLLVM-NEXT:    [[COND:%.*]] = icmp slt i32 [[NEXT]], [[N]]
-; SIMPLIFYLLVM-NEXT:  ; pp9: preds=[pp8(dom), pp10(pdom)], succs=[pp8(pdom), pp10(dom)]
+; SIMPLIFYLLVM-NEXT:  ; pp11: preds=[pp10(dom)], succs=[pp10(pdom)]
 ; SIMPLIFYLLVM-NEXT:    br i1 [[COND]], label %[[LOOP]], label %[[EXIT:.*]]
 ; SIMPLIFYLLVM:       [[EXIT]]:
-; SIMPLIFYLLVM-NEXT:  ; pp10: preds=[pp11(pdom), pp9(dom)], succs=[pp11(dom), pp9(pdom)]
-; SIMPLIFYLLVM-NEXT:  ; pp11: preds=[pp10(dom)], succs=[pp10(pdom)]
+; SIMPLIFYLLVM-NEXT:  ; pp12: preds=[pp15(dom), pp13(pdom)], succs=[pp15(pdom), pp13(dom)]
+; SIMPLIFYLLVM-NEXT:  ; pp13: preds=[pp12(dom)], succs=[pp12(pdom)]
+; SIMPLIFYLLVM-NEXT:  ; pp15: loop-exit=%[[LOOP]], preds=[pp12(pdom), pp14(dom)], succs=[pp12(dom), pp14(pdom)]
 ; SIMPLIFYLLVM-NEXT:    ret void
 ;
 entry:

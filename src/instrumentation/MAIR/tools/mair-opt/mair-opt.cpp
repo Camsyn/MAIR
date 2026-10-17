@@ -147,6 +147,7 @@ int main(int argc, char **argv) {
     if (F.isDeclaration())
       continue;
 
+    normalizeMAIRLoops(F, FAM);
     Graphs.push_back(MAIRGraph::build<DefaultBarrierTrait>(F, FAM));
     MAIRGraph &Graph = Graphs.back();
     if (!Graph.verify(&errs())) {

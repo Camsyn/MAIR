@@ -2,6 +2,7 @@
 
 #include "MAIR/MAIR.h"
 #include "MAIR/MAIRPasses.h"
+#include "MAIRHierarchyTestUtil.h"
 
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -24,6 +25,14 @@ inline std::unique_ptr<llvm::Module> parseModule(llvm::StringRef IR,
 inline mair::MAIRGraph buildGraph(llvm::Function &F,
                                   mair::MAIROptimizationConfig Config =
                                       mair::MAIROptimizationConfig::generic()) {
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  FAM.registerPass([&] { return llvm::PassInstrumentationAnalysis(&PIC); });
+  FAM.registerPass([] { return llvm::DominatorTreeAnalysis(); });
+  FAM.registerPass([] { return llvm::LoopAnalysis(); });
+  FAM.registerPass([] { return llvm::AssumptionAnalysis(); });
+  FAM.registerPass([] { return llvm::TargetIRAnalysis(); });
+  mair::normalizeMAIRLoops(F, FAM);
   llvm::DominatorTree DT(F);
   llvm::PostDominatorTree PDT(F);
   llvm::LoopInfo LI(DT);
@@ -34,7 +43,7 @@ inline mair::MAIRGraph buildGraph(llvm::Function &F,
 inline unsigned observationCount(const mair::MAIRGraph &Graph,
                                  llvm::StringRef Block) {
   unsigned Count = 0;
-  for (const mair::ProgramPoint &PP : Graph)
+  for (const mair::ProgramPoint &PP : testProgramPoints(Graph))
     if (PP.getBasicBlock() && PP.getBasicBlock()->getName() == Block)
       Count += PP.size();
   return Count;
@@ -42,7 +51,7 @@ inline unsigned observationCount(const mair::MAIRGraph &Graph,
 
 inline mair::ProgramPoint *
 findMutableMemoryProgramPoint(mair::MAIRGraph &Graph, llvm::StringRef Block) {
-  for (mair::ProgramPoint &PP : Graph)
+  for (mair::ProgramPoint &PP : testProgramPoints(Graph))
     if (PP.isMemoryInstSite() && PP.getBasicBlock() &&
         PP.getBasicBlock()->getName() == Block)
       return &PP;

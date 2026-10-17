@@ -6,8 +6,10 @@
 
 define void @hoist_header_invariant(ptr %p, i32 %n) {
 ; CHECK-LABEL: mair graph of fn @hoist_header_invariant {
-; CHECK:       pp1: preds=
+; CHECK:       pp9: loop-preheader=%header,
 ; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK:       loop-exit=%header,
+; CHECK-LABEL: mair graph of fn @hoist_header_invariant of loop %header {
 ; CHECK:       pp3: preds=
 ; CHECK-EMPTY:
 entry:
@@ -29,8 +31,14 @@ exit:
 
 define void @hoist_to_outer_preheader(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @hoist_to_outer_preheader {
-; CHECK:       pp1: preds=
+; CHECK:       pp11: loop-preheader=%outer.header,
 ; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK-LABEL: mair graph of fn @hoist_to_outer_preheader of loop %outer.header {
+; CHECK-NOT:   o:
+; CHECK:       loop-preheader=%inner.header,
+; CHECK-NOT:   o:
+; CHECK:       }
+; CHECK-LABEL: mair graph of fn @hoist_to_outer_preheader of loop %inner.header {
 ; CHECK:       pp5: preds=
 ; CHECK-EMPTY:
 entry:
@@ -60,10 +68,11 @@ define void @sink_branch_only(ptr %p, i32 %n, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @sink_branch_only {
 ; CHECK:       pp1: preds=
 ; CHECK-EMPTY:
+; CHECK:       pp15: site=bb.entry(%exit), guard=any(%v), reset=%entry, preds=[], succs=[]
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK-LABEL: mair graph of fn @sink_branch_only of loop %header {
 ; CHECK:       pp7: preds=
 ; CHECK-EMPTY:
-; CHECK:       pp13: site=bb.entry(%exit), guard=any(%v), preds=[], succs=[]
-; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br label %header
 
@@ -91,10 +100,11 @@ define void @sink_zero_trip_body(ptr %p, i32 %n) {
 ; CHECK-LABEL: mair graph of fn @sink_zero_trip_body {
 ; CHECK:       pp1: preds=
 ; CHECK-EMPTY:
+; CHECK:       pp11: site=bb.entry(%exit), guard=any(%v), reset=%entry, preds=[], succs=[]
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK-LABEL: mair graph of fn @sink_zero_trip_body of loop %header {
 ; CHECK:       pp5: preds=
 ; CHECK-EMPTY:
-; CHECK:       pp9: site=bb.entry(%exit), guard=any(%v), preds=[], succs=[]
-; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br label %header
 
@@ -115,10 +125,12 @@ exit:
 define void @sink_branch_to_shared_exit(ptr %p, i32 %n, i1 %cond,
                                         i1 %bypass) {
 ; CHECK-LABEL: mair graph of fn @sink_branch_to_shared_exit {
+; CHECK:       loop-exit=%header,
+; CHECK:       pp19: site=bb.entry(%exit.loopexit), guard=any(%v), reset=%preheader, preds=[], succs=[]
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK-LABEL: mair graph of fn @sink_branch_to_shared_exit of loop %header {
 ; CHECK:       pp9: preds=
 ; CHECK-EMPTY:
-; CHECK:       pp15: site=edge(%header -> %exit), guard=any(%v), preds=[], succs=[]
-; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br i1 %bypass, label %exit, label %preheader
 
@@ -147,8 +159,11 @@ exit:
 
 define void @hoist_with_multiple_exits(ptr %p, i32 %n, i1 %early) {
 ; CHECK-LABEL: mair graph of fn @hoist_with_multiple_exits {
-; CHECK:       pp1: preds=
+; CHECK:       pp11: loop-preheader=%header,
 ; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK:       loop-exit=%header,
+; CHECK:       loop-exit=%header,
+; CHECK-LABEL: mair graph of fn @hoist_with_multiple_exits of loop %header {
 ; CHECK:       pp3: preds=
 ; CHECK-EMPTY:
 entry:
@@ -173,10 +188,11 @@ exit.normal:
 
 define void @sink_without_preheader(ptr %p, i1 %path, i32 %n) {
 ; CHECK-LABEL: mair graph of fn @sink_without_preheader {
-; CHECK:       pp7: preds=
-; CHECK-EMPTY:
-; CHECK:       pp13: site=bb.entry(%exit), guard=any(%v), preds=[], succs=[]
+; CHECK:       pp15: loop-preheader=%header,
 ; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK-LABEL: mair graph of fn @sink_without_preheader of loop %header {
+; CHECK:       pp9: preds=
+; CHECK-EMPTY:
 entry:
   br i1 %path, label %left, label %right
 

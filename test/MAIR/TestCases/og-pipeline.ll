@@ -39,8 +39,9 @@ entry:
 define void @og_includes_provenance_preserving_loop_transforms(ptr %p,
                                                                 i32 %n) {
 ; CHECK-LABEL: mair graph of fn @og_includes_provenance_preserving_loop_transforms {
-; CHECK:       pp1: preds=
+; CHECK:       pp10: loop-preheader=%header, preds=
 ; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK-LABEL: mair graph of fn @og_includes_provenance_preserving_loop_transforms of loop %header {
 ; CHECK:       pp4: preds=
 ; CHECK-EMPTY:
 entry:
@@ -63,8 +64,11 @@ exit:
 
 define void @og_includes_periodic_combine(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @og_includes_periodic_combine {
-; CHECK:       pp6: preds=
+; CHECK:       pp9: loop-exit=%header, preds=
 ; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK-LABEL: mair graph of fn @og_includes_periodic_combine of loop %header {
+; CHECK-NOT:     o:
+; CHECK:       }
 entry:
   br label %header
 

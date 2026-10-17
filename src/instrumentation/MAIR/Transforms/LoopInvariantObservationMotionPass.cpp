@@ -41,7 +41,7 @@ bool isRegionAvailableAt(const AbstractAccess &Region,
 }
 
 std::optional<AnyProvenanceExecutedGuard>
-makeExecutionGuard(const Observation &Obs) {
+makeExecutionGuard(const Observation &Obs, BasicBlock *ResetBlock) {
   SmallVector<Instruction *, 4> Provenance;
   for (Instruction *I : Obs.getInstructions()) {
     if (!I)
@@ -51,7 +51,7 @@ makeExecutionGuard(const Observation &Obs) {
   }
   if (Provenance.empty())
     return std::nullopt;
-  return AnyProvenanceExecutedGuard(Provenance);
+  return AnyProvenanceExecutedGuard(Provenance, ResetBlock);
 }
 
 ProgramPoint *findProgramPoint(MAIRGraph &G, const ProgramPointSite &Site,
@@ -96,23 +96,21 @@ struct InvariantMotionPlan {
 std::optional<InvariantMotionPlan>
 findInvariantMotionForLoop(MAIRGraph &G, MAIRLoopInfo &Loops,
                            ProgramPoint &Source, Observation &Obs,
-                           const AbstractAccess &Region, Loop &L) {
+                           const AbstractAccess &Region, const Loop &L) {
   ProgramPoint *Preheader = Loops.getPreheaderExit(L);
   if (Preheader && Preheader != &Source &&
-      G.isAncestor(*Preheader, Source, PPEdgeKind::Dom) &&
-      G.isAncestor(Source, *Preheader, PPEdgeKind::PostDom) &&
+      Loops.canHoistToPreheader(Source, L) &&
       isRegionAvailableAt(Region, Preheader->getSite(), Loops))
     return InvariantMotionPlan{&Obs, Preheader, std::nullopt, AlwaysGuard{},
                                InvariantMotionKind::Preheader};
 
   std::optional<MAIRLoopExit> Exit = Loops.describeUniqueExit(L);
   ProgramPoint *ExitAncestor = Loops.getUniqueExitEntry(L);
-  if (!Exit || !ExitAncestor ||
-      !G.isAncestor(*ExitAncestor, Source, PPEdgeKind::PostDom))
+  if (!Exit || !ExitAncestor || !Loops.canSinkToExit(Source, L))
     return std::nullopt;
 
   std::optional<AnyProvenanceExecutedGuard> ExecutionGuard =
-      makeExecutionGuard(Obs);
+      makeExecutionGuard(Obs, L.getLoopPreheader());
   if (!ExecutionGuard)
     return std::nullopt;
 
@@ -123,7 +121,7 @@ findInvariantMotionForLoop(MAIRGraph &G, MAIRLoopInfo &Loops,
     return std::nullopt;
 
   ProgramPointGuard Guard = std::move(*ExecutionGuard);
-  ProgramPoint *Target = findProgramPoint(G, TargetSite, Guard);
+  ProgramPoint *Target = findProgramPoint(*G.getParent(), TargetSite, Guard);
   std::optional<ProgramPointSite> NewTargetSite;
   if (!Target)
     NewTargetSite = TargetSite;
@@ -133,7 +131,8 @@ findInvariantMotionForLoop(MAIRGraph &G, MAIRLoopInfo &Loops,
 
 std::optional<InvariantMotionPlan> findInvariantMotion(MAIRGraph &G,
                                                        MAIRLoopInfo &Loops) {
-  if (!Loops.isAvailable())
+  const Loop *ScopedLoop = G.getLoop();
+  if (!Loops.isAvailable() || !ScopedLoop)
     return std::nullopt;
 
   for (ProgramPoint &PP : G) {
@@ -142,10 +141,6 @@ std::optional<InvariantMotionPlan> findInvariantMotion(MAIRGraph &G,
     // program point an ordinary loop-body candidate for another motion round.
     if (PP.isEdgeSite() || !PP.hasAlwaysGuard())
       continue;
-    Loop *L = Loops.getLoopFor(PP);
-    if (!L)
-      continue;
-
     for (Observation &Obs : PP) {
       if (!Obs.isMovable())
         continue;
@@ -153,27 +148,11 @@ std::optional<InvariantMotionPlan> findInvariantMotion(MAIRGraph &G,
       if (!Region)
         continue;
 
-      Loop *Top = Loops.getTopInvariantLoop(Obs, *L);
-      if (!Top)
+      if (!Loops.isLoopInvariant(Obs, *ScopedLoop))
         continue;
-
-      // Invariance defines the outer bound, not whether motion to that loop is
-      // legal. Try candidates from outermost to innermost so graph barriers or
-      // unavailable values at an outer target can fall back to an inner one.
-      SmallVector<Loop *, 4> InvariantLoops;
-      for (Loop *Candidate = L; Candidate;
-           Candidate = Candidate->getParentLoop()) {
-        InvariantLoops.push_back(Candidate);
-        if (Candidate == Top)
-          break;
-      }
-      assert(InvariantLoops.back() == Top &&
-             "top invariant loop must be an ancestor of the source loop");
-      for (Loop *Candidate : llvm::reverse(InvariantLoops))
-        if (std::optional<InvariantMotionPlan> Plan =
-                findInvariantMotionForLoop(G, Loops, PP, Obs, *Region,
-                                           *Candidate))
-          return Plan;
+      if (std::optional<InvariantMotionPlan> Plan = findInvariantMotionForLoop(
+              G, Loops, PP, Obs, *Region, *ScopedLoop))
+        return Plan;
     }
   }
   return std::nullopt;
@@ -185,7 +164,8 @@ void commitInvariantMotion(MAIRGraph &G, InvariantMotionPlan Plan,
   ProgramPoint *Target = Plan.Target;
   if (!Target) {
     assert(Plan.NewTargetSite && "new motion target requires a site");
-    Target = &G.createProgramPoint(*Plan.NewTargetSite, Plan.Guard);
+    Target =
+        &G.getParent()->createProgramPoint(*Plan.NewTargetSite, Plan.Guard);
   }
   moveObservationTo(*Plan.Obs, *Target, MergeEquivalentObservations);
   if (Plan.Kind == InvariantMotionKind::Preheader)

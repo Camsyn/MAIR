@@ -42,6 +42,7 @@ public:
 
   MAIRGraph &build() {
     assert(!Graph && "MAOpt graph has already been built");
+    ModifiedIR = normalizeMAIRLoops(F, FAM);
     Graph = std::make_unique<MAIRGraph>(
         MAIRGraph::template build<BarrierTrait>(F, FAM, Config));
     rebuildProgramPointObservations();

@@ -97,12 +97,13 @@ define i32 @cross_bb_loop(ptr %p, i32 %n) {
 ; CHECK-LABEL: mair graph of fn @cross_bb_loop {
 ; CHECK:       pp1: preds=
 ; CHECK-NEXT:    o: read ptr %p, 8
-; CHECK:       pp6: preds=
-; CHECK-NOT:     o: read ptr %p, 4
-; CHECK:       pp9: preds=
-; CHECK-NOT:     o: read ptr %p + 4, 4
 ; CHECK:       pp12: preds=
 ; CHECK-NOT:     o: read ptr %p, 4
+; CHECK-LABEL: mair graph of fn @cross_bb_loop of loop %header {
+; CHECK:       pp6: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK:       pp9: preds=
+; CHECK-NEXT:    o: read ptr %p + 4, 4
 entry:
   %wide = load i64, ptr %p, align 8
   br label %header
@@ -129,10 +130,11 @@ exit:
 
 define void @cross_bb_loop_postdom(ptr %p, i1 %stop) {
 ; CHECK-LABEL: mair graph of fn @cross_bb_loop_postdom {
-; CHECK:       pp5: preds=
-; CHECK-NEXT:    o: read ptr %p, 4
 ; CHECK:       pp8: preds=
 ; CHECK-NEXT:    o: read ptr %p, 8
+; CHECK-LABEL: mair graph of fn @cross_bb_loop_postdom of loop %header {
+; CHECK:       pp5: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br label %header
 
@@ -208,9 +210,10 @@ dead:
 
 define i32 @loop_pointer_conditional(ptr %base, i64 %n) {
 ; CHECK-LABEL: mair graph of fn @loop_pointer_conditional {
-; CHECK:       pp5:
-; CHECK-NEXT:    o: read ptr %base + %p, 4
 ; CHECK:       pp10:
+; CHECK-NEXT:    o: read ptr %base + %p, 4
+; CHECK-LABEL: mair graph of fn @loop_pointer_conditional of loop %loop {
+; CHECK:       pp5:
 ; CHECK-NEXT:    o: read ptr %base + %p, 4
 entry:
   br label %loop
@@ -237,6 +240,7 @@ exit:
 
 define i32 @same_loop_repeated_read(ptr %base, i64 %n) {
 ; CHECK-LABEL: mair graph of fn @same_loop_repeated_read {
+; CHECK-LABEL: mair graph of fn @same_loop_repeated_read of loop %loop {
 ; CHECK:       pp3: preds=
 ; CHECK-NOT:     o: read ptr %base + %p, 4
 ; CHECK:       pp4: preds=

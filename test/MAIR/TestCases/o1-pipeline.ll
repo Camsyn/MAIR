@@ -46,10 +46,11 @@ entry:
 
 define void @o1_loop_periodic_combine(ptr %p) {
 ; CHECK-LABEL: mair graph of fn @o1_loop_periodic_combine {
+; CHECK:       pp8: loop-exit=%header, preds=
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK-LABEL: mair graph of fn @o1_loop_periodic_combine of loop %header {
 ; CHECK:       pp3: preds=
 ; CHECK-EMPTY:
-; CHECK:       pp5: preds=
-; CHECK-NEXT:    o: read ptr %p, 4
 entry:
   br label %header
 
@@ -67,8 +68,9 @@ exit:
 
 define void @o1_loop_invariant_motion(ptr %p, i32 %n) {
 ; CHECK-LABEL: mair graph of fn @o1_loop_invariant_motion {
-; CHECK:       pp1: preds=
+; CHECK:       pp9: loop-preheader=%header, preds=
 ; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK-LABEL: mair graph of fn @o1_loop_invariant_motion of loop %header {
 ; CHECK:       pp3: preds=
 ; CHECK-EMPTY:
 entry:

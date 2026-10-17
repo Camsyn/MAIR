@@ -16,6 +16,7 @@ MAIRLoopInfo::MAIRLoopInfo(MAIRGraph &G, FunctionAnalysisManager &Manager)
     return;
   LI = &G.getLoopInfo();
   DT = &G.getDominatorTree();
+  PDT = &G.getPostDominatorTree();
 }
 
 Loop *MAIRLoopInfo::getLoopFor(const ProgramPoint &PP) const {
@@ -45,8 +46,7 @@ bool MAIRLoopInfo::executesOncePerRelevantIteration(const ProgramPoint &PP,
 
   // An internal irreducible cycle can revisit a dominated program point more
   // than once during one natural-loop iteration. This check belongs to
-  // execution counting; barrier legality is represented separately by graph
-  // edges.
+  // execution counting.
   LoopBlocksRPO RPOT(const_cast<Loop *>(&L));
   RPOT.perform(LI);
   if (containsIrreducibleCFG<const BasicBlock *>(RPOT, *LI))
@@ -123,8 +123,33 @@ Loop *MAIRLoopInfo::getTopInvariantLoop(const Observation &Obs,
 ProgramPoint *MAIRLoopInfo::getPreheaderExit(const Loop &L) const {
   if (!Graph)
     return nullptr;
+  MAIRGraph *Body = Graph->getLoopGraph(L);
+  return Body ? Body->getLoopPreheader() : nullptr;
+}
+
+bool MAIRLoopInfo::canHoistToPreheader(const ProgramPoint &PP,
+                                       const Loop &L) const {
+  if (!isAvailable() || PP.getParent() != Graph || Graph->getLoop() != &L ||
+      !PP.hasAlwaysGuard() || !PP.getSite().isAnchored() ||
+      Graph->hasForwardBarrier() || Graph->hasBackwardBarrier())
+    return false;
+
+  const BasicBlock *Source = PP.getBasicBlock();
   BasicBlock *Preheader = L.getLoopPreheader();
-  return Preheader ? &Graph->getBBExitRepresentative(*Preheader) : nullptr;
+  return Source && Preheader && L.contains(Source) &&
+         DT->dominates(Preheader, Source) && PDT->dominates(Source, Preheader);
+}
+
+bool MAIRLoopInfo::canSinkToExit(const ProgramPoint &PP, const Loop &L) const {
+  if (!isAvailable() || PP.getParent() != Graph || Graph->getLoop() != &L ||
+      !PP.hasAlwaysGuard() || !PP.getSite().isAnchored() ||
+      Graph->hasBackwardBarrier())
+    return false;
+
+  const BasicBlock *Source = PP.getBasicBlock();
+  std::optional<MAIRLoopExit> Exit = describeUniqueExit(L);
+  return Source && L.contains(Source) && Exit &&
+         PDT->dominates(Exit->Exit, Source);
 }
 
 std::optional<MAIRLoopExit>
@@ -139,8 +164,14 @@ MAIRLoopInfo::describeUniqueExit(const Loop &L) const {
 ProgramPoint *MAIRLoopInfo::getUniqueExitEntry(const Loop &L) const {
   if (!Graph)
     return nullptr;
+  MAIRGraph *Body = Graph->getLoopGraph(L);
   BasicBlock *Exit = L.getUniqueExitBlock();
-  return Exit ? &Graph->getBBEntryRepresentative(*Exit) : nullptr;
+  if (!Body || !Exit)
+    return nullptr;
+  for (LoopProgramPoint *Boundary : Body->getLoopExits())
+    if (Boundary->getBasicBlock() == Exit)
+      return Boundary;
+  return nullptr;
 }
 
 ScalarEvolution &MAIRLoopInfo::getSE() const {

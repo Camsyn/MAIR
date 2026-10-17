@@ -75,6 +75,46 @@ bool isInterestingMop(const Instruction &I) {
          isMaskedMemoryIntrinsic(I);
 }
 
+void verifyLoopStructure(const Function &F, const DominatorTree &DT,
+                         const LoopInfo &LI) {
+  for (const Loop *Loop : LI.getLoopsInPreorder()) {
+    if (!Loop->getLoopPreheader())
+      report_fatal_error(
+          "MAIR requires a loop preheader before graph building");
+    if (!Loop->hasDedicatedExits())
+      report_fatal_error(
+          "MAIR requires dedicated loop exits before graph building");
+  }
+  SmallPtrSet<const BasicBlock *, 32> Visited;
+  SmallPtrSet<const BasicBlock *, 32> Active;
+  SmallVector<std::pair<const BasicBlock *, const_succ_iterator>, 16> Stack;
+  for (const BasicBlock &Start : F) {
+    if (!Visited.insert(&Start).second)
+      continue;
+    Active.insert(&Start);
+    Stack.emplace_back(&Start, succ_begin(&Start));
+    while (!Stack.empty()) {
+      const BasicBlock *Block = Stack.back().first;
+      auto &NextSuccessor = Stack.back().second;
+      if (NextSuccessor == succ_end(Block)) {
+        Active.erase(Block);
+        Stack.pop_back();
+        continue;
+      }
+      const BasicBlock *Successor = *NextSuccessor++;
+      if (Active.contains(Successor)) {
+        const Loop *Loop = LI.getLoopFor(Successor);
+        if (!DT.dominates(Successor, Block) || !Loop ||
+            Loop->getHeader() != Successor || !Loop->contains(Block))
+          report_fatal_error(
+              "MAIR does not support irreducible or unrepresented cycles");
+      } else if (Visited.insert(Successor).second) {
+        Active.insert(Successor);
+        Stack.emplace_back(Successor, succ_begin(Successor));
+      }
+    }
+  }
+}
 
 } // namespace
 
@@ -90,50 +130,96 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
                            const PostDominatorTree &PDT, const LoopInfo &LI,
                            MAIRBarrierAnalysisCore &BA,
                            MAIROptimizationConfig Config) {
+  verifyLoopStructure(F, DT, LI);
   MAIRGraph Graph(F, Config);
   Graph.Analyses.bind(DT, PDT, LI);
-  DenseMap<const BasicBlock *, ProgramPoint *> BBEntryPPs;
-  DenseMap<const BasicBlock *, ProgramPoint *> BBExitPPs;
-  DenseMap<const BasicBlock *, SmallVector<ProgramPoint *, 4>> OrderedPPs;
+  DenseMap<const Loop *, MAIRGraph *> LoopGraphs;
+  for (const Loop *Loop : LI.getLoopsInPreorder()) {
+    MAIRGraph *Parent = Loop->getParentLoop()
+                            ? LoopGraphs.lookup(Loop->getParentLoop())
+                            : &Graph;
+    auto Body = std::unique_ptr<MAIRGraph>(new MAIRGraph(*Parent, *Loop));
+    LoopGraphs[Loop] = Body.get();
+    Parent->ChildGraphs.push_back(std::move(Body));
+  }
+  auto ScopeFor = [&](const BasicBlock &BB) -> MAIRGraph & {
+    const Loop *Loop = LI.getLoopFor(&BB);
+    return Loop ? *LoopGraphs.lookup(Loop) : Graph;
+  };
+  using BlockPoints =
+      DenseMap<const BasicBlock *, SmallVector<ProgramPoint *, 4>>;
+  DenseMap<MAIRGraph *, BlockPoints> OrderedPPs;
 
   // ===========================================================
   // 1. Create program points for memory instructions and block boundaries
   // ===========================================================
   for (BasicBlock &BB : F) {
-    auto &PPsInOneBB = OrderedPPs[&BB];
-    auto &Start = Graph.createBBProgramPoint(BB, true);
-    BBEntryPPs[&BB] = &Start;
+    MAIRGraph &Scope = ScopeFor(BB);
+    Scope.ForwardBarrier |= BA.hasFwdBarrier(BB);
+    Scope.BackwardBarrier |= BA.hasBwdBarrier(BB);
+    auto &PPsInOneBB = OrderedPPs[&Scope][&BB];
+    auto &Start = Scope.createBBProgramPoint(BB, true);
     PPsInOneBB.push_back(&Start);
     for (Instruction &I : BB) {
       if (isInterestingMop(I)) {
-        auto &PP = Graph.createInstProgramPoint(BB, I);
+        auto &PP = Scope.createInstProgramPoint(BB, I);
         PPsInOneBB.push_back(&PP);
       }
     }
-    auto &End = Graph.createBBProgramPoint(BB, false);
-    BBExitPPs[&BB] = &End;
+    auto &End = Scope.createBBProgramPoint(BB, false);
     PPsInOneBB.push_back(&End);
   }
+  for (const Loop *Loop : LI.getLoopsInPreorder()) {
+    MAIRGraph &Body = *LoopGraphs.lookup(Loop);
+    MAIRGraph &Parent = *Body.Parent;
+    BasicBlock *Preheader = Loop->getLoopPreheader();
+    Body.LoopPreheader = &Parent.createLoopProgramPoint(
+        ProgramPointSite::anchored(*Preheader->getTerminator(),
+                                   ProgramPointSite::Kind::BasicBlockExit),
+        LoopProgramPoint::BoundaryKind::LoopPreheader, Body);
+    OrderedPPs[&Parent][Preheader].push_back(Body.LoopPreheader);
+    SmallVector<BasicBlock *, 4> ExitBlocks;
+    Loop->getUniqueExitBlocks(ExitBlocks);
+    for (BasicBlock *Exit : ExitBlocks) {
+      auto &Boundary = Parent.createLoopProgramPoint(
+          ProgramPointSite::anchored(*Exit->getFirstNonPHIIt(),
+                                     ProgramPointSite::Kind::BasicBlockEntry),
+          LoopProgramPoint::BoundaryKind::LoopExit, Body);
+      Body.LoopExits.push_back(&Boundary);
+      auto &Points = OrderedPPs[&Parent][Exit];
+      Points.insert(Points.begin(), &Boundary);
+    }
+  }
+  for (MAIRGraph *Scope : llvm::reverse(Graph.graphs()))
+    for (const auto &Child : Scope->ChildGraphs) {
+      Scope->ForwardBarrier |= Child->ForwardBarrier;
+      Scope->BackwardBarrier |= Child->BackwardBarrier;
+    }
 
   // ===========================================================
   // 2. Connect program point edges inside each block
   // ===========================================================
-  for (auto &Entry : OrderedPPs) {
-    const BasicBlock &BB = *Entry.first;
-    ArrayRef<ProgramPoint *> Points = Entry.second;
-    assert(Points.size() > 1);
-    for (unsigned I = 1; I < Points.size(); ++I) {
-      ProgramPoint &Prev = *Points[I - 1], &Next = *Points[I];
-      const Instruction *PrevI = getBarrierRangeStart(Prev);
-      const Instruction *NextI = getBarrierRangeEnd(Next);
-      bool FwdEndpointBarrier =
-          Prev.isMemoryInstSite() && PrevI && BA.isFwdBarrier(*PrevI);
-      bool BwdEndpointBarrier =
-          Prev.isMemoryInstSite() && PrevI && BA.isBwdBarrier(*PrevI);
-      if (!FwdEndpointBarrier && !BA.hasFwdBarrierBetween(BB, PrevI, NextI))
-        Graph.addEdge(Prev, Next, PPEdgeKind::Dom);
-      if (!BwdEndpointBarrier && !BA.hasBwdBarrierBetween(BB, PrevI, NextI))
-        Graph.addEdge(Next, Prev, PPEdgeKind::PostDom);
+  for (auto &ScopeEntry : OrderedPPs) {
+    MAIRGraph &Scope = *ScopeEntry.first;
+    for (auto &Entry : ScopeEntry.second) {
+      const BasicBlock &BB = *Entry.first;
+      ArrayRef<ProgramPoint *> Points = Entry.second;
+      for (unsigned I = 1; I < Points.size(); ++I) {
+        ProgramPoint &Prev = *Points[I - 1], &Next = *Points[I];
+        const Instruction *PrevI = getBarrierRangeStart(Prev);
+        const Instruction *NextI = getBarrierRangeEnd(Next);
+        bool FwdEndpointBarrier =
+            Prev.isMemoryInstSite() && PrevI && BA.isFwdBarrier(*PrevI);
+        bool BwdEndpointBarrier =
+            Prev.isMemoryInstSite() && PrevI && BA.isBwdBarrier(*PrevI);
+        const bool SameSite = Prev.getSite() == Next.getSite();
+        if (SameSite ||
+            (!FwdEndpointBarrier && !BA.hasFwdBarrierBetween(BB, PrevI, NextI)))
+          Scope.addEdge(Prev, Next, PPEdgeKind::Dom);
+        if (SameSite ||
+            (!BwdEndpointBarrier && !BA.hasBwdBarrierBetween(BB, PrevI, NextI)))
+          Scope.addEdge(Next, Prev, PPEdgeKind::PostDom);
+      }
     }
   }
 
@@ -147,22 +233,27 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
     return nullptr;
   };
   for (BasicBlock &BB : F) {
-    ProgramPoint *EntryPP = BBEntryPPs.lookup(&BB);
-    ProgramPoint *ExitPP = BBExitPPs.lookup(&BB);
+    MAIRGraph &Scope = ScopeFor(BB);
+    ProgramPoint *EntryPP = OrderedPPs[&Scope][&BB].front();
+    ProgramPoint *ExitPP = OrderedPPs[&Scope][&BB].back();
     assert(EntryPP && ExitPP);
-    if (const BasicBlock *IDom = GetIDom(DT, BB)) {
-      ProgramPoint *Pred = BBExitPPs.lookup(IDom);
-      assert(Pred);
+    const BasicBlock *IDom = GetIDom(DT, BB);
+    while (IDom && &ScopeFor(*IDom) != &Scope)
+      IDom = GetIDom(DT, *IDom);
+    if (IDom) {
+      ProgramPoint *Pred = OrderedPPs[&Scope][IDom].back();
       if (!BA.isFwdBarrier(*IDom->getTerminator()) &&
           !BA.hasFwdBarrierPath(*IDom, BB))
-        Graph.addEdge(*Pred, *EntryPP, PPEdgeKind::Dom);
+        Scope.addEdge(*Pred, *EntryPP, PPEdgeKind::Dom);
     }
-    if (const BasicBlock *IPDom = GetIDom(PDT, BB)) {
-      ProgramPoint *Succ = BBEntryPPs.lookup(IPDom);
-      assert(Succ);
+    const BasicBlock *IPDom = GetIDom(PDT, BB);
+    while (IPDom && &ScopeFor(*IPDom) != &Scope)
+      IPDom = GetIDom(PDT, *IPDom);
+    if (IPDom) {
+      ProgramPoint *Succ = OrderedPPs[&Scope][IPDom].front();
       if (!BA.isBwdBarrier(*BB.getTerminator()) &&
           !BA.hasBwdBarrierPath(BB, *IPDom))
-        Graph.addEdge(*Succ, *ExitPP, PPEdgeKind::PostDom);
+        Scope.addEdge(*Succ, *ExitPP, PPEdgeKind::PostDom);
     }
   }
 
@@ -1343,7 +1434,8 @@ const MAIRGraph *MAIRGraph::getLoopGraph(const Loop &Loop) const {
 
 bool MAIRGraph::containsBlock(const BasicBlock &BB) const {
   assertLive("query");
-  return BB.getParent() == F;
+  return BB.getParent() == F &&
+         (!hasLoopInfo() || getLoopInfo().getLoopFor(&BB) == ScopeLoop);
 }
 
 void MAIRGraph::markConsumed() {

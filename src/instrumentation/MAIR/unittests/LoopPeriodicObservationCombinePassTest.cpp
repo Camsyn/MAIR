@@ -36,11 +36,12 @@ TEST(LoopPeriodicObservationCombinePass, AggregatesAUnitStrideLoop) {
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   llvm::Function &F = prepare(Ctx, M, PIC, FAM);
-  MAIRGraph Graph = MAIRGraph::build(F, FAM);
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(F, FAM);
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
   EXPECT_FALSE(
-      LoopPeriodicObservationCombinePass().run(Graph, AM).areAllPreserved());
+      runPassOnGraphTree(LoopPeriodicObservationCombinePass(), Graph, AM)
+          .areAllPreserved());
   EXPECT_EQ(observationCount(Graph, "exit"), 1u);
   EXPECT_EQ(observationCount(Graph, "header"), 0u);
   EXPECT_TRUE(Graph.verify());
@@ -52,12 +53,13 @@ TEST(LoopPeriodicObservationCombinePass, AddressSanitizerDoesNotAggregate) {
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   llvm::Function &F = prepare(Ctx, M, PIC, FAM);
-  MAIRGraph Graph =
-      MAIRGraph::build(F, FAM, MAIROptimizationConfig::forAddressSanitizer());
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(
+      F, FAM, MAIROptimizationConfig::forAddressSanitizer());
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
   EXPECT_TRUE(
-      LoopPeriodicObservationCombinePass().run(Graph, AM).areAllPreserved());
+      runPassOnGraphTree(LoopPeriodicObservationCombinePass(), Graph, AM)
+          .areAllPreserved());
   EXPECT_EQ(observationCount(Graph, "header"), 1u);
   EXPECT_EQ(observationCount(Graph, "exit"), 0u);
   EXPECT_TRUE(Graph.verify());
@@ -77,11 +79,12 @@ entry:
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   registerLoopAnalyses(FAM, PIC);
-  MAIRGraph Graph = MAIRGraph::build(*M->getFunction("f"), FAM);
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(*M->getFunction("f"), FAM);
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
   EXPECT_TRUE(
-      LoopPeriodicObservationCombinePass().run(Graph, AM).areAllPreserved());
+      runPassOnGraphTree(LoopPeriodicObservationCombinePass(), Graph, AM)
+          .areAllPreserved());
   EXPECT_EQ(observationCount(Graph, "entry"), 1u);
   EXPECT_TRUE(Graph.verify());
 }

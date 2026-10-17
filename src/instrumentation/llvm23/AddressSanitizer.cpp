@@ -4269,6 +4269,7 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
       /*KeepFullDebug=*/false,
       mair::MAIROptimizationConfig::forAddressSanitizer());
   Opt.build();
+  FunctionModified |= Opt.hasModifiedIR();
 
   // Reads or writes disabled by the instrumentation flags are not sanitizer
   // observations. Drop them before optimization so a disabled access cannot
@@ -4369,12 +4370,12 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
 
   AsanToInstrument Targets;
   if (!collectTargetsToIntrument(F, TLI, TTI, Targets))
-    return false;
+    return FunctionModified;
 
   auto &[OperandsToInstrument, IntrinToInstrument, NoReturnCalls,
          PointerComparisonsOrSubtracts, IsBug11395] = Targets;
   if (IsBug11395)
-    return false;
+    return FunctionModified;
 
   unsigned NumFallbackOperands = llvm::count_if(
       OperandsToInstrument, [&](InterestingMemoryOperand &Operand) {

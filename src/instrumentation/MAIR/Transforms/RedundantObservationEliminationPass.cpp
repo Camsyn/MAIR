@@ -150,8 +150,8 @@ unsigned doIntraROE(MAIRGraph &G) {
           continue;
         }
 
-        // Observation::covers requires both observations to be deletable, so
-        // this candidate cannot become a covering witness.
+        // A pinned observation can witness later deletions, but it is not a
+        // candidate for deletion itself.
         if (!Obs.isDeletable())
           continue;
 

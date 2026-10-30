@@ -79,8 +79,6 @@ RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
     if (!PP.hasAlwaysGuard())
       continue;
     for (const Observation &Obs : PP) {
-      if (!Obs.isDeletable())
-        continue;
       // A local observation becomes available only after its program point,
       // so seed it at each allowed child rather than in the source point's IN.
       for (const ProgramPointEdge &Edge : PP.children())

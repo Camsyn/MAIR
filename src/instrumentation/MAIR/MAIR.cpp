@@ -925,7 +925,9 @@ bool Observation::hasConcreteRange() const {
 }
 
 bool Observation::covers(const Observation &Other) const {
-  if (getBase() != Other.getBase() || !isDeletable() || !Other.isDeletable() ||
+  // The witness may be pinned. Only the observation being deleted must be
+  // deletable, so a retained memset can cover a later ordinary store.
+  if (getBase() != Other.getBase() || !Other.isDeletable() ||
       getLevel() < Other.getLevel())
     return false;
   if (isAtomic() != Other.isAtomic() &&

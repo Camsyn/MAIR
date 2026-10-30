@@ -264,4 +264,63 @@ exit:
   EXPECT_TRUE(Graph.verify());
 }
 
+TEST(RedundantObservationEliminationPass, RetainedMemsetCoversALaterStore) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+define void @f(ptr %p) {
+entry:
+  call void @llvm.memset.p0.i64(ptr %p, i8 0, i64 8, i1 false)
+  store i32 1, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  MAIRGraph Graph = buildGraph(*M->getFunction("f"),
+                               MAIROptimizationConfig::forThreadSanitizer());
+  const ProgramPoint *Memset = findMutableMemoryProgramPoint(Graph, "entry");
+  ASSERT_NE(Memset, nullptr);
+  ASSERT_FALSE(Memset->empty());
+  EXPECT_TRUE(Memset->begin()->isCallLike());
+  EXPECT_FALSE(Memset->begin()->isDeletable());
+  MAIRGraphAnalysisManager AM;
+  EXPECT_FALSE(
+      runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM)
+          .areAllPreserved());
+  EXPECT_EQ(observationCount(Graph, "entry"), 1u);
+  const ProgramPoint *Kept = nullptr;
+  for (const ProgramPoint &PP : testProgramPoints(Graph))
+    if (!PP.empty())
+      Kept = &PP;
+  ASSERT_NE(Kept, nullptr);
+  EXPECT_TRUE(Kept->begin()->isCallLike());
+  EXPECT_EQ(Kept->begin()->getKind(), AccessKind::Write);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(RedundantObservationEliminationPass,
+     RetainedMemsetDoesNotCoverAVolatileStore) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+define void @f(ptr %p) {
+entry:
+  call void @llvm.memset.p0.i64(ptr %p, i8 0, i64 8, i1 false)
+  store volatile i32 1, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  MAIRGraph Graph = buildGraph(*M->getFunction("f"),
+                               MAIROptimizationConfig::forThreadSanitizer());
+  MAIRGraphAnalysisManager AM;
+  EXPECT_TRUE(
+      runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM)
+          .areAllPreserved());
+  EXPECT_EQ(observationCount(Graph, "entry"), 2u);
+  EXPECT_TRUE(Graph.verify());
+}
+
 } // namespace

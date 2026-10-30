@@ -110,7 +110,7 @@ $$
 
 Sanitizer 策略还决定访问类型的覆盖关系、Observation 是否可删除、合并或移动，以及哪些边可用于覆盖传播。这些条件彼此独立。例如当前 ASan 策略把读写类型视为同一覆盖级别，仅允许沿 $E^D$ 传播覆盖，且不移动 Observation；当前 TSan 策略使用 $r\preceq_s w\preceq_s rw$，并允许两种方向在各自条件下传播。两者仍需检查区域、属性与执行条件。
 
-记 $E^{\mathrm{cov}}_{f,s}\subseteq E^D_{f,s}\cup E^P_{f,s}$ 为逐边通过当前策略检查的覆盖传播边集。每条边的两端必须属于同层 MAIR，父子图之间没有普通传播边。跨 PP 覆盖可以使用 $(E^{\mathrm{cov}}_{f,s})^+$，但这种可达性**只是候选关系**。只有独立保留的 Observation $o_1$ 对目标 Observation $o_2$ 满足 sanitizer 特定的 $\operatorname{covers}_s(o_1,o_2)$，且相应动态实例的区域与效果确实匹配，$o_1$ 才能作为删除 $o_2$ 的见证。$\operatorname{covers}_s$ 至少要求 Observation 可删除、区域包含、类型覆盖及属性兼容；其中区域包含必须针对被配对的动态实例解释。静态值相同本身不足以跨迭代证明覆盖。
+记 $E^{\mathrm{cov}}_{f,s}\subseteq E^D_{f,s}\cup E^P_{f,s}$ 为逐边通过当前策略检查的覆盖传播边集。每条边的两端必须属于同层 MAIR，父子图之间没有普通传播边。跨 PP 覆盖可以使用 $(E^{\mathrm{cov}}_{f,s})^+$，但这种可达性**只是候选关系**。只有独立保留的 Observation $o_1$ 对目标 Observation $o_2$ 满足 sanitizer 特定的 $\operatorname{covers}_s(o_1,o_2)$，且相应动态实例的区域与效果确实匹配，$o_1$ 才能作为删除 $o_2$ 的见证。$\operatorname{covers}_s$ 要求 $o_2$ 可删除，并要求区域包含、类型覆盖及属性兼容；$o_1$ 自身不可删除时仍可作为见证。区域包含必须针对被配对的动态实例解释。静态值相同本身不足以跨迭代证明覆盖。
 
 ## 5. 已实现变换的抽象边界
 
@@ -125,7 +125,7 @@ $$
 
 **图收缩（SimplifyGraph）。** 若 $u\,E^D\,v$ 且 $v\,E^P\,u$，两个 PP 的 site 与 guard 具有兼容的执行语义，且 $u$ 的全部 Observation 可移动，则可将 $u$ 的 payload 下沉至 $v$ 并收缩图。跨基本块时，当前实现还要求两端处于同一最内层循环。互有无类型边并不足以允许收缩。
 
-**冗余观测删除（ROE）。** 若独立且保留的 $o_1$ 在同一 PP 内或经允许的覆盖传播到达 $o_2$，并满足 $\operatorname{covers}_s(o_1,o_2)$，则可删除 $o_2$ 这一 Observation。覆盖必须同时处理动态区域包含、访问类型、属性和删除能力。
+**冗余观测删除（ROE）。** 若独立且保留的 $o_1$ 在同一 PP 内或经允许的覆盖传播到达 $o_2$，并满足 $\operatorname{covers}_s(o_1,o_2)$，则可删除 $o_2$ 这一 Observation。覆盖必须同时处理动态区域包含、访问类型、属性和目标 Observation 的删除能力。
 
 **同 PP 区域合并（LocationMerge）。** 只有在两个 Observation 属于同一 PP、语义兼容且可合并，并且 $\ell_1\cup\ell_2$ 可在目标处精确表达时，才能用一个 Observation 替代二者。替代 Observation 的类型为 $t_1\sqcup t_2$，并保留必要属性与来源。不能以包含未观测空隙的外包区间代替精确并集；当前 pass 不聚合周期区域。
 

@@ -14,7 +14,6 @@ int tsan_tail(int *p, int *dst) {
 // CHECK: call void @__tsan_func_entry
 // CHECK: call i32 @__tsan_atomic32_load
 // CHECK: call void @__tsan_atomic32_store
-// CHECK: call void @llvm.memcpy
-// CHECK-NOT: call ptr @__tsan_memcpy
+// CHECK: call ptr @__tsan_memcpy
 // CHECK: call void @__tsan_write4
 // CHECK: call void @__tsan_func_exit

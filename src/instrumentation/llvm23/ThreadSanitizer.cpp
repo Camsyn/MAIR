@@ -1042,6 +1042,8 @@ bool XsanThreadSanitizer::instrumentMAIRObservation(
 
   Instruction *Source = SelectedSources.front();
   if (isa<AnyMemIntrinsic>(Source)) {
+    // TODO: Unused while call-like observations are skipped. Memory intrinsics
+    // currently go through ThreadSanitizer::instrumentMemIntrinsic.
     if (!Obs.Address || !Obs.AccessSize)
       return false;
     __xsan::InstrumentationIRBuilder IRB(Builder);
@@ -1168,29 +1170,13 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
           Obs.getInstructions().size() != 1)
         return false;
 
-      Instruction *Source = Obs.getInstructions().front();
-      // memcpy and memmove are one range read plus one range write. memset is
-      // one range write. MAIR already creates those observations, and the
-      // length may be symbolic.
-      const bool IsRangeIntrinsic = isa<AnyMemIntrinsic>(Source);
-      if ((Obs.isCallLike() && !IsRangeIntrinsic) ||
-          (!IsRangeIntrinsic && !Obs.hasConcreteRange()))
+      // TODO: Treat memory intrinsics as ordinary observations. They are
+      // call-like and skipped below; ThreadSanitizer's original lowering
+      // instruments them until then.
+      if (Obs.isCallLike() || !Obs.hasConcreteRange())
         return false;
-      if (IsRangeIntrinsic) {
-        Value *Addr = nullptr;
-        if (auto *Transfer = dyn_cast<AnyMemTransferInst>(Source))
-          Addr = Obs.getKind() == mair::AccessKind::Read
-                     ? Transfer->getRawSource()
-                     : Transfer->getRawDest();
-        else
-          Addr = cast<AnyMemSetInst>(Source)->getRawDest();
-        if (!shouldInstrumentReadWriteFromAddress(Source->getModule(), Addr))
-          return false;
-        const AllocaInst *AI = findAllocaForValue(Addr);
-        return !AI || !ClOmitNonCaptured ||
-               PointerMayBeCaptured(AI, /*ReturnCaptures=*/true);
-      }
 
+      Instruction *Source = Obs.getInstructions().front();
       auto *LI = dyn_cast<LoadInst>(Source);
       auto *SI = dyn_cast<StoreInst>(Source);
       if ((!LI && !SI) || __xsan::DelegateToXSan::is(*Source) ||
@@ -1217,6 +1203,8 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
     for (const auto &[PP, Observations] : Opt->getProgramPointObservations()) {
       (void)PP;
       for (const mair::Observation *Obs : Observations) {
+        if (Obs->isCallLike())
+          continue;
         if (CanInstrumentViaMAIR(*Obs)) {
           MAIRCandidates.push_back(Obs);
           continue;
@@ -1292,9 +1280,11 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
   /// and AllocInsts.
   /// TSan does not instrument on GlobalVariables and AllocInsts, but it does
   /// instrument on MemIntrinsics. We need to handle MemIntrinsics separately.
-  // memcpy, memmove, and memset are emitted above as
-  // __tsan_read_range and __tsan_write_range. Leave the intrinsic in place.
-  (void)MemIntrinCalls;
+  // TODO: Treat memcpy, memmove, and memset as ordinary observations. Until
+  // then, use ThreadSanitizer's original memintrinsic lowering.
+  if (ClInstrumentMemIntrinsics && SanitizeFunction)
+    for (auto *Inst : MemIntrinCalls)
+      Res |= instrumentMemIntrinsic(Inst);
 
   if (F.hasFnAttribute("sanitize_thread_no_checking_at_run_time")) {
     assert(!F.hasFnAttribute(Attribute::SanitizeThread));

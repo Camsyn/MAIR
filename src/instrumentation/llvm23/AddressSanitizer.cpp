@@ -4349,6 +4349,11 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
   for (const auto &[PP, Observations] : Opt.getProgramPointObservations()) {
     (void)PP;
     for (const mair::Observation *Obs : Observations) {
+      // TODO: Treat memory intrinsics as ordinary observations. They are
+      // call-like and skipped here; AddressSanitizer's original lowering
+      // instruments them until then.
+      if (Obs->isCallLike())
+        continue;
       if (CanInstrumentViaMAIR(*Obs)) {
         MAIRCandidates.push_back(Obs);
         continue;
@@ -4430,6 +4435,8 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
       instrumentMop(ObjSizeVis, Operand, UseCalls, F.getDataLayout(), RTCI);
     FunctionModified = true;
   }
+  // TODO: Treat memcpy, memmove, and memset as ordinary observations. Until
+  // then, use AddressSanitizer's original memintrinsic lowering.
   for (auto *Inst : IntrinToInstrument) {
     if (!suppressInstrumentationSiteForDebug(NumInstrumented))
       instrumentMemIntrinsic(Inst, RTCI);

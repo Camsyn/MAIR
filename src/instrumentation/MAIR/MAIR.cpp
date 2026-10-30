@@ -884,6 +884,8 @@ uint8_t MAIROptimizationConfig::getLevel(AccessKind Kind) const {
 void MAIROptimizationConfig::initializeObservation(Observation &Obs) const {
   const MaskedRegion *Masked = Obs.getMaskedRegion();
   const bool IsComparableMasked = !Masked || Masked->isComparable();
+  // TODO: CallLike observations, currently modeled memory intrinsics, should
+  // become movable and mergeable. They remain pinned until that is proven.
   const bool CanMerge = !Obs.isVolatile() && !Obs.isCallLike() &&
                         IsComparableMasked && (IgnoreAtomic || !Obs.isAtomic());
   const bool CanMove = AllowRelocation && !Obs.isVolatile() &&

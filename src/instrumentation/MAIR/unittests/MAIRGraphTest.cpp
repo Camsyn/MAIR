@@ -1152,6 +1152,94 @@ merge:
   EXPECT_FALSE(hasSuccessor(Graph, *Merge, *EntryExit, PPEdgeKind::PostDom));
 }
 
+TEST(MAIRGraph, PropagatesNestedBarrierPastManySiblingLoops) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @barrier()
+define void @f(ptr %p, i1 %c) {
+entry:
+  br label %l0
+l0:
+  %a0 = load i32, ptr %p, align 4
+  br i1 %c, label %l0.exit, label %l0
+l0.exit:
+  br label %l1
+l1:
+  %a1 = load i32, ptr %p, align 4
+  br i1 %c, label %l1.exit, label %l1
+l1.exit:
+  br label %l2
+l2:
+  %a2 = load i32, ptr %p, align 4
+  br i1 %c, label %l2.exit, label %l2
+l2.exit:
+  br label %l3
+l3:
+  %a3 = load i32, ptr %p, align 4
+  br i1 %c, label %l3.exit, label %l3
+l3.exit:
+  br label %l4
+l4:
+  %a4 = load i32, ptr %p, align 4
+  br i1 %c, label %l4.exit, label %l4
+l4.exit:
+  br label %l5
+l5:
+  %a5 = load i32, ptr %p, align 4
+  br i1 %c, label %l5.exit, label %l5
+l5.exit:
+  br label %l6
+l6:
+  %a6 = load i32, ptr %p, align 4
+  br i1 %c, label %l6.exit, label %l6
+l6.exit:
+  br label %outer
+outer:
+  br label %inner
+inner:
+  call void @barrier()
+  %ai = load i32, ptr %p, align 4
+  br i1 %c, label %inner.exit, label %inner
+inner.exit:
+  br label %outer.latch
+outer.latch:
+  br i1 %c, label %exit, label %outer
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithExplicitAnalyses<CallBarrierTrait>(F);
+  ASSERT_TRUE(Graph.verify());
+  // Root plus nine loops used to overflow graphs()' inline storage and crash
+  // while folding barriers. The call is only in the inner loop.
+  EXPECT_EQ(Graph.graphs().size(), 10u);
+
+  auto LoopScope = [&](llvm::StringRef Header) -> const MAIRGraph * {
+    for (const MAIRGraph *Scope : Graph.graphs())
+      if (const llvm::Loop *Loop = Scope->getLoop())
+        if (Loop->getHeader()->getName() == Header)
+          return Scope;
+    return nullptr;
+  };
+  const MAIRGraph *Sibling = LoopScope("l0");
+  const MAIRGraph *Outer = LoopScope("outer");
+  const MAIRGraph *Inner = LoopScope("inner");
+  ASSERT_NE(Sibling, nullptr);
+  ASSERT_NE(Outer, nullptr);
+  ASSERT_NE(Inner, nullptr);
+  EXPECT_FALSE(Sibling->hasForwardBarrier());
+  EXPECT_FALSE(Sibling->hasBackwardBarrier());
+  EXPECT_TRUE(Inner->hasForwardBarrier());
+  EXPECT_TRUE(Inner->hasBackwardBarrier());
+  EXPECT_TRUE(Outer->hasForwardBarrier());
+  EXPECT_TRUE(Outer->hasBackwardBarrier());
+  EXPECT_TRUE(Graph.hasForwardBarrier());
+  EXPECT_TRUE(Graph.hasBackwardBarrier());
+}
+
 TEST(MAIRGraph, CreateFromHonorsBarrierTraitInsideBlock) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(

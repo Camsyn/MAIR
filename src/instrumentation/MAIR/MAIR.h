@@ -914,6 +914,7 @@ public:
   }
   const llvm::Loop *getLoop() const { return ScopeLoop; }
   ArrayRef<std::unique_ptr<MAIRGraph>> children() const { return ChildGraphs; }
+  /// Returns the subgraphs via DFS order.
   SmallVector<MAIRGraph *, 8> graphs();
   SmallVector<const MAIRGraph *, 8> graphs() const;
   SmallVector<ProgramPoint *, 16> allProgramPoints();
@@ -1061,6 +1062,9 @@ private:
   void assertLive(StringRef Operation) const;
   void markConsumed();
   void clearStorage();
+  /// Fold each scope's barriers into its ancestors. Descendants are visited
+  /// first, so a barrier inside a nested loop reaches the function scope.
+  void propagateBarrier();
   MAIRGraph(MAIRGraph &ParentGraph, const llvm::Loop &Loop);
   LoopProgramPoint &createLoopProgramPoint(ProgramPointSite Site,
                                            LoopProgramPoint::BoundaryKind Kind,

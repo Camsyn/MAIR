@@ -1,5 +1,6 @@
 #include "MAIR/MAIR.h"
 
+#include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Analysis/PostDominators.h"
@@ -17,6 +18,47 @@
 #include <optional>
 
 using namespace llvm;
+
+namespace {
+
+struct MAIRScopeTree {
+  mair::MAIRGraph *Root = nullptr;
+};
+
+mair::MAIRGraph *scopeChild(const std::unique_ptr<mair::MAIRGraph> &Child) {
+  return Child.get();
+}
+
+} // namespace
+
+namespace llvm {
+
+template <> struct GraphTraits<MAIRScopeTree *> {
+  using NodeRef = mair::MAIRGraph *;
+  using ChildIteratorType = decltype(map_iterator(
+      std::declval<NodeRef>()->children().begin(), scopeChild));
+
+  static NodeRef getEntryNode(MAIRScopeTree *Tree) { return Tree->Root; }
+
+  static ChildIteratorType child_begin(NodeRef Scope) {
+    return map_iterator(Scope->children().begin(), scopeChild);
+  }
+
+  static ChildIteratorType child_end(NodeRef Scope) {
+    return map_iterator(Scope->children().end(), scopeChild);
+  }
+};
+
+} // namespace llvm
+
+void mair::MAIRGraph::propagateBarrier() {
+  MAIRScopeTree Tree{this};
+  for (MAIRGraph *Scope : post_order(&Tree))
+    for (const auto &Child : Scope->ChildGraphs) {
+      Scope->ForwardBarrier |= Child->ForwardBarrier;
+      Scope->BackwardBarrier |= Child->BackwardBarrier;
+    }
+}
 
 namespace mair {
 
@@ -190,11 +232,9 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
       Points.insert(Points.begin(), &Boundary);
     }
   }
-  for (MAIRGraph *Scope : llvm::reverse(Graph.graphs()))
-    for (const auto &Child : Scope->ChildGraphs) {
-      Scope->ForwardBarrier |= Child->ForwardBarrier;
-      Scope->BackwardBarrier |= Child->BackwardBarrier;
-    }
+
+  // Propagate the barrier status from children to parents.
+  Graph.propagateBarrier();
 
   // ===========================================================
   // 2. Connect program point edges inside each block

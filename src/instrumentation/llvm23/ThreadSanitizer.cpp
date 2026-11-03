@@ -1072,17 +1072,18 @@ bool XsanThreadSanitizer::instrumentMAIRObservation(
           ? cast<LoadInst>(Source)->getType()
           : cast<StoreInst>(Source)->getValueOperand()->getType();
   const auto *Size = dyn_cast_or_null<ConstantInt>(Obs.AccessSize);
-  bool IsVolatile = isa<LoadInst>(Source)
-                        ? cast<LoadInst>(Source)->isVolatile()
-                        : cast<StoreInst>(Source)->isVolatile();
+  // volatile observation should be considered as a normal obs.
+  // bool IsVolatile = isa<LoadInst>(Source)
+  //                       ? cast<LoadInst>(Source)->isVolatile()
+  //                       : cast<StoreInst>(Source)->isVolatile();
   TypeSize SourceSize = DL.getTypeStoreSize(SourceType);
   bool CanUseOptimizedSite =
       SelectedSources.size() == 1 &&
       Obs.Source->getInstructions().size() == 1 && Obs.Source->isContiguous() &&
       !SourceType->isVectorTy() && !SourceSize.isScalable() && Size &&
       Size->getValue().getActiveBits() < 32 &&
-      Size->getZExtValue() == SourceSize.getFixedValue() &&
-      !isVtableAccess(Source) && !IsVolatile;
+      Size->getZExtValue() == SourceSize.getFixedValue() && /* !IsVolatile && */
+      !isVtableAccess(Source);
   if (!CanUseOptimizedSite) {
     bool Changed = false;
     for (Instruction *Selected : SelectedSources)
@@ -1172,7 +1173,7 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
     };
 
     auto CanInstrumentViaMAIR = [&](const mair::Observation &Obs) {
-      if (!Obs.isContiguous() || Obs.isVolatile() || Obs.isAtomic() ||
+      if (!Obs.isContiguous() /* || Obs.isVolatile() */ || Obs.isAtomic() ||
           Obs.getInstructions().size() != 1)
         return false;
 
@@ -1186,8 +1187,8 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
       auto *LI = dyn_cast<LoadInst>(Source);
       auto *SI = dyn_cast<StoreInst>(Source);
       if ((!LI && !SI) || __xsan::DelegateToXSan::is(*Source) ||
-          isTsanAtomic(Source) || isVtableAccess(Source) ||
-          (LI && LI->isVolatile()) || (SI && SI->isVolatile()))
+          // (LI && LI->isVolatile()) || (SI && SI->isVolatile()) ||
+          isTsanAtomic(Source) || isVtableAccess(Source))
         return false;
 
       Type *AccessTy = LI ? LI->getType() : SI->getValueOperand()->getType();

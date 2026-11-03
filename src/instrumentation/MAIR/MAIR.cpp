@@ -915,6 +915,7 @@ uint8_t MAIROptimizationConfig::getLevel(AccessKind Kind) const {
   llvm_unreachable("unknown access kind");
 }
 
+/// TODO: let this be configurable.
 void MAIROptimizationConfig::initializeObservation(Observation &Obs) const {
   const MaskedRegion *Masked = Obs.getMaskedRegion();
   const bool IsComparableMasked = !Masked || Masked->isComparable();
@@ -922,7 +923,10 @@ void MAIROptimizationConfig::initializeObservation(Observation &Obs) const {
   // become movable and mergeable. They remain pinned until that is proven.
   const bool CanMerge = !Obs.isVolatile() && !Obs.isCallLike() &&
                         IsComparableMasked && (IgnoreAtomic || !Obs.isAtomic());
-  const bool CanMove = AllowRelocation && !Obs.isVolatile() &&
+  const bool CanMove = AllowRelocation &&
+                       // "MA is immovable" does not mean its observation is
+                       // immovable.
+                       // !Obs.isVolatile() &&
                        !Obs.isCallLike() && !Obs.isAtomic();
   const bool CanDelete = !Obs.isVolatile() && !Obs.isCallLike() &&
                          (IgnoreAtomic || !Obs.isAtomic());

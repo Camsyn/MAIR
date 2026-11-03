@@ -1,5 +1,5 @@
-; RUN: mair-opt %s | FileCheck %s
-; RUN: mair-opt -passes='default<O1>' %s | FileCheck %s
+; RUN: mair-opt %s | FileCheck %s --check-prefixes=CHECK,RAW
+; RUN: mair-opt -passes='default<O1>' %s | FileCheck %s --check-prefixes=CHECK,OPT
 
 declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
 declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1 immarg)
@@ -28,10 +28,13 @@ entry:
 }
 
 ; CHECK-LABEL: mair graph of fn @properties {
-; CHECK: pp1:
-; CHECK-NEXT:   o: read volatile ptr %p, 4
-; CHECK: pp2:
-; CHECK-NEXT:   o: read atomic ptr %p, 4
+; RAW: pp1:
+; RAW-NEXT:   o: read volatile ptr %p, 4
+; RAW: pp2:
+; RAW-NEXT:   o: read atomic ptr %p, 4
+; OPT: pp2:
+; OPT-NEXT:   o: read volatile ptr %p, 4
+; OPT-NEXT:   o: read atomic ptr %p, 4
 ; CHECK: pp3:
 ; CHECK-NEXT:   o: read/write atomic ptr %p, 4
 ; CHECK: pp4:

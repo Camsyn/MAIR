@@ -5059,7 +5059,7 @@ entry:
   EXPECT_FALSE(Atomic.isMovable());
   EXPECT_FALSE(Atomic.isDeletable());
   EXPECT_FALSE(Volatile.isMergeable());
-  EXPECT_FALSE(Volatile.isMovable());
+  EXPECT_TRUE(Volatile.isMovable());
   EXPECT_FALSE(Volatile.isDeletable());
   EXPECT_FALSE(CallLike.isMergeable());
   EXPECT_FALSE(CallLike.isMovable());

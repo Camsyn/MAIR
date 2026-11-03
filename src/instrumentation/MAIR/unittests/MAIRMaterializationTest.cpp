@@ -842,4 +842,67 @@ exit:
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST(MAIRMaterialization, ZeroOffsetUsesBaseWithoutGEP) {
+  LLVMContext Ctx;
+  auto M = parseMaterializationModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %tmp = alloca i32, align 4
+  store i32 1, ptr %tmp, align 4
+  %v = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                                      Ctx);
+  ASSERT_TRUE(M);
+  Function &F = *M->getFunction("f");
+  MAIRGraph Graph = buildMaterializationGraph(F);
+  ASSERT_TRUE(Graph.verify());
+
+  PassInstrumentationCallbacks PIC;
+  FunctionAnalysisManager FAM;
+  registerMaterializationAnalyses(FAM, PIC);
+  RecordingBackend Backend;
+  auto Result = Graph.instantiate(FAM, Backend);
+  if (!Result) {
+    ADD_FAILURE() << toString(Result.takeError());
+    return;
+  }
+
+  EXPECT_EQ(Backend.EmittedObservations, 2u);
+  EXPECT_EQ(printModule(*M).find("mair.observation.gep"), std::string::npos);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST(MAIRMaterialization, NonZeroOffsetStillLowersGEP) {
+  LLVMContext Ctx;
+  auto M = parseMaterializationModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %q = getelementptr inbounds i8, ptr %p, i64 4
+  %v = load i32, ptr %q, align 4
+  ret void
+}
+)IR",
+                                      Ctx);
+  ASSERT_TRUE(M);
+  Function &F = *M->getFunction("f");
+  MAIRGraph Graph = buildMaterializationGraph(F);
+  ASSERT_TRUE(Graph.verify());
+
+  PassInstrumentationCallbacks PIC;
+  FunctionAnalysisManager FAM;
+  registerMaterializationAnalyses(FAM, PIC);
+  RecordingBackend Backend;
+  auto Result = Graph.instantiate(FAM, Backend);
+  if (!Result) {
+    ADD_FAILURE() << toString(Result.takeError());
+    return;
+  }
+
+  EXPECT_EQ(Backend.EmittedObservations, 1u);
+  EXPECT_NE(printModule(*M).find("mair.observation.gep"), std::string::npos);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 } // namespace

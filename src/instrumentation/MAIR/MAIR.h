@@ -149,10 +149,11 @@ private:
 
 public:
   AbstractValue() = default;
+  AbstractValue(uint64_t C) : Storage(C) {}
 
   static AbstractValue unknown() { return AbstractValue(); }
   static AbstractValue symbol(const Value &V);
-  static AbstractValue constant(uint64_t C);
+  static AbstractValue constant(uint64_t C) { return AbstractValue(C); }
 
   Kind getKind() const;
   bool isUnknown() const {
@@ -171,11 +172,11 @@ public:
     return std::get<uint64_t>(Storage);
   }
 
-  bool operator==(const AbstractValue &Other) const {
-    return Storage == Other.Storage;
+  friend bool operator==(const AbstractValue &LHS, const AbstractValue &RHS) {
+    return LHS.Storage == RHS.Storage;
   }
-  bool operator!=(const AbstractValue &Other) const {
-    return !(*this == Other);
+  friend bool operator!=(const AbstractValue &LHS, const AbstractValue &RHS) {
+    return !(LHS == RHS);
   }
 };
 

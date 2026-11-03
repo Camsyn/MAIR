@@ -299,6 +299,8 @@ Value *lowerAbstractValue(const AbstractValue &Value, IRBuilder<> &Builder) {
 
 Value *lowerContiguous(const AbstractAccess &Region, IRBuilder<> &Builder) {
   Value *Base = const_cast<Value *>(Region.getBase());
+  if (Region.getOffset() == 0)
+    return Base;
   if (Region.getOffset().isSymbol() &&
       Region.getOffset().getSymbol()->getType()->isPointerTy())
     return const_cast<Value *>(Region.getOffset().getSymbol());

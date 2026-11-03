@@ -679,12 +679,6 @@ AbstractValue AbstractValue::symbol(const Value &V) {
   return Result;
 }
 
-AbstractValue AbstractValue::constant(uint64_t C) {
-  AbstractValue Result;
-  Result.Storage = C;
-  return Result;
-}
-
 AbstractAccess AbstractAccess::fromPointerAndSize(const Value &Ptr,
                                                   AbstractValue Size,
                                                   const DataLayout &DL) {

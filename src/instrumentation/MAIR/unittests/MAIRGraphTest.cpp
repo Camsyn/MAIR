@@ -657,6 +657,32 @@ entry:
   EXPECT_TRUE(Graph.verify());
 }
 
+TEST(MAIRGraph, AbstractValueConstructsFromInteger) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  const llvm::Value &P = *M->getFunction("f")->arg_begin();
+
+  AbstractValue Zero = 0;
+  EXPECT_TRUE(Zero.isConstant());
+  EXPECT_EQ(Zero.getConstant(), 0u);
+  EXPECT_TRUE(Zero == 0);
+  EXPECT_TRUE(0 == Zero);
+  EXPECT_FALSE(AbstractValue(4) == 0);
+  EXPECT_FALSE(0 == AbstractValue(4));
+  EXPECT_FALSE(AbstractValue() == 0);
+  EXPECT_FALSE(0 == AbstractValue());
+  EXPECT_FALSE(AbstractValue::symbol(P) == 0);
+  EXPECT_FALSE(0 == AbstractValue::symbol(P));
+  EXPECT_EQ(AbstractValue::constant(0), Zero);
+}
+
 TEST(MAIRGraph, AbstractAccessMergesConcreteRanges) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(

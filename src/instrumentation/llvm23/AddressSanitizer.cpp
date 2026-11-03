@@ -837,19 +837,20 @@ struct AddressSanitizer {
                          Value *Addr, MaybeAlign Alignment,
                          uint32_t TypeStoreSize, bool IsWrite,
                          Value *SizeArgument, bool UseCalls, uint32_t Exp,
-                         RuntimeCallInserter &RTCI);
-  Instruction *instrumentAMDGPUAddress(Instruction *OrigIns,
-                                       Instruction *InsertBefore, Value *Addr,
-                                       uint32_t TypeStoreSize, bool IsWrite,
-                                       Value *SizeArgument);
+                         RuntimeCallInserter &RTCI,
+                         const DebugLoc &OriginalAccessLoc = DebugLoc());
+  Instruction *
+  instrumentAMDGPUAddress(Instruction *OrigIns, Instruction *InsertBefore,
+                          Value *Addr, uint32_t TypeStoreSize, bool IsWrite,
+                          Value *SizeArgument,
+                          const DebugLoc &OriginalAccessLoc = DebugLoc());
   Instruction *genAMDGPUReportBlock(IRBuilder<> &IRB, Value *Cond,
                                     bool Recover);
-  void instrumentUnusualSizeOrAlignment(Instruction *I,
-                                        Instruction *InsertBefore, Value *Addr,
-                                        TypeSize TypeStoreSize, bool IsWrite,
-                                        Value *SizeArgument, bool UseCalls,
-                                        uint32_t Exp,
-                                        RuntimeCallInserter &RTCI);
+  void instrumentUnusualSizeOrAlignment(
+      Instruction *I, Instruction *InsertBefore, Value *Addr,
+      TypeSize TypeStoreSize, bool IsWrite, Value *SizeArgument, bool UseCalls,
+      uint32_t Exp, RuntimeCallInserter &RTCI,
+      const DebugLoc &OriginalAccessLoc = DebugLoc());
   void instrumentMaskedLoadOrStore(AddressSanitizer *Pass, const DataLayout &DL,
                                    Type *IntptrTy, Value *Mask, Value *EVL,
                                    Value *Stride, Instruction *I, Value *Addr,
@@ -1740,12 +1741,18 @@ void AddressSanitizer::instrumentPointerComparisonOrSubtraction(
   RTCI.createRuntimeCall(IRB, F, Param);
 }
 
-static void doInstrumentAddress(AddressSanitizer *Pass, Instruction *I,
-                                Instruction *InsertBefore, Value *Addr,
-                                MaybeAlign Alignment, unsigned Granularity,
-                                TypeSize TypeStoreSize, bool IsWrite,
-                                Value *SizeArgument, bool UseCalls,
-                                uint32_t Exp, RuntimeCallInserter &RTCI) {
+static void useOriginalAccessDebugLoc(IRBuilderBase &IRB, const DebugLoc &Loc) {
+  if (Loc)
+    IRB.SetCurrentDebugLocation(Loc);
+}
+
+static void
+doInstrumentAddress(AddressSanitizer *Pass, Instruction *I,
+                    Instruction *InsertBefore, Value *Addr,
+                    MaybeAlign Alignment, unsigned Granularity,
+                    TypeSize TypeStoreSize, bool IsWrite, Value *SizeArgument,
+                    bool UseCalls, uint32_t Exp, RuntimeCallInserter &RTCI,
+                    const DebugLoc &OriginalAccessLoc = DebugLoc()) {
   // Instrument a 1-, 2-, 4-, 8-, or 16- byte access with one check
   // if the data is properly aligned.
   if (!TypeStoreSize.isScalable()) {
@@ -1760,11 +1767,12 @@ static void doInstrumentAddress(AddressSanitizer *Pass, Instruction *I,
           *Alignment >= FixedSize / 8)
         return Pass->instrumentAddress(I, InsertBefore, Addr, Alignment,
                                        FixedSize, IsWrite, nullptr, UseCalls,
-                                       Exp, RTCI);
+                                       Exp, RTCI, OriginalAccessLoc);
     }
   }
   Pass->instrumentUnusualSizeOrAlignment(I, InsertBefore, Addr, TypeStoreSize,
-                                         IsWrite, nullptr, UseCalls, Exp, RTCI);
+                                         IsWrite, nullptr, UseCalls, Exp, RTCI,
+                                         OriginalAccessLoc);
 }
 
 void AddressSanitizer::instrumentMaskedLoadOrStore(
@@ -1961,7 +1969,8 @@ Value *AddressSanitizer::createSlowPathCmp(IRBuilder<> &IRB, Value *AddrLong,
 
 Instruction *AddressSanitizer::instrumentAMDGPUAddress(
     Instruction *OrigIns, Instruction *InsertBefore, Value *Addr,
-    uint32_t TypeStoreSize, bool IsWrite, Value *SizeArgument) {
+    uint32_t TypeStoreSize, bool IsWrite, Value *SizeArgument,
+    const DebugLoc &OriginalAccessLoc) {
   // Do not instrument unsupported addrspaces.
   if (isUnsupportedAMDGPUAddrspace(Addr))
     return nullptr;
@@ -1971,6 +1980,7 @@ Instruction *AddressSanitizer::instrumentAMDGPUAddress(
     return InsertBefore;
   // Instrument generic addresses in supported addressspaces.
   IRBuilder<> IRB(InsertBefore);
+  useOriginalAccessDebugLoc(IRB, OriginalAccessLoc);
   Value *IsShared = IRB.CreateCall(AMDGPUAddressShared, {Addr});
   Value *IsPrivate = IRB.CreateCall(AMDGPUAddressPrivate, {Addr});
   Value *IsSharedOrPrivate = IRB.CreateOr(IsShared, IsPrivate);
@@ -2005,21 +2015,21 @@ Instruction *AddressSanitizer::genAMDGPUReportBlock(IRBuilder<> &IRB,
       M.getOrInsertFunction(kAMDGPUUnreachableName, IRB.getVoidTy()), {});
 }
 
-void AddressSanitizer::instrumentAddress(Instruction *OrigIns,
-                                         Instruction *InsertBefore, Value *Addr,
-                                         MaybeAlign Alignment,
-                                         uint32_t TypeStoreSize, bool IsWrite,
-                                         Value *SizeArgument, bool UseCalls,
-                                         uint32_t Exp,
-                                         RuntimeCallInserter &RTCI) {
+void AddressSanitizer::instrumentAddress(
+    Instruction *OrigIns, Instruction *InsertBefore, Value *Addr,
+    MaybeAlign Alignment, uint32_t TypeStoreSize, bool IsWrite,
+    Value *SizeArgument, bool UseCalls, uint32_t Exp, RuntimeCallInserter &RTCI,
+    const DebugLoc &OriginalAccessLoc) {
   if (TargetTriple.isAMDGPU()) {
-    InsertBefore = instrumentAMDGPUAddress(
-        OrigIns, InsertBefore, Addr, TypeStoreSize, IsWrite, SizeArgument);
+    InsertBefore =
+        instrumentAMDGPUAddress(OrigIns, InsertBefore, Addr, TypeStoreSize,
+                                IsWrite, SizeArgument, OriginalAccessLoc);
     if (!InsertBefore)
       return;
   }
 
   InstrumentationIRBuilder IRB(InsertBefore);
+  useOriginalAccessDebugLoc(IRB, OriginalAccessLoc);
   size_t AccessSizeIndex = TypeStoreSizeToSizeIndex(TypeStoreSize);
 
   if (UseCalls && ClOptimizeCallbacks) {
@@ -2071,6 +2081,7 @@ void AddressSanitizer::instrumentAddress(Instruction *OrigIns,
     assert(cast<BranchInst>(CheckTerm)->isUnconditional());
     BasicBlock *NextBB = CheckTerm->getSuccessor(0);
     IRB.SetInsertPoint(CheckTerm);
+    useOriginalAccessDebugLoc(IRB, OriginalAccessLoc);
     Value *Cmp2 = createSlowPathCmp(IRB, AddrLong, ShadowValue, TypeStoreSize);
     if (Recover) {
       CrashTerm = SplitBlockAndInsertIfThen(Cmp2, CheckTerm, false);
@@ -2087,7 +2098,9 @@ void AddressSanitizer::instrumentAddress(Instruction *OrigIns,
 
   Instruction *Crash = generateCrashCode(
       CrashTerm, AddrLong, IsWrite, AccessSizeIndex, SizeArgument, Exp, RTCI);
-  if (OrigIns->getDebugLoc())
+  if (OriginalAccessLoc)
+    Crash->setDebugLoc(OriginalAccessLoc);
+  else if (OrigIns->getDebugLoc())
     Crash->setDebugLoc(OrigIns->getDebugLoc());
 }
 
@@ -2098,8 +2111,10 @@ void AddressSanitizer::instrumentAddress(Instruction *OrigIns,
 void AddressSanitizer::instrumentUnusualSizeOrAlignment(
     Instruction *I, Instruction *InsertBefore, Value *Addr,
     TypeSize TypeStoreSize, bool IsWrite, Value *SizeArgument, bool UseCalls,
-    uint32_t Exp, RuntimeCallInserter &RTCI) {
+    uint32_t Exp, RuntimeCallInserter &RTCI,
+    const DebugLoc &OriginalAccessLoc) {
   InstrumentationIRBuilder IRB(InsertBefore);
+  useOriginalAccessDebugLoc(IRB, OriginalAccessLoc);
   Value *NumBits = IRB.CreateTypeSize(IntptrTy, TypeStoreSize);
   Value *Size = IRB.CreateLShr(NumBits, ConstantInt::get(IntptrTy, 3));
 
@@ -2117,9 +2132,9 @@ void AddressSanitizer::instrumentUnusualSizeOrAlignment(
     Value *LastByte = IRB.CreateIntToPtr(IRB.CreateAdd(AddrLong, SizeMinusOne),
                                          Addr->getType());
     instrumentAddress(I, InsertBefore, Addr, {}, 8, IsWrite, Size, false, Exp,
-                      RTCI);
+                      RTCI, OriginalAccessLoc);
     instrumentAddress(I, InsertBefore, LastByte, {}, 8, IsWrite, Size, false,
-                      Exp, RTCI);
+                      Exp, RTCI, OriginalAccessLoc);
   }
 }
 
@@ -4218,7 +4233,8 @@ bool XsanAddressSanitizer::instrumentMAIRObservation(
   bool IsWrite = Obs.Kind != mair::AccessKind::Read;
   doInstrumentAddress(this, Source, InsertBefore, Obs.Address, Alignment,
                       1U << Mapping.Scale, SizeInBits, IsWrite, nullptr,
-                      UseCalls, ClForceExperiment, RTCI);
+                      UseCalls, ClForceExperiment, RTCI,
+                      Obs.Source->getStableDebugLoc());
   return true;
 }
 

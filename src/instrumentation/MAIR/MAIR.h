@@ -19,6 +19,7 @@
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instruction.h"
@@ -617,6 +618,9 @@ public:
   const Instruction *getInstruction() const {
     return Insts.empty() ? nullptr : Insts.front();
   }
+  /// First non-empty stable debug location among the original accesses, in
+  /// `Insts` order. Empty when none of them has one.
+  llvm::DebugLoc getStableDebugLoc() const;
   const MemoryRegion &getRegion() const { return Region; }
   const AbstractAccess *getContiguousRegion() const {
     return std::get_if<AbstractAccess>(&Region);

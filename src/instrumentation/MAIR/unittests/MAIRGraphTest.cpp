@@ -18,6 +18,10 @@
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/AsmParser/Parser.h"
+#include "llvm/BinaryFormat/Dwarf.h"
+#include "llvm/IR/DIBuilder.h"
+#include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -5792,4 +5796,52 @@ entry:
   DOTOS.flush();
   EXPECT_NE(DOTText.find("bb.entry(%entry)"), std::string::npos);
   EXPECT_NE(DOTText.find("memory(%entry, %v)"), std::string::npos);
+}
+
+TEST(Observation, StableDebugLocComesFromTheOriginalAccess) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %a = load i32, ptr %p, align 4
+  %b = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  auto It = BB.begin();
+  llvm::Instruction &First = *It++;
+  llvm::Instruction &Second = *It++;
+
+  llvm::DIBuilder DIB(*M);
+  llvm::DIFile *File = DIB.createFile("simple_stack.c", "/");
+  llvm::DICompileUnit *CU =
+      DIB.createCompileUnit(llvm::DISourceLanguageName(llvm::dwarf::DW_LANG_C),
+                            File, "clang", false, "", 0);
+  llvm::DISubroutineType *Type =
+      DIB.createSubroutineType(DIB.getOrCreateTypeArray({}));
+  llvm::DISubprogram *SP =
+      DIB.createFunction(CU, "f", "f", File, 1, Type, 1, llvm::DINode::FlagZero,
+                         llvm::DISubprogram::SPFlagDefinition);
+  F.setSubprogram(SP);
+  llvm::DebugLoc AtGlobal = llvm::DILocation::get(Ctx, 15, 20, SP);
+  llvm::DebugLoc AtAnchor = llvm::DILocation::get(Ctx, 15, 16, SP);
+  DIB.finalize();
+
+  MemoryRegion Region(AbstractAccess(F.getArg(0), AbstractValue::constant(0),
+                                     AbstractValue::constant(4)));
+  Observation None({&First, &Second}, Region, AccessKind::Read);
+  EXPECT_EQ(None.getStableDebugLoc().get(), nullptr);
+
+  Second.setDebugLoc(AtAnchor);
+  Observation Later({&First, &Second}, Region, AccessKind::Read);
+  EXPECT_EQ(Later.getStableDebugLoc().get(), AtAnchor.get());
+
+  First.setDebugLoc(AtGlobal);
+  Observation Earliest({&First, &Second}, Region, AccessKind::Read);
+  EXPECT_EQ(Earliest.getStableDebugLoc().get(), AtGlobal.get());
 }

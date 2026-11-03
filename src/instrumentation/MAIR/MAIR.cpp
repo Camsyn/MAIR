@@ -1057,6 +1057,15 @@ bool Observation::mergeWith(const Observation &Other) {
   return true;
 }
 
+DebugLoc Observation::getStableDebugLoc() const {
+  for (const Instruction *I : Insts) {
+    const DebugLoc &Loc = I->getStableDebugLoc();
+    if (Loc)
+      return Loc;
+  }
+  return DebugLoc();
+}
+
 std::string Observation::toString() const {
   std::string S;
   raw_string_ostream OS(S);

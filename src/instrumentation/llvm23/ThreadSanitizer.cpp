@@ -1039,6 +1039,10 @@ bool XsanThreadSanitizer::instrumentMAIRObservation(
   auto InstrumentAtSource = [&](Instruction &Source) {
     return instrumentLoadOrStore(InstructionInfo(&Source), DL);
   };
+  auto useOriginalAccessDebugLoc = [&](IRBuilderBase &IRB) {
+    if (DebugLoc Loc = Obs.Source->getStableDebugLoc())
+      IRB.SetCurrentDebugLocation(Loc);
+  };
 
   Instruction *Source = SelectedSources.front();
   if (isa<AnyMemIntrinsic>(Source)) {
@@ -1047,6 +1051,7 @@ bool XsanThreadSanitizer::instrumentMAIRObservation(
     if (!Obs.Address || !Obs.AccessSize)
       return false;
     __xsan::InstrumentationIRBuilder IRB(Builder);
+    useOriginalAccessDebugLoc(IRB);
     Value *Size = Obs.AccessSize;
     if (Size->getType() != IntptrTy)
       Size = IRB.CreateIntCast(Size, IntptrTy, /*isSigned=*/false);
@@ -1114,6 +1119,7 @@ bool XsanThreadSanitizer::instrumentMAIRObservation(
   }
 
   __xsan::InstrumentationIRBuilder IRB(Builder);
+  useOriginalAccessDebugLoc(IRB);
   IRB.CreateCall(OnAccessFunc, Obs.Address);
   if (IsCompoundRW || IsWrite)
     NumInstrumentedWrites++;

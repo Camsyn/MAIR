@@ -1,4 +1,5 @@
 ; RUN: mair-opt -passes=lpoc %s | FileCheck %s
+; RUN: mair-opt -passes=lpoc,liom %s | FileCheck %s --check-prefix=HOIST
 ; RUN: mair-opt -passes=lpoc --disable-output %s
 ; RUN: mair-opt -passes=lpoc %s > %t.once
 ; RUN: mair-opt -passes=lpoc,lpoc %s > %t.twice
@@ -74,7 +75,7 @@ exit:
 define void @aggregate_dynamic_header_count(ptr %p, i64 %n) {
 ; CHECK-LABEL: mair graph of fn @aggregate_dynamic_header_count {
 ; CHECK:       pp10: loop-exit=%header,
-; CHECK-NEXT:    o: read period start=%p, stride=1, access-size=1, trips=(1 + zext(%n to i65))
+; CHECK-NEXT:    o: read ptr %p, (1 + zext(%n to i65))
 ; CHECK-LABEL: mair graph of fn @aggregate_dynamic_header_count of loop %header {
 ; CHECK:       pp3: preds=
 ; CHECK-EMPTY:
@@ -99,7 +100,7 @@ exit:
 define void @aggregate_zero_trip_dynamic_body(ptr %p, i64 %n) {
 ; CHECK-LABEL: mair graph of fn @aggregate_zero_trip_dynamic_body {
 ; CHECK:       pp10: loop-exit=%header,
-; CHECK-NEXT:    o: read period start=%p, stride=1, access-size=1, trips=zext(%n to i65)
+; CHECK-NEXT:    o: read ptr %p, zext(%n to i65)
 ; CHECK-LABEL: mair graph of fn @aggregate_zero_trip_dynamic_body of loop %header {
 ; CHECK:       pp5: preds=
 ; CHECK-EMPTY:
@@ -211,7 +212,7 @@ define void @keep_branch_only_period(ptr %p, i64 %n, i1 %cond) {
 ; CHECK:       }
 ; CHECK-LABEL: mair graph of fn @keep_branch_only_period of loop %header {
 ; CHECK:       pp7: preds=
-; CHECK-NEXT:    o: read ptr %p + %pi, 1
+; CHECK-NEXT:    o: read ptr %p + %i, 1
 entry:
   br label %header
 
@@ -266,7 +267,7 @@ define void @keep_nested_addrec_site(ptr %p) {
 ; CHECK-NOT:   o:
 ; CHECK:       }
 ; CHECK-LABEL: mair graph of fn @keep_nested_addrec_site of loop %inner.header {
-; CHECK:       o: read ptr %p + %pi, 1
+; CHECK:       o: read ptr %p + %oi, 1
 entry:
   br label %outer.header
 
@@ -296,7 +297,7 @@ define void @keep_quadratic_pointer_recurrence(ptr %p) {
 ; CHECK-NOT:   o:
 ; CHECK:       }
 ; CHECK-LABEL: mair graph of fn @keep_quadratic_pointer_recurrence of loop %header {
-; CHECK:       o: read ptr %p + %pi, 1
+; CHECK:       o: read ptr %p + %i, 1
 entry:
   br label %header
 
@@ -314,4 +315,85 @@ header:
 
 exit:
   ret void
+}
+
+define void @aggregate_adjacent_symbolic_bytes(ptr %p, i64 %n) {
+; CHECK-LABEL: mair graph of fn @aggregate_adjacent_symbolic_bytes {
+; CHECK:       pp9: loop-exit=%header,
+; CHECK-NEXT:    o: read ptr %p, (1 + zext((18446744073709551615 + %n) to i65))
+; CHECK-NEXT:    o: read ptr %p + 1, (1 + zext((18446744073709551615 + %n) to i65))
+; CHECK-LABEL: mair graph of fn @aggregate_adjacent_symbolic_bytes of loop %header {
+; CHECK:       pp3: preds=
+; CHECK-EMPTY:
+entry:
+  br label %header
+
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %header ]
+  %a = getelementptr i8, ptr %p, i64 %i
+  %x = load i8, ptr %a, align 1
+  %bidx = add i64 %i, 1
+  %b = getelementptr i8, ptr %p, i64 %bidx
+  %y = load i8, ptr %b, align 1
+  %next = add i64 %i, 1
+  %done = icmp eq i64 %next, %n
+  br i1 %done, label %exit, label %header
+
+exit:
+  ret void
+}
+
+; Inner lpoc synthesizes one 128-byte read at the inner exit, which still
+; executes once per outer iteration. The following invariant motion must hoist
+; that read to the outer preheader.
+define i32 @repeated_row32(ptr %p, i32 %n) {
+; CHECK-LABEL: mair graph of fn @repeated_row32 {
+; CHECK-NOT:   o:
+; CHECK:       loop-preheader=%outer.header,
+; CHECK-NOT:   o:
+; CHECK:       }
+; CHECK-LABEL: mair graph of fn @repeated_row32 of loop %outer.header {
+; CHECK:       loop-exit=%inner.header,
+; CHECK-NEXT:    o: read ptr %p, 128
+; CHECK-LABEL: mair graph of fn @repeated_row32 of loop %inner.header {
+; CHECK-NOT:   o:
+; CHECK:       }
+; HOIST-LABEL: mair graph of fn @repeated_row32 {
+; HOIST:       loop-preheader=%outer.header,
+; HOIST-NEXT:    o: read ptr %p, 128
+; HOIST-LABEL: mair graph of fn @repeated_row32 of loop %outer.header {
+; HOIST-NOT:   o:
+; HOIST:       loop-exit=%inner.header,
+; HOIST-LABEL: mair graph of fn @repeated_row32 of loop %inner.header {
+; HOIST-NOT:   o:
+; HOIST:       }
+entry:
+  %enter = icmp sgt i32 %n, 0
+  br i1 %enter, label %outer.header, label %exit
+
+outer.header:
+  %i = phi i32 [ 0, %entry ], [ %inext, %outer.latch ]
+  %s.outer = phi i32 [ 0, %entry ], [ %s.exit, %outer.latch ]
+  br label %inner.header
+
+inner.header:
+  %j = phi i32 [ 0, %outer.header ], [ %jnext, %inner.header ]
+  %s.inner = phi i32 [ %s.outer, %outer.header ], [ %s.next, %inner.header ]
+  %j64 = sext i32 %j to i64
+  %addr = getelementptr inbounds i32, ptr %p, i64 %j64
+  %v = load i32, ptr %addr, align 4
+  %s.next = add i32 %s.inner, %v
+  %jnext = add i32 %j, 1
+  %inner.done = icmp eq i32 %jnext, 32
+  br i1 %inner.done, label %outer.latch, label %inner.header
+
+outer.latch:
+  %s.exit = phi i32 [ %s.next, %inner.header ]
+  %inext = add i32 %i, 1
+  %outer.done = icmp eq i32 %inext, %n
+  br i1 %outer.done, label %exit, label %outer.header
+
+exit:
+  %s.ret = phi i32 [ 0, %entry ], [ %s.exit, %outer.latch ]
+  ret i32 %s.ret
 }

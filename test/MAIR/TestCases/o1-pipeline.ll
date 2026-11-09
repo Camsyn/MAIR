@@ -107,3 +107,46 @@ tail:
   %narrow = load i32, ptr %p, align 4
   ret void
 }
+
+define i32 @o1_hoist_synthesized_inner_range(ptr %p, i32 %n) {
+; CHECK-LABEL: mair graph of fn @o1_hoist_synthesized_inner_range {
+; CHECK:       loop-preheader=%outer.header,
+; CHECK-NEXT:    o: read ptr %p, 128
+; CHECK-LABEL: mair graph of fn @o1_hoist_synthesized_inner_range of loop %outer.header {
+; CHECK-NOT:   o:
+; CHECK:       loop-exit=%inner.header,
+; CHECK-NOT:   o:
+; CHECK:       }
+; CHECK-LABEL: mair graph of fn @o1_hoist_synthesized_inner_range of loop %inner.header {
+; CHECK-NOT:   o:
+; CHECK:       }
+entry:
+  %enter = icmp sgt i32 %n, 0
+  br i1 %enter, label %outer.header, label %exit
+
+outer.header:
+  %i = phi i32 [ 0, %entry ], [ %inext, %outer.latch ]
+  %s.outer = phi i32 [ 0, %entry ], [ %s.exit, %outer.latch ]
+  br label %inner.header
+
+inner.header:
+  %j = phi i32 [ 0, %outer.header ], [ %jnext, %inner.header ]
+  %s.inner = phi i32 [ %s.outer, %outer.header ], [ %s.next, %inner.header ]
+  %j64 = sext i32 %j to i64
+  %addr = getelementptr inbounds i32, ptr %p, i64 %j64
+  %v = load i32, ptr %addr, align 4
+  %s.next = add i32 %s.inner, %v
+  %jnext = add i32 %j, 1
+  %inner.done = icmp eq i32 %jnext, 32
+  br i1 %inner.done, label %outer.latch, label %inner.header
+
+outer.latch:
+  %s.exit = phi i32 [ %s.next, %inner.header ]
+  %inext = add i32 %i, 1
+  %outer.done = icmp eq i32 %inext, %n
+  br i1 %outer.done, label %exit, label %outer.header
+
+exit:
+  %s.ret = phi i32 [ 0, %entry ], [ %s.exit, %outer.latch ]
+  ret i32 %s.ret
+}

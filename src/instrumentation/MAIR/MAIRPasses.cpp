@@ -95,18 +95,26 @@ void buildMAIRGraphOgPipeline(MAIRGraphPassManager &PM) {
                            /*MergeEquivalentObservations=*/false));
   addHierarchyPass(PM, LoopPeriodicObservationCombinePass(
                            /*MergeEquivalentObservations=*/false));
+  // Inner combination exports into the parent after that parent has already
+  // moved its original invariants. Run motion again so the parent can hoist
+  // the synthesized observation.
+  addHierarchyPass(PM, LoopInvariantObservationMotionPass(
+                           /*MergeEquivalentObservations=*/false));
   addHierarchyPass(PM, RedundantObservationEliminationPass());
   addHierarchyPass(PM, SimplifyGraphPass());
 }
 
 void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
   // Normalize topology before motion, combine loop and location opportunities,
-  // then alternate global motion with local merging/elimination. The final
-  // simplification removes program points emptied by those observation
-  // transforms.
+  // then alternate global motion with local merging/elimination. Invariant
+  // motion runs again after periodic combination: an inner loop can synthesize
+  // an observation in its parent only after the parent's first motion pass.
+  // The final simplification removes program points emptied by those
+  // observation transforms.
   addHierarchyPass(PM, SimplifyGraphPass());
   addHierarchyPass(PM, LoopInvariantObservationMotionPass());
   addHierarchyPass(PM, LoopPeriodicObservationCombinePass());
+  addHierarchyPass(PM, LoopInvariantObservationMotionPass());
   addHierarchyPass(PM, LocationMergePass());
   addHierarchyPass(PM, RedundantObservationEliminationPass());
   addHierarchyPass(PM, CommonObservationMotionPass());

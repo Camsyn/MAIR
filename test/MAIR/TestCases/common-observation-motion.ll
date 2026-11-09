@@ -158,9 +158,9 @@ define void @hoist_target_local_symbol(ptr %p, i64 %i, i1 %cond) {
 ; CHECK:       pp1: preds=
 ; CHECK-EMPTY:
 ; CHECK:       pp3: preds=
-; CHECK-NEXT:    o: read ptr %p + %pi, 4
+; CHECK-NEXT:    o: read ptr %p + %i, 4
 ; CHECK:       pp6: preds=
-; CHECK-NEXT:    o: read ptr %p + %pi, 4
+; CHECK-NEXT:    o: read ptr %p + %i, 4
 entry:
   %pi = getelementptr i8, ptr %p, i64 %i
   br i1 %cond, label %left, label %right

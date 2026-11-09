@@ -1,8 +1,10 @@
 #include "MAIR/Transforms/LocationMergePass.h"
+#include "MAIR/Analysis/LoopAnalysis.h"
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
 
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/ScalarEvolution.h"
 
 #include <functional>
 #include <iterator>
@@ -95,7 +97,7 @@ bool hasSameMergeClass(const Observation &LHS, const Observation &RHS) {
 }
 
 bool mergeConcreteRange(ProgramPoint &PP, ObservationIterator Begin,
-                        ObservationIterator End) {
+                        ObservationIterator End, ScalarEvolution *SE) {
   bool Changed = false;
   if (Begin == End)
     return false;
@@ -103,7 +105,7 @@ bool mergeConcreteRange(ProgramPoint &PP, ObservationIterator Begin,
   ObservationIterator Current = Begin;
   ObservationIterator Next = std::next(Current);
   while (Next != End) {
-    if (!Current->mergeWith(*Next)) {
+    if (!Current->mergeWith(*Next, SE)) {
       Current = Next;
       Next = std::next(Current);
       continue;
@@ -116,12 +118,12 @@ bool mergeConcreteRange(ProgramPoint &PP, ObservationIterator Begin,
 }
 
 bool mergeNonConcreteRange(ProgramPoint &PP, ObservationIterator Begin,
-                           ObservationIterator End) {
+                           ObservationIterator End, ScalarEvolution *SE) {
   bool Changed = false;
 
   for (ObservationIterator Current = Begin; Current != End; ++Current) {
     for (ObservationIterator Next = std::next(Current); Next != End;) {
-      if (!Current->mergeWith(*Next)) {
+      if (!Current->mergeWith(*Next, SE)) {
         ++Next;
         continue;
       }
@@ -134,7 +136,7 @@ bool mergeNonConcreteRange(ProgramPoint &PP, ObservationIterator Begin,
   return Changed;
 }
 
-bool mergeLocations(ProgramPoint &PP) {
+bool mergeLocations(ProgramPoint &PP, ScalarEvolution *SE) {
   PP.sort(compareForLocationMerge);
 
   bool Changed = false;
@@ -149,9 +151,9 @@ bool mergeLocations(ProgramPoint &PP) {
       ++End;
 
     if (Begin->hasConcreteRange())
-      Changed |= mergeConcreteRange(PP, Begin, End);
+      Changed |= mergeConcreteRange(PP, Begin, End, SE);
     else
-      Changed |= mergeNonConcreteRange(PP, Begin, End);
+      Changed |= mergeNonConcreteRange(PP, Begin, End, SE);
     Begin = End;
   }
   return Changed;
@@ -166,9 +168,15 @@ PreservedAnalyses LocationMergePass::run(MAIRGraph &G,
 #else
   (void)AM;
 #endif
+  ScalarEvolution *SE = nullptr;
+  if (AM.isPassRegistered<LoopAnalysis>()) {
+    MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
+    if (Loops.isAvailable())
+      SE = &Loops.getSE();
+  }
   bool Changed = false;
   for (ProgramPoint &PP : G)
-    Changed |= mergeLocations(PP);
+    Changed |= mergeLocations(PP, SE);
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 

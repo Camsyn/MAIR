@@ -22,9 +22,9 @@ entry:
 define void @remove_identical_symbolic_access(ptr %p, i64 %i) {
 ; CHECK-LABEL: mair graph of fn @remove_identical_symbolic_access {
 ; CHECK:       pp1: preds=
-; CHECK-NOT:     o: read ptr %p + %pi, 4
+; CHECK-NOT:     o: read ptr %p + %i, 4
 ; CHECK:       pp2: preds=
-; CHECK-NEXT:    o: read ptr %p + %pi, 4
+; CHECK-NEXT:    o: read ptr %p + %i, 4
 entry:
   %pi = getelementptr i8, ptr %p, i64 %i
   %a = load i32, ptr %pi, align 4

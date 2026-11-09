@@ -4,6 +4,8 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Analysis/PostDominators.h"
+#include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
@@ -13,6 +15,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <optional>
@@ -694,6 +697,25 @@ AbstractAccess AbstractAccess::fromPointerAndSize(const Value &Ptr,
     return AbstractAccess(Underlying, AbstractValue::constant(*ConcreteOffset),
                           Size);
 
+  // gep i8 p, %i has byte offset %i. The GEP itself is not the offset: %i and
+  // %i+1 are symbolic byte offsets of the same object.
+  if (const auto *GEP = dyn_cast<GEPOperator>(&Ptr)) {
+    TypeSize Stride = DL.getTypeAllocSize(GEP->getSourceElementType());
+    const Value *PointerOp = GEP->getPointerOperand()->stripPointerCasts();
+    if (Stride.isFixed() && Stride.getFixedValue() == 1 &&
+        PointerOp == Underlying && GEP->getNumIndices() == 1) {
+      const Value *Index = GEP->getOperand(1);
+      if (const auto *ConstIndex = dyn_cast<ConstantInt>(Index)) {
+        if (std::optional<uint64_t> IndexOffset =
+                getNonNegativeU64(ConstIndex->getValue()))
+          return AbstractAccess(Underlying,
+                                AbstractValue::constant(*IndexOffset), Size);
+      } else if (Index->getType()->isIntegerTy()) {
+        return AbstractAccess(Underlying, AbstractValue::symbol(*Index), Size);
+      }
+    }
+  }
+
   if (Underlying != &Ptr)
     return AbstractAccess(Underlying, AbstractValue::symbol(Ptr), Size);
 
@@ -719,9 +741,214 @@ bool AbstractAccess::contains(const AbstractAccess &Other) const {
   return ThisBegin <= OtherBegin && *OtherEnd <= *ThisEnd;
 }
 
+namespace {
+
+// Minimum value of a non-negative expression, when every leaf proves one.
+std::optional<uint64_t> minimumNonNegative(const MAIRScalarExpr &Expr) {
+  if (!Expr.isValid())
+    return std::nullopt;
+  using Kind = MAIRScalarExpr::Kind;
+  switch (Expr.getKind()) {
+  case Kind::Constant: {
+    const APInt &Value = Expr.getConstant();
+    if (Value.isNegative() || Value.getActiveBits() > 64)
+      return std::nullopt;
+    return Value.getZExtValue();
+  }
+  case Kind::ZeroExtend:
+    return 0;
+  case Kind::Add:
+  case Kind::Mul: {
+    uint64_t Result = Expr.getKind() == Kind::Mul ? 1 : 0;
+    for (const MAIRScalarExpr &Operand : Expr.operands()) {
+      std::optional<uint64_t> OperandMin = minimumNonNegative(Operand);
+      if (!OperandMin)
+        return std::nullopt;
+      if (Expr.getKind() == Kind::Mul) {
+        if (*OperandMin != 0 && Result > UINT64_MAX / *OperandMin)
+          return std::nullopt;
+        Result *= *OperandMin;
+      } else {
+        if (Result > UINT64_MAX - *OperandMin)
+          return std::nullopt;
+        Result += *OperandMin;
+      }
+    }
+    return Result;
+  }
+  default:
+    return std::nullopt;
+  }
+}
+
+const SCEV *addressSCEV(const AbstractAccess &Access, ScalarEvolution &SE) {
+  const Value *Base = Access.getBase();
+  if (!Base || !Base->getType()->isPointerTy())
+    return nullptr;
+  Type *ByteTy = Type::getInt8Ty(Base->getContext());
+  Value *BaseValue = const_cast<Value *>(Base);
+  const AbstractValue &Offset = Access.getOffset();
+  if (Offset.isConstant()) {
+    if (Offset.getConstant() == 0)
+      return SE.getUnknown(BaseValue);
+    Type *IndexTy = SE.getEffectiveSCEVType(Base->getType());
+    unsigned Width = cast<IntegerType>(IndexTy)->getBitWidth();
+    if (Width < 64 && (Offset.getConstant() >> Width) != 0)
+      return nullptr;
+    const SCEV *Index = SE.getConstant(IndexTy, Offset.getConstant(), true);
+    return SE.getGEPExpr(SE.getUnknown(BaseValue), Index, ByteTy);
+  }
+  if (!Offset.isSymbol())
+    return nullptr;
+  Value *Symbol = const_cast<Value *>(Offset.getSymbol());
+  if (Symbol->getType()->isPointerTy())
+    return SE.getSCEV(Symbol);
+  if (!Symbol->getType()->isIntegerTy())
+    return nullptr;
+  return SE.getGEPExpr(SE.getUnknown(BaseValue), SE.getSCEV(Symbol), ByteTy);
+}
+
+std::optional<int64_t> addConstantDelta(const Value *From, const Value *To) {
+  if (From == To)
+    return 0;
+  auto AsAdd =
+      [](const Value *V) -> std::optional<std::pair<const Value *, int64_t>> {
+    const auto *Add = dyn_cast<BinaryOperator>(V);
+    if (!Add || Add->getOpcode() != Instruction::Add)
+      return std::nullopt;
+    const Value *LHS = Add->getOperand(0);
+    const Value *RHS = Add->getOperand(1);
+    const auto *Const = dyn_cast<ConstantInt>(RHS);
+    const Value *Base = LHS;
+    if (!Const) {
+      Const = dyn_cast<ConstantInt>(LHS);
+      Base = RHS;
+    }
+    if (!Const || !Const->getValue().isSignedIntN(64))
+      return std::nullopt;
+    return std::pair<const Value *, int64_t>(Base, Const->getSExtValue());
+  };
+  if (std::optional<std::pair<const Value *, int64_t>> Added = AsAdd(To))
+    if (Added->first == From)
+      return Added->second;
+  if (std::optional<std::pair<const Value *, int64_t>> Added = AsAdd(From))
+    if (Added->first == To)
+      return -Added->second;
+  return std::nullopt;
+}
+
+// Byte distance from IndexSymbol to Pointer, for a chain of i8 GEPs such as
+// gep (gep p, %i), 4. Null when the chain is not that shape.
+std::optional<int64_t> byteDeltaFromIndex(const Value *Pointer,
+                                          const Value *Base,
+                                          const Value *IndexSymbol,
+                                          const DataLayout &DL) {
+  int64_t Accumulated = 0;
+  const Value *Current = Pointer;
+  for (unsigned Step = 0; Step < 8; ++Step) {
+    const auto *GEP = dyn_cast<GEPOperator>(Current);
+    if (!GEP || GEP->getNumIndices() != 1)
+      return std::nullopt;
+    TypeSize Stride = DL.getTypeAllocSize(GEP->getSourceElementType());
+    if (!Stride.isFixed() || Stride.getFixedValue() != 1)
+      return std::nullopt;
+    const Value *Index = GEP->getOperand(1);
+    const Value *PointerOp = GEP->getPointerOperand()->stripPointerCasts();
+    if (const auto *Const = dyn_cast<ConstantInt>(Index)) {
+      if (!Const->getValue().isSignedIntN(64))
+        return std::nullopt;
+      Accumulated += Const->getSExtValue();
+      Current = PointerOp;
+      continue;
+    }
+    if (PointerOp != Base)
+      return std::nullopt;
+    if (Index == IndexSymbol)
+      return Accumulated;
+    if (std::optional<int64_t> Delta = addConstantDelta(IndexSymbol, Index))
+      return Accumulated + *Delta;
+    return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+std::optional<int64_t> constantAddressDelta(const AbstractAccess &A,
+                                            const AbstractAccess &B,
+                                            const DataLayout *DL,
+                                            ScalarEvolution *SE) {
+  if (SE) {
+    const SCEV *AddrA = addressSCEV(A, *SE);
+    const SCEV *AddrB = addressSCEV(B, *SE);
+    if (AddrA && AddrB && AddrA->getType() == AddrB->getType()) {
+      if (std::optional<APInt> Diff =
+              SE->computeConstantDifference(AddrB, AddrA))
+        if (Diff->isSignedIntN(64))
+          return Diff->getSExtValue();
+    }
+  }
+  if (!A.getOffset().isSymbol() || !B.getOffset().isSymbol())
+    return std::nullopt;
+  const Value *ASymbol = A.getOffset().getSymbol();
+  const Value *BSymbol = B.getOffset().getSymbol();
+  if (ASymbol->getType()->isIntegerTy() && BSymbol->getType()->isIntegerTy())
+    return addConstantDelta(ASymbol, BSymbol);
+  if (ASymbol->getType()->isPointerTy() && BSymbol->getType()->isPointerTy() &&
+      DL)
+    return BSymbol->getPointerOffsetFrom(ASymbol, *DL);
+  if (!DL)
+    return std::nullopt;
+  if (ASymbol->getType()->isIntegerTy() && BSymbol->getType()->isPointerTy())
+    return byteDeltaFromIndex(BSymbol, A.getBase(), ASymbol, *DL);
+  if (ASymbol->getType()->isPointerTy() && BSymbol->getType()->isIntegerTy()) {
+    if (std::optional<int64_t> Delta =
+            byteDeltaFromIndex(ASymbol, B.getBase(), BSymbol, *DL))
+      return -*Delta;
+  }
+  return std::nullopt;
+}
+
+std::optional<AbstractAccess>
+mergeExpressionSizedRanges(const AbstractAccess &A, const AbstractAccess &B,
+                           MAIRGraph *ExprGraph) {
+  if (!ExprGraph || !A.hasSizeExpr() || !B.hasSizeExpr() ||
+      expressionSize(A) != expressionSize(B) || !A.getOffset().isConstant() ||
+      !B.getOffset().isConstant())
+    return std::nullopt;
+  uint64_t ABegin = A.getOffset().getConstant();
+  uint64_t BBegin = B.getOffset().getConstant();
+  if (ABegin == BBegin)
+    return A;
+  uint64_t Low = std::min(ABegin, BBegin);
+  uint64_t High = std::max(ABegin, BBegin);
+  uint64_t Delta = High - Low;
+  std::optional<uint64_t> Minimum = minimumNonNegative(expressionSize(A));
+  // Equal symbolic lengths abut or overlap only when the length is at least
+  // the distance between the starts. A zero-trip length must not grow.
+  if (!Minimum || *Minimum < Delta)
+    return std::nullopt;
+  Type *SizeTy = expressionSize(A).getType();
+  if (!SizeTy || !SizeTy->isIntegerTy())
+    return std::nullopt;
+  unsigned Bits = SizeTy->getIntegerBitWidth();
+  if (Bits < 64 && (Delta >> Bits) != 0)
+    return std::nullopt;
+  MAIRScalarExpr Extra =
+      ExprGraph->createConstantExpr(*SizeTy, APInt(Bits, Delta));
+  MAIRScalarExpr Merged = ExprGraph->createBinaryExpr(
+      MAIRScalarExpr::Kind::Add, *SizeTy, expressionSize(A), Extra);
+  AbstractAccess Result(A.getBase(), AbstractValue::constant(Low),
+                        AbstractValue());
+  Result.setSizeExprNode(Merged.getOpaqueNode());
+  return Result;
+}
+
+} // namespace
+
 std::optional<AbstractAccess> AbstractAccess::merge(const AbstractAccess &A,
                                                     const AbstractAccess &B,
-                                                    const DataLayout *DL) {
+                                                    const DataLayout *DL,
+                                                    ScalarEvolution *SE,
+                                                    MAIRGraph *ExprGraph) {
   if (A == B)
     return A;
   if (A.Base != B.Base)
@@ -730,19 +957,13 @@ std::optional<AbstractAccess> AbstractAccess::merge(const AbstractAccess &A,
     return A;
   if (B.contains(A))
     return B;
+  if (A.hasSizeExpr() || B.hasSizeExpr())
+    return mergeExpressionSizedRanges(A, B, ExprGraph);
   if (!A.Size.isConstant() || !B.Size.isConstant())
     return std::nullopt;
 
   if (!A.Offset.isConstant() || !B.Offset.isConstant()) {
-    if (!DL || !A.Offset.isSymbol() || !B.Offset.isSymbol())
-      return std::nullopt;
-    const Value *AStart = A.Offset.getSymbol();
-    const Value *BStart = B.Offset.getSymbol();
-    if (!AStart->getType()->isPointerTy() || !BStart->getType()->isPointerTy())
-      return std::nullopt;
-
-    std::optional<int64_t> PointerDelta =
-        BStart->getPointerOffsetFrom(AStart, *DL);
+    std::optional<int64_t> PointerDelta = constantAddressDelta(A, B, DL, SE);
     if (!PointerDelta)
       return std::nullopt;
 
@@ -990,7 +1211,7 @@ bool Observation::covers(const Observation &Other) const {
   return ThisPeriodic && OtherPeriodic && *ThisPeriodic == *OtherPeriodic;
 }
 
-bool Observation::mergeWith(const Observation &Other) {
+bool Observation::mergeWith(const Observation &Other, ScalarEvolution *SE) {
   if (getBase() != Other.getBase())
     return false;
   if (!isMergeable() || !Other.isMergeable())
@@ -1005,8 +1226,11 @@ bool Observation::mergeWith(const Observation &Other) {
     const Instruction *Provenance = getInstruction();
     const DataLayout *DL =
         Provenance ? &Provenance->getModule()->getDataLayout() : nullptr;
+    MAIRGraph *ExprGraph = nullptr;
+    if (ProgramPoint *PP = getParent())
+      ExprGraph = PP->getParent();
     std::optional<AbstractAccess> Merged =
-        AbstractAccess::merge(*ThisAccess, *OtherAccess, DL);
+        AbstractAccess::merge(*ThisAccess, *OtherAccess, DL, SE, ExprGraph);
     if (!Merged)
       return false;
     const bool ThisContainsOther = *Merged == *ThisAccess;
@@ -1157,7 +1381,10 @@ void Observation::print(raw_ostream &OS) const {
     OS << " ptr ";
     Obs->print(OS);
     OS << ", ";
-    printAbstractValue(OS, Obs->getSize());
+    if (Obs->hasSizeExpr())
+      expressionSize(*Obs).print(OS);
+    else
+      printAbstractValue(OS, Obs->getSize());
     return;
   }
   if (const MaskedRegion *Masked = getMaskedRegion()) {

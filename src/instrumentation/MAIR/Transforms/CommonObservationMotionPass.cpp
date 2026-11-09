@@ -43,6 +43,8 @@ bool isObservationAvailableAt(const Observation &Obs,
     return false;
   if (!isValueAvailableAt(Location->getBase(), Anchor, DT))
     return false;
+  if (Location->hasSizeExpr())
+    return false;
   if (Location->getOffset().isSymbol() &&
       !isValueAvailableAt(Location->getOffset().getSymbol(), Anchor, DT))
     return false;

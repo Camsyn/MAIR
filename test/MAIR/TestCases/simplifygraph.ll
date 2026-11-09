@@ -24,13 +24,13 @@ define void @sink_symbolic_pointer(ptr %p, i64 %i) {
 ; CHECK-LABEL: mair graph of fn @sink_symbolic_pointer {
 ; CHECK:       pp2: preds=
 ; CHECK-NEXT:    o: read ptr %p, 1
-; CHECK-NEXT:    o: read ptr %p + %pi, 1
+; CHECK-NEXT:    o: read ptr %p + %i, 1
 ; LLVM-LABEL: define void @sink_symbolic_pointer(
 ; LLVM:         %first = load i8, ptr %p, align 1
 ; LLVM-NEXT:    %pi = getelementptr i8, ptr %p, i64 %i
 ; LLVM-NEXT:    ; pp2: preds=
 ; LLVM-NEXT:    ;   o: read ptr %p, 1
-; LLVM-NEXT:    ;   o: read ptr %p + %pi, 1
+; LLVM-NEXT:    ;   o: read ptr %p + %i, 1
 ; LLVM-NEXT:    %second = load i8, ptr %pi, align 1
 entry:
   %first = load i8, ptr %p, align 1

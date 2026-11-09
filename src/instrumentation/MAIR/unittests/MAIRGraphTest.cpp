@@ -5399,7 +5399,7 @@ entry:
   llvm::Argument &P = *F.arg_begin();
   llvm::BasicBlock &BB = F.getEntryBlock();
   auto It = BB.begin();
-  llvm::Instruction &PX = *It++;
+  ++It;
   llvm::Instruction &LowerStore = *It++;
   ++It;
   llvm::Instruction &UpperStore = *It++;
@@ -5416,7 +5416,9 @@ entry:
   ASSERT_TRUE(Lower.mergeWith(Upper));
   const AbstractAccess *Merged = Lower.getContiguousRegion();
   ASSERT_NE(Merged, nullptr);
-  EXPECT_EQ(Merged->getOffset(), AbstractValue::symbol(PX));
+  // gep i8 %p, %x is the byte offset %x, not the GEP itself.
+  EXPECT_EQ(Merged->getOffset(),
+            AbstractValue::symbol(*std::next(F.arg_begin())));
   EXPECT_EQ(Merged->getSize(), AbstractValue::constant(8));
   EXPECT_TRUE(Lower.isWrite());
 
@@ -5427,7 +5429,8 @@ entry:
   ASSERT_TRUE(ReversedUpper.mergeWith(ReversedLower));
   Merged = ReversedUpper.getContiguousRegion();
   ASSERT_NE(Merged, nullptr);
-  EXPECT_EQ(Merged->getOffset(), AbstractValue::symbol(PX));
+  EXPECT_EQ(Merged->getOffset(),
+            AbstractValue::symbol(*std::next(F.arg_begin())));
   EXPECT_EQ(Merged->getSize(), AbstractValue::constant(8));
 
   Observation GappedLower =

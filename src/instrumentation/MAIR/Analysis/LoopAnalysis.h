@@ -24,6 +24,7 @@ class MAIRLoopInfo {
   const llvm::PostDominatorTree *PDT = nullptr;
 
 public:
+  MAIRLoopInfo() = default;
   MAIRLoopInfo(MAIRGraph &G, llvm::FunctionAnalysisManager &FAM);
 
   bool isAvailable() const { return Graph && FAM && Func && LI && DT && PDT; }

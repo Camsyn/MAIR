@@ -184,6 +184,9 @@ class AbstractAccess {
   const Value *Base = nullptr;
   AbstractValue Offset;
   AbstractValue Size;
+  // Non-null when Size is an expression owned by the graph. Size is then
+  // unknown; the expression is the access length.
+  const MAIRScalarExprNode *SizeExprNode = nullptr;
 
 public:
   AbstractAccess() = default;
@@ -193,17 +196,25 @@ public:
   const Value *getBase() const { return Base; }
   const AbstractValue &getOffset() const { return Offset; }
   const AbstractValue &getSize() const { return Size; }
+  bool hasSizeExpr() const { return SizeExprNode != nullptr; }
+  const MAIRScalarExprNode *getSizeExprNode() const { return SizeExprNode; }
+  void setSizeExprNode(const void *Node) {
+    SizeExprNode = static_cast<const MAIRScalarExprNode *>(Node);
+    Size = AbstractValue();
+  }
 
   bool contains(const AbstractAccess &Other) const;
 
   static AbstractAccess fromPointerAndSize(const Value &Ptr, AbstractValue Size,
                                            const DataLayout &DL);
-  static std::optional<AbstractAccess> merge(const AbstractAccess &A,
-                                             const AbstractAccess &B,
-                                             const DataLayout *DL = nullptr);
+  static std::optional<AbstractAccess>
+  merge(const AbstractAccess &A, const AbstractAccess &B,
+        const DataLayout *DL = nullptr, llvm::ScalarEvolution *SE = nullptr,
+        MAIRGraph *ExprGraph = nullptr);
 
   bool operator==(const AbstractAccess &Other) const {
-    return Base == Other.Base && Offset == Other.Offset && Size == Other.Size;
+    return Base == Other.Base && Offset == Other.Offset && Size == Other.Size &&
+           SizeExprNode == Other.SizeExprNode;
   }
   bool operator!=(const AbstractAccess &Other) const {
     return !(*this == Other);
@@ -316,6 +327,11 @@ private:
 public:
   MAIRScalarExpr() = default;
 
+  static MAIRScalarExpr fromNode(const MAIRScalarExprNode *Node) {
+    assert(Node && "missing scalar expression node");
+    return MAIRScalarExpr(*Node);
+  }
+
   bool isValid() const { return Node != nullptr; }
   Kind getKind() const;
   Type *getType() const;
@@ -408,6 +424,10 @@ public:
 };
 
 /// A contiguous, masked, or explicitly periodic memory-access region.
+inline MAIRScalarExpr expressionSize(const AbstractAccess &Access) {
+  return MAIRScalarExpr::fromNode(Access.getSizeExprNode());
+}
+
 using MemoryRegion = std::variant<AbstractAccess, MaskedRegion, PeriodicRegion>;
 
 class ProgramPointEdge {
@@ -670,7 +690,7 @@ public:
   /// observation is registered. Coverage requires LHS level >= RHS level, while
   /// merging requires equal levels.
   bool covers(const Observation &Other) const;
-  bool mergeWith(const Observation &Other);
+  bool mergeWith(const Observation &Other, llvm::ScalarEvolution *SE = nullptr);
   void mergeKind(AccessKind Other);
   void eraseFromParent();
 

@@ -487,6 +487,9 @@ void MAIRVerifier::verifyObservation(const ProgramPoint &PP,
   Check(FoundUse, "memory object use-list does not contain this observation",
         Obs, PP, Base);
 
+  if (const AbstractAccess *Region = Obs.getContiguousRegion())
+    if (Region->hasSizeExpr())
+      verifyScalarExpr(expressionSize(*Region), Obs, PP);
   if (const PeriodicRegion *Region = Obs.getPeriodicRegion())
     verifyPeriodicRegion(*Region, Obs, PP);
   if (const MaskedRegion *Region = Obs.getMaskedRegion()) {

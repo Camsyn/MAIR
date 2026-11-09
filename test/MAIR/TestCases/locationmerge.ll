@@ -48,6 +48,26 @@ entry:
   ret void
 }
 
+define void @merge_symbolic_index_delta(ptr %p, i64 %i) {
+entry:
+  %a = getelementptr i8, ptr %p, i64 %i
+  %next = add i64 %i, 1
+  %b = getelementptr i8, ptr %p, i64 %next
+  %x = load i8, ptr %a, align 1
+  %y = load i8, ptr %b, align 1
+  ret void
+}
+
+define void @merge_symbolic_i32_index_delta(ptr %p, i64 %i) {
+entry:
+  %a = getelementptr i32, ptr %p, i64 %i
+  %next = add i64 %i, 1
+  %b = getelementptr i32, ptr %p, i64 %next
+  %x = load i32, ptr %a, align 4
+  %y = load i32, ptr %b, align 4
+  ret void
+}
+
 define void @merge_overlapping_and_contained(ptr %p) {
 entry:
   %wide = load i64, ptr %p, align 8
@@ -66,16 +86,24 @@ entry:
 ; CHECK:         o: read ptr %q, 4
 ;
 ; CHECK-LABEL: mair graph of fn @keep_symbolic_locations {
-; CHECK:         o: read ptr %p + %pi, 4
-; CHECK:         o: read ptr %p + %pj, 4
+; CHECK:         o: read ptr %p + %i, 4
+; CHECK:         o: read ptr %p + %j, 4
 ;
 ; CHECK-LABEL: mair graph of fn @merge_identical_symbolic_location {
-; CHECK:         o: read ptr %p + %pi, 4
+; CHECK:         o: read ptr %p + %i, 4
 ; CHECK-NOT:     o: read ptr
 ;
 ; CHECK-LABEL: mair graph of fn @merge_adjacent_symbolic_location {
-; CHECK:         o: write ptr %p + %pi, 8
+; CHECK:         o: write ptr %p + %i, 8
 ; CHECK-NOT:     o: write ptr
+;
+; CHECK-LABEL: mair graph of fn @merge_symbolic_index_delta {
+; CHECK:         o: read ptr %p + %i, 2
+; CHECK-NOT:     o: read ptr
+;
+; CHECK-LABEL: mair graph of fn @merge_symbolic_i32_index_delta {
+; CHECK:         o: read ptr %p + %a, 8
+; CHECK-NOT:     o: read ptr
 ;
 ; CHECK-LABEL: mair graph of fn @merge_overlapping_and_contained {
 ; CHECK:         o: read ptr %p, 8
@@ -88,5 +116,13 @@ entry:
 ; LOCAL:         o: read ptr %p + 4, 4
 ;
 ; LOCAL-LABEL: mair graph of fn @merge_adjacent_symbolic_location {
-; LOCAL:         o: write ptr %p + %pi, 4
+; LOCAL:         o: write ptr %p + %i, 4
 ; LOCAL:         o: write ptr %p + %pi4, 4
+;
+; LOCAL-LABEL: mair graph of fn @merge_symbolic_index_delta {
+; LOCAL:         o: read ptr %p + %i, 1
+; LOCAL:         o: read ptr %p + %next, 1
+;
+; LOCAL-LABEL: mair graph of fn @merge_symbolic_i32_index_delta {
+; LOCAL:         o: read ptr %p + %a, 4
+; LOCAL:         o: read ptr %p + %b, 4

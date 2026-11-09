@@ -6,7 +6,10 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
 
 using namespace llvm;
 
@@ -77,6 +80,98 @@ std::optional<uint64_t> matchStartOffset(const SCEV *Start,
 
   if (Base == ExpectedBase)
     return Offset.value_or(0);
+  return std::nullopt;
+}
+
+const SCEV *regionAddressSCEV(const AbstractAccess &Access,
+                              ScalarEvolution &SE) {
+  const Value *Base = Access.getBase();
+  if (!Base || !Base->getType()->isPointerTy())
+    return nullptr;
+  Type *ByteTy = Type::getInt8Ty(Base->getContext());
+  Value *BaseValue = const_cast<Value *>(Base);
+  const AbstractValue &Offset = Access.getOffset();
+  if (Offset.isConstant()) {
+    if (Offset == 0)
+      return SE.getSCEV(BaseValue);
+    Type *IndexTy = SE.getEffectiveSCEVType(Base->getType());
+    unsigned Width = cast<IntegerType>(IndexTy)->getBitWidth();
+    if (Width < 64 && (Offset.getConstant() >> Width) != 0)
+      return nullptr;
+    const SCEV *Index = SE.getConstant(IndexTy, Offset.getConstant(), true);
+    return SE.getGEPExpr(SE.getUnknown(BaseValue), Index, ByteTy);
+  }
+  if (!Offset.isSymbol())
+    return nullptr;
+  Value *Symbol = const_cast<Value *>(Offset.getSymbol());
+  if (Symbol->getType()->isPointerTy())
+    return SE.getSCEV(Symbol);
+  if (!Symbol->getType()->isIntegerTy())
+    return nullptr;
+  return SE.getGEPExpr(SE.getUnknown(BaseValue), SE.getSCEV(Symbol), ByteTy);
+}
+
+const Value *findValueForSCEV(const SCEV *Expr, const Observation &Obs,
+                              ScalarEvolution &SE, const MAIRLoopInfo &Loops,
+                              const ProgramPointSite &Site) {
+  if (!Expr)
+    return nullptr;
+  auto Matches = [&](const Value *V) {
+    return V && Loops.isValueAvailableAt(*V, Site) &&
+           SE.getSCEV(const_cast<Value *>(V)) == Expr;
+  };
+  for (Instruction *I : Obs.getInstructions()) {
+    const Value *Pointer = I ? getPointerOperand(*I) : nullptr;
+    if (const auto *GEP = dyn_cast_or_null<GEPOperator>(Pointer))
+      if (Matches(GEP->getPointerOperand()))
+        return GEP->getPointerOperand();
+    if (Matches(Pointer))
+      return Pointer;
+  }
+  const Function *F = Site.getAnchor().getFunction();
+  if (!F)
+    return nullptr;
+  for (const Argument &Arg : F->args())
+    if (Matches(&Arg))
+      return &Arg;
+  for (const BasicBlock &BB : *F)
+    for (const Instruction &Insn : BB)
+      if (Matches(&Insn))
+        return &Insn;
+  return nullptr;
+}
+
+// The inner AddRec start is often an outer induction, not base+constant.
+// Keep that induction as the byte offset of the widened range so the parent
+// loop can fold the next AddRec.
+std::optional<AbstractValue>
+representStartOffset(const SCEV *Start, const Value *ExpectedBase,
+                     const Observation &Obs, ScalarEvolution &SE,
+                     const MAIRLoopInfo &Loops, const ProgramPointSite &Site) {
+  if (std::optional<uint64_t> Offset = matchStartOffset(Start, ExpectedBase))
+    return AbstractValue::constant(*Offset);
+  const Value *StartPtr = findValueForSCEV(Start, Obs, SE, Loops, Site);
+  if (!StartPtr || !ExpectedBase)
+    return std::nullopt;
+
+  if (const auto *GEP = dyn_cast<GEPOperator>(StartPtr)) {
+    const Module *M = Site.getAnchor().getModule();
+    if (!M)
+      return std::nullopt;
+    const DataLayout &DL = M->getDataLayout();
+    TypeSize Stride = DL.getTypeAllocSize(GEP->getSourceElementType());
+    const Value *PointerOp = GEP->getPointerOperand()->stripPointerCasts();
+    if (Stride.isFixed() && Stride.getFixedValue() == 1 &&
+        PointerOp == ExpectedBase && GEP->getNumIndices() == 1) {
+      const Value *Index = GEP->getOperand(1);
+      if (Index->getType()->isIntegerTy() &&
+          Loops.isValueAvailableAt(*Index, Site))
+        return AbstractValue::symbol(*Index);
+    }
+  }
+  if (StartPtr->getType()->isPointerTy() &&
+      getUnderlyingObject(StartPtr) == ExpectedBase)
+    return AbstractValue::symbol(*StartPtr);
   return std::nullopt;
 }
 
@@ -259,7 +354,8 @@ void addOrMergeObservation(ProgramPoint &Target, const Observation &Obs,
 
 std::optional<AbstractAccess> buildContiguousAggregate(
     const Observation &Obs, const SCEVAddRecExpr &Recurrence,
-    const SCEV *ExecutionCount, uint64_t AccessSize, ScalarEvolution &SE) {
+    const SCEV *ExecutionCount, uint64_t AccessSize, ScalarEvolution &SE,
+    const MAIRLoopInfo &Loops, const ProgramPointSite &Site) {
   const auto *Step = dyn_cast<SCEVConstant>(Recurrence.getStepRecurrence(SE));
   const auto *Count = dyn_cast<SCEVConstant>(ExecutionCount);
   const AbstractAccess *Location = Obs.getContiguousRegion();
@@ -279,25 +375,79 @@ std::optional<AbstractAccess> buildContiguousAggregate(
   if (Trips == 0 || UINT64_MAX / AccessSize < Trips)
     return std::nullopt;
 
-  std::optional<uint64_t> StartOffset =
-      matchStartOffset(Recurrence.getStart(), Location->getBase());
+  std::optional<AbstractValue> StartOffset = representStartOffset(
+      Recurrence.getStart(), Location->getBase(), Obs, SE, Loops, Site);
   if (!StartOffset)
     return std::nullopt;
 
-  uint64_t RangeOffset = *StartOffset;
-  if (StepValue.isNegative()) {
-    uint64_t PreviousTrips = Trips - 1;
-    if (UINT64_MAX / AccessSize < PreviousTrips)
+  if (StartOffset->isConstant()) {
+    uint64_t RangeOffset = StartOffset->getConstant();
+    if (StepValue.isNegative()) {
+      uint64_t PreviousTrips = Trips - 1;
+      if (UINT64_MAX / AccessSize < PreviousTrips)
+        return std::nullopt;
+      uint64_t Distance = PreviousTrips * AccessSize;
+      if (RangeOffset < Distance)
+        return std::nullopt;
+      RangeOffset -= Distance;
+    }
+    return AbstractAccess(Location->getBase(),
+                          AbstractValue::constant(RangeOffset),
+                          AbstractValue::constant(Trips * AccessSize));
+  }
+  if (StepValue.isNegative())
+    return std::nullopt;
+  return AbstractAccess(Location->getBase(), *StartOffset,
+                        AbstractValue::constant(Trips * AccessSize));
+}
+
+std::optional<AbstractAccess>
+buildSymbolicContiguousRange(MAIRGraph &ExprGraph, const Observation &Obs,
+                             const SCEVAddRecExpr &Recurrence,
+                             const SCEV *ExecutionCount, uint64_t AccessSize,
+                             ScalarEvolution &SE, const MAIRLoopInfo &Loops,
+                             const ProgramPointSite &Site) {
+  const auto *Step = dyn_cast<SCEVConstant>(Recurrence.getStepRecurrence(SE));
+  const AbstractAccess *Location = Obs.getContiguousRegion();
+  if (!Step || !Location || isa<SCEVConstant>(ExecutionCount))
+    return std::nullopt;
+
+  const APInt &StepValue = Step->getAPInt();
+  APInt AbsoluteStep = StepValue.abs();
+  // A negative step still covers one interval, but its start moves with the
+  // trip count. Keep that form on the periodic path.
+  if (StepValue.isNegative() || StepValue.isZero() ||
+      AbsoluteStep.getActiveBits() > 64 ||
+      AbsoluteStep.getZExtValue() != AccessSize)
+    return std::nullopt;
+
+  std::optional<AbstractValue> StartOffset = representStartOffset(
+      Recurrence.getStart(), Location->getBase(), Obs, SE, Loops, Site);
+  if (!StartOffset || !StartOffset->isConstant())
+    return std::nullopt;
+
+  SCEVExprConverter Converter(ExprGraph, Loops, Site);
+  if (!Converter.canConvert(ExecutionCount))
+    return std::nullopt;
+  MAIRScalarExpr SizeExpr = Converter.convert(ExecutionCount);
+  if (AccessSize != 1) {
+    Type *SizeTy = SizeExpr.getType();
+    if (!SizeTy || !SizeTy->isIntegerTy())
       return std::nullopt;
-    uint64_t Distance = PreviousTrips * AccessSize;
-    if (RangeOffset < Distance)
+    unsigned Bits = SizeTy->getIntegerBitWidth();
+    if (APInt(64, AccessSize).getActiveBits() > Bits)
       return std::nullopt;
-    RangeOffset -= Distance;
+    MAIRScalarExpr Scale =
+        ExprGraph.createConstantExpr(*SizeTy, APInt(Bits, AccessSize));
+    SizeExpr = ExprGraph.createBinaryExpr(MAIRScalarExpr::Kind::Mul, *SizeTy,
+                                          SizeExpr, Scale);
   }
 
-  return AbstractAccess(Location->getBase(),
-                        AbstractValue::constant(RangeOffset),
-                        AbstractValue::constant(Trips * AccessSize));
+  AbstractAccess Range(Location->getBase(),
+                       AbstractValue::constant(StartOffset->getConstant()),
+                       AbstractValue());
+  Range.setSizeExprNode(SizeExpr.getOpaqueNode());
+  return Range;
 }
 
 struct AggregateTarget {
@@ -340,20 +490,28 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
       *AccessSize == 0 || Obs.getInstructions().empty())
     return std::nullopt;
 
-  // First bind the observation to the loop described by its pointer recurrence,
-  // then prove that its program point executes exactly once in that loop.
+  // Peel one affine AddRec of this loop. A range produced by an inner loop
+  // keeps the outer induction as its start, so the address SCEV — not the
+  // original inner pointer — is the recurrence of the parent loop.
   ScalarEvolution &SE = Loops.getSE();
   const SCEVAddRecExpr *Recurrence = nullptr;
-  for (Instruction *I : Obs.getInstructions()) {
-    const Value *Pointer = I ? getPointerOperand(*I) : nullptr;
-    if (!Pointer)
-      return std::nullopt;
-    const auto *Candidate =
-        dyn_cast<SCEVAddRecExpr>(SE.getSCEV(const_cast<Value *>(Pointer)));
-    if (!Candidate || !Candidate->isAffine() ||
-        (Recurrence && Recurrence != Candidate))
-      return std::nullopt;
-    Recurrence = Candidate;
+  if (const SCEV *Address = regionAddressSCEV(*Location, SE)) {
+    if (const auto *AddRec = dyn_cast<SCEVAddRecExpr>(Address))
+      if (AddRec->isAffine() && AddRec->getLoop() == G.getLoop())
+        Recurrence = AddRec;
+  }
+  if (!Recurrence) {
+    for (Instruction *I : Obs.getInstructions()) {
+      const Value *Pointer = I ? getPointerOperand(*I) : nullptr;
+      if (!Pointer)
+        return std::nullopt;
+      const auto *Candidate =
+          dyn_cast<SCEVAddRecExpr>(SE.getSCEV(const_cast<Value *>(Pointer)));
+      if (!Candidate || !Candidate->isAffine() ||
+          (Recurrence && Recurrence != Candidate))
+        return std::nullopt;
+      Recurrence = Candidate;
+    }
   }
   if (!Recurrence || !Recurrence->getLoop() ||
       Recurrence->getLoop() != G.getLoop())
@@ -377,8 +535,14 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
   // compact range form. Everything else must survive as an explicit periodic
   // region with no later dependence on LLVM SCEV objects.
   bool IsRangeAggregate = false;
-  if (std::optional<AbstractAccess> Range = buildContiguousAggregate(
-          Obs, *Recurrence, ExecutionCount, *AccessSize, SE)) {
+  if (std::optional<AbstractAccess> Range =
+          buildContiguousAggregate(Obs, *Recurrence, ExecutionCount,
+                                   *AccessSize, SE, Loops, Target->Site)) {
+    Aggregate = *Range;
+    IsRangeAggregate = true;
+  } else if (std::optional<AbstractAccess> Range = buildSymbolicContiguousRange(
+                 *G.getParent(), Obs, *Recurrence, ExecutionCount, *AccessSize,
+                 SE, Loops, Target->Site)) {
     Aggregate = *Range;
     IsRangeAggregate = true;
   } else {

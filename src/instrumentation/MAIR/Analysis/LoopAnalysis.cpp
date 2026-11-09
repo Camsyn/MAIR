@@ -188,9 +188,10 @@ LoopAnalysis::Result LoopAnalysis::run(MAIRGraph &G,
                                        MAIRGraphAnalysisManager &) {
   if (!G.isLive())
     report_fatal_error("MAIR LoopAnalysis cannot run on a consumed graph");
+  // Graphs built without a function analysis manager have no ScalarEvolution.
+  // Callers treat that as an unavailable loop analysis.
   if (!FAM)
-    report_fatal_error(
-        "MAIR LoopAnalysis requires a FunctionAnalysisManager bridge");
+    return MAIRLoopInfo();
   return MAIRLoopInfo(G, *FAM);
 }
 

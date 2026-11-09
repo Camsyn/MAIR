@@ -107,13 +107,17 @@ bool validateObservation(const Observation &Obs, const Instruction &Target,
     bool OffsetHasMaterializableType =
         !Offset.isSymbol() || OffsetIsCompletePointer ||
         Offset.getSymbol()->getType()->isIntegerTy();
-    bool SizeHasMaterializableType =
-        !Size.isSymbol() || Size.getSymbol()->getType()->isIntegerTy();
+    bool SizeHasMaterializableType = Region.hasSizeExpr() || !Size.isSymbol() ||
+                                     Size.getSymbol()->getType()->isIntegerTy();
+    bool SizeAvailable =
+        Region.hasSizeExpr()
+            ? expressionAvailableAt(expressionSize(Region), Target, DT)
+            : abstractValueAvailableAt(Region.getSize(), Target, DT);
     if (!Base || !Base->getType()->isPointerTy() ||
         (!OffsetIsCompletePointer && !valueAvailableAt(*Base, Target, DT)) ||
         !OffsetHasMaterializableType || !SizeHasMaterializableType ||
         !abstractValueAvailableAt(Region.getOffset(), Target, DT) ||
-        !abstractValueAvailableAt(Region.getSize(), Target, DT)) {
+        !SizeAvailable) {
       Failure = "contiguous region has an unavailable or unknown value";
       return false;
     }
@@ -450,7 +454,9 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
       if (const auto *Contiguous = std::get_if<AbstractAccess>(&Obs.Region)) {
         Materialized.Address = lowerContiguous(*Contiguous, *BuilderPtr);
         Materialized.AccessSize =
-            lowerAbstractValue(Contiguous->getSize(), *BuilderPtr);
+            Contiguous->hasSizeExpr()
+                ? lowerExpr(expressionSize(*Contiguous), *BuilderPtr, ExprCache)
+                : lowerAbstractValue(Contiguous->getSize(), *BuilderPtr);
       } else if (const auto *Masked = std::get_if<MaskedRegion>(&Obs.Region)) {
         Materialized.Address =
             lowerContiguous(Masked->getBounds(), *BuilderPtr);

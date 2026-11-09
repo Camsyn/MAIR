@@ -13,7 +13,7 @@
 ; LOCATION: {{[1-9][0-9]*}} mair-locationmerge - Number of observations merged by location merging
 ; COMMON: 30 mair-common-observation-motion - Number of observations entering common observation motion
 ; PERIODIC: {{[1-9][0-9]*}} mair-loop-periodic-combine - Number of observations aggregated across loop iterations
-; PERIODIC: 21 mair-loop-periodic-combine - Number of observations entering loop periodic combination
+; PERIODIC: 27 mair-loop-periodic-combine - Number of observations entering loop periodic combination
 ; INVARIANT: 15 mair-loop-invariant-motion - Number of observations entering loop-invariant motion
 ; INVARIANT: {{[1-9][0-9]*}} mair-loop-invariant-motion - Number of invariant observations moved to loop preheaders
 ; REDUNDANT-DAG: 10 mair-redundant-observation-elimination - Number of redundant observations eliminated

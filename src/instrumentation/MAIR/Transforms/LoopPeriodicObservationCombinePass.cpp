@@ -118,8 +118,17 @@ const Value *findValueForSCEV(const SCEV *Expr, const Observation &Obs,
   if (!Expr)
     return nullptr;
   auto Matches = [&](const Value *V) {
-    return V && Loops.isValueAvailableAt(*V, Site) &&
-           SE.getSCEV(const_cast<Value *>(V)) == Expr;
+    if (!V || !SE.isSCEVable(V->getType()) || V->getType() != Expr->getType() ||
+        !Loops.isValueAvailableAt(*V, Site) ||
+        SE.getSCEV(const_cast<Value *>(V)) != Expr)
+      return false;
+    if (const auto *Insn = dyn_cast<Instruction>(V)) {
+      SmallVector<Instruction *, 4> DropPoisonGeneratingInsts;
+      return SE.canReuseInstruction(Expr, const_cast<Instruction *>(Insn),
+                                    DropPoisonGeneratingInsts) &&
+             DropPoisonGeneratingInsts.empty();
+    }
+    return true;
   };
   for (Instruction *I : Obs.getInstructions()) {
     const Value *Pointer = I ? getPointerOperand(*I) : nullptr;

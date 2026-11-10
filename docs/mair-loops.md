@@ -33,6 +33,8 @@ MAIR 用循环层次限制普通优化的范围。每个函数有一个根图，
 
 带“来源访问执行过”条件的下沉，以本次循环调用的 preheader 为 guard 重置位置。嵌套循环的下一次调用不会继承上一次调用的 true 状态。整树统一生成物化计划，统一 prepare/apply；完成后整树都进入 consumed 状态。
 
+内层范围起点复用已有 LLVM Value 时，除 SCEV 相等和目标位置可用外，还必须保证类型匹配与 poison 安全。指令候选只有在 `ScalarEvolution::canReuseInstruction` 允许复用且无需丢弃 poison flags 时才接受；优化阶段不修改原 LLVM IR。`loop-start-reuse.ll` 覆盖不安全候选、非 SCEV 类型以及继续寻找安全候选。
+
 ## 地址合并
 
 符号地址只有在能够证明字节差时才合并。有 ScalarEvolution 时使用地址 SCEV 的常量差；证明失败即保留原观察。没有该分析时，只用 LLVM 的常量偏移剥离匹配相同剩余地址，以 APInt 计算差值，不把整数 `add` 当成不回绕的地址距离。

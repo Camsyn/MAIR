@@ -335,6 +335,60 @@ merge:
   EXPECT_TRUE(Graph.isLive());
 }
 
+TEST(MAIRMaterialization, RejectsPointerContiguousSizeBeforeMutation) {
+  LLVMContext Ctx;
+  auto Module = parseMaterializationModule(R"IR(
+define void @f(ptr %base) {
+entry:
+  ret void
+}
+)IR",
+                                           Ctx);
+  ASSERT_TRUE(Module);
+  Function &Func = *Module->getFunction("f");
+  Argument &Base = *Func.getArg(0);
+  MAIRGraph Graph(Func);
+  ProgramPoint &Point = Graph.createProgramPoint(
+      ProgramPointSite::anchored(*Func.getEntryBlock().getTerminator(),
+                                 ProgramPoint::SiteKind::BasicBlockExit));
+  MAIRScalarExpr BaseExpr = Graph.createValueExpr(Base);
+  MAIRScalarExpr One =
+      Graph.createConstantExpr(*Type::getInt64Ty(Ctx), APInt(64, 1));
+  MAIRScalarExpr SizeExpr = Graph.createBinaryExpr(
+      MAIRScalarExpr::Kind::Add, *Base.getType(), BaseExpr, One);
+  AbstractAccess Region(&Base, AbstractValue::constant(0), AbstractValue());
+  Region.setSizeExprNode(SizeExpr.getOpaqueNode());
+  Point.addObservation(Observation({}, Region, AccessKind::Read));
+
+  std::string Diagnostics;
+  raw_string_ostream DiagnosticStream(Diagnostics);
+  EXPECT_FALSE(Graph.verify(&DiagnosticStream));
+  EXPECT_NE(Diagnostics.find("contiguous region size is not integer typed"),
+            std::string::npos);
+
+  PassInstrumentationCallbacks PIC;
+  FunctionAnalysisManager FAM;
+  registerMaterializationAnalyses(FAM, PIC);
+  RecordingBackend Backend;
+  std::string BeforeModule = printModule(*Module);
+  std::string BeforeGraph;
+  raw_string_ostream BeforeGraphStream(BeforeGraph);
+  Graph.print(BeforeGraphStream);
+
+  auto Result = Graph.instantiate(FAM, Backend);
+  ASSERT_FALSE(Result);
+  EXPECT_NE(toString(Result.takeError()).find("invalid MAIRGraph"),
+            std::string::npos);
+  EXPECT_EQ(printModule(*Module), BeforeModule);
+  EXPECT_EQ(Backend.PrepareCalls, 0u);
+  EXPECT_EQ(Backend.EmittedProgramPoints, 0u);
+  EXPECT_TRUE(Graph.isLive());
+  std::string AfterGraph;
+  raw_string_ostream AfterGraphStream(AfterGraph);
+  Graph.print(AfterGraphStream);
+  EXPECT_EQ(AfterGraph, BeforeGraph);
+}
+
 TEST(MAIRMaterialization, RejectsUnavailableContiguousBaseBeforeMutation) {
   LLVMContext Ctx;
   auto M = parseMaterializationModule(R"IR(

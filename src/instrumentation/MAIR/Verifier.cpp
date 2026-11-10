@@ -488,8 +488,12 @@ void MAIRVerifier::verifyObservation(const ProgramPoint &PP,
         Obs, PP, Base);
 
   if (const AbstractAccess *Region = Obs.getContiguousRegion())
-    if (Region->hasSizeExpr())
-      verifyScalarExpr(expressionSize(*Region), Obs, PP);
+    if (Region->hasSizeExpr()) {
+      MAIRScalarExpr Size = expressionSize(*Region);
+      verifyScalarExpr(Size, Obs, PP);
+      Check(Size.getType()->isIntegerTy(),
+            "contiguous region size is not integer typed", Obs, PP);
+    }
   if (const PeriodicRegion *Region = Obs.getPeriodicRegion())
     verifyPeriodicRegion(*Region, Obs, PP);
   if (const MaskedRegion *Region = Obs.getMaskedRegion()) {

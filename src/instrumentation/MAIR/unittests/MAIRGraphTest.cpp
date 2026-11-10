@@ -1890,7 +1890,7 @@ exit:
   EXPECT_EQ(BodyConstant->getAPInt(), llvm::APInt(65, 4));
 }
 
-TEST(MAIRLoopAnalysis, RejectsIrreducibleRepeatedSiteBeforeBuilding) {
+TEST(MAIRLoopAnalysis, BuildsIrreducibleRepeatedSite) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(i1 %entry.sel, i1 %cycle.sel, i1 %again) {
@@ -1917,8 +1917,8 @@ exit:
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   registerLoopTestAnalyses(FAM, PIC);
-  EXPECT_DEATH_IF_SUPPORTED((void)createGraphWithFunctionAnalyses(F, FAM),
-                            "irreducible");
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(F, FAM);
+  EXPECT_TRUE(Graph.verify());
 }
 
 TEST(MAIRLoopAnalysis, WidensMaximumBackedgeCountWithoutWrapping) {

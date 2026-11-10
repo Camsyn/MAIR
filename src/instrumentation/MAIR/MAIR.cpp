@@ -120,8 +120,7 @@ bool isInterestingMop(const Instruction &I) {
          isMaskedMemoryIntrinsic(I);
 }
 
-void verifyLoopStructure(const Function &F, const DominatorTree &DT,
-                         const LoopInfo &LI) {
+void verifyNaturalLoops(const LoopInfo &LI) {
   for (const Loop *Loop : LI.getLoopsInPreorder()) {
     if (!Loop->getLoopPreheader())
       report_fatal_error(
@@ -130,6 +129,14 @@ void verifyLoopStructure(const Function &F, const DominatorTree &DT,
       report_fatal_error(
           "MAIR requires dedicated loop exits before graph building");
   }
+}
+
+// Blocks on a backedge that is not a natural-loop latch. LoopInfo does not
+// represent these cycles, so they have no MAIR loop scope of their own.
+SmallPtrSet<const BasicBlock *, 16>
+collectUnsupportedLoopBlocks(const Function &F, const DominatorTree &DT,
+                             const LoopInfo &LI) {
+  SmallPtrSet<const BasicBlock *, 16> Unsupported;
   SmallPtrSet<const BasicBlock *, 32> Visited;
   SmallPtrSet<const BasicBlock *, 32> Active;
   SmallVector<std::pair<const BasicBlock *, const_succ_iterator>, 16> Stack;
@@ -147,18 +154,29 @@ void verifyLoopStructure(const Function &F, const DominatorTree &DT,
         continue;
       }
       const BasicBlock *Successor = *NextSuccessor++;
-      if (Active.contains(Successor)) {
-        const Loop *Loop = LI.getLoopFor(Successor);
-        if (!DT.dominates(Successor, Block) || !Loop ||
-            Loop->getHeader() != Successor || !Loop->contains(Block))
-          report_fatal_error(
-              "MAIR does not support irreducible or unrepresented cycles");
-      } else if (Visited.insert(Successor).second) {
-        Active.insert(Successor);
-        Stack.emplace_back(Successor, succ_begin(Successor));
+      if (!Active.contains(Successor)) {
+        if (Visited.insert(Successor).second) {
+          Active.insert(Successor);
+          Stack.emplace_back(Successor, succ_begin(Successor));
+        }
+        continue;
+      }
+      const Loop *Loop = LI.getLoopFor(Successor);
+      if (DT.dominates(Successor, Block) && Loop &&
+          Loop->getHeader() == Successor && Loop->contains(Block))
+        continue;
+      // TODO: Non-standard loops are not optimized yet. Observations in the
+      // cycle stay where they are; represent and optimize the region later.
+      bool InCycle = false;
+      for (const auto &Frame : Stack) {
+        if (Frame.first == Successor)
+          InCycle = true;
+        if (InCycle)
+          Unsupported.insert(Frame.first);
       }
     }
   }
+  return Unsupported;
 }
 
 } // namespace
@@ -175,8 +193,12 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
                            const PostDominatorTree &PDT, const LoopInfo &LI,
                            MAIRBarrierAnalysisCore &BA,
                            MAIROptimizationConfig Config) {
-  verifyLoopStructure(F, DT, LI);
+  verifyNaturalLoops(LI);
+  SmallPtrSet<const BasicBlock *, 16> Unsupported =
+      collectUnsupportedLoopBlocks(F, DT, LI);
   MAIRGraph Graph(F, Config);
+  for (const BasicBlock *BB : Unsupported)
+    Graph.addUnsupportedLoopBlock(*BB);
   Graph.Analyses.bind(DT, PDT, LI);
   DenseMap<const Loop *, MAIRGraph *> LoopGraphs;
   for (const Loop *Loop : LI.getLoopsInPreorder()) {
@@ -1157,8 +1179,13 @@ void MAIROptimizationConfig::initializeObservation(Observation &Obs) const {
 
 void Observation::refreshOptimizationProperties() {
   if (ProgramPoint *PP = getParent())
-    if (MAIRGraph *Graph = PP->getParent())
-      return Graph->getOptimizationConfig().initializeObservation(*this);
+    if (MAIRGraph *Graph = PP->getParent()) {
+      Graph->getOptimizationConfig().initializeObservation(*this);
+      if (Graph->isUnsupportedLoopBlock(PP->getBasicBlock()))
+        setOptimizationProperties(/*CanMerge=*/false, /*CanMove=*/false,
+                                  /*CanDelete=*/false, getLevel());
+      return;
+    }
   MAIROptimizationConfig::generic().initializeObservation(*this);
 }
 
@@ -1600,6 +1627,7 @@ MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
       LoopPreheader(Other.LoopPreheader), LoopExits(std::move(Other.LoopExits)),
       ForwardBarrier(Other.ForwardBarrier),
       BackwardBarrier(Other.BackwardBarrier),
+      UnsupportedLoopBlocks(std::move(Other.UnsupportedLoopBlocks)),
       BBEntryRepresentatives(std::move(Other.BBEntryRepresentatives)),
       BBExitRepresentatives(std::move(Other.BBExitRepresentatives)),
       ProgramPoints(std::move(Other.ProgramPoints)),
@@ -1638,6 +1666,7 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   LoopExits = std::move(Other.LoopExits);
   ForwardBarrier = Other.ForwardBarrier;
   BackwardBarrier = Other.BackwardBarrier;
+  UnsupportedLoopBlocks = std::move(Other.UnsupportedLoopBlocks);
   BBEntryRepresentatives = std::move(Other.BBEntryRepresentatives);
   BBExitRepresentatives = std::move(Other.BBExitRepresentatives);
   ProgramPoints = std::move(Other.ProgramPoints);
@@ -1716,6 +1745,14 @@ bool MAIRGraph::containsBlock(const BasicBlock &BB) const {
          (!hasLoopInfo() || getLoopInfo().getLoopFor(&BB) == ScopeLoop);
 }
 
+void MAIRGraph::addUnsupportedLoopBlock(const BasicBlock &BB) {
+  getRoot().UnsupportedLoopBlocks.insert(&BB);
+}
+
+bool MAIRGraph::isUnsupportedLoopBlock(const BasicBlock *BB) const {
+  return BB && getRoot().UnsupportedLoopBlocks.contains(BB);
+}
+
 void MAIRGraph::markConsumed() {
   for (MAIRGraph *Graph : getRoot().graphs())
     Graph->GraphState = State::ConsumedByInstantiation;
@@ -1753,6 +1790,10 @@ void MAIRGraph::registerObservation(Observation &Obs) {
   const Value *Base = Obs.getBase();
   assert(Base && "cannot add a base-less observation to a MAIRGraph");
   OptimizationConfig.initializeObservation(Obs);
+  if (const ProgramPoint *PP = Obs.getParent())
+    if (isUnsupportedLoopBlock(PP->getBasicBlock()))
+      Obs.setOptimizationProperties(/*CanMerge=*/false, /*CanMove=*/false,
+                                    /*CanDelete=*/false, Obs.getLevel());
   Obs.setMemoryObject(&getOrCreateMemoryObject(*Base));
 }
 
@@ -1938,6 +1979,7 @@ void MAIRGraph::clearStorage() {
   NumEdges = 0;
   LoopPreheader = nullptr;
   LoopExits.clear();
+  UnsupportedLoopBlocks.clear();
 }
 
 void MAIRGraph::clear() {

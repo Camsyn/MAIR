@@ -910,6 +910,8 @@ private:
   SmallVector<LoopProgramPoint *, 2> LoopExits;
   bool ForwardBarrier = false;
   bool BackwardBarrier = false;
+  // Blocks that form a non-standard cycle. Only the root graph stores them.
+  llvm::SmallPtrSet<const llvm::BasicBlock *, 8> UnsupportedLoopBlocks;
   DenseMap<const BasicBlock *, ProgramPoint *> BBEntryRepresentatives;
   DenseMap<const BasicBlock *, ProgramPoint *> BBExitRepresentatives;
   ProgramPointListType ProgramPoints;
@@ -952,6 +954,8 @@ public:
   bool hasForwardBarrier() const { return ForwardBarrier; }
   bool hasBackwardBarrier() const { return BackwardBarrier; }
   bool containsBlock(const BasicBlock &BB) const;
+  void addUnsupportedLoopBlock(const llvm::BasicBlock &BB);
+  bool isUnsupportedLoopBlock(const llvm::BasicBlock *BB) const;
   const MAIROptimizationConfig &getOptimizationConfig() const {
     return OptimizationConfig;
   }

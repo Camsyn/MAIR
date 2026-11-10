@@ -9,7 +9,7 @@
 define void @nested_contiguous_rows(ptr %p, i64 %n) {
 ; CHECK-LABEL: mair graph of fn @nested_contiguous_rows {
 ; CHECK:       pp14: loop-exit=%outer.header,
-; CHECK-NEXT:    o: read ptr %p, (zext(%n to i65) * 4)
+; CHECK-NEXT:    o: read ptr %p, (4 * zext(%n to i66))
 ; CHECK-LABEL: mair graph of fn @nested_contiguous_rows of loop %outer.header {
 ; CHECK-NOT:   o:
 ; CHECK:       }

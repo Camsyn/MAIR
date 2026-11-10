@@ -9,6 +9,7 @@
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/ConstantRange.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
@@ -765,41 +766,30 @@ bool AbstractAccess::contains(const AbstractAccess &Other) const {
 
 namespace {
 
-// Minimum value of a non-negative expression, when every leaf proves one.
-std::optional<uint64_t> minimumNonNegative(const MAIRScalarExpr &Expr) {
-  if (!Expr.isValid())
-    return std::nullopt;
+ConstantRange expressionRange(const MAIRScalarExpr &Expr) {
+  unsigned Bits = Expr.getType()->getIntegerBitWidth();
   using Kind = MAIRScalarExpr::Kind;
   switch (Expr.getKind()) {
-  case Kind::Constant: {
-    const APInt &Value = Expr.getConstant();
-    if (Value.isNegative() || Value.getActiveBits() > 64)
-      return std::nullopt;
-    return Value.getZExtValue();
-  }
+  case Kind::Constant:
+    return ConstantRange(Expr.getConstant());
   case Kind::ZeroExtend:
-    return 0;
+    return expressionRange(Expr.operands().front()).zeroExtend(Bits);
+  case Kind::SignExtend:
+    return expressionRange(Expr.operands().front()).signExtend(Bits);
+  case Kind::Truncate:
+    return expressionRange(Expr.operands().front()).truncate(Bits);
   case Kind::Add:
   case Kind::Mul: {
-    uint64_t Result = Expr.getKind() == Kind::Mul ? 1 : 0;
+    ConstantRange Result(APInt(Bits, Expr.getKind() == Kind::Mul ? 1 : 0));
     for (const MAIRScalarExpr &Operand : Expr.operands()) {
-      std::optional<uint64_t> OperandMin = minimumNonNegative(Operand);
-      if (!OperandMin)
-        return std::nullopt;
-      if (Expr.getKind() == Kind::Mul) {
-        if (*OperandMin != 0 && Result > UINT64_MAX / *OperandMin)
-          return std::nullopt;
-        Result *= *OperandMin;
-      } else {
-        if (Result > UINT64_MAX - *OperandMin)
-          return std::nullopt;
-        Result += *OperandMin;
-      }
+      ConstantRange OperandRange = expressionRange(Operand);
+      Result = Expr.getKind() == Kind::Mul ? Result.multiply(OperandRange)
+                                           : Result.add(OperandRange);
     }
     return Result;
   }
   default:
-    return std::nullopt;
+    return ConstantRange::getFull(Bits);
   }
 }
 
@@ -891,21 +881,29 @@ mergeExpressionSizedRanges(const AbstractAccess &A, const AbstractAccess &B,
   uint64_t Low = std::min(ABegin, BBegin);
   uint64_t High = std::max(ABegin, BBegin);
   uint64_t Delta = High - Low;
-  std::optional<uint64_t> Minimum = minimumNonNegative(expressionSize(A));
-  // Equal symbolic lengths abut or overlap only when the length is at least
-  // the distance between the starts. A zero-trip length must not grow.
-  if (!Minimum || *Minimum < Delta)
-    return std::nullopt;
-  Type *SizeTy = expressionSize(A).getType();
+  MAIRScalarExpr SizeExpr = expressionSize(A);
+  Type *SizeTy = SizeExpr.getType();
   if (!SizeTy || !SizeTy->isIntegerTy())
     return std::nullopt;
   unsigned Bits = SizeTy->getIntegerBitWidth();
-  if (Bits < 64 && (Delta >> Bits) != 0)
+  unsigned ScratchBits = std::max(Bits, 64u) + 1;
+  ConstantRange SizeRange = expressionRange(SizeExpr);
+  APInt ExtraSize(ScratchBits, Delta);
+  if (SizeRange.getUnsignedMin().zext(ScratchBits).ult(ExtraSize))
     return std::nullopt;
+  APInt MaxMerged = SizeRange.getUnsignedMax().zext(ScratchBits) + ExtraSize;
+  unsigned MergedBits = std::max(Bits, MaxMerged.getActiveBits());
+  if (MergedBits > IntegerType::MAX_INT_BITS)
+    return std::nullopt;
+  if (MergedBits > Bits) {
+    SizeTy = IntegerType::get(SizeTy->getContext(), MergedBits);
+    SizeExpr = ExprGraph->createUnaryExpr(MAIRScalarExpr::Kind::ZeroExtend,
+                                          *SizeTy, SizeExpr);
+  }
   MAIRScalarExpr Extra =
-      ExprGraph->createConstantExpr(*SizeTy, APInt(Bits, Delta));
-  MAIRScalarExpr Merged = ExprGraph->createBinaryExpr(
-      MAIRScalarExpr::Kind::Add, *SizeTy, expressionSize(A), Extra);
+      ExprGraph->createConstantExpr(*SizeTy, APInt(MergedBits, Delta));
+  MAIRScalarExpr Merged = ExprGraph->createBinaryExpr(MAIRScalarExpr::Kind::Add,
+                                                      *SizeTy, SizeExpr, Extra);
   AbstractAccess Result(A.getBase(), AbstractValue::constant(Low),
                         AbstractValue());
   Result.setSizeExprNode(Merged.getOpaqueNode());

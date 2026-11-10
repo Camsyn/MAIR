@@ -1,9 +1,12 @@
 #include "MAIR/Materialization/MAIRMaterialization.h"
 #include "MAIR/Analysis/LoopAnalysis.h"
 #include "MAIR/MAIR.h"
+#include "MAIR/Transforms/LoopPeriodicObservationCombinePass.h"
 #include "MAIRHierarchyTestUtil.h"
+#include "MAIRPassTestUtil.h"
 
 #include "llvm/Analysis/AssumptionCache.h"
+#include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/AsmParser/Parser.h"
@@ -13,6 +16,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassInstrumentation.h"
+#include "llvm/IR/ValueHandle.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/SourceMgr.h"
@@ -957,6 +961,235 @@ entry:
   EXPECT_EQ(Backend.EmittedObservations, 1u);
   EXPECT_NE(printModule(*M).find("mair.observation.gep"), std::string::npos);
   EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+class ConstantSizeBackend final : public MAIRObservationBackend {
+public:
+  SmallVector<WeakTrackingVH, 2> AccessSizes;
+
+  Error prepare(const MAIRMaterializationPlan &) override {
+    return Error::success();
+  }
+
+  void emit(const MaterializedProgramPoint &Point, IRBuilderBase &) override {
+    for (const MaterializedObservation &Obs : Point.Observations) {
+      EXPECT_FALSE(Obs.isPeriodic());
+      AccessSizes.emplace_back(Obs.AccessSize);
+    }
+  }
+};
+
+void expectConstantAccessSize(Function &Function, ConstantSizeBackend &Backend,
+                              uint64_t Input, uint64_t ExpectedSize) {
+  Argument *Count = Function.getArg(1);
+  Count->replaceAllUsesWith(ConstantInt::get(Count->getType(), Input));
+  const DataLayout &Layout = Function.getParent()->getDataLayout();
+  for (BasicBlock &Block : Function)
+    for (Instruction &Instruction : Block)
+      if (!Instruction.getType()->isVoidTy())
+        if (Constant *Folded = ConstantFoldInstruction(&Instruction, Layout))
+          Instruction.replaceAllUsesWith(Folded);
+  ASSERT_EQ(Backend.AccessSizes.size(), 1u);
+  auto *Size = dyn_cast_or_null<ConstantInt>(
+      static_cast<Value *>(Backend.AccessSizes.front()));
+  ASSERT_NE(Size, nullptr);
+  EXPECT_EQ(Size->getValue().getZExtValue(), ExpectedSize);
+  EXPECT_FALSE(verifyModule(*Function.getParent(), &errs()));
+}
+
+void expectLoopAccessSize(StringRef IR, uint64_t Input, uint64_t ExpectedSize) {
+  LLVMContext Context;
+  auto Module = parseMaterializationModule(IR, Context);
+  ASSERT_TRUE(Module);
+  Function &Function = *Module->getFunction("f");
+  PassInstrumentationCallbacks Callbacks;
+  FunctionAnalysisManager Analyses;
+  registerLoopAnalyses(Analyses, Callbacks);
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(Function, Analyses);
+  MAIRGraphAnalysisManager GraphAnalyses;
+  registerMAIRGraphAnalyses(GraphAnalyses, &Callbacks, &Analyses);
+  EXPECT_FALSE(runPassOnGraphTree(LoopPeriodicObservationCombinePass(), Graph,
+                                  GraphAnalyses)
+                   .areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  for (MAIRGraph *Scope : Graph.graphs())
+    GraphAnalyses.clear(*Scope, Function.getName());
+  ConstantSizeBackend Backend;
+  auto Result = Graph.instantiate(Analyses, Backend);
+  if (!Result) {
+    ADD_FAILURE() << toString(Result.takeError());
+    return;
+  }
+  expectConstantAccessSize(Function, Backend, Input, ExpectedSize);
+}
+
+TEST(MAIRMaterialization, WidensSymbolicLoopAccessSizeBeforeMultiplication) {
+  const char *IR = R"IR(
+define void @f(ptr %base, i8 %count) {
+entry:
+  br label %header
+header:
+  %index = phi i8 [ 0, %entry ], [ %next, %body ]
+  %more = icmp ult i8 %index, %count
+  br i1 %more, label %body, label %exit
+body:
+  %wide = zext i8 %index to i64
+  %address = getelementptr inbounds i32, ptr %base, i64 %wide
+  %value = load i32, ptr %address, align 4
+  %next = add nuw i8 %index, 1
+  br label %header
+exit:
+  ret void
+}
+)IR";
+  for (auto [Count, ExpectedSize] : {std::pair<uint64_t, uint64_t>{0, 0},
+                                     {1, 4},
+                                     {127, 508},
+                                     {128, 512},
+                                     {255, 1020}}) {
+    SCOPED_TRACE(Count);
+    expectLoopAccessSize(IR, Count, ExpectedSize);
+  }
+}
+
+TEST(MAIRMaterialization, PreservesFullNarrowCounterLoopAccessSize) {
+  expectLoopAccessSize(R"IR(
+define void @f(ptr %base, i8 %count) {
+entry:
+  br label %loop
+loop:
+  %index = phi i8 [ 0, %entry ], [ %next, %loop ]
+  %wide = zext i8 %index to i64
+  %address = getelementptr inbounds i32, ptr %base, i64 %wide
+  %value = load i32, ptr %address, align 4
+  %next = add i8 %index, 1
+  %done = icmp eq i8 %next, %count
+  br i1 %done, label %exit, label %loop
+exit:
+  ret void
+}
+)IR",
+                       0, 1024);
+}
+
+TEST(MAIRMaterialization, WidensMergedExpressionAccessSizeBeforeAddition) {
+  for (bool Reverse : {false, true}) {
+    SCOPED_TRACE(Reverse);
+    for (auto [Count, ExpectedSize] :
+         {std::pair<uint64_t, uint64_t>{0, 400}, {200, 600}, {255, 655}}) {
+      SCOPED_TRACE(Count);
+      LLVMContext Context;
+      auto Module = parseMaterializationModule(R"IR(
+define void @f(ptr %base, i8 %count) {
+entry:
+  ret void
+}
+)IR",
+                                               Context);
+      ASSERT_TRUE(Module);
+      Function &Function = *Module->getFunction("f");
+      MAIRGraph Graph(Function);
+      Type &SizeType = *IntegerType::get(Context, 9);
+      MAIRScalarExpr CountExpr = Graph.createValueExpr(*Function.getArg(1));
+      MAIRScalarExpr Extended = Graph.createUnaryExpr(
+          MAIRScalarExpr::Kind::ZeroExtend, SizeType, CountExpr);
+      MAIRScalarExpr Constant =
+          Graph.createConstantExpr(SizeType, APInt(9, 200));
+      MAIRScalarExpr Size = Graph.createBinaryExpr(
+          MAIRScalarExpr::Kind::Add, SizeType, Constant, Extended);
+      AbstractAccess First(Function.getArg(0), AbstractValue::constant(0),
+                           AbstractValue());
+      First.setSizeExprNode(Size.getOpaqueNode());
+      AbstractAccess Second(Function.getArg(0), AbstractValue::constant(200),
+                            AbstractValue());
+      Second.setSizeExprNode(Size.getOpaqueNode());
+      auto Merged =
+          Reverse
+              ? AbstractAccess::merge(Second, First, nullptr, nullptr, &Graph)
+              : AbstractAccess::merge(First, Second, nullptr, nullptr, &Graph);
+      ASSERT_TRUE(Merged);
+      EXPECT_EQ(Merged->getOffset(), AbstractValue::constant(0));
+      ProgramPoint &Point = Graph.createProgramPoint(
+          ProgramPointSite::anchored(*Function.getEntryBlock().getTerminator(),
+                                     ProgramPoint::SiteKind::BasicBlockExit));
+      Point.addObservation(
+          Observation({}, MemoryRegion(*Merged), AccessKind::Read));
+      ASSERT_TRUE(Graph.verify());
+      PassInstrumentationCallbacks Callbacks;
+      FunctionAnalysisManager Analyses;
+      registerMaterializationAnalyses(Analyses, Callbacks);
+      ConstantSizeBackend Backend;
+      auto Result = Graph.instantiate(Analyses, Backend);
+      if (!Result) {
+        ADD_FAILURE() << toString(Result.takeError());
+        continue;
+      }
+      expectConstantAccessSize(Function, Backend, Count, ExpectedSize);
+    }
+  }
+}
+
+TEST(MAIRMaterialization, RejectsWrappingMultiplyExpressionSizeMerge) {
+  LLVMContext Context;
+  auto Module = parseMaterializationModule(R"IR(
+define void @f(ptr %base, i8 %count) {
+entry:
+  ret void
+}
+)IR",
+                                           Context);
+  ASSERT_TRUE(Module);
+  Function &Function = *Module->getFunction("f");
+  MAIRGraph Graph(Function);
+  Type &SizeType = *IntegerType::get(Context, 9);
+  MAIRScalarExpr Count = Graph.createValueExpr(*Function.getArg(1));
+  MAIRScalarExpr Extended =
+      Graph.createUnaryExpr(MAIRScalarExpr::Kind::ZeroExtend, SizeType, Count);
+  MAIRScalarExpr One = Graph.createConstantExpr(SizeType, APInt(9, 1));
+  MAIRScalarExpr Five = Graph.createConstantExpr(SizeType, APInt(9, 5));
+  MAIRScalarExpr Sum = Graph.createBinaryExpr(MAIRScalarExpr::Kind::Add,
+                                              SizeType, One, Extended);
+  MAIRScalarExpr Size =
+      Graph.createBinaryExpr(MAIRScalarExpr::Kind::Mul, SizeType, Five, Sum);
+  AbstractAccess First(Function.getArg(0), AbstractValue::constant(0),
+                       AbstractValue());
+  First.setSizeExprNode(Size.getOpaqueNode());
+  AbstractAccess Second(Function.getArg(0), AbstractValue::constant(5),
+                        AbstractValue());
+  Second.setSizeExprNode(Size.getOpaqueNode());
+  EXPECT_FALSE(AbstractAccess::merge(First, Second, nullptr, nullptr, &Graph));
+  EXPECT_FALSE(AbstractAccess::merge(Second, First, nullptr, nullptr, &Graph));
+}
+
+TEST(MAIRMaterialization, RejectsWrappingAddExpressionSizeMerge) {
+  LLVMContext Context;
+  auto Module = parseMaterializationModule(R"IR(
+define void @f(ptr %base, i7 %count) {
+entry:
+  ret void
+}
+)IR",
+                                           Context);
+  ASSERT_TRUE(Module);
+  Function &Function = *Module->getFunction("f");
+  MAIRGraph Graph(Function);
+  Type &SizeType = *Type::getInt8Ty(Context);
+  MAIRScalarExpr Count = Graph.createValueExpr(*Function.getArg(1));
+  MAIRScalarExpr Extended =
+      Graph.createUnaryExpr(MAIRScalarExpr::Kind::ZeroExtend, SizeType, Count);
+  MAIRScalarExpr Hundred = Graph.createConstantExpr(SizeType, APInt(8, 100));
+  MAIRScalarExpr Sum = Graph.createBinaryExpr(MAIRScalarExpr::Kind::Add,
+                                              SizeType, Hundred, Extended);
+  MAIRScalarExpr Size =
+      Graph.createBinaryExpr(MAIRScalarExpr::Kind::Add, SizeType, Sum, Hundred);
+  AbstractAccess First(Function.getArg(0), AbstractValue::constant(0),
+                       AbstractValue());
+  First.setSizeExprNode(Size.getOpaqueNode());
+  AbstractAccess Second(Function.getArg(0), AbstractValue::constant(100),
+                        AbstractValue());
+  Second.setSizeExprNode(Size.getOpaqueNode());
+  EXPECT_FALSE(AbstractAccess::merge(First, Second, nullptr, nullptr, &Graph));
+  EXPECT_FALSE(AbstractAccess::merge(Second, First, nullptr, nullptr, &Graph));
 }
 
 } // namespace

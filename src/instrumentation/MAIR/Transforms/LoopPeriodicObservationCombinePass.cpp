@@ -436,22 +436,27 @@ buildSymbolicContiguousRange(MAIRGraph &ExprGraph, const Observation &Obs,
   if (!StartOffset || !StartOffset->isConstant())
     return std::nullopt;
 
-  SCEVExprConverter Converter(ExprGraph, Loops, Site);
-  if (!Converter.canConvert(ExecutionCount))
-    return std::nullopt;
-  MAIRScalarExpr SizeExpr = Converter.convert(ExecutionCount);
+  const SCEV *SizeSCEV = ExecutionCount;
   if (AccessSize != 1) {
-    Type *SizeTy = SizeExpr.getType();
-    if (!SizeTy || !SizeTy->isIntegerTy())
+    unsigned CountBits = ExecutionCount->getType()->getIntegerBitWidth();
+    unsigned ScratchBits = CountBits + 64;
+    APInt Scale(ScratchBits, AccessSize);
+    APInt MaxSize =
+        SE.getUnsignedRangeMax(ExecutionCount).zext(ScratchBits) * Scale;
+    unsigned SizeBits = std::max(
+        CountBits, std::max(Scale.getActiveBits(), MaxSize.getActiveBits()));
+    if (SizeBits > IntegerType::MAX_INT_BITS)
       return std::nullopt;
-    unsigned Bits = SizeTy->getIntegerBitWidth();
-    if (APInt(64, AccessSize).getActiveBits() > Bits)
-      return std::nullopt;
-    MAIRScalarExpr Scale =
-        ExprGraph.createConstantExpr(*SizeTy, APInt(Bits, AccessSize));
-    SizeExpr = ExprGraph.createBinaryExpr(MAIRScalarExpr::Kind::Mul, *SizeTy,
-                                          SizeExpr, Scale);
+    Type *SizeTy =
+        IntegerType::get(ExecutionCount->getType()->getContext(), SizeBits);
+    if (SizeBits > CountBits)
+      SizeSCEV = SE.getZeroExtendExpr(SizeSCEV, SizeTy);
+    SizeSCEV = SE.getMulExpr(SizeSCEV, SE.getConstant(SizeTy, AccessSize));
   }
+  SCEVExprConverter Converter(ExprGraph, Loops, Site);
+  if (!Converter.canConvert(SizeSCEV))
+    return std::nullopt;
+  MAIRScalarExpr SizeExpr = Converter.convert(SizeSCEV);
 
   AbstractAccess Range(Location->getBase(),
                        AbstractValue::constant(StartOffset->getConstant()),

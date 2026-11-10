@@ -1,6 +1,7 @@
 #include "MAIR/Transforms/RedundantObservationEliminationPass.h"
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/Analysis/RedundantObservationAnalysis.h"
+#include "MAIR/MAIRStatLog.h"
 
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -198,6 +199,9 @@ RedundantObservationEliminationPass::run(MAIRGraph &G,
 #if LLVM_ENABLE_STATS
   NumInputObservations += MAIRStat::compute(G).getNumObservations();
 #endif
+  MAIRStatScope Scope("roe", Ordinal, mairStatFunctionName(G));
+  if (mairStatsEnabled())
+    MAIRStatScope::add("in", MAIRStat::compute(G).getNumObservations());
   const unsigned NumEliminatedIntra = doIntraROE(G);
 
   // Intra elimination changes the source set. Compute this pass's inter
@@ -210,6 +214,9 @@ RedundantObservationEliminationPass::run(MAIRGraph &G,
   NumEliminatedObservations += NumEliminated;
   NumEliminatedIntraObservations += NumEliminatedIntra;
   NumEliminatedInterObservations += NumEliminatedInter;
+  MAIRStatScope::add("intra", NumEliminatedIntra);
+  MAIRStatScope::add("inter", NumEliminatedInter);
+  MAIRStatScope::add("eliminated", NumEliminated);
   return NumEliminated == 0 ? PreservedAnalyses::all()
                             : PreservedAnalyses::none();
 }

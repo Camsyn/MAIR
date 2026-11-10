@@ -2,6 +2,7 @@
 #include "MAIR/Analysis/LoopAnalysis.h"
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
+#include "MAIR/MAIRStatLog.h"
 
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/ScalarEvolution.h"
@@ -113,6 +114,7 @@ bool mergeConcreteRange(ProgramPoint &PP, ObservationIterator Begin,
     Next = PP.erase(Next);
     Changed = true;
     ++NumMergedObservations;
+    MAIRStatScope::add("merged");
   }
   return Changed;
 }
@@ -131,6 +133,7 @@ bool mergeNonConcreteRange(ProgramPoint &PP, ObservationIterator Begin,
       Next = std::next(Current);
       Changed = true;
       ++NumMergedObservations;
+      MAIRStatScope::add("merged");
     }
   }
   return Changed;
@@ -168,6 +171,9 @@ PreservedAnalyses LocationMergePass::run(MAIRGraph &G,
 #else
   (void)AM;
 #endif
+  MAIRStatScope Scope("locationmerge", Ordinal, mairStatFunctionName(G));
+  if (mairStatsEnabled())
+    MAIRStatScope::add("in", MAIRStat::compute(G).getNumObservations());
   ScalarEvolution *SE = nullptr;
   if (AM.isPassRegistered<LoopAnalysis>()) {
     MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);

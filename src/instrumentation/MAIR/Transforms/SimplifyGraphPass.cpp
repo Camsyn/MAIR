@@ -1,6 +1,7 @@
 #include "MAIR/Transforms/SimplifyGraphPass.h"
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
+#include "MAIR/MAIRStatLog.h"
 
 #include "llvm/ADT/Statistic.h"
 using namespace llvm;
@@ -69,6 +70,9 @@ PreservedAnalyses SimplifyGraphPass::run(MAIRGraph &G,
 #else
   (void)AM;
 #endif
+  MAIRStatScope Scope("simplify", Ordinal, mairStatFunctionName(G));
+  if (mairStatsEnabled())
+    MAIRStatScope::add("in", MAIRStat::compute(G).getNumProgramPoints());
   bool Changed = false;
 
   // Contract one mutual Dom/PostDom pair at a time. Rewiring can expose a new
@@ -80,6 +84,7 @@ PreservedAnalyses SimplifyGraphPass::run(MAIRGraph &G,
       break;
     G.contractProgramPoint(*Candidate.Into, *Candidate.From);
     ++NumMergedProgramPoints;
+    MAIRStatScope::add("merged");
     Changed = true;
   }
 

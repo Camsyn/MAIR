@@ -2,6 +2,7 @@
 #include "MAIR/Analysis/LoopAnalysis.h"
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
+#include "MAIR/MAIRStatLog.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Statistic.h"
@@ -583,10 +584,13 @@ void commitAggregate(MAIRGraph &G, Observation &Obs, AggregatePlan Plan,
                         MergeEquivalentObservations);
   Obs.getParent()->erase(Obs);
   ++NumAggregatedObservations;
-  if (Plan.IsRange)
+  if (Plan.IsRange) {
     ++NumRangeAggregates;
-  else
+    MAIRStatScope::add("range");
+  } else {
     ++NumPeriodicAggregates;
+    MAIRStatScope::add("periodic");
+  }
 }
 
 bool aggregateObservations(MAIRGraph &G, MAIRLoopInfo &Loops,
@@ -624,6 +628,9 @@ LoopPeriodicObservationCombinePass::run(MAIRGraph &G,
 #if LLVM_ENABLE_STATS
   NumInputObservations += MAIRStat::compute(G).getNumObservations();
 #endif
+  MAIRStatScope Scope("lpoc", Ordinal, mairStatFunctionName(G));
+  if (mairStatsEnabled())
+    MAIRStatScope::add("in", MAIRStat::compute(G).getNumObservations());
   MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
   bool Changed = aggregateObservations(G, Loops, MergeEquivalentObservations);
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();

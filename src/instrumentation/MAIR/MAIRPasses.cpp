@@ -1,4 +1,5 @@
 #include "MAIR/MAIRPasses.h"
+#include "MAIR/MAIRStatLog.h"
 
 #include "MAIR/Analysis/LoopAnalysis.h"
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
@@ -90,18 +91,21 @@ void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
 }
 
 void buildMAIRGraphOgPipeline(MAIRGraphPassManager &PM) {
-  addHierarchyPass(PM, SimplifyGraphPass());
+  noteMAIRPipeline("Og");
+  addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/1));
   addHierarchyPass(PM, LoopInvariantObservationMotionPass(
-                           /*MergeEquivalentObservations=*/false));
+                           /*MergeEquivalentObservations=*/false,
+                           /*Ordinal=*/1));
   addHierarchyPass(PM, LoopPeriodicObservationCombinePass(
                            /*MergeEquivalentObservations=*/false));
   // Inner combination exports into the parent after that parent has already
   // moved its original invariants. Run motion again so the parent can hoist
   // the synthesized observation.
   addHierarchyPass(PM, LoopInvariantObservationMotionPass(
-                           /*MergeEquivalentObservations=*/false));
-  addHierarchyPass(PM, RedundantObservationEliminationPass());
-  addHierarchyPass(PM, SimplifyGraphPass());
+                           /*MergeEquivalentObservations=*/false,
+                           /*Ordinal=*/2));
+  addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/1));
+  addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/2));
 }
 
 void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
@@ -111,16 +115,21 @@ void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
   // an observation in its parent only after the parent's first motion pass.
   // The final simplification removes program points emptied by those
   // observation transforms.
-  addHierarchyPass(PM, SimplifyGraphPass());
-  addHierarchyPass(PM, LoopInvariantObservationMotionPass());
+  noteMAIRPipeline("O1");
+  addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/1));
+  addHierarchyPass(PM,
+                   LoopInvariantObservationMotionPass(
+                       /*MergeEquivalentObservations=*/true, /*Ordinal=*/1));
   addHierarchyPass(PM, LoopPeriodicObservationCombinePass());
-  addHierarchyPass(PM, LoopInvariantObservationMotionPass());
-  addHierarchyPass(PM, LocationMergePass());
-  addHierarchyPass(PM, RedundantObservationEliminationPass());
+  addHierarchyPass(PM,
+                   LoopInvariantObservationMotionPass(
+                       /*MergeEquivalentObservations=*/true, /*Ordinal=*/2));
+  addHierarchyPass(PM, LocationMergePass(/*Ordinal=*/1));
+  addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/1));
   addHierarchyPass(PM, CommonObservationMotionPass());
-  addHierarchyPass(PM, LocationMergePass());
-  addHierarchyPass(PM, RedundantObservationEliminationPass());
-  addHierarchyPass(PM, SimplifyGraphPass());
+  addHierarchyPass(PM, LocationMergePass(/*Ordinal=*/2));
+  addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/2));
+  addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/2));
 }
 
 Error parseMAIRGraphPassPipeline(MAIRGraphPassManager &PM,

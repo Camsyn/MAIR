@@ -2,6 +2,7 @@
 #include "MAIR/Analysis/LoopAnalysis.h"
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
+#include "MAIR/MAIRStatLog.h"
 #include "MAIR/Transforms/TransformUtils.h"
 
 #include "llvm/ADT/STLExtras.h"
@@ -168,10 +169,13 @@ void commitInvariantMotion(MAIRGraph &G, InvariantMotionPlan Plan,
         &G.getParent()->createProgramPoint(*Plan.NewTargetSite, Plan.Guard);
   }
   moveObservationTo(*Plan.Obs, *Target, MergeEquivalentObservations);
-  if (Plan.Kind == InvariantMotionKind::Preheader)
+  if (Plan.Kind == InvariantMotionKind::Preheader) {
     ++NumMovedToPreheaders;
-  else
+    MAIRStatScope::add("preheader");
+  } else {
     ++NumMovedToExits;
+    MAIRStatScope::add("exit");
+  }
 }
 
 bool moveOneInvariantObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
@@ -191,6 +195,9 @@ LoopInvariantObservationMotionPass::run(MAIRGraph &G,
 #if LLVM_ENABLE_STATS
   NumInputObservations += MAIRStat::compute(G).getNumObservations();
 #endif
+  MAIRStatScope Scope("liom", Ordinal, mairStatFunctionName(G));
+  if (mairStatsEnabled())
+    MAIRStatScope::add("in", MAIRStat::compute(G).getNumObservations());
   bool Changed = false;
   MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
   while (moveOneInvariantObservation(G, Loops, MergeEquivalentObservations))

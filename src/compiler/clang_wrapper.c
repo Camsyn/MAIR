@@ -445,7 +445,7 @@ static void edit_params(u32 argc, const char **argv) {
   */
   u8 fortify_set = 0, asan_set = 0, x_set = 0, bit_mode = 0, shared_linking = 0,
      preprocessor_only = 0, have_unroll = 0, have_o = 0, have_pic = 0,
-     have_c = 0, partial_linking = 0;
+     have_c = 0, partial_linking = 0, mair_stats = 0;
   u8 only_lib = 0, needs_shared_rt = 0;
   const u8 *name;
   enum SanitizerType xsanTy = SanNone;
@@ -631,6 +631,11 @@ static void edit_params(u32 argc, const char **argv) {
     if (!strcmp(cur, "-Wl,-z,defs") || !strcmp(cur, "-Wl,--no-undefined"))
       continue;
 
+    if (!strcmp(cur, "-mair-stats")) {
+      mair_stats = 1;
+      continue;
+    }
+
     if (handle_sanitizer_options(cur, !strcmp(argv[-1], "-mllvm"), xsanTy))
       continue;
 
@@ -734,6 +739,9 @@ static void edit_params(u32 argc, const char **argv) {
 
     }
   #endif*/
+
+  if (mair_stats)
+    ADD_LLVM_MIDDLE_END_OPTION("-mair-stats");
 
   cc_params[cc_par_cnt] = NULL;
 }

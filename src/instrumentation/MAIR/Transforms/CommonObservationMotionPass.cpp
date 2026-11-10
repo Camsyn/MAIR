@@ -1,6 +1,7 @@
 #include "MAIR/Transforms/CommonObservationMotionPass.h"
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/MAIR.h"
+#include "MAIR/MAIRStatLog.h"
 #include "MAIR/Transforms/TransformUtils.h"
 
 #include "llvm/ADT/STLExtras.h"
@@ -129,10 +130,13 @@ void moveObservationsToTarget(ProgramPoint &Target,
   for (Observation *Obs : Matches)
     Obs->getParent()->erase(*Obs);
 
-  if (isSink(Direction))
+  if (isSink(Direction)) {
     ++NumSunkObservations;
-  else
+    MAIRStatScope::add("sunk");
+  } else {
     ++NumHoistedObservations;
+    MAIRStatScope::add("hoisted");
+  }
 }
 
 bool moveOneCommonObservation(MAIRGraph &G, const BasicBlock &BB,
@@ -208,6 +212,9 @@ CommonObservationMotionPass::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
 #else
   (void)AM;
 #endif
+  MAIRStatScope Scope("common", Ordinal, mairStatFunctionName(G));
+  if (mairStatsEnabled())
+    MAIRStatScope::add("in", MAIRStat::compute(G).getNumObservations());
   bool Changed = moveCommonObservationsToFixedPoint(G, MotionDirection::Hoist);
   Changed |= moveCommonObservationsToFixedPoint(G, MotionDirection::Sink);
 

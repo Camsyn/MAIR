@@ -5018,7 +5018,7 @@ entry:
   EXPECT_TRUE(ReadAccess.covers(WriteAccess));
   EXPECT_TRUE(WriteAccess.covers(ReadAccess));
   EXPECT_FALSE(ReadAccess.isMovable());
-  EXPECT_FALSE(WriteAccess.isMovable());
+  EXPECT_TRUE(WriteAccess.isMovable());
   EXPECT_TRUE(ReadAccess.isDeletable());
   EXPECT_TRUE(WriteAccess.isDeletable());
   EXPECT_TRUE(ReadAccess.mergeWith(WriteAccess));

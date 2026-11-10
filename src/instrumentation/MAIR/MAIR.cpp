@@ -1077,7 +1077,7 @@ MAIROptimizationConfig MAIROptimizationConfig::forAddressSanitizer() {
                                 /*ReadWriteLevel=*/1,
                                 /*IgnoreAtomic=*/true,
                                 /*DomCoverageOnly=*/true,
-                                /*AllowRelocation=*/false);
+                                /*AllowRelocation=*/true);
 }
 
 MAIROptimizationConfig MAIROptimizationConfig::forThreadSanitizer() {

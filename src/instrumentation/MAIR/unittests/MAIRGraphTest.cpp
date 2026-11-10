@@ -5378,6 +5378,74 @@ entry:
   EXPECT_TRUE(Graph.verify());
 }
 
+TEST(MAIROptimizationConfig, MergeRejectsWrappingSymbolicOffsets) {
+  llvm::LLVMContext Context;
+  auto Module = parseModule(R"IR(
+target datalayout = "e-p:64:64"
+define void @wrapping(ptr %base, i8 %index) {
+entry:
+  %first = getelementptr i8, ptr %base, i8 %index
+  %next = add i8 %index, 1
+  %second = getelementptr i8, ptr %base, i8 %next
+  %first.value = load i8, ptr %first
+  %second.value = load i8, ptr %second
+  ret void
+}
+)IR",
+                            Context);
+  ASSERT_TRUE(Module);
+  llvm::Function &Function = *Module->getFunction("wrapping");
+  auto Instructions = Function.getEntryBlock().begin();
+  std::advance(Instructions, 3);
+  Observation First =
+      Observation::fromInstruction(*Instructions++, Module->getDataLayout());
+  Observation Second =
+      Observation::fromInstruction(*Instructions, Module->getDataLayout());
+  EXPECT_FALSE(First.mergeWith(Second));
+  llvm::PassInstrumentationCallbacks Callbacks;
+  llvm::FunctionAnalysisManager Analyses;
+  registerLoopTestAnalyses(Analyses, Callbacks);
+  auto &Evolution = Analyses.getResult<llvm::ScalarEvolutionAnalysis>(Function);
+  Instructions = Function.getEntryBlock().begin();
+  std::advance(Instructions, 3);
+  Observation FirstWithSE =
+      Observation::fromInstruction(*Instructions++, Module->getDataLayout());
+  Observation SecondWithSE =
+      Observation::fromInstruction(*Instructions, Module->getDataLayout());
+  EXPECT_FALSE(FirstWithSE.mergeWith(SecondWithSE, &Evolution));
+}
+
+TEST(MAIROptimizationConfig, MergeRejectsUnrepresentablePointerDistance) {
+  llvm::LLVMContext Context;
+  auto Module = parseModule(R"IR(
+target datalayout = "e-p:128:128:128:128"
+define void @wide(ptr %base) {
+entry:
+  %first = getelementptr i8, ptr %base, i128 -18446744073709551616
+  %second = getelementptr i8, ptr %base, i128 -1
+  %first.value = load i8, ptr %first
+  %second.value = load i8, ptr %second
+  ret void
+}
+)IR",
+                            Context);
+  ASSERT_TRUE(Module);
+  llvm::Function &Function = *Module->getFunction("wide");
+  auto Instructions = Function.getEntryBlock().begin();
+  auto First = AbstractAccess::fromPointerAndSize(
+      *Instructions++, AbstractValue::constant(1), Module->getDataLayout());
+  auto Second = AbstractAccess::fromPointerAndSize(
+      *Instructions, AbstractValue::constant(1), Module->getDataLayout());
+  EXPECT_FALSE(AbstractAccess::merge(First, Second, &Module->getDataLayout()));
+  EXPECT_FALSE(AbstractAccess::merge(Second, First, &Module->getDataLayout()));
+  llvm::PassInstrumentationCallbacks Callbacks;
+  llvm::FunctionAnalysisManager Analyses;
+  registerLoopTestAnalyses(Analyses, Callbacks);
+  auto &Evolution = Analyses.getResult<llvm::ScalarEvolutionAnalysis>(Function);
+  EXPECT_FALSE(AbstractAccess::merge(First, Second, &Module->getDataLayout(),
+                                     &Evolution));
+}
+
 TEST(MAIROptimizationConfig, MergeWithJoinsAdjacentSymbolicLocations) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(

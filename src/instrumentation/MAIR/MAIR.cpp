@@ -830,70 +830,6 @@ const SCEV *addressSCEV(const AbstractAccess &Access, ScalarEvolution &SE) {
   return SE.getGEPExpr(SE.getUnknown(BaseValue), SE.getSCEV(Symbol), ByteTy);
 }
 
-std::optional<int64_t> addConstantDelta(const Value *From, const Value *To) {
-  if (From == To)
-    return 0;
-  auto AsAdd =
-      [](const Value *V) -> std::optional<std::pair<const Value *, int64_t>> {
-    const auto *Add = dyn_cast<BinaryOperator>(V);
-    if (!Add || Add->getOpcode() != Instruction::Add)
-      return std::nullopt;
-    const Value *LHS = Add->getOperand(0);
-    const Value *RHS = Add->getOperand(1);
-    const auto *Const = dyn_cast<ConstantInt>(RHS);
-    const Value *Base = LHS;
-    if (!Const) {
-      Const = dyn_cast<ConstantInt>(LHS);
-      Base = RHS;
-    }
-    if (!Const || !Const->getValue().isSignedIntN(64))
-      return std::nullopt;
-    return std::pair<const Value *, int64_t>(Base, Const->getSExtValue());
-  };
-  if (std::optional<std::pair<const Value *, int64_t>> Added = AsAdd(To))
-    if (Added->first == From)
-      return Added->second;
-  if (std::optional<std::pair<const Value *, int64_t>> Added = AsAdd(From))
-    if (Added->first == To)
-      return -Added->second;
-  return std::nullopt;
-}
-
-// Byte distance from IndexSymbol to Pointer, for a chain of i8 GEPs such as
-// gep (gep p, %i), 4. Null when the chain is not that shape.
-std::optional<int64_t> byteDeltaFromIndex(const Value *Pointer,
-                                          const Value *Base,
-                                          const Value *IndexSymbol,
-                                          const DataLayout &DL) {
-  int64_t Accumulated = 0;
-  const Value *Current = Pointer;
-  for (unsigned Step = 0; Step < 8; ++Step) {
-    const auto *GEP = dyn_cast<GEPOperator>(Current);
-    if (!GEP || GEP->getNumIndices() != 1)
-      return std::nullopt;
-    TypeSize Stride = DL.getTypeAllocSize(GEP->getSourceElementType());
-    if (!Stride.isFixed() || Stride.getFixedValue() != 1)
-      return std::nullopt;
-    const Value *Index = GEP->getOperand(1);
-    const Value *PointerOp = GEP->getPointerOperand()->stripPointerCasts();
-    if (const auto *Const = dyn_cast<ConstantInt>(Index)) {
-      if (!Const->getValue().isSignedIntN(64))
-        return std::nullopt;
-      Accumulated += Const->getSExtValue();
-      Current = PointerOp;
-      continue;
-    }
-    if (PointerOp != Base)
-      return std::nullopt;
-    if (Index == IndexSymbol)
-      return Accumulated;
-    if (std::optional<int64_t> Delta = addConstantDelta(IndexSymbol, Index))
-      return Accumulated + *Delta;
-    return std::nullopt;
-  }
-  return std::nullopt;
-}
-
 std::optional<int64_t> constantAddressDelta(const AbstractAccess &A,
                                             const AbstractAccess &B,
                                             const DataLayout *DL,
@@ -907,26 +843,38 @@ std::optional<int64_t> constantAddressDelta(const AbstractAccess &A,
         if (Diff->isSignedIntN(64))
           return Diff->getSExtValue();
     }
-  }
-  if (!A.getOffset().isSymbol() || !B.getOffset().isSymbol())
     return std::nullopt;
-  const Value *ASymbol = A.getOffset().getSymbol();
-  const Value *BSymbol = B.getOffset().getSymbol();
-  if (ASymbol->getType()->isIntegerTy() && BSymbol->getType()->isIntegerTy())
-    return addConstantDelta(ASymbol, BSymbol);
-  if (ASymbol->getType()->isPointerTy() && BSymbol->getType()->isPointerTy() &&
-      DL)
-    return BSymbol->getPointerOffsetFrom(ASymbol, *DL);
-  if (!DL)
-    return std::nullopt;
-  if (ASymbol->getType()->isIntegerTy() && BSymbol->getType()->isPointerTy())
-    return byteDeltaFromIndex(BSymbol, A.getBase(), ASymbol, *DL);
-  if (ASymbol->getType()->isPointerTy() && BSymbol->getType()->isIntegerTy()) {
-    if (std::optional<int64_t> Delta =
-            byteDeltaFromIndex(ASymbol, B.getBase(), BSymbol, *DL))
-      return -*Delta;
   }
-  return std::nullopt;
+  if (!DL || !A.getBase() || !A.getBase()->getType()->isPointerTy())
+    return std::nullopt;
+  unsigned IndexBits = DL->getIndexTypeSizeInBits(A.getBase()->getType());
+  auto StripOffset = [&](const AbstractAccess &Access,
+                         APInt &Offset) -> std::optional<AbstractValue> {
+    const AbstractValue &Start = Access.getOffset();
+    if (Start.isUnknown())
+      return std::nullopt;
+    if (!Start.isSymbol() || !Start.getSymbol()->getType()->isPointerTy())
+      return Start;
+    const Value *Pointer = Start.getSymbol();
+    if (Pointer->getType() != Access.getBase()->getType())
+      return std::nullopt;
+    const Value *Stripped = Pointer->stripAndAccumulateConstantOffsets(
+        *DL, Offset, /*AllowNonInbounds=*/true);
+    if (Stripped->getType() != Pointer->getType())
+      return std::nullopt;
+    AbstractAccess Anchor =
+        AbstractAccess::fromPointerAndSize(*Stripped, Access.getSize(), *DL);
+    if (Anchor.getBase() != Access.getBase())
+      return std::nullopt;
+    return Anchor.getOffset();
+  };
+  APInt OffsetA(IndexBits, 0), OffsetB(IndexBits, 0);
+  auto AnchorA = StripOffset(A, OffsetA);
+  auto AnchorB = StripOffset(B, OffsetB);
+  if (!AnchorA || !AnchorB || *AnchorA != *AnchorB)
+    return std::nullopt;
+  APInt Difference = OffsetB.sext(IndexBits + 1) - OffsetA.sext(IndexBits + 1);
+  return Difference.trySExtValue();
 }
 
 std::optional<AbstractAccess>

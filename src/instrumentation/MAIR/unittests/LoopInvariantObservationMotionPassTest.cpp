@@ -383,4 +383,92 @@ exit:
   }
 }
 
+TEST(LoopInvariantObservationMotionPass,
+     DoesNotHoistAnAccessTheLoopCanExitWithout) {
+  llvm::LLVMContext Ctx;
+  // The store post-dominates the inner preheader only around the outer
+  // backedge: for %j <= 5 the inner loop exits without executing it.
+  auto M = parseModule(R"IR(
+define void @f(ptr %base, i64 %n) {
+entry:
+  br label %Ho
+Ho:
+  %j = phi i64 [ 0, %entry ], [ %j.next, %Lo.latch ]
+  %p = getelementptr inbounds i32, ptr %base, i64 %j
+  br label %Hi
+Hi:
+  %i = phi i64 [ 0, %Ho ], [ %i.next, %Hi.latch ]
+  %c = icmp ugt i64 %j, 5
+  br i1 %c, label %S, label %Lo.latch
+S:
+  store i32 0, ptr %p, align 4
+  %c2 = icmp eq i64 %j, %n
+  br i1 %c2, label %exit, label %Hi.latch
+Hi.latch:
+  %i.next = add i64 %i, 1
+  br label %Hi
+Lo.latch:
+  %j.next = add i64 %j, 1
+  br label %Ho
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(F, FAM);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+  EXPECT_TRUE(
+      runPassOnGraphTree(LoopInvariantObservationMotionPass(), Graph, AM)
+          .areAllPreserved());
+  EXPECT_EQ(observationCount(Graph, "S"), 1u);
+  EXPECT_EQ(observationCount(Graph, "Ho"), 0u);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(LoopInvariantObservationMotionPass, HoistsAnAccessEveryExitPathExecutes) {
+  llvm::LLVMContext Ctx;
+  // The store runs only from the fourth iteration on, but the loop cannot be
+  // left before it has run.
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i64 %n) {
+entry:
+  br label %H
+H:
+  %i = phi i64 [ 0, %entry ], [ %i.next, %L ]
+  %late = icmp ugt i64 %i, 3
+  br i1 %late, label %S, label %L
+S:
+  store i32 0, ptr %p, align 4
+  %done = icmp eq i64 %i, %n
+  br i1 %done, label %exit, label %L
+L:
+  %i.next = add i64 %i, 1
+  br label %H
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(F, FAM);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+  EXPECT_FALSE(
+      runPassOnGraphTree(LoopInvariantObservationMotionPass(), Graph, AM)
+          .areAllPreserved());
+  EXPECT_EQ(observationCount(Graph, "S"), 0u);
+  EXPECT_EQ(observationCount(Graph, "entry"), 1u);
+  EXPECT_TRUE(Graph.verify());
+}
+
 } // namespace

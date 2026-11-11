@@ -136,8 +136,18 @@ bool MAIRLoopInfo::canHoistToPreheader(const ProgramPoint &PP,
 
   const BasicBlock *Source = PP.getBasicBlock();
   BasicBlock *Preheader = L.getLoopPreheader();
-  return Source && Preheader && L.contains(Source) &&
-         DT->dominates(Preheader, Source) && PDT->dominates(Source, Preheader);
+  if (!Source || !Preheader || !L.contains(Source) ||
+      !DT->dominates(Preheader, Source) || !PDT->dominates(Source, Preheader))
+    return false;
+
+  // Post-dominance alone lets control leave the loop without reaching Source
+  // and come back through an enclosing loop. Each entry of the loop executes
+  // Source only if no exit can be taken before it.
+  SmallVector<BasicBlock *, 4> ExitingBlocks;
+  L.getExitingBlocks(ExitingBlocks);
+  return all_of(ExitingBlocks, [&](const BasicBlock *Exiting) {
+    return DT->dominates(Source, Exiting);
+  });
 }
 
 bool MAIRLoopInfo::canSinkToExit(const ProgramPoint &PP, const Loop &L) const {

@@ -37,7 +37,6 @@ struct ConcreteRange {
 
 struct ConcreteObservation {
   Observation *Obs = nullptr;
-  uint64_t Begin = 0;
   uint64_t End = 0;
 };
 
@@ -138,7 +137,7 @@ unsigned doIntraROE(MAIRGraph &G) {
         std::optional<ConcreteRange> Range = getConcreteRange(*It);
         assert(Range &&
                "concrete coverage run contains a non-concrete observation");
-        ConcreteObservation Candidate{&*It, Range->Begin, Range->End};
+        ConcreteObservation Candidate{&*It, Range->End};
         Observation &Obs = *It;
         const unsigned Atomicity = Obs.isAtomic();
         bool Covered = hasCoveringWitness(AllWitnesses[Atomicity], Candidate);

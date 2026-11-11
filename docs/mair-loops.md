@@ -27,6 +27,8 @@ MAIR 用循环层次限制普通优化的范围。每个函数有一个根图，
 
 不变量移动按本图 ProgramPoint 和 Observation 的原顺序逐项计划并立即提交，每次实时查找父图目标。提交只删除当前源 Observation 并更新父图，不改本图其他候选、拓扑或 LLVM 分析，因此不需要从头重扫；若以后改变这些前提，必须重新检查单遍遍历的等价性。
 
+`default<O1>` 在首次不变量移动前先做冗余删除。循环展开可能在同一条件块中留下多次相同访问；先消除重复观察，才能在下沉时只保留一个来源 guard。若先逐项下沉，来源不同会生成不同 guarded ProgramPoint，随后冗余分析也不会把它们作为无条件覆盖来源。冗余删除只保留原有覆盖见证及其来源，不拼接被删除观察的 provenance，因此不改变保留检查的源位置规则。消冗余仍遵守既有层次、覆盖和 sanitizer 规则。`default<Og>` 不改变既有优化顺序。
+
 周期合并也直接按本图 ProgramPoint 的原顺序遍历。聚合目标属于父图，提交不增删本图 ProgramPoint，因此不需要快照；内层仍先递增迭代器再删除当前 Observation。来源指针查询使用 LLVM 的 `getLoadStorePointerOperand`，仅接受 load/store，并保留空指针检查。
 
 优化输入统计按每次本层 pass 调用累计；Observation 导出后再次作为父层输入，会再次计入该统计，这不表示重复物化。`print<stat>` 则汇总当前整树的 ProgramPoint 和 Observation 数量。

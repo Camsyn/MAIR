@@ -117,6 +117,7 @@ void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
   // observation transforms.
   noteMAIRPipeline("O1");
   addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/1));
+  addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/1));
   addHierarchyPass(PM,
                    LoopInvariantObservationMotionPass(
                        /*MergeEquivalentObservations=*/true, /*Ordinal=*/1));
@@ -125,10 +126,10 @@ void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
                    LoopInvariantObservationMotionPass(
                        /*MergeEquivalentObservations=*/true, /*Ordinal=*/2));
   addHierarchyPass(PM, LocationMergePass(/*Ordinal=*/1));
-  addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/1));
+  addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/2));
   addHierarchyPass(PM, CommonObservationMotionPass());
   addHierarchyPass(PM, LocationMergePass(/*Ordinal=*/2));
-  addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/2));
+  addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/3));
   addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/2));
 }
 

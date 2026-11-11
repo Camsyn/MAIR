@@ -22,8 +22,8 @@
 ; REDUNDANT: 35 mair-redundant-observation-elimination - Number of observations entering redundant observation elimination
 
 ; O1: 1 mair-common-observation-motion - Number of observations entering common observation motion
-; O1: 3 mair-locationmerge - Number of observations entering location merging
+; O1: 2 mair-locationmerge - Number of observations entering location merging
 ; O1: 2 mair-loop-invariant-motion - Number of observations entering loop-invariant motion
-; O1: 2 mair-loop-periodic-combine - Number of observations entering loop periodic combination
-; O1: 3 mair-redundant-observation-elimination - Number of observations entering redundant observation elimination
+; O1: 1 mair-loop-periodic-combine - Number of observations entering loop periodic combination
+; O1: 4 mair-redundant-observation-elimination - Number of observations entering redundant observation elimination
 ; O1: 11 mair-simplifygraph - Number of program points entering graph simplification

@@ -1,5 +1,8 @@
 #include "MAIR/Transforms/LoopInvariantObservationMotionPass.h"
+#include "MAIR/Materialization/MAIRMaterialization.h"
 #include "MAIRPassTestUtil.h"
+
+#include "llvm/IR/Verifier.h"
 
 using namespace mair;
 
@@ -104,6 +107,77 @@ entry:
           .areAllPreserved());
   EXPECT_EQ(observationCount(Graph, "entry"), 1u);
   EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraphPipeline, EliminatesRepeatedConditionalStoresBeforeMotion) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i32 %n, i1 %cond) {
+entry:
+  br label %header
+header:
+  %i = phi i32 [ 0, %entry ], [ %next, %latch ]
+  %more = icmp slt i32 %i, %n
+  br i1 %more, label %body, label %exit
+body:
+  br i1 %cond, label %store, label %latch
+store:
+  store i32 1, ptr %p
+  store i32 1, ptr %p
+  br label %latch
+latch:
+  %next = add i32 %i, 1
+  br label %header
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &Func = *M->getFunction("f");
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(
+      Func, FAM, MAIROptimizationConfig::forAddressSanitizer());
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+  MAIRGraphPassManager PM;
+  buildMAIRGraphO1Pipeline(PM);
+  PM.run(Graph, AM);
+  ASSERT_TRUE(Graph.verify());
+  unsigned Observations = 0;
+  for (ProgramPoint *Point : Graph.allProgramPoints())
+    Observations += Point->size();
+  ASSERT_EQ(Observations, 1u);
+  EXPECT_EQ(observationCount(Graph, "exit"), 1u);
+
+  class Backend final : public MAIRObservationBackend {
+  public:
+    unsigned Emissions = 0;
+
+    llvm::Error prepare(const MAIRMaterializationPlan &Plan) override {
+      EXPECT_EQ(Plan.units().size(), 1u);
+      return llvm::Error::success();
+    }
+
+    void emit(const MaterializedProgramPoint &Point,
+              llvm::IRBuilderBase &) override {
+      EXPECT_TRUE(Point.Guarded);
+      ASSERT_EQ(Point.Observations.size(), 1u);
+      EXPECT_EQ(Point.Observations.front().Source->getInstructions().size(),
+                1u);
+      ++Emissions;
+    }
+  } Recorder;
+  auto Result = Graph.instantiate(FAM, Recorder);
+  if (!Result) {
+    ADD_FAILURE() << llvm::toString(Result.takeError());
+    return;
+  }
+  EXPECT_EQ(Result->GuardBranches, 1u);
+  EXPECT_EQ(Recorder.Emissions, 1u);
+  EXPECT_FALSE(llvm::verifyModule(*M, &llvm::errs()));
 }
 
 TEST(LoopInvariantObservationMotionPass,

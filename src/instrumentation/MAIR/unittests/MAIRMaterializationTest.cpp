@@ -445,7 +445,7 @@ merge:
   EXPECT_TRUE(Graph.isLive());
 }
 
-TEST(MAIRMaterialization, SplitsCriticalExitAndBuildsAnyProvenanceGuard) {
+void checkCriticalExitMaterialization(bool RepeatedExit, bool Guarded) {
   LLVMContext Ctx;
   auto M = parseMaterializationModule(R"IR(
 define void @f(ptr %p, ptr %q, i64 %n, i1 %take_a, i1 %take_b, i1 %bypass) {
@@ -473,6 +473,7 @@ latch:
 other:
   br label %exit
 exit:
+  %last = phi i64 [ %i, %header ], [ 0, %other ]
   ret void
 }
 )IR",
@@ -494,10 +495,27 @@ exit:
       LoadB = &BB.front();
   }
   ASSERT_TRUE(Header && Exit && LoadA && LoadB);
+  PHINode *Induction = cast<PHINode>(&Header->front());
+  if (RepeatedExit) {
+    auto *Branch = cast<BranchInst>(Header->getTerminator());
+    auto *Switch = SwitchInst::Create(Branch->getCondition(), Exit, 2);
+    Switch->addCase(ConstantInt::getTrue(Ctx), Branch->getSuccessor(0));
+    Switch->addCase(ConstantInt::getFalse(Ctx), Exit);
+    cast<PHINode>(&Exit->front())->addIncoming(Induction, Header);
+    ReplaceInstWithInst(Branch, Switch);
+  }
+  ASSERT_FALSE(verifyModule(*M, &errs()));
+  DominatorTree BeforeDT(F);
+  LoopInfo BeforeLI(BeforeDT);
+  ASSERT_FALSE(BeforeLI.empty());
+  for (const llvm::Loop *Loop : BeforeLI)
+    ASSERT_TRUE(Loop->isRecursivelyLCSSAForm(BeforeDT, BeforeLI));
 
   MAIRGraph Graph(F);
-  ProgramPoint &PP = Graph.createEdgeProgramPoint(
-      *Header, *Exit, AnyProvenanceExecutedGuard({LoadA, LoadB}));
+  ProgramPointGuard Guard = AlwaysGuard{};
+  if (Guarded)
+    Guard = AnyProvenanceExecutedGuard({LoadA, LoadB});
+  ProgramPoint &PP = Graph.createEdgeProgramPoint(*Header, *Exit, Guard);
   PP.addObservation(Observation::fromInstruction(*LoadA, M->getDataLayout()));
   ProgramPoint &Second = Graph.createEdgeProgramPoint(*Header, *Exit);
   Second.addObservation(
@@ -507,6 +525,20 @@ exit:
   PassInstrumentationCallbacks PIC;
   FunctionAnalysisManager FAM;
   registerMaterializationAnalyses(FAM, PIC);
+  RecordingBackend RejectingBackend;
+  RejectingBackend.Reject = true;
+  std::string Before = printModule(*M);
+  auto Rejected = Graph.instantiate(FAM, RejectingBackend);
+  ASSERT_FALSE(Rejected);
+  EXPECT_NE(toString(Rejected.takeError()).find("recording backend rejected"),
+            std::string::npos);
+  EXPECT_EQ(RejectingBackend.PrepareCalls, 1u);
+  EXPECT_EQ(RejectingBackend.PreparedUnits, 2u);
+  EXPECT_EQ(RejectingBackend.EmittedProgramPoints, 0u);
+  EXPECT_EQ(printModule(*M), Before);
+  EXPECT_TRUE(Graph.isLive());
+  ASSERT_TRUE(Graph.verify());
+
   RecordingBackend Backend;
   auto Result = Graph.instantiate(FAM, Backend);
   if (!Result) {
@@ -515,7 +547,7 @@ exit:
   }
 
   EXPECT_EQ(Result->SplitEdges, 1u);
-  EXPECT_EQ(Result->GuardBranches, 1u);
+  EXPECT_EQ(Result->GuardBranches, Guarded ? 1u : 0u);
   EXPECT_EQ(Result->LoweredProgramPoints, 2u);
   EXPECT_TRUE(Result->CFGChanged);
   EXPECT_EQ(Backend.PreparedUnits, 2u);
@@ -523,12 +555,48 @@ exit:
   EXPECT_EQ(Backend.EmittedProgramPoints, 2u);
   EXPECT_TRUE(Graph.isConsumed());
   EXPECT_FALSE(verifyModule(*M, &errs()));
+  BasicBlock *Split =
+      Header->getTerminator()->getSuccessor(RepeatedExit ? 0 : 1);
+  ASSERT_NE(Split, Exit);
+  unsigned IncomingCount = RepeatedExit ? 2 : 1;
+  EXPECT_EQ(Split->getUniquePredecessor(), Header);
+  EXPECT_TRUE(Split->hasNPredecessors(IncomingCount));
+  PHINode *LoopExitPhi = nullptr;
+  for (PHINode &Phi : Split->phis())
+    if (Phi.getType()->isIntegerTy(64))
+      LoopExitPhi = &Phi;
+  ASSERT_NE(LoopExitPhi, nullptr);
+  ASSERT_EQ(LoopExitPhi->getNumIncomingValues(), IncomingCount);
+  for (unsigned Index = 0; Index != IncomingCount; ++Index) {
+    EXPECT_EQ(LoopExitPhi->getIncomingBlock(Index), Header);
+    EXPECT_EQ(LoopExitPhi->getIncomingValue(Index), Induction);
+  }
+  DominatorTree AfterDT(F);
+  LoopInfo AfterLI(AfterDT);
+  EXPECT_TRUE(AfterDT.verify());
+  if (!Guarded)
+    for (const llvm::Loop *Loop : AfterLI)
+      EXPECT_TRUE(Loop->isRecursivelyLCSSAForm(AfterDT, AfterLI));
 
   std::string Text = printModule(*M);
   EXPECT_NE(Text.find("mair.edge"), std::string::npos);
-  EXPECT_NE(Text.find("mair.executed"), std::string::npos);
-  EXPECT_NE(Text.find("phi i1 [ false"), std::string::npos);
-  EXPECT_NE(Text.find("br i1 %mair.executed"), std::string::npos);
+  if (Guarded) {
+    EXPECT_NE(Text.find("mair.executed"), std::string::npos);
+    EXPECT_NE(Text.find("phi i1 [ false"), std::string::npos);
+    EXPECT_NE(Text.find("br i1 %mair.executed"), std::string::npos);
+  }
+}
+
+TEST(MAIRMaterialization, SplitsCriticalExitAndBuildsAnyProvenanceGuard) {
+  checkCriticalExitMaterialization(false, true);
+}
+
+TEST(MAIRMaterialization, SplitsRepeatedCriticalExitPreservingLCSSA) {
+  checkCriticalExitMaterialization(true, false);
+}
+
+TEST(MAIRMaterialization, SplitsRepeatedCriticalExitAndBuildsGuard) {
+  checkCriticalExitMaterialization(true, true);
 }
 
 TEST(MAIRMaterialization, LowersCompletePeriodicExpressionDag) {

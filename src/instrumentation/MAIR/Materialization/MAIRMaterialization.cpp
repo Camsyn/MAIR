@@ -3,7 +3,6 @@
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/LoopInfo.h"
-#include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -386,20 +385,17 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
   Function &F = *MutableF;
 
   // Preflight owns its analysis snapshots and finishes before any IR mutation.
-  DominatorTree PreflightDT(F);
-  LoopInfo PreflightLI(PreflightDT);
+  DominatorTree DT(F);
+  LoopInfo LI(DT);
   Expected<MAIRMaterializationPlan> PlanOrErr =
-      buildPlan(*this, F, PreflightDT, PreflightLI);
+      buildPlan(*this, F, DT, LI);
   if (!PlanOrErr)
     return PlanOrErr.takeError();
   MAIRMaterializationPlan Plan = std::move(*PlanOrErr);
   if (Error Err = Backend.prepare(Plan))
     return std::move(Err);
 
-  DominatorTree DT(F);
-  PostDominatorTree PDT(F);
-  LoopInfo LI(DT);
-  DomTreeUpdater DTU(DT, PDT, DomTreeUpdater::UpdateStrategy::Eager);
+  DomTreeUpdater DTU(DT, DomTreeUpdater::UpdateStrategy::Eager);
   SmallVector<EdgeCursor, 8> EdgeCursors;
   SmallVector<PendingProgramPoint, 8> Pending;
   MAIRInstantiationResult Result;
@@ -412,7 +408,7 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
     if (findEdgeCursor(EdgeCursors, From, To))
       continue;
     unsigned SuccNo = GetSuccessorNumber(From, To);
-    CriticalEdgeSplittingOptions Options(&DT, &LI, nullptr, &PDT);
+    CriticalEdgeSplittingOptions Options(&DT, &LI);
     Options.setPreserveLCSSA().setMergeIdenticalEdges();
     BasicBlock *VirtualExit =
         SplitKnownCriticalEdge(const_cast<Instruction *>(From->getTerminator()),

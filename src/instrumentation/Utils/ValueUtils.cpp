@@ -22,16 +22,6 @@ bool shouldSkip(const Instruction &I) {
   return isNoSanitize(I) || DelegateToXSan::is(I);
 }
 
-const llvm::Value *extractAddrFromLoadStoreInst(const llvm::Instruction &I) {
-  if (auto *LI = dyn_cast<LoadInst>(&I)) {
-    return LI->getPointerOperand();
-  }
-  if (auto *SI = dyn_cast<StoreInst>(&I)) {
-    return SI->getPointerOperand();
-  }
-  return nullptr;
-}
-
 #if LLVM_VERSION_MAJOR <= 18
 /// Direct migrated from new version LLVM, which introduced by this PR:
 /// https://github.com/llvm/llvm-project/pull/99509

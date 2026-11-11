@@ -16,8 +16,6 @@ inline bool isNoSanitize(const llvm::Instruction &I) {
 
 bool shouldSkip(const llvm::Instruction &I);
 
-const llvm::Value *extractAddrFromLoadStoreInst(const llvm::Instruction &I);
-
 bool addrPointsToConstantDataAggressive(const llvm::Value *Addr);
 
 /// `alloc` is handled in other place, this function is for other cases.

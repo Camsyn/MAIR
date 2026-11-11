@@ -565,7 +565,7 @@ namespace __xsan {
 AnalysisKey StackObjRaceAnalysis::Key;
 
 bool StackObjRaceResult::mightRace(const Instruction *Mop) const {
-  const Value *Addr = extractAddrFromLoadStoreInst(*Mop);
+  const Value *Addr = llvm::getLoadStorePointerOperand(Mop);
   if (!Addr) {
     llvm_unreachable("StackObjRaceResult::mightRace: not a load/store, "
                      "unexpected instruction");

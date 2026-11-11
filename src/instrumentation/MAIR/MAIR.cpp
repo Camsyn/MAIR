@@ -1880,18 +1880,14 @@ MAIRGraph::iterator MAIRGraph::erase(ProgramPoint &PP) {
   PP.Parents.clear();
   NumEdges -= IncidentEdges;
 
-  SmallVector<const BasicBlock *, 4> EntryKeys;
-  SmallVector<const BasicBlock *, 4> ExitKeys;
-  for (const auto &Entry : BBEntryRepresentatives)
-    if (Entry.second == &PP)
-      EntryKeys.push_back(Entry.first);
-  for (const auto &Entry : BBExitRepresentatives)
-    if (Entry.second == &PP)
-      ExitKeys.push_back(Entry.first);
-  for (const BasicBlock *BB : EntryKeys)
-    BBEntryRepresentatives.erase(BB);
-  for (const BasicBlock *BB : ExitKeys)
-    BBExitRepresentatives.erase(BB);
+  for (const BasicBlock *BB : PP.RepresentedBlocks) {
+    auto EntryIt = BBEntryRepresentatives.find(BB);
+    if (EntryIt != BBEntryRepresentatives.end() && EntryIt->second == &PP)
+      BBEntryRepresentatives.erase(EntryIt);
+    auto ExitIt = BBExitRepresentatives.find(BB);
+    if (ExitIt != BBExitRepresentatives.end() && ExitIt->second == &PP)
+      BBExitRepresentatives.erase(ExitIt);
+  }
   for (Observation &Obs : PP.Observations)
     unregisterObservation(Obs);
   auto Next = ProgramPoints.erase(It);
@@ -1978,12 +1974,14 @@ void MAIRGraph::replaceProgramPoint(ProgramPoint &From, ProgramPoint &Into) {
   assert(Into.hasCompatibleMergeSemantics(From) &&
          "replacement program points have incompatible semantics");
   Into.mergeRepresentationFrom(From);
-  for (auto &Entry : BBEntryRepresentatives)
-    if (Entry.second == &From)
-      Entry.second = &Into;
-  for (auto &Entry : BBExitRepresentatives)
-    if (Entry.second == &From)
-      Entry.second = &Into;
+  for (const BasicBlock *BB : From.RepresentedBlocks) {
+    auto EntryIt = BBEntryRepresentatives.find(BB);
+    if (EntryIt != BBEntryRepresentatives.end() && EntryIt->second == &From)
+      EntryIt->second = &Into;
+    auto ExitIt = BBExitRepresentatives.find(BB);
+    if (ExitIt != BBExitRepresentatives.end() && ExitIt->second == &From)
+      ExitIt->second = &Into;
+  }
 }
 
 void MAIRGraph::contractProgramPoint(ProgramPoint &Into, ProgramPoint &From) {

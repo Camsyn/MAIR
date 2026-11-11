@@ -975,6 +975,7 @@ entry:
   Graph.erase(Load);
 
   EXPECT_TRUE(Graph.verify());
+  EXPECT_EQ(&Graph.getBBEntryRepresentative(BB), &Entry);
   EXPECT_TRUE(Entry.children().empty());
   EXPECT_EQ(Graph.size(), 1u);
 }
@@ -3747,6 +3748,8 @@ entry:
   llvm::Function &F = *M->begin();
   llvm::BasicBlock &BB = F.getEntryBlock();
   MAIRGraph Graph(F);
+  ProgramPoint &OldEntry = Graph.createBBProgramPoint(BB, true);
+  ProgramPoint &OldExit = Graph.createBBProgramPoint(BB, false);
   ProgramPoint &Entry = Graph.createBBProgramPoint(BB, true);
   ProgramPoint &Exit = Graph.createBBProgramPoint(BB, false);
   ASSERT_EQ(&Graph.getBBEntryRepresentative(BB), &Entry);
@@ -3754,6 +3757,12 @@ entry:
   const MAIRGraph &ConstGraph = Graph;
   ASSERT_EQ(&ConstGraph.getBBEntryRepresentative(BB), &Entry);
   ASSERT_EQ(&ConstGraph.getBBExitRepresentative(BB), &Exit);
+
+  Graph.erase(OldEntry);
+  Graph.erase(OldExit);
+  EXPECT_EQ(&Graph.getBBEntryRepresentative(BB), &Entry);
+  EXPECT_EQ(&Graph.getBBExitRepresentative(BB), &Exit);
+  ASSERT_TRUE(Graph.verify());
 
   Graph.erase(Entry);
 
@@ -3771,6 +3780,68 @@ entry:
                             "Seems the MAIRGraph is broken.");
 #endif
   ASSERT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraph, ChainedReplacementsPreserveBoundaryRepresentatives) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f() {
+entry:
+  br label %middle
+middle:
+  br label %exit
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &FirstBB = F.getEntryBlock();
+  llvm::BasicBlock &MiddleBB = *std::next(F.begin());
+  llvm::BasicBlock &LastBB = F.back();
+  for (bool IsEntry : {true, false}) {
+    SCOPED_TRACE(IsEntry);
+    MAIRGraph Graph(F);
+    ProgramPoint &First = Graph.createBBProgramPoint(FirstBB, IsEntry);
+    ProgramPoint &Middle = Graph.createBBProgramPoint(MiddleBB, IsEntry);
+    ProgramPoint &Last = Graph.createBBProgramPoint(LastBB, IsEntry);
+    llvm::SmallVector<ProgramPoint *, 3> OppositeBoundaries;
+    for (llvm::BasicBlock &BB : F)
+      OppositeBoundaries.push_back(&Graph.createBBProgramPoint(BB, !IsEntry));
+    auto Representative = [&](const llvm::BasicBlock &BB) -> ProgramPoint & {
+      return IsEntry ? Graph.getBBEntryRepresentative(BB)
+                     : Graph.getBBExitRepresentative(BB);
+    };
+
+    Graph.replaceProgramPoint(First, Middle);
+    Graph.erase(First);
+    EXPECT_EQ(&Representative(FirstBB), &Middle);
+    EXPECT_EQ(&Representative(MiddleBB), &Middle);
+    EXPECT_EQ(&Representative(LastBB), &Last);
+    ASSERT_TRUE(Graph.verify());
+
+    Graph.replaceProgramPoint(Middle, Last);
+    Graph.erase(Middle);
+    for (llvm::BasicBlock &BB : F) {
+      EXPECT_EQ(&Representative(BB), &Last);
+      EXPECT_TRUE(Last.representsBlock(BB));
+    }
+    EXPECT_TRUE(Last.parents().empty());
+    EXPECT_TRUE(Last.children().empty());
+    ASSERT_TRUE(Graph.verify());
+
+    Graph.erase(Last);
+    for (ProgramPoint *Boundary : OppositeBoundaries) {
+      const llvm::BasicBlock &BB = *Boundary->getBasicBlock();
+      EXPECT_EQ(IsEntry ? &Graph.getBBExitRepresentative(BB)
+                        : &Graph.getBBEntryRepresentative(BB),
+                Boundary);
+    }
+    EXPECT_EQ(Graph.size(), 3u);
+    EXPECT_TRUE(Graph.verify());
+  }
 }
 
 TEST(MAIRGraphPass, CommonObservationMotionDoesNotSearchNeighborDescendants) {
@@ -4268,6 +4339,11 @@ exit:
   EXPECT_TRUE(Edge.hasExecutionGuard());
   EXPECT_EQ(&Graph.getBBEntryRepresentative(Entry), &EntryRep);
   EXPECT_EQ(&Graph.getBBEntryRepresentative(Exit), &ExitRep);
+
+  Graph.erase(Edge);
+  EXPECT_EQ(&Graph.getBBEntryRepresentative(Entry), &EntryRep);
+  EXPECT_EQ(&Graph.getBBEntryRepresentative(Exit), &ExitRep);
+  EXPECT_TRUE(Graph.verify());
 }
 
 TEST(MAIRSchema, VerifierRejectsCrossFunctionAndNonCFGEdgeSites) {
@@ -4487,6 +4563,10 @@ entry:
   EXPECT_EQ(Guarded.getSite(), Representative.getSite());
   EXPECT_NE(Guarded.getGuard(), Representative.getGuard());
   EXPECT_EQ(&Graph.getBBEntryRepresentative(BB), &Representative);
+
+  Graph.erase(Guarded);
+  EXPECT_EQ(&Graph.getBBEntryRepresentative(BB), &Representative);
+  EXPECT_TRUE(Graph.verify());
 }
 
 TEST(MAIRSchema, ProgramPointSortCacheInvalidatesWhenAccessIsAdded) {

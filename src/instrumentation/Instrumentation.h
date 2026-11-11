@@ -34,43 +34,6 @@ bool checkIfAlreadyInstrumented(Module &M, StringRef Flag);
 
 // Use to ensure the inserted instrumentation has a !nosanitize metadata.
 struct InstrumentationIRBuilder : public IRBuilder<> {
-private:
-  static void ensureNoSanitize(IRBuilder<> &IRB) {
-    // Because `AddOrRemoveMetadataToCopy` is private, we can only use it by the
-    // delegation of `CollectMetadataToCopy`.
-    // Therefore, we create a temporary instruction with the desired !nosanitize
-    // metadata.
-    static llvm::ReturnInst *I = [&IRB]() {
-      auto *I = llvm::ReturnInst::Create(IRB.getContext());
-      I->setMetadata(LLVMContext::MD_nosanitize,
-                     MDNode::get(I->getContext(), {}));
-      return I;
-    }();
-    // Every instructions created by this IRBuilder will have this metadata.
-    IRB.CollectMetadataToCopy(I, {LLVMContext::MD_nosanitize});
-    // AddOrRemoveMetadataToCopy(MD_nosanitize, MDNode::get(Context, None));
-  }
-
-  static void resetEnsureNoSanitize(IRBuilder<> &IRB) {
-    // Because `AddOrRemoveMetadataToCopy` is private, we can only use it by the
-    // delegation of `CollectMetadataToCopy`.
-    // Therefore, we create a temporary instruction with the desired !nosanitize
-    // metadata.
-    static llvm::ReturnInst *I = llvm::ReturnInst::Create(IRB.getContext());
-    // Every instructions created by this IRBuilder will have this metadata.
-    IRB.CollectMetadataToCopy(I, {LLVMContext::MD_nosanitize});
-    // AddOrRemoveMetadataToCopy(MD_nosanitize, nullptr);
-  }
-
-  struct ScopedNotTagNoSanitize {
-    IRBuilder<> &IRB;
-    ScopedNotTagNoSanitize(IRBuilder<> &IRB) : IRB(IRB) {
-      resetEnsureNoSanitize(IRB);
-    }
-    ~ScopedNotTagNoSanitize() { ensureNoSanitize(IRB); }
-  };
-
-public:
   static void ensureDebugInfo(IRBuilder<> &IRB, const Function &F) {
     if (IRB.getCurrentDebugLocation())
       return;
@@ -85,27 +48,23 @@ public:
   }
 
   explicit InstrumentationIRBuilder(LLVMContext &C) : IRBuilder<>(C) {
-    ensureNoSanitize(*this);
+    SetNoSanitizeMetadata();
   }
 
   explicit InstrumentationIRBuilder(Instruction *IP) : IRBuilder<>(IP) {
     ensureDebugInfo(*this, *IP);
-    ensureNoSanitize(*this);
+    SetNoSanitizeMetadata();
   }
   explicit InstrumentationIRBuilder(IRBuilderBase &IRB)
       : IRBuilder<>(IRB.GetInsertBlock(), IRB.GetInsertPoint()) {
     ensureDebugInfo(*this, *IRB.GetInsertPoint());
-    ensureNoSanitize(*this);
+    SetNoSanitizeMetadata();
   }
 
   InstrumentationIRBuilder(BasicBlock *TheBB, BasicBlock::iterator IP)
       : IRBuilder<>(TheBB, IP) {
     ensureDebugInfo(*this, *TheBB->getParent());
-    ensureNoSanitize(*this);
-  }
-
-  ScopedNotTagNoSanitize scopedNotTagNoSanitize() {
-    return ScopedNotTagNoSanitize(*this);
+    SetNoSanitizeMetadata();
   }
 };
 

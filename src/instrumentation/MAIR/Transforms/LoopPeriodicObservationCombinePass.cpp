@@ -29,14 +29,6 @@ namespace mair {
 
 namespace {
 
-const Value *getPointerOperand(const Instruction &I) {
-  if (const auto *LI = dyn_cast<LoadInst>(&I))
-    return LI->getPointerOperand();
-  if (const auto *SI = dyn_cast<StoreInst>(&I))
-    return SI->getPointerOperand();
-  return nullptr;
-}
-
 std::optional<uint64_t> getConstantAccessSize(const Observation &Obs) {
   const AbstractAccess *Region = Obs.getContiguousRegion();
   if (!Region)
@@ -131,7 +123,7 @@ const Value *findValueForSCEV(const SCEV *Expr, const Observation &Obs,
     return true;
   };
   for (Instruction *I : Obs.getInstructions()) {
-    const Value *Pointer = I ? getPointerOperand(*I) : nullptr;
+    const Value *Pointer = I ? llvm::getLoadStorePointerOperand(I) : nullptr;
     if (const auto *GEP = dyn_cast_or_null<GEPOperator>(Pointer))
       if (Matches(GEP->getPointerOperand()))
         return GEP->getPointerOperand();
@@ -517,7 +509,7 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
   }
   if (!Recurrence) {
     for (Instruction *I : Obs.getInstructions()) {
-      const Value *Pointer = I ? getPointerOperand(*I) : nullptr;
+      const Value *Pointer = I ? llvm::getLoadStorePointerOperand(I) : nullptr;
       if (!Pointer)
         return std::nullopt;
       const auto *Candidate =
@@ -612,16 +604,8 @@ bool aggregateObservations(MAIRGraph &G, MAIRLoopInfo &Loops,
   if (!Loops.isAvailable() || !G.getLoop())
     return false;
 
-  SmallVector<ProgramPoint *, 16> Worklist;
-  for (ProgramPoint &PP : G)
-    Worklist.push_back(&PP);
-
   bool Changed = false;
-  // Snapshot the original program points. Aggregates are placed outside their
-  // relevant loop (or on its exit edge), so they are not candidates for a
-  // second aggregation of the same recurrence.
-  for (ProgramPoint *PPPtr : Worklist) {
-    ProgramPoint &PP = *PPPtr;
+  for (ProgramPoint &PP : G) {
     for (auto It = PP.begin(); It != PP.end();) {
       Observation &Obs = *It++;
       std::optional<AggregatePlan> Plan = buildAggregatePlan(G, Loops, PP, Obs);

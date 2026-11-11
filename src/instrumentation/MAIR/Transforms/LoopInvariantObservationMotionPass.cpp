@@ -130,33 +130,15 @@ findInvariantMotionForLoop(MAIRGraph &G, MAIRLoopInfo &Loops,
                              InvariantMotionKind::Exit};
 }
 
-std::optional<InvariantMotionPlan> findInvariantMotion(MAIRGraph &G,
-                                                       MAIRLoopInfo &Loops) {
-  const Loop *ScopedLoop = G.getLoop();
-  if (!Loops.isAvailable() || !ScopedLoop)
+std::optional<InvariantMotionPlan>
+findInvariantMotion(MAIRGraph &G, MAIRLoopInfo &Loops, ProgramPoint &PP,
+                    Observation &Obs, const Loop &ScopedLoop) {
+  if (!Obs.isMovable())
     return std::nullopt;
-
-  for (ProgramPoint &PP : G) {
-    // Edge program points are already placed at a virtual CFG edge. Their
-    // source terminator anchor identifies that edge; it does not make the
-    // program point an ordinary loop-body candidate for another motion round.
-    if (PP.isEdgeSite() || !PP.hasAlwaysGuard())
-      continue;
-    for (Observation &Obs : PP) {
-      if (!Obs.isMovable())
-        continue;
-      const AbstractAccess *Region = Obs.getContiguousRegion();
-      if (!Region)
-        continue;
-
-      if (!Loops.isLoopInvariant(Obs, *ScopedLoop))
-        continue;
-      if (std::optional<InvariantMotionPlan> Plan = findInvariantMotionForLoop(
-              G, Loops, PP, Obs, *Region, *ScopedLoop))
-        return Plan;
-    }
-  }
-  return std::nullopt;
+  const AbstractAccess *Region = Obs.getContiguousRegion();
+  if (!Region || !Loops.isLoopInvariant(Obs, ScopedLoop))
+    return std::nullopt;
+  return findInvariantMotionForLoop(G, Loops, PP, Obs, *Region, ScopedLoop);
 }
 
 void commitInvariantMotion(MAIRGraph &G, InvariantMotionPlan Plan,
@@ -178,15 +160,6 @@ void commitInvariantMotion(MAIRGraph &G, InvariantMotionPlan Plan,
   }
 }
 
-bool moveOneInvariantObservation(MAIRGraph &G, MAIRLoopInfo &Loops,
-                                 bool MergeEquivalentObservations) {
-  std::optional<InvariantMotionPlan> Plan = findInvariantMotion(G, Loops);
-  if (!Plan)
-    return false;
-  commitInvariantMotion(G, std::move(*Plan), MergeEquivalentObservations);
-  return true;
-}
-
 } // namespace
 
 PreservedAnalyses
@@ -200,8 +173,24 @@ LoopInvariantObservationMotionPass::run(MAIRGraph &G,
     MAIRStatScope::add("in", MAIRStat::compute(G).getNumObservations());
   bool Changed = false;
   MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
-  while (moveOneInvariantObservation(G, Loops, MergeEquivalentObservations))
-    Changed = true;
+  const Loop *ScopedLoop = G.getLoop();
+  if (!Loops.isAvailable() || !ScopedLoop)
+    return PreservedAnalyses::all();
+  for (ProgramPoint &PP : G) {
+    // Edge program points are already placed at a virtual CFG edge. Their
+    // source terminator anchor identifies that edge; it does not make the
+    // program point an ordinary loop-body candidate for another motion round.
+    if (PP.isEdgeSite() || !PP.hasAlwaysGuard())
+      continue;
+    for (Observation &Obs : llvm::make_early_inc_range(PP)) {
+      std::optional<InvariantMotionPlan> Plan =
+          findInvariantMotion(G, Loops, PP, Obs, *ScopedLoop);
+      if (!Plan)
+        continue;
+      commitInvariantMotion(G, std::move(*Plan), MergeEquivalentObservations);
+      Changed = true;
+    }
+  }
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 

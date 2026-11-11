@@ -3,14 +3,14 @@
 - 基线：`29342887`（main），LLVM 23.0.0git（`/home/camsyn/kits/llvm/23`）。
 - 基线测试：`ninja -C build check-mair` 通过，202 项单元测试，lit 27 通过、1 unsupported。
 - 审查范围：`src/instrumentation/MAIR/` 全部源码，以及 `llvm23/AddressSanitizer.cpp`、`llvm23/ThreadSanitizer.cpp` 中的 MAIR 接入点。runtime 与上游 sanitizer 主体未逐行审查。
-- 任务资料：`.tasks/mair_review_refactor_20261111_2102/`（复现用例在 `probes/`，过程记录在 `worklog.md`）。
+- 任务资料：`.archive/mair_review_refactor_20261111_2102/`（复现用例在 `probes/`，差分脚本 `difftest.sh`，过程记录 `worklog.md`）。该目录被 `.gitignore` 忽略，只在本机存在；F0–F3 的复现 IR 已同时写进对应的单元测试。
 - 分支：`claude/mair-review-refactor`，每个条目一个 conventional commit。
 
 本计划同时是实施依据和事后 review 的对照表。每个条目写明：现象、根因、改法、验证方式、不做什么。实施结果回填在文末“实施记录”。
 
 ## 1. 严重 bug（均已用最小 IR 复现）
 
-复现命令均为 `build/mair-opt <选项> .tasks/mair_review_refactor_20261111_2102/probes/<文件>`。
+复现命令均为 `build/mair-opt <选项> .archive/mair_review_refactor_20261111_2102/probes/<文件>`。
 
 ### F0 优化结果随进程地址变化（输出不确定）
 
@@ -91,4 +91,24 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 
 ## 5. 实施记录
 
-实施后在此回填每个条目的 commit、验证结果和与计划的偏差。
+最终状态：`ninja -C build check-mair` 通过，209 项单元测试（基线 202，新增 7），lit 27 通过、1 unsupported；ASan 6 项、TSan 5 项 `mair-*` 接入测试通过。ASan/TSan 的其余测试、MSan 和 XSan 插件没有运行。
+
+| 条目 | commit | 验证 |
+| --- | --- | --- |
+| 计划 | `00441f86` | — |
+| F0 | `369f0f97` | 新二进制 15 种输入×pipeline 各运行 8 次输出一致；与基线归一化比较 351 组一致。新增 `OrdersObservationsByMemoryObjectCreation` |
+| R1 | `f0c449c8` | 与 F0 二进制逐字节比较 364 组一致。4000 个 load 的 `simplifygraph`：4.02 s / 1.5 GB → 0.23 s / 25 MB。新增 `ContractionMovesObservationsInSourceOrder` |
+| R2 | `cf307f64` | 逐字节比较 369 组一致（含 1500 个菱形）。该输入的 `simplifygraph,roe`：34.9 s / 1.2 GB → 1.0 s / 61 MB |
+| F3 | `a8697722` | 369 组中 12 组不同，全部是两个不可约环用例，差异为多保留 1 条 observation。新增 `EveryBlockOfAnIrreducibleCycleIsPinned` |
+| F2 | `85381729` | 369 组中 108 组不同：102 组只有 `preds/succs` 列表变化，6 组是 `pdom_backedge.ll` 多保留 1 条 observation。jsoncpp 上保留的 observation 不变。新增两个测试（负例与同迭代内仍可消除的正例） |
+| F1 | `fa635591` | 369 组中 3 组不同，全部是 `liom_outer_backedge.ll`，observation 留在原块。新增两个测试（负例与仍可提升的正例） |
+| 接入测试 | `5ff029be` | 见偏差 3 |
+
+以上耗时均为 Debug 构建下的单次测量。
+
+与计划的偏差：
+
+1. F0 不在最初的审查结论里，是做差分验证时发现基线与自身比较都不一致才查出来的，因此补进计划并排到最前。
+2. R2 原计划用位向量加工作表迭代，实施时改为按强连通分量一遍算出，计划正文已同步改写。
+3. F0 使程序点内的顺序跟随源码中首次访问的顺序，`test/tsan/TestCases/mair-basic.cpp` 原先期望先 `write` 后 `read`（地址顺序碰巧如此），改为先 `read` 后 `write`。这是产出目标码的可见变化。
+4. F2 没有重新生成 lit golden：现有 lit 用例都没有检查循环内的 PostDom 边，27 项原样通过。

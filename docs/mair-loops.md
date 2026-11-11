@@ -21,7 +21,9 @@ MAIR 用循环层次限制普通优化的范围。每个函数有一个根图，
 
 ## 输入与优化规则
 
-构图前使用 LLVM `LoopSimplifyPass` 建立真实 preheader 和 dedicated exits，再取得构图依赖的分析。构图本身不修改 LLVM IR。直接调用构图 API 的调用者也必须满足这些前提。不能形成这些边界时直接报告错误，不创建假边界。不可归约或不能由 LoopInfo 表示的环先不优化：环里的 Observation 保持原位。自然循环仍按原规则优化。TODO：以后再表示并优化这种非标准循环。
+构图前使用 LLVM `LoopSimplifyPass` 建立真实 preheader 和 dedicated exits，再取得构图依赖的分析。构图本身不修改 LLVM IR。直接调用构图 API 的调用者也必须满足这些前提。不能形成这些边界时直接报告错误，不创建假边界。不可归约环先不优化：构图用 LLVM `CycleInfo` 找出每个不可归约环，环里所有块（包括嵌在其中的自然循环）的 Observation 保持原位。其余自然循环仍按原规则优化。TODO：以后再表示并优化这种非标准循环。
+
+循环 body 图描述一次迭代。PostDom 边只在“同一次迭代内必然到达”时建立：从块出发的每条路径都必须先到达它的后支配者，之后才能回到循环 header 或离开循环（`postDominatesWithinIteration`，`src/instrumentation/MAIR/MAIR.cpp`）。只靠绕回边成立的后支配不建边，因为循环内定义的地址到下一次迭代已经是另一个值。Dom 边不需要这条限制。
 
 每个优化阶段按子图优先顺序执行，随后处理父图。普通冗余删除、位置合并和公共 Observation 移动继续使用本层 MAIR。它们不能沿父子图链接复用检查。循环不变量移动和周期合并可以显式导出到父图中的循环边界，嵌套导出每次只跨一层，逐层重新证明。内层周期合并会把新的区间观察放到父图的循环出口，而父层第一次不变外提此时已经结束。`default<Og>` 和 `default<O1>` 都在周期合并后再跑一次不变外提，让外层循环重新证明这条观察。
 
@@ -37,7 +39,7 @@ MAIR 用循环层次限制普通优化的范围。每个函数有一个根图，
 
 统计汇总按函数首次出现的顺序遍历各函数的 pass visits，以 pass 标签首次出现的位置决定行顺序；不是全局事件时间顺序。汇总阶段一次累计，保持 ordinal、字段顺序及只含 `in` 的行，全零行不打印。
 
-循环 barrier 摘要来自构图时的 LLVM 指令，并包含子循环。导出 Observation 不会抹掉摘要。当前最小规则是：提升、下沉和周期合并都要求循环中正向、反向均无 barrier。任一迭代中的 barrier 都阻止相应导出，不需要逐动态回边路径查询。这是保守条件，并未放宽既有必执行、SSA 可用性、精确计数、affine recurrence 或 guard 条件。ASan 允许搬动普通 Observation，检查可以落在实际访问之后。原子访问仍然不能搬。
+循环 barrier 摘要来自构图时的 LLVM 指令，并包含子循环。导出 Observation 不会抹掉摘要。当前最小规则是：提升、下沉和周期合并都要求循环中正向、反向均无 barrier。任一迭代中的 barrier 都阻止相应导出，不需要逐动态回边路径查询。这是保守条件，并未放宽既有必执行、SSA 可用性、精确计数、affine recurrence 或 guard 条件。提升到 preheader 的必执行条件是：来源块后支配 preheader，并且支配循环的每个 exiting block（`MAIRLoopInfo::canHoistToPreheader`）；只有前者时，控制流可以不经过来源块就离开循环，再从外层循环绕回来。ASan 允许搬动普通 Observation，检查可以落在实际访问之后。原子访问仍然不能搬。
 
 带“来源访问执行过”条件的下沉，以本次循环调用的 preheader 为 guard 重置位置。嵌套循环的下一次调用不会继承上一次调用的 true 状态。整树统一生成物化计划，统一 prepare/apply；完成后整树都进入 consumed 状态。
 
@@ -62,7 +64,7 @@ Observation 合并保留完整来源指令序列及重复项。若右项严格�
 - `test/MAIR/TestCases/loop-irreducible.ll`：不可归约环不中断构图，环内访问留在原块；外层自然循环仍可合并。
 - `test/MAIR/TestCases/loop-invariant-observation-motion.ll` 与 `loop-range-aggregation.ll`：合法循环专用导出及重复执行稳定性。`repeated_row32` 同时检查内层周期合并得到的 128 字节读，以及随后不变外提把它提到外层 preheader。
 - `test/MAIR/TestCases/mair-stats.ll`：`-mair-stats` 把第二次不变外提和内层区间合并分开打印。
-- `src/instrumentation/MAIR/unittests`：图边界、方向 barrier、整树生命周期和 guard 物化回归。
+- `src/instrumentation/MAIR/unittests`：图边界、方向 barrier、整树生命周期和 guard 物化回归。其中 `EveryBlockOfAnIrreducibleCycleIsPinned`、`KeepsAccessCoveredOnlyInALaterIteration`、`DoesNotHoistAnAccessTheLoopCanExitWithout` 分别对应上面三条规则。
 
 在 `build` 中运行 `ninja check-mair` 执行 MAIR 回归。
 

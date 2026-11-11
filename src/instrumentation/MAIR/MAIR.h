@@ -744,7 +744,7 @@ private:
   Kind PointKind = Kind::Ordinary;
   ProgramPointSite Site;
   ProgramPointGuard Guard = AlwaysGuard{};
-  SpecificBumpPtrAllocator<Observation> ObservationAllocator;
+  /// Observations are heap-allocated and owned by the list they are in.
   ObservationListType Observations;
   EdgeListType Children;
   EdgeListType Parents;
@@ -818,7 +818,6 @@ public:
   iterator erase(iterator It);
   iterator erase(Observation &Obs);
   void mergeObservationsFrom(const ProgramPoint &Other);
-  void prependObservationsFrom(const ProgramPoint &Other);
 
   std::string toString() const;
   void print(raw_ostream &OS) const;
@@ -834,6 +833,9 @@ private:
   Observation &createObservation(ArrayRef<Instruction *> Insts,
                                  const MemoryRegion &Region, AccessKind Kind,
                                  AccessProperty Properties);
+  /// Move every observation of \p Other, which belongs to the same graph, to
+  /// the front of this list. The observations keep their identity and order.
+  void takeObservationsFrom(ProgramPoint &Other);
   void mergeRepresentationFrom(const ProgramPoint &Other);
 };
 

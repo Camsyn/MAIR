@@ -1370,7 +1370,9 @@ ProgramPoint::ProgramPoint(StringRef N, ProgramPointSite S, ProgramPointGuard G)
     RepresentedBlocks.insert(Site.getBasicBlock());
 }
 
-ProgramPoint::~ProgramPoint() { ObservationAllocator.DestroyAll(); }
+ProgramPoint::~ProgramPoint() {
+  Observations.clearAndDispose(std::default_delete<Observation>());
+}
 
 LoopProgramPoint::LoopProgramPoint(StringRef Name, ProgramPointSite Site,
                                    BoundaryKind Kind, MAIRGraph &LoopGraph)
@@ -1383,8 +1385,7 @@ Observation &ProgramPoint::createObservation(ArrayRef<Instruction *> Insts,
                                              const MemoryRegion &Region,
                                              AccessKind Kind,
                                              AccessProperty Properties) {
-  return *new (ObservationAllocator.Allocate())
-      Observation(Insts, Region, Kind, Properties);
+  return *new Observation(Insts, Region, Kind, Properties);
 }
 
 Observation &ProgramPoint::addObservation(const Observation &A) {
@@ -1432,13 +1433,9 @@ void ProgramPoint::sort(ObservationComparator Compare) {
 
 ProgramPoint::iterator ProgramPoint::erase(iterator It) {
   assert(It != Observations.end() && "Cannot erase end iterator");
-  if (MAIRGraph *Graph = getParent())
-    Graph->unregisterObservation(*It);
-  else
-    It->clearMemoryObject();
-  auto Next = Observations.erase(It);
   --NumObservations;
-  return Next;
+  // Destroying the observation unlinks it from its memory object.
+  return Observations.eraseAndDispose(It, std::default_delete<Observation>());
 }
 
 ProgramPoint::iterator ProgramPoint::erase(Observation &Obs) {
@@ -1455,20 +1452,28 @@ void ProgramPoint::mergeObservationsFrom(const ProgramPoint &Other) {
     addObservation(A);
 }
 
-void ProgramPoint::prependObservationsFrom(const ProgramPoint &Other) {
+void ProgramPoint::takeObservationsFrom(ProgramPoint &Other) {
   assert(
       hasCompatibleMergeSemantics(Other) &&
       "cannot merge program points with incompatible site or guard semantics");
-  for (const Observation &A : llvm::reverse(Other.Observations)) {
-    auto &Node = createObservation(A.getInstructions(), A.getRegion(),
-                                   A.getKind(), A.getProperties());
-    Observations.push_front(Node);
-    Node.setParent(this);
-    if (MAIRGraph *Graph = getParent())
-      Graph->registerObservation(Node);
-    ++NumObservations;
-    Sorted = false;
+  assert(getParent() && getParent() == Other.getParent() &&
+         "observations can only move between program points of one graph");
+  if (Other.empty())
+    return;
+  // Optimization properties depend on the program point only through whether
+  // its block is in an unsupported cycle.
+  const MAIRGraph &Graph = *getParent();
+  const bool Repin = Graph.isUnsupportedLoopBlock(getBasicBlock()) !=
+                     Graph.isUnsupportedLoopBlock(Other.getBasicBlock());
+  for (Observation &Obs : Other.Observations) {
+    Obs.setParent(this);
+    if (Repin)
+      Obs.refreshOptimizationProperties();
   }
+  Observations.splice(Observations.begin(), Other.Observations);
+  NumObservations += Other.NumObservations;
+  Other.NumObservations = 0;
+  Sorted = false;
 }
 
 void ProgramPoint::mergeRepresentationFrom(const ProgramPoint &Other) {
@@ -1997,7 +2002,7 @@ void MAIRGraph::contractProgramPoint(ProgramPoint &Into, ProgramPoint &From) {
          From.hasChild(Into, PPEdgeKind::Dom) &&
          "contraction requires mutual Dom/PostDom edges");
 
-  Into.prependObservationsFrom(From);
+  Into.takeObservationsFrom(From);
   SmallVector<ProgramPointEdge, 2> Incoming(From.parents());
   SmallVector<ProgramPointEdge, 2> Outgoing(From.children());
   for (const ProgramPointEdge &Edge : Incoming) {

@@ -32,6 +32,41 @@ entry:
   EXPECT_TRUE(Graph.verify());
 }
 
+TEST(SimplifyGraphPass, ContractionMovesObservationsInSourceOrder) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, ptr %q, ptr %r) {
+entry:
+  %first = load i32, ptr %p, align 4
+  %second = load i32, ptr %q, align 4
+  %third = load i32, ptr %r, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  MAIRGraph Graph = buildGraph(*M->getFunction("f"));
+  llvm::SmallVector<const Observation *, 3> Before;
+  for (const ProgramPoint &PP : Graph)
+    for (const Observation &Obs : PP)
+      Before.push_back(&Obs);
+  ASSERT_EQ(Before.size(), 3u);
+
+  MAIRGraphAnalysisManager AM;
+  EXPECT_FALSE(SimplifyGraphPass().run(Graph, AM).areAllPreserved());
+
+  // Contraction relinks the existing observations instead of copying them.
+  llvm::SmallVector<const Observation *, 3> After;
+  for (const ProgramPoint &PP : Graph)
+    for (const Observation &Obs : PP) {
+      EXPECT_EQ(Obs.getParent(), &PP);
+      EXPECT_EQ(Graph.getMemoryObject(*Obs.getBase()), &Obs.getMemoryObject());
+      After.push_back(&Obs);
+    }
+  EXPECT_EQ(After, Before);
+  EXPECT_TRUE(Graph.verify());
+}
+
 TEST(SimplifyGraphPass, LeavesASingleReadUnchanged) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(

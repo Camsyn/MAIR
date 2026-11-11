@@ -1716,10 +1716,11 @@ ProgramPoint &MAIRGraph::addProgramPoint(ProgramPoint &PP) {
 }
 
 MemoryObject &MAIRGraph::getOrCreateMemoryObject(const Value &Base) {
+  const unsigned NextID = Resources->MemoryObjects.size();
   MemoryObject *&Object = Resources->MemoryObjects[&Base];
   if (!Object)
-    Object =
-        new (Resources->MemoryObjectAllocator.Allocate()) MemoryObject(Base);
+    Object = new (Resources->MemoryObjectAllocator.Allocate())
+        MemoryObject(Base, NextID);
   return *Object;
 }
 

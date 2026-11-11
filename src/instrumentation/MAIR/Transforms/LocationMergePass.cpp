@@ -7,7 +7,6 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 
-#include <functional>
 #include <iterator>
 
 using namespace llvm;
@@ -50,23 +49,22 @@ const AbstractAccess *getLocationBounds(const Observation &Obs) {
   return nullptr;
 }
 
+// Constants in ascending order, then symbols, then unknown. Symbols have no
+// run-independent order, so they compare equivalent and the stable sort keeps
+// them in list order.
 bool compareAbstractValue(const AbstractValue &LHS, const AbstractValue &RHS) {
   if (LHS.isConstant() != RHS.isConstant())
     return LHS.isConstant();
   if (LHS.isConstant())
     return LHS.getConstant() < RHS.getConstant();
-  if (LHS.isSymbol() != RHS.isSymbol())
-    return LHS.isSymbol();
-  if (LHS.isSymbol())
-    return std::less<const Value *>()(LHS.getSymbol(), RHS.getSymbol());
-  return false;
+  return LHS.isSymbol() && RHS.isUnknown();
 }
 
 bool compareForLocationMerge(const Observation &LHS, const Observation &RHS) {
-  const MemoryObject *LObject = LHS.getBaseUse().get();
-  const MemoryObject *RObject = RHS.getBaseUse().get();
-  if (LObject != RObject)
-    return std::less<const MemoryObject *>()(LObject, RObject);
+  const MemoryObject &LObject = LHS.getMemoryObject();
+  const MemoryObject &RObject = RHS.getMemoryObject();
+  if (&LObject != &RObject)
+    return LObject.getID() < RObject.getID();
   if (LHS.isMergeable() != RHS.isMergeable())
     return LHS.isMergeable();
   if (LHS.getLevel() != RHS.getLevel())
@@ -81,7 +79,11 @@ bool compareForLocationMerge(const Observation &LHS, const Observation &RHS) {
   const AbstractAccess *RBounds = getLocationBounds(RHS);
   if (!LBounds || !RBounds)
     return false;
-  if (LBounds->getOffset() != RBounds->getOffset())
+  // Only constant offsets order the sizes behind them. Ordering sizes behind
+  // equivalent symbolic offsets would not be a strict weak ordering.
+  if (!LBounds->getOffset().isConstant() ||
+      !RBounds->getOffset().isConstant() ||
+      LBounds->getOffset() != RBounds->getOffset())
     return compareAbstractValue(LBounds->getOffset(), RBounds->getOffset());
   if (LBounds->getSize() == RBounds->getSize())
     return false;

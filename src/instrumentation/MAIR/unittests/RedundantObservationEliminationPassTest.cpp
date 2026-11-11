@@ -1,4 +1,5 @@
 #include "MAIR/Transforms/RedundantObservationEliminationPass.h"
+#include "MAIR/Transforms/SimplifyGraphPass.h"
 #include "MAIRPassTestUtil.h"
 
 using namespace mair;
@@ -320,6 +321,37 @@ entry:
       runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM)
           .areAllPreserved());
   EXPECT_EQ(observationCount(Graph, "entry"), 2u);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(RedundantObservationEliminationPass,
+     OrdersObservationsByMemoryObjectCreation) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, ptr %q) {
+entry:
+  %a = load i32, ptr %q, align 4
+  %b = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = buildGraph(F);
+  MAIRGraphAnalysisManager AM;
+  runPassOnGraphTree(SimplifyGraphPass(), Graph, AM);
+  runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM);
+
+  // The order must follow the first access to each base, not the addresses of
+  // the LLVM values, which differ between runs.
+  llvm::SmallVector<const llvm::Value *, 2> Bases;
+  for (const ProgramPoint &PP : testProgramPoints(Graph))
+    for (const Observation &Obs : PP)
+      Bases.push_back(Obs.getBase());
+  ASSERT_EQ(Bases.size(), 2u);
+  EXPECT_EQ(Bases[0], F.getArg(1));
+  EXPECT_EQ(Bases[1], F.getArg(0));
   EXPECT_TRUE(Graph.verify());
 }
 

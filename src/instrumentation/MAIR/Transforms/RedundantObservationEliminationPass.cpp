@@ -8,7 +8,6 @@
 #include "llvm/ADT/Statistic.h"
 
 #include <array>
-#include <functional>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -62,8 +61,10 @@ std::optional<ConcreteRange> getConcreteRange(const Observation &Obs) {
 }
 
 bool compareForCoverage(const Observation &LHS, const Observation &RHS) {
-  if (LHS.getBase() != RHS.getBase())
-    return std::less<const Value *>()(LHS.getBase(), RHS.getBase());
+  const MemoryObject &LObject = LHS.getMemoryObject();
+  const MemoryObject &RObject = RHS.getMemoryObject();
+  if (&LObject != &RObject)
+    return LObject.getID() < RObject.getID();
 
   // A coverage sweep needs containing intervals before the intervals they may
   // eliminate: begin ascending, then end and coverage level descending.

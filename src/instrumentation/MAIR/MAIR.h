@@ -524,6 +524,7 @@ class MemoryObject {
   friend class MemoryUse;
 
   const Value *Base = nullptr;
+  unsigned ID = 0;
   MemoryUse *UseList = nullptr;
 
 public:
@@ -533,7 +534,7 @@ public:
   using const_user_iterator =
       mapped_iterator<const_use_iterator, MemoryUseToUser>;
 
-  explicit MemoryObject(const Value &B) : Base(&B) {}
+  MemoryObject(const Value &B, unsigned ID) : Base(&B), ID(ID) {}
   ~MemoryObject() {
     assert(use_empty() && "destroying a MAIR memory object with uses");
   }
@@ -544,6 +545,9 @@ public:
   MemoryObject &operator=(MemoryObject &&) = delete;
 
   const Value *getBase() const { return Base; }
+  /// Creation order within the graph. Passes that need an order over memory
+  /// objects use this rather than addresses, which vary between runs.
+  unsigned getID() const { return ID; }
   bool use_empty() const { return UseList == nullptr; }
 
   use_iterator use_begin() { return use_iterator(UseList); }

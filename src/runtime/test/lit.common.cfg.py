@@ -1026,3 +1026,8 @@ if config.compiler_id == "GNU":
 # llvm.
 config.substitutions.append(("%crt_src", config.compiler_rt_src_root))
 config.substitutions.append(("%llvm_src", config.llvm_src_root))
+
+# xclang turns on MAIR only when this variable is present. Lit does not forward
+# it from the outer process, so the suite enables it for every test command.
+config.environment["MAIR"] = "1"
+config.available_features.add("mair")

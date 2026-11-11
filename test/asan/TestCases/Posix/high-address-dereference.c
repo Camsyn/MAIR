@@ -4,6 +4,9 @@
 // that ASan does not misrepresent such cases as "NULL dereferences".
 
 // REQUIRES: x86_64-target-arch
+// MAIR may check after the load. A canonical address then faults with a real
+// si_addr, which this test requires to be omitted.
+// UNSUPPORTED: mair
 // RUN: %clang_asan %s -o %t
 // RUN: %env_asan_opts=print_scariness=1 not %run %t 0x0000000000000000 2>&1 | FileCheck %s --check-prefixes=ZERO,HINT-PAGE0
 // RUN: %env_asan_opts=print_scariness=1 not %run %t 0x0000000000000FFF 2>&1 | FileCheck %s --check-prefixes=LOW1,HINT-PAGE0

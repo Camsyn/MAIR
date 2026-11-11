@@ -25,6 +25,13 @@ struct EdgeCursor {
   Instruction *Cursor = nullptr;
 };
 
+struct PendingProgramPoint {
+  const MaterializationUnit *Unit;
+  Instruction *Cursor;
+  bool Guarded;
+  SmallVector<MaterializedObservation, 4> Observations;
+};
+
 bool isPatchBLoopExit(const BasicBlock &From, const BasicBlock &To,
                       LoopInfo &LI) {
   for (Loop *L = LI.getLoopFor(&From); L; L = L->getParentLoop()) {
@@ -394,6 +401,7 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
   LoopInfo LI(DT);
   DomTreeUpdater DTU(DT, PDT, DomTreeUpdater::UpdateStrategy::Eager);
   SmallVector<EdgeCursor, 8> EdgeCursors;
+  SmallVector<PendingProgramPoint, 8> Pending;
   MAIRInstantiationResult Result;
 
   for (const MaterializationUnit &Unit : Plan.units()) {
@@ -436,8 +444,12 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
         !provenanceExecutesWithTarget(Unit.Guard, Cursor->getParent());
     if (IsGuarded) {
       Value *Guard = materializeGuard(Unit.Guard, Cursor->getParent(), F);
+      BasicBlock *Head = Cursor->getParent();
       Instruction *ThenTerminator = SplitBlockAndInsertIfThen(
           Guard, Cursor, /*Unreachable=*/false, nullptr, &DTU, &LI, nullptr);
+      for (PendingProgramPoint &Point : Pending)
+        if (Point.Cursor == Cursor)
+          Point.Cursor = Head->getTerminator();
       GuardBuilder.emplace(ThenTerminator);
       BuilderPtr = &*GuardBuilder;
       ++Result.GuardBranches;
@@ -487,9 +499,15 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
       Lowered.push_back(Materialized);
     }
 
-    MaterializedProgramPoint PP{Unit.Source, Unit.Site.getKind(), IsGuarded,
-                                Lowered};
-    Backend.emit(PP, *BuilderPtr);
+    Pending.push_back(
+        {&Unit, &*BuilderPtr->GetInsertPoint(), IsGuarded, std::move(Lowered)});
+  }
+
+  for (const PendingProgramPoint &Point : Pending) {
+    IRBuilder<> Builder(Point.Cursor);
+    MaterializedProgramPoint PP{Point.Unit->Source, Point.Unit->Site.getKind(),
+                                Point.Guarded, Point.Observations};
+    Backend.emit(PP, Builder);
     ++Result.LoweredProgramPoints;
   }
 

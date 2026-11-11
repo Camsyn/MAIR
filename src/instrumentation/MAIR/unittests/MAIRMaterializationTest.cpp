@@ -20,6 +20,7 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "gtest/gtest.h"
 
 using namespace llvm;
@@ -668,6 +669,173 @@ entry:
   std::string Text = printModule(*M);
   EXPECT_EQ(Text.find("br i1"), std::string::npos);
   EXPECT_EQ(Text.find("poison"), std::string::npos);
+}
+
+TEST(MAIRMaterialization, MaterializesAllGuardsBeforeBackendChangesCFG) {
+  LLVMContext Ctx;
+  auto M = parseMaterializationModule(R"IR(
+define void @f(ptr %p, i1 %first, i1 %second, i1 %bad, i64 %offset) {
+entry:
+  br i1 %first, label %first.store, label %first.exit
+first.store:
+  store i32 1, ptr %p
+  br label %first.exit
+first.exit:
+  br label %second.dispatch
+second.dispatch:
+  br i1 %second, label %second.store, label %second.exit
+second.store:
+  store i32 2, ptr %p
+  br label %second.exit
+second.exit:
+  br label %finish
+finish:
+  ret void
+}
+)IR",
+                                      Ctx);
+  ASSERT_TRUE(M);
+  Function &F = *M->getFunction("f");
+  MAIRGraph Graph(F);
+  Instruction *Store = nullptr;
+  for (BasicBlock &BB : F) {
+    if (isa<StoreInst>(BB.front()))
+      Store = &BB.front();
+    if (BB.getName() != "first.exit" && BB.getName() != "second.exit")
+      continue;
+    ASSERT_TRUE(Store);
+    ProgramPoint &Point = Graph.createProgramPoint(
+        ProgramPointSite::anchored(*BB.getTerminator(),
+                                   ProgramPoint::SiteKind::BasicBlockExit),
+        AnyProvenanceExecutedGuard({Store}));
+    Point.addObservation(Observation(
+        {Store},
+        AbstractAccess(F.getArg(0), AbstractValue::symbol(*F.getArg(4)),
+                       AbstractValue::constant(4)),
+        AccessKind::Write));
+  }
+  ASSERT_TRUE(Graph.verify());
+
+  class SplittingBackend final : public MAIRObservationBackend {
+  public:
+    unsigned Emissions = 0;
+
+    Error prepare(const MAIRMaterializationPlan &Plan) override {
+      EXPECT_EQ(Plan.units().size(), 2u);
+      return Error::success();
+    }
+
+    void emit(const MaterializedProgramPoint &Point,
+              IRBuilderBase &Builder) override {
+      Instruction *Cursor = &*Builder.GetInsertPoint();
+      Function &F = *Cursor->getFunction();
+      if (Emissions == 0) {
+        unsigned Guards = 0;
+        unsigned Addresses = 0;
+        for (BasicBlock &BB : F)
+          for (Instruction &Inst : BB) {
+            if (auto *Branch = dyn_cast<BranchInst>(&Inst))
+              Guards += Branch->isConditional() &&
+                        isa<PHINode>(Branch->getCondition());
+            Addresses += isa<GetElementPtrInst>(Inst);
+          }
+        EXPECT_EQ(Guards, 2u);
+        EXPECT_EQ(Addresses, 2u);
+      }
+      EXPECT_TRUE(Point.Guarded);
+      ASSERT_EQ(Point.Observations.size(), 1u);
+      Builder.CreateFreeze(Point.Observations.front().Address,
+                           "mair.test.address");
+      SplitBlockAndInsertIfThen(F.getArg(3), Cursor, true);
+      ++Emissions;
+    }
+  } Backend;
+
+  PassInstrumentationCallbacks PIC;
+  FunctionAnalysisManager FAM;
+  registerMaterializationAnalyses(FAM, PIC);
+  auto Result = Graph.instantiate(FAM, Backend);
+  if (!Result) {
+    ADD_FAILURE() << toString(Result.takeError());
+    return;
+  }
+  EXPECT_EQ(Result->GuardBranches, 2u);
+  EXPECT_EQ(Result->LoweredProgramPoints, 2u);
+  EXPECT_EQ(Backend.Emissions, 2u);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST(MAIRMaterialization,
+     PreservesSharedAnchorOrderAcrossGenericAndBackendSplits) {
+  LLVMContext Ctx;
+  auto M = parseMaterializationModule(R"IR(
+define void @f(ptr %p, i1 %take, i1 %bad) {
+entry:
+  br i1 %take, label %store, label %exit
+store:
+  store i32 1, ptr %p
+  br label %exit
+exit:
+  ret void
+}
+)IR",
+                                      Ctx);
+  ASSERT_TRUE(M);
+  Function &F = *M->getFunction("f");
+  Instruction &Store = F.getEntryBlock().getNextNode()->front();
+  ProgramPointSite Site = ProgramPointSite::anchored(
+      *F.back().getTerminator(), ProgramPoint::SiteKind::BasicBlockExit);
+  MAIRGraph Graph(F);
+  for (unsigned Index = 0; Index != 2; ++Index)
+    Graph.createProgramPoint(Site).addObservation(
+        Observation::fromInstruction(Store, M->getDataLayout()));
+  Graph.createProgramPoint(Site, AnyProvenanceExecutedGuard({&Store}))
+      .addObservation(Observation::fromInstruction(Store, M->getDataLayout()));
+  ASSERT_TRUE(Graph.verify());
+
+  class SplittingBackend final : public MAIRObservationBackend {
+  public:
+    SmallVector<Instruction *, 3> Emissions;
+    BranchInst *Guard = nullptr;
+
+    Error prepare(const MAIRMaterializationPlan &) override {
+      return Error::success();
+    }
+
+    void emit(const MaterializedProgramPoint &Point,
+              IRBuilderBase &Builder) override {
+      Instruction *Cursor = &*Builder.GetInsertPoint();
+      Function &F = *Cursor->getFunction();
+      if (Emissions.empty())
+        for (BasicBlock &BB : F)
+          if (auto *Branch = dyn_cast<BranchInst>(BB.getTerminator()))
+            if (Branch->isConditional() && isa<PHINode>(Branch->getCondition()))
+              Guard = Branch;
+      EXPECT_EQ(Point.Guarded, Emissions.size() == 2);
+      Emissions.push_back(cast<Instruction>(Builder.CreateFreeze(
+          Point.Observations.front().Address, "mair.test.address")));
+      SplitBlockAndInsertIfThen(F.getArg(2), Cursor, true);
+    }
+  } Backend;
+
+  PassInstrumentationCallbacks PIC;
+  FunctionAnalysisManager FAM;
+  registerMaterializationAnalyses(FAM, PIC);
+  auto Result = Graph.instantiate(FAM, Backend);
+  if (!Result) {
+    ADD_FAILURE() << toString(Result.takeError());
+    return;
+  }
+  EXPECT_EQ(Result->GuardBranches, 1u);
+  EXPECT_EQ(Result->LoweredProgramPoints, 3u);
+  ASSERT_EQ(Backend.Emissions.size(), 3u);
+  ASSERT_TRUE(Backend.Guard);
+  DominatorTree DT(F);
+  EXPECT_TRUE(DT.dominates(Backend.Emissions[0], Backend.Emissions[1]));
+  EXPECT_TRUE(DT.dominates(Backend.Emissions[1], Backend.Guard));
+  EXPECT_TRUE(DT.dominates(Backend.Guard->getSuccessor(0),
+                           Backend.Emissions[2]->getParent()));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
 TEST(MAIRMaterialization, InvalidatesFunctionAnalysesAndIsSingleUse) {

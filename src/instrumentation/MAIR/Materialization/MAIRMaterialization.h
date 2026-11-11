@@ -65,6 +65,10 @@ struct MAIRInstantiationResult {
 
 /// Backend boundary for generic MAIR materialization. `prepare` must be
 /// read-only and reject all recoverable constraints before committed apply.
+/// All guards and observation operands are materialized before the first
+/// `emit`. Emission may split CFG blocks, but must preserve pending insertion
+/// instructions and materialized operands. MAIR does not reuse CFG analyses
+/// after emission begins.
 class MAIRObservationBackend {
 public:
   virtual ~MAIRObservationBackend() = default;

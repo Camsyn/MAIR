@@ -41,6 +41,8 @@ MAIR 用循环层次限制普通优化的范围。每个函数有一个根图，
 
 带“来源访问执行过”条件的下沉，以本次循环调用的 preheader 为 guard 重置位置。嵌套循环的下一次调用不会继承上一次调用的 true 状态。整树统一生成物化计划，统一 prepare/apply；完成后整树都进入 consumed 状态。
 
+物化必须在 sanitizer emission 前完成全部拆边、guard 和观察参数 lowering。sanitizer 可自行拆 CFG，MAIR 无法同步维护这些修改后的局部分析，因此不能交错执行后续 guard 更新。第一阶段保留 DTU/LI，pending record 自有 lowered observations，并保存 plan unit 指针和稳定指令插入点；第二阶段按原顺序从指令的当前基本块重建 builder，仅在同步 emit 时构造 ArrayRef。若后来的 guard 拆分共享 anchor，早先 pending 的插入点改指向拆分前块的新条件 terminator，保持原先 emission 在该 guard 之前。backend 必须保留后续插入指令和已物化参数；第一遍之后不再消费局部 CFG 分析。
+
 内层范围起点复用已有 LLVM Value 时，除 SCEV 相等和目标位置可用外，还必须保证类型匹配与 poison 安全。指令候选只有在 `ScalarEvolution::canReuseInstruction` 允许复用且无需丢弃 poison flags 时才接受；优化阶段不修改原 LLVM IR。`loop-start-reuse.ll` 覆盖不安全候选、非 SCEV 类型以及继续寻找安全候选。
 
 ## 地址合并

@@ -142,6 +142,7 @@ class MAIRVerifier : public MAIRVerifierSupport {
   DenseMap<EdgeKey, EdgeCounts> ChildEdgeCounts;
   DenseMap<EdgeKey, EdgeCounts> ParentEdgeCounts;
   std::optional<DominatorTree> GuardDominance;
+  SmallPtrSet<const void *, 16> VisitedScalarExprs;
 
 public:
   explicit MAIRVerifier(raw_ostream *OS) : MAIRVerifierSupport(OS) {}
@@ -519,6 +520,8 @@ void MAIRVerifier::verifyScalarExpr(const MAIRScalarExpr &Expr,
                                     const Observation &Obs,
                                     const ProgramPoint &PP) {
   if (!CheckRequired(Expr.isValid(), "invalid scalar expression", Obs, PP))
+    return;
+  if (!OS && !VisitedScalarExprs.insert(Expr.getOpaqueNode()).second)
     return;
   Check(Graph->ownsScalarExpr(Expr),
         "scalar expression belongs to another graph", Obs, PP);

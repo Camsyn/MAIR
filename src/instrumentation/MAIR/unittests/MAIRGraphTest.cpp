@@ -4818,6 +4818,36 @@ entry:
   EXPECT_NE(Text.find("stride=sext("), std::string::npos);
   EXPECT_NE(Text.find("access-size="), std::string::npos);
   EXPECT_NE(Text.find("trips=zext(%n to i64)"), std::string::npos);
+
+  for (bool Shared : {false, true}) {
+    SCOPED_TRACE(Shared);
+    MAIRGraph ExprGraph(F);
+    ProgramPoint &ExprPP =
+        ExprGraph.createBBProgramPoint(F.getEntryBlock(), true);
+    MAIRScalarExpr Expr = ExprGraph.createConstantExpr(I64, llvm::APInt(64, 1));
+    for (unsigned Depth = 0; Depth < 10; ++Depth) {
+      MAIRScalarExpr Right =
+          Shared
+              ? Expr
+              : ExprGraph.createConstantExpr(I64, llvm::APInt(64, Depth + 2));
+      Expr = ExprGraph.createBinaryExpr(MAIRScalarExpr::Kind::Add, I64, Expr,
+                                        Right);
+    }
+    EXPECT_EQ(Expr.operands()[0].getOpaqueNode() ==
+                  Expr.operands()[1].getOpaqueNode(),
+              Shared);
+    AbstractAccess Access(&P, AbstractValue::constant(0),
+                          AbstractValue::constant(4));
+    Access.setSizeExprNode(Expr.getOpaqueNode());
+    ExprPP.addObservation(Observation({&Load}, Access, AccessKind::Read));
+    if (Shared)
+      ExprPP.addObservation(Observation({&Load}, Access, AccessKind::Read));
+    EXPECT_TRUE(ExprGraph.verify());
+    std::string Error;
+    llvm::raw_string_ostream OS(Error);
+    EXPECT_TRUE(ExprGraph.verify(&OS));
+    EXPECT_TRUE(Error.empty());
+  }
 }
 
 TEST(MAIRSchema, VerifierRejectsForeignExpressionAndZeroStride) {
@@ -4849,12 +4879,42 @@ entry:
   PP.addObservation(
       Observation({&Load}, MemoryRegion(Region), AccessKind::Read));
 
+  EXPECT_FALSE(Graph.verify());
   std::string Error;
   llvm::raw_string_ostream OS(Error);
   EXPECT_FALSE(Graph.verify(&OS));
   EXPECT_NE(Error.find("scalar expression belongs to another graph"),
             std::string::npos);
   EXPECT_NE(Error.find("periodic region has zero stride"), std::string::npos);
+
+  MAIRGraph Shared(F);
+  MAIRScalarExpr Expr = Shared.createBinaryExpr(MAIRScalarExpr::Kind::Add, I64,
+                                                ForeignTrips, ForeignTrips);
+  AbstractAccess Access(&P, AbstractValue::constant(0),
+                        AbstractValue::constant(4));
+  Access.setSizeExprNode(Expr.getOpaqueNode());
+  std::string Expected;
+  llvm::raw_string_ostream ExpectedOS(Expected);
+  for (bool IsEntry : {true, false}) {
+    ProgramPoint &SharedPP =
+        Shared.createBBProgramPoint(F.getEntryBlock(), IsEntry);
+    const Observation &Obs =
+        SharedPP.addObservation(Observation({&Load}, Access, AccessKind::Read));
+    for (unsigned Occurrence = 0; Occurrence < 2; ++Occurrence) {
+      ExpectedOS << "MAIR verification failed: scalar expression belongs to "
+                    "another graph\n  observation: ";
+      Obs.print(ExpectedOS);
+      ExpectedOS << "\n  program point: ";
+      SharedPP.print(ExpectedOS);
+      ExpectedOS << "\n";
+    }
+  }
+  EXPECT_FALSE(Shared.verify());
+  std::string SharedError;
+  llvm::raw_string_ostream SharedOS(SharedError);
+  EXPECT_FALSE(Shared.verify(&SharedOS));
+  EXPECT_EQ(SharedError, Expected);
+  EXPECT_FALSE(Shared.verify());
 }
 
 TEST(MAIRSchema, VerifierRejectsIllTypedPeriodicRegionAndZeroSize) {
@@ -4898,6 +4958,7 @@ entry:
   EXPECT_NE(Error.find("periodic region has zero access size"),
             std::string::npos);
   EXPECT_NE(Error.find("scalar truncate does not narrow"), std::string::npos);
+  EXPECT_FALSE(Graph.verify());
 }
 
 TEST(MAIRSchema, VerifierRejectsInvalidScalarOperandWithoutCrashing) {
@@ -4930,6 +4991,7 @@ entry:
   llvm::raw_string_ostream OS(Error);
   EXPECT_FALSE(Graph.verify(&OS));
   EXPECT_NE(Error.find("invalid scalar expression"), std::string::npos);
+  EXPECT_FALSE(Graph.verify());
 }
 
 TEST(MAIRSchema, PeriodicMergesPreserveProvenanceAndRejectUnequalRegions) {

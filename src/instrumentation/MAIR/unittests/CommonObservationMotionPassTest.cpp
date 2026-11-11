@@ -49,7 +49,7 @@ exit:
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(CommonObservationMotionPass, AddressSanitizerDoesNotHoist) {
+TEST(CommonObservationMotionPass, AddressSanitizerHoistsIdenticalReads) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p, i1 %cond) {
@@ -70,12 +70,24 @@ exit:
   llvm::Function &F = *M->getFunction("f");
   MAIRGraph Graph =
       buildGraph(F, MAIROptimizationConfig::forAddressSanitizer());
+  llvm::Instruction *LeftLoad = &std::next(F.begin())->front();
+  llvm::Instruction *RightLoad = &std::next(F.begin(), 2)->front();
   placeBranchReadsOnEntries(Graph, F);
   MAIRGraphAnalysisManager AM;
-  EXPECT_TRUE(CommonObservationMotionPass().run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(observationCount(Graph, "left"), 1u);
-  EXPECT_EQ(observationCount(Graph, "right"), 1u);
-  EXPECT_EQ(observationCount(Graph, "entry"), 0u);
+  EXPECT_FALSE(CommonObservationMotionPass().run(Graph, AM).areAllPreserved());
+  EXPECT_EQ(observationCount(Graph, "left"), 0u);
+  EXPECT_EQ(observationCount(Graph, "right"), 0u);
+  EXPECT_EQ(observationCount(Graph, "entry"), 1u);
+  const ProgramPoint &Target = Graph.getBBExitRepresentative(F.getEntryBlock());
+  ASSERT_EQ(Target.size(), 1u);
+  EXPECT_TRUE(Target.hasAlwaysGuard());
+  const Observation &Moved = *Target.begin();
+  EXPECT_EQ(Moved.getInstructions(),
+            (llvm::ArrayRef<llvm::Instruction *>{LeftLoad, RightLoad}));
+  ASSERT_NE(Moved.getContiguousRegion(), nullptr);
+  EXPECT_EQ(*Moved.getContiguousRegion(),
+            AbstractAccess(F.getArg(0), AbstractValue::constant(0),
+                           AbstractValue::constant(4)));
   EXPECT_TRUE(Graph.verify());
 }
 

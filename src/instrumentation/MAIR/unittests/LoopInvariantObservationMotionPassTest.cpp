@@ -46,7 +46,8 @@ TEST(LoopInvariantObservationMotionPass, HoistsAnInvariantLoad) {
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(LoopInvariantObservationMotionPass, AddressSanitizerDoesNotHoist) {
+TEST(LoopInvariantObservationMotionPass,
+     AddressSanitizerHoistsAnInvariantLoad) {
   llvm::LLVMContext Ctx;
   std::unique_ptr<llvm::Module> M;
   llvm::PassInstrumentationCallbacks PIC;
@@ -54,13 +55,30 @@ TEST(LoopInvariantObservationMotionPass, AddressSanitizerDoesNotHoist) {
   llvm::Function &F = prepare(Ctx, M, PIC, FAM);
   MAIRGraph Graph = createGraphWithFunctionAnalyses(
       F, FAM, MAIROptimizationConfig::forAddressSanitizer());
+  llvm::Instruction *Load = findMutableMemoryProgramPoint(Graph, "header")
+                                ->begin()
+                                ->getInstructions()
+                                .front();
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
-  EXPECT_TRUE(
+  EXPECT_FALSE(
       runPassOnGraphTree(LoopInvariantObservationMotionPass(), Graph, AM)
           .areAllPreserved());
-  EXPECT_EQ(observationCount(Graph, "entry"), 0u);
-  EXPECT_EQ(observationCount(Graph, "header"), 1u);
+  EXPECT_EQ(observationCount(Graph, "entry"), 1u);
+  EXPECT_EQ(observationCount(Graph, "header"), 0u);
+  ASSERT_EQ(Graph.children().size(), 1u);
+  const ProgramPoint *Target = Graph.children().front()->getLoopPreheader();
+  ASSERT_NE(Target, nullptr);
+  EXPECT_EQ(Target->getParent(), &Graph);
+  ASSERT_EQ(Target->size(), 1u);
+  EXPECT_TRUE(Target->hasAlwaysGuard());
+  const Observation &Moved = *Target->begin();
+  EXPECT_EQ(Moved.getInstructions(),
+            (llvm::ArrayRef<llvm::Instruction *>{Load}));
+  ASSERT_NE(Moved.getContiguousRegion(), nullptr);
+  EXPECT_EQ(*Moved.getContiguousRegion(),
+            AbstractAccess(F.getArg(0), AbstractValue::constant(0),
+                           AbstractValue::constant(4)));
   EXPECT_TRUE(Graph.verify());
 }
 

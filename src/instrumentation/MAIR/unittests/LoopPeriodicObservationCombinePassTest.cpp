@@ -47,7 +47,8 @@ TEST(LoopPeriodicObservationCombinePass, AggregatesAUnitStrideLoop) {
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(LoopPeriodicObservationCombinePass, AddressSanitizerDoesNotAggregate) {
+TEST(LoopPeriodicObservationCombinePass,
+     AddressSanitizerAggregatesAUnitStrideLoop) {
   llvm::LLVMContext Ctx;
   std::unique_ptr<llvm::Module> M;
   llvm::PassInstrumentationCallbacks PIC;
@@ -55,13 +56,31 @@ TEST(LoopPeriodicObservationCombinePass, AddressSanitizerDoesNotAggregate) {
   llvm::Function &F = prepare(Ctx, M, PIC, FAM);
   MAIRGraph Graph = createGraphWithFunctionAnalyses(
       F, FAM, MAIROptimizationConfig::forAddressSanitizer());
+  llvm::Instruction *Load = findMutableMemoryProgramPoint(Graph, "header")
+                                ->begin()
+                                ->getInstructions()
+                                .front();
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC, &FAM);
-  EXPECT_TRUE(
+  EXPECT_FALSE(
       runPassOnGraphTree(LoopPeriodicObservationCombinePass(), Graph, AM)
           .areAllPreserved());
-  EXPECT_EQ(observationCount(Graph, "header"), 1u);
-  EXPECT_EQ(observationCount(Graph, "exit"), 0u);
+  EXPECT_EQ(observationCount(Graph, "header"), 0u);
+  EXPECT_EQ(observationCount(Graph, "exit"), 1u);
+  ASSERT_EQ(Graph.children().size(), 1u);
+  auto Exits = Graph.children().front()->getLoopExits();
+  ASSERT_EQ(Exits.size(), 1u);
+  const ProgramPoint &Target = *Exits.front();
+  EXPECT_EQ(Target.getParent(), &Graph);
+  ASSERT_EQ(Target.size(), 1u);
+  EXPECT_TRUE(Target.hasAlwaysGuard());
+  const Observation &Combined = *Target.begin();
+  EXPECT_EQ(Combined.getInstructions(),
+            (llvm::ArrayRef<llvm::Instruction *>{Load}));
+  ASSERT_NE(Combined.getContiguousRegion(), nullptr);
+  EXPECT_EQ(*Combined.getContiguousRegion(),
+            AbstractAccess(F.getArg(0), AbstractValue::constant(0),
+                           AbstractValue::constant(4)));
   EXPECT_TRUE(Graph.verify());
 }
 

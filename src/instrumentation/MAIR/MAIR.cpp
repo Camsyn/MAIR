@@ -1013,11 +1013,7 @@ bool MaskedRegion::contains(const MaskedRegion &Other) const {
     return false;
   if (!IsConstant || !Other.IsConstant)
     return !IsConstant && !Other.IsConstant && DynamicMask == Other.DynamicMask;
-  for (int Lane = Other.ConstantMask.find_first(); Lane >= 0;
-       Lane = Other.ConstantMask.find_next(Lane))
-    if (!ConstantMask.test(Lane))
-      return false;
-  return true;
+  return Other.ConstantMask.subsetOf(ConstantMask);
 }
 
 std::optional<MaskedRegion> MaskedRegion::merge(const MaskedRegion &A,
@@ -1192,6 +1188,7 @@ bool Observation::mergeWith(const Observation &Other, ScalarEvolution *SE) {
   if (getLevel() != Other.getLevel())
     return false;
 
+  bool PrependOther = false;
   if (const auto *ThisAccess = getContiguousRegion()) {
     const auto *OtherAccess = Other.getContiguousRegion();
     if (!OtherAccess)
@@ -1208,15 +1205,8 @@ bool Observation::mergeWith(const Observation &Other, ScalarEvolution *SE) {
       return false;
     const bool ThisContainsOther = *Merged == *ThisAccess;
     const bool OtherContainsThis = *Merged == *OtherAccess;
+    PrependOther = OtherContainsThis && !ThisContainsOther;
     Region = *Merged;
-    if (OtherContainsThis && !ThisContainsOther) {
-      SmallVector<Instruction *, 2> OrderedInsts;
-      OrderedInsts.append(Other.Insts.begin(), Other.Insts.end());
-      OrderedInsts.append(Insts.begin(), Insts.end());
-      Insts = std::move(OrderedInsts);
-    } else {
-      Insts.append(Other.Insts);
-    }
   } else if (const auto *ThisMasked = getMaskedRegion()) {
     const auto *OtherMasked = Other.getMaskedRegion();
     if (!OtherMasked)
@@ -1227,20 +1217,21 @@ bool Observation::mergeWith(const Observation &Other, ScalarEvolution *SE) {
         MaskedRegion::merge(*ThisMasked, *OtherMasked);
     if (!Merged)
       return false;
+    PrependOther = OtherContainsThis && !ThisContainsOther;
     Region = std::move(*Merged);
-    if (OtherContainsThis && !ThisContainsOther) {
-      SmallVector<Instruction *, 2> OrderedInsts;
-      OrderedInsts.append(Other.Insts.begin(), Other.Insts.end());
-      OrderedInsts.append(Insts.begin(), Insts.end());
-      Insts = std::move(OrderedInsts);
-    } else {
-      Insts.append(Other.Insts);
-    }
   } else {
     const auto *ThisPeriodic = getPeriodicRegion();
     const auto *OtherPeriodic = Other.getPeriodicRegion();
     if (!ThisPeriodic || !OtherPeriodic || *ThisPeriodic != *OtherPeriodic)
       return false;
+  }
+
+  if (PrependOther) {
+    SmallVector<Instruction *, 2> OrderedInsts;
+    OrderedInsts.append(Other.Insts.begin(), Other.Insts.end());
+    OrderedInsts.append(Insts.begin(), Insts.end());
+    Insts = std::move(OrderedInsts);
+  } else {
     Insts.append(Other.Insts);
   }
 

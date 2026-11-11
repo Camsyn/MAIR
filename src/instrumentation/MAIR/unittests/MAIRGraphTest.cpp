@@ -30,6 +30,7 @@
 #include "llvm/IR/PassInstrumentation.h"
 #include "llvm/Support/SourceMgr.h"
 #include "gtest/gtest.h"
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -81,6 +82,24 @@ bool compareTestObservations(const Observation &LHS, const Observation &RHS) {
   if (LRegion->getSize() != RRegion->getSize())
     return LRegion->getSize().getConstant() > RRegion->getSize().getConstant();
   return LHS.getLevel() > RHS.getLevel();
+}
+
+void expectMergeRejectedWithoutMutation(Observation &Left, Observation &Right,
+                                        llvm::ScalarEvolution *SE = nullptr) {
+  auto Snapshot = [](const Observation &Obs) {
+    return std::make_tuple(
+        MemoryRegion(Obs.getRegion()),
+        llvm::SmallVector<llvm::Instruction *, 4>(Obs.getInstructions().begin(),
+                                                  Obs.getInstructions().end()),
+        Obs.getKind(), Obs.getProperties(), Obs.isMergeable(), Obs.isMovable(),
+        Obs.isDeletable(), Obs.getLevel(), Obs.getParent(),
+        Obs.getBaseUse().get());
+  };
+  const auto LeftBefore = Snapshot(Left);
+  const auto RightBefore = Snapshot(Right);
+  EXPECT_FALSE(Left.mergeWith(Right, SE));
+  EXPECT_EQ(Snapshot(Left), LeftBefore);
+  EXPECT_EQ(Snapshot(Right), RightBefore);
 }
 
 TEST(MAOpt, BuildsOptimizesAndExposesProgramPointObservations) {
@@ -3177,7 +3196,7 @@ entry:
   Graph.addEdge(Read, Write, PPEdgeKind::Dom);
 
   Observation Copy = Observation::fromInstruction(Load, M->getDataLayout());
-  EXPECT_FALSE(Copy.mergeWith(*Write.begin()));
+  expectMergeRejectedWithoutMutation(Copy, *Write.begin());
   EXPECT_EQ(Copy.getLevel(), 1u);
   Copy.mergeKind(AccessKind::Write);
   EXPECT_EQ(Copy.getKind(), AccessKind::ReadWrite);
@@ -3220,7 +3239,7 @@ entry:
 
   Observation Copy =
       Observation::fromInstruction(PlainLoad, M->getDataLayout());
-  EXPECT_FALSE(Copy.mergeWith(*Atomic.begin()));
+  expectMergeRejectedWithoutMutation(Copy, *Atomic.begin());
 
   llvm::PassInstrumentationCallbacks PIC;
   MAIRGraphAnalysisManager AM;
@@ -4836,13 +4855,14 @@ entry:
   EXPECT_NE(Error.find("invalid scalar expression"), std::string::npos);
 }
 
-TEST(MAIRSchema, EqualPeriodicRegionsRequireSameAccessKindToMerge) {
+TEST(MAIRSchema, PeriodicMergesPreserveProvenanceAndRejectUnequalRegions) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
 entry:
   %a = load i32, ptr %p, align 4
   %b = load i32, ptr %p, align 4
+  %c = load i32, ptr %p, align 4
   ret void
 }
 )IR",
@@ -4854,6 +4874,7 @@ entry:
   llvm::BasicBlock &BB = F.getEntryBlock();
   llvm::Instruction *AInst = &BB.front();
   llvm::Instruction *BInst = &*std::next(BB.begin());
+  llvm::Instruction *CInst = &*std::next(BB.begin(), 2);
   llvm::Type &I64 = *llvm::Type::getInt64Ty(Ctx);
   MAIRGraph Graph(F);
   MAIRScalarExpr StartA = Graph.createValueExpr(P);
@@ -4871,9 +4892,26 @@ entry:
       {BInst}, MemoryRegion(PeriodicRegion(&P, StartB, StrideB, SizeB, TripsB)),
       AccessKind::Write);
 
-  EXPECT_FALSE(A.mergeWith(B));
-  EXPECT_EQ(A.getKind(), AccessKind::Read);
-  EXPECT_EQ(A.getInstructions().size(), 1u);
+  expectMergeRejectedWithoutMutation(A, B);
+  Observation Left({AInst, BInst, AInst}, A.getRegion(), AccessKind::Read);
+  Observation Equal({CInst, BInst}, B.getRegion(), AccessKind::Read);
+  ASSERT_EQ(Left.getLevel(), Equal.getLevel());
+  ASSERT_TRUE(Left.mergeWith(Equal));
+  EXPECT_EQ(Left.getInstructions(), (llvm::ArrayRef<llvm::Instruction *>{
+                                        AInst, BInst, AInst, CInst, BInst}));
+  EXPECT_EQ(Left.getInstruction(), AInst);
+  Observation Unequal(
+      {CInst, BInst},
+      MemoryRegion(PeriodicRegion(&P, StartB, StrideB, SizeB, SizeB)),
+      AccessKind::Read);
+  ASSERT_EQ(Left.getLevel(), Unequal.getLevel());
+  expectMergeRejectedWithoutMutation(Left, Unequal);
+  Observation Contiguous({CInst, BInst},
+                         AbstractAccess(&P, AbstractValue::constant(0),
+                                        AbstractValue::constant(4)),
+                         AccessKind::Read);
+  expectMergeRejectedWithoutMutation(Left, Contiguous);
+  expectMergeRejectedWithoutMutation(Contiguous, Left);
 }
 
 TEST(MAIRSchema, MaskednessIsDerivedFromTheRegion) {
@@ -4904,7 +4942,7 @@ entry:
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(MAIRSchema, ContainingContiguousMergeKeepsCoveringInstructionFirst) {
+TEST(MAIRSchema, ContiguousMergesKeepCompleteProvenanceOrder) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -4912,6 +4950,7 @@ entry:
   %wide = load i32, ptr %p, align 4
   %p4 = getelementptr i8, ptr %p, i64 4
   %narrow = load i32, ptr %p4, align 4
+  %extra = load i32, ptr %p, align 4
   ret void
 }
 )IR",
@@ -4923,36 +4962,44 @@ entry:
   llvm::BasicBlock &BB = F.getEntryBlock();
   llvm::Instruction *Wide = &BB.front();
   llvm::Instruction *Narrow = &*std::next(BB.begin(), 2);
-  Observation WideAccess(
-      {Wide},
-      MemoryRegion(AbstractAccess(&P, AbstractValue::constant(0),
-                                  AbstractValue::constant(8))),
-      AccessKind::Read);
-  Observation NarrowAccess(
-      {Narrow},
-      MemoryRegion(AbstractAccess(&P, AbstractValue::constant(4),
-                                  AbstractValue::constant(4))),
-      AccessKind::Read);
-
-  EXPECT_TRUE(WideAccess.mergeWith(NarrowAccess));
-  EXPECT_EQ(WideAccess.getInstructions().size(), 2u);
-  EXPECT_EQ(WideAccess.getInstructions().front(), Wide);
-  EXPECT_EQ(WideAccess.getInstructions().back(), Narrow);
-
-  Observation Reversed(
-      {Narrow},
-      MemoryRegion(AbstractAccess(&P, AbstractValue::constant(4),
-                                  AbstractValue::constant(4))),
-      AccessKind::Read);
-  Observation Covering(
-      {Wide},
-      MemoryRegion(AbstractAccess(&P, AbstractValue::constant(0),
-                                  AbstractValue::constant(8))),
-      AccessKind::Read);
-  EXPECT_TRUE(Reversed.mergeWith(Covering));
-  EXPECT_EQ(Reversed.getInstructions().size(), 2u);
-  EXPECT_EQ(Reversed.getInstructions().front(), Wide);
-  EXPECT_EQ(Reversed.getInstructions().back(), Narrow);
+  llvm::Instruction *Extra = &*std::next(BB.begin(), 3);
+  struct MergeCase {
+    uint64_t LeftOffset, LeftSize, RightOffset, RightSize;
+    bool Prepend;
+  };
+  for (const MergeCase &Case : {MergeCase{0, 8, 4, 4, false},
+                                {4, 4, 0, 8, true},
+                                {0, 8, 0, 8, false},
+                                {0, 4, 4, 4, false},
+                                {4, 4, 0, 4, false},
+                                {0, 8, 4, 8, false}}) {
+    SCOPED_TRACE(::testing::Message()
+                 << Case.LeftOffset << ':' << Case.LeftSize << " + "
+                 << Case.RightOffset << ':' << Case.RightSize);
+    Observation Left({Wide, Narrow, Wide},
+                     AbstractAccess(&P,
+                                    AbstractValue::constant(Case.LeftOffset),
+                                    AbstractValue::constant(Case.LeftSize)),
+                     AccessKind::Read);
+    Observation Right({Extra, Narrow},
+                      AbstractAccess(&P,
+                                     AbstractValue::constant(Case.RightOffset),
+                                     AbstractValue::constant(Case.RightSize)),
+                      AccessKind::Read);
+    ASSERT_TRUE(Left.mergeWith(Right));
+    llvm::SmallVector<llvm::Instruction *, 5> Expected{Wide, Narrow, Wide,
+                                                       Extra, Narrow};
+    if (Case.Prepend)
+      Expected = {Extra, Narrow, Wide, Narrow, Wide};
+    EXPECT_EQ(Left.getInstructions(), llvm::ArrayRef(Expected));
+    EXPECT_EQ(Left.getInstruction(), Expected.front());
+    uint64_t Begin = std::min(Case.LeftOffset, Case.RightOffset);
+    uint64_t End = std::max(Case.LeftOffset + Case.LeftSize,
+                            Case.RightOffset + Case.RightSize);
+    EXPECT_EQ(Left.getRegion(), MemoryRegion(AbstractAccess(
+                                    &P, AbstractValue::constant(Begin),
+                                    AbstractValue::constant(End - Begin))));
+  }
 }
 
 TEST(MAIRSchema, NewSemanticsHaveExplicitStableDumpSyntax) {
@@ -5021,8 +5068,16 @@ entry:
   EXPECT_TRUE(WriteAccess.isMovable());
   EXPECT_TRUE(ReadAccess.isDeletable());
   EXPECT_TRUE(WriteAccess.isDeletable());
-  EXPECT_TRUE(ReadAccess.mergeWith(WriteAccess));
-  EXPECT_TRUE(ReadAccess.isReadWrite());
+  EXPECT_TRUE(WriteAccess.mergeWith(ReadAccess));
+  EXPECT_TRUE(WriteAccess.isReadWrite());
+  EXPECT_TRUE(WriteAccess.isAtomic());
+  EXPECT_TRUE(WriteAccess.isMergeable());
+  EXPECT_FALSE(WriteAccess.isMovable());
+  EXPECT_TRUE(WriteAccess.isDeletable());
+  EXPECT_EQ(WriteAccess.getLevel(), ReadAccess.getLevel());
+  EXPECT_EQ(WriteAccess.getInstructions(),
+            (llvm::ArrayRef<llvm::Instruction *>{&Write, &Read}));
+  EXPECT_TRUE(Graph.verify());
 }
 
 TEST(MAIROptimizationConfig, GraphInitializationStoresAccessCapabilities) {
@@ -5251,7 +5306,7 @@ entry:
     EXPECT_FALSE(Second.isMergeable());
     EXPECT_FALSE(First.isDeletable());
     EXPECT_FALSE(Second.isDeletable());
-    EXPECT_FALSE(First.mergeWith(Second));
+    expectMergeRejectedWithoutMutation(First, Second);
   };
   CheckConfig(MAIROptimizationConfig::forAddressSanitizer());
   CheckConfig(MAIROptimizationConfig::forThreadSanitizer());
@@ -5269,6 +5324,7 @@ entry:
   %narrow = call <4 x i32> @llvm.masked.load.v4i32.p0(
       ptr %p, <4 x i1> <i1 true, i1 false, i1 false, i1 false>,
       <4 x i32> zeroinitializer)
+  %extra = load i32, ptr %p, align 4
   ret void
 }
 )IR",
@@ -5292,6 +5348,52 @@ entry:
       << "narrow=" << Narrow.toString() << " wide=" << Wide.toString();
   EXPECT_TRUE(Narrow.mergeWith(Wide));
   EXPECT_TRUE(Narrow.covers(Wide));
+  llvm::Instruction *First = &BB.front();
+  llvm::Instruction *Second = &*std::next(BB.begin());
+  llvm::Instruction *Third = &*std::next(BB.begin(), 2);
+  for (unsigned Lanes : {4u, 128u}) {
+    for (const auto &Bits : {std::pair{3u, 1u},
+                             {1u, 3u},
+                             {3u, 3u},
+                             {1u, 2u},
+                             {0u, 0u},
+                             {0u, 1u},
+                             {1u, 0u}}) {
+      SCOPED_TRACE(::testing::Message() << Lanes << " lanes: " << Bits.first
+                                        << " + " << Bits.second);
+      auto MakeRegion = [&](unsigned Active) {
+        llvm::SmallBitVector Mask(Lanes);
+        if (Active & 1)
+          Mask.set(0);
+        if (Active & 2)
+          Mask.set(Lanes - 1);
+        return MaskedRegion(AbstractAccess(F.getArg(0),
+                                           AbstractValue::constant(0),
+                                           AbstractValue::constant(4 * Lanes)),
+                            std::move(Mask), 4);
+      };
+      MaskedRegion LeftRegion = MakeRegion(Bits.first);
+      MaskedRegion RightRegion = MakeRegion(Bits.second);
+      const bool LeftContains = (Bits.second & Bits.first) == Bits.second;
+      const bool RightContains = (Bits.first & Bits.second) == Bits.first;
+      EXPECT_EQ(LeftRegion.contains(RightRegion), LeftContains);
+      EXPECT_EQ(RightRegion.contains(LeftRegion), RightContains);
+      Observation Left({First, Second, First}, MemoryRegion(LeftRegion),
+                       AccessKind::Read);
+      Observation Right({Third, Second}, MemoryRegion(RightRegion),
+                        AccessKind::Read);
+      ASSERT_TRUE(Left.mergeWith(Right));
+      llvm::SmallVector<llvm::Instruction *, 5> Expected{First, Second, First,
+                                                         Third, Second};
+      if (RightContains && !LeftContains)
+        Expected = {Third, Second, First, Second, First};
+      EXPECT_EQ(Left.getInstructions(), llvm::ArrayRef(Expected));
+      EXPECT_EQ(Left.getInstruction(), Expected.front());
+      EXPECT_EQ(Left.getRegion(),
+                MemoryRegion(MakeRegion(Bits.first | Bits.second)));
+    }
+  }
+  EXPECT_TRUE(Graph.verify());
 }
 
 TEST(MAIROptimizationConfig, DynamicMasksRequireTheSameSSAValue) {
@@ -5326,8 +5428,20 @@ entry:
   EXPECT_FALSE(First.covers(Different))
       << "first=" << First.toString() << " different=" << Different.toString();
   EXPECT_TRUE(First.mergeWith(Same));
-  EXPECT_FALSE(First.mergeWith(Different))
-      << "first=" << First.toString() << " different=" << Different.toString();
+  EXPECT_EQ(First.getInstructions(),
+            (llvm::ArrayRef<llvm::Instruction *>{&BB.front(),
+                                                 &*std::next(BB.begin())}));
+  expectMergeRejectedWithoutMutation(First, Different);
+  expectMergeRejectedWithoutMutation(Different, First);
+  const MaskedRegion &Bounds = *First.getMaskedRegion();
+  Observation Constant(
+      {&BB.front()},
+      MemoryRegion(
+          MaskedRegion(Bounds.getBounds(), llvm::SmallBitVector(4, true), 4)),
+      AccessKind::Read);
+  expectMergeRejectedWithoutMutation(First, Constant);
+  expectMergeRejectedWithoutMutation(Constant, First);
+  EXPECT_TRUE(Graph.verify());
 }
 
 TEST(MAIROptimizationConfig, LocationMergeJoinsEquivalentNonConcreteLocations) {
@@ -5401,7 +5515,7 @@ entry:
       Observation::fromInstruction(*Instructions++, Module->getDataLayout());
   Observation Second =
       Observation::fromInstruction(*Instructions, Module->getDataLayout());
-  EXPECT_FALSE(First.mergeWith(Second));
+  expectMergeRejectedWithoutMutation(First, Second);
   llvm::PassInstrumentationCallbacks Callbacks;
   llvm::FunctionAnalysisManager Analyses;
   registerLoopTestAnalyses(Analyses, Callbacks);
@@ -5412,7 +5526,7 @@ entry:
       Observation::fromInstruction(*Instructions++, Module->getDataLayout());
   Observation SecondWithSE =
       Observation::fromInstruction(*Instructions, Module->getDataLayout());
-  EXPECT_FALSE(FirstWithSE.mergeWith(SecondWithSE, &Evolution));
+  expectMergeRejectedWithoutMutation(FirstWithSE, SecondWithSE, &Evolution);
 }
 
 TEST(MAIROptimizationConfig, MergeRejectsUnrepresentablePointerDistance) {
@@ -5505,7 +5619,7 @@ entry:
       Observation::fromInstruction(LowerStore, M->getDataLayout());
   Observation GappedUpper =
       Observation::fromInstruction(GappedStore, M->getDataLayout());
-  EXPECT_FALSE(GappedLower.mergeWith(GappedUpper));
+  expectMergeRejectedWithoutMutation(GappedLower, GappedUpper);
 }
 
 TEST(MAIROptimizationConfig,
@@ -5941,4 +6055,15 @@ entry:
   First.setDebugLoc(AtGlobal);
   Observation Earliest({&First, &Second}, Region, AccessKind::Read);
   EXPECT_EQ(Earliest.getStableDebugLoc().get(), AtGlobal.get());
+  Observation Equal({&Second, &First}, Region, AccessKind::Read);
+  ASSERT_TRUE(Earliest.mergeWith(Equal));
+  EXPECT_EQ(Earliest.getInstruction(), &First);
+  EXPECT_EQ(Earliest.getStableDebugLoc().get(), AtGlobal.get());
+  Observation Covering({&Second, &First},
+                       AbstractAccess(F.getArg(0), AbstractValue::constant(0),
+                                      AbstractValue::constant(8)),
+                       AccessKind::Read);
+  ASSERT_TRUE(Earliest.mergeWith(Covering));
+  EXPECT_EQ(Earliest.getInstruction(), &Second);
+  EXPECT_EQ(Earliest.getStableDebugLoc().get(), AtAnchor.get());
 }

@@ -16,7 +16,7 @@ endif()
 add_subdirectory(livepatch)
 add_subdirectory(MAIR)
 
-set(XSAN_PASS_COMMON
+set(XSAN_PASS_COMMON_SOURCES
   AttributeTaggingPass.cpp
   Instrumentation.cpp
   PassRegistry.cpp
@@ -29,16 +29,17 @@ set(XSAN_PASS_COMMON
   Utils/MetaDataUtils.cpp
   Utils/Options.cpp
   Utils/UbsanUtils.cpp
+)
+
+add_library(XSanPassCommon OBJECT ${XSAN_PASS_COMMON_SOURCES})
+set_target_properties(XSanPassCommon PROPERTIES POSITION_INDEPENDENT_CODE ON)
+llvm_update_compile_flags(XSanPassCommon)
+set(XSAN_PASS_COMMON
+  $<TARGET_OBJECTS:XSanPassCommon>
   $<TARGET_OBJECTS:MAIRCore>
 )
 
 set(XSAN_PASS_VERSIONED_DIR ${XSAN_INSTRUMENTATION_VARIANT})
-set(XSAN_PASS_VERSIONED
-  ${XSAN_PASS_VERSIONED_DIR}/AddressSanitizer.cpp
-  ${XSAN_PASS_VERSIONED_DIR}/MemorySanitizer.cpp
-  ${XSAN_PASS_VERSIONED_DIR}/SanitizerCoverage.cpp
-  ${XSAN_PASS_VERSIONED_DIR}/ThreadSanitizer.cpp
-)
 
 message(STATUS "Using instrumentation sources from ${XSAN_PASS_VERSIONED_DIR}")
 
@@ -78,7 +79,8 @@ add_llvm_pass_plugin(XSanInstPass
   XSanReSan.cpp
   XSanSanitizingContext.cpp
   XSanitizerCompositor.cpp
-  ${XSAN_PASS_COMMON}
+  ${XSAN_PASS_COMMON_SOURCES}
+  $<TARGET_OBJECTS:MAIRCore>
   ${XSAN_INSTRUMENTATION_LIVEPATCH_OBJECTS}
 )
 
@@ -88,13 +90,14 @@ add_llvm_pass_plugin(TestPass
   ${XSAN_PASS_COMMON}
 )
 
-foreach(_xsan_pass_target
+set(XSAN_PASS_TARGETS
     ASanInstPass
     TSanInstPass
     CovSanInstPass
     MSanInstPass
     XSanInstPass
     TestPass)
+foreach(_xsan_pass_target IN LISTS XSAN_PASS_TARGETS ITEMS XSanPassCommon)
   target_include_directories(${_xsan_pass_target} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${XSAN_PASS_VERSIONED_DIR}
@@ -105,6 +108,8 @@ foreach(_xsan_pass_target
   target_compile_definitions(${_xsan_pass_target} PRIVATE
     XSAN_LLVM_MAJOR=${LLVM_VERSION_MAJOR}
   )
+endforeach()
+foreach(_xsan_pass_target IN LISTS XSAN_PASS_TARGETS)
   # Keep symbol binding local for pass plugins without affecting standalone LLVM
   # tools such as mair-opt, which rely on LLVM shared-library type identity.
   target_link_options(${_xsan_pass_target} PRIVATE -Wl,-Bsymbolic)
@@ -119,12 +124,7 @@ foreach(_xsan_livepatch_pass_target
   add_livepatch_core_into_llvm_plugin(${_xsan_livepatch_pass_target})
 endforeach()
 
-set_target_properties(ASanInstPass
-  TSanInstPass
-  CovSanInstPass
-  MSanInstPass
-  XSanInstPass
-  TestPass
+set_target_properties(${XSAN_PASS_TARGETS}
   PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${XSAN_OUTPUT_PASSDIR}"
 )

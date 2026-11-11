@@ -154,6 +154,31 @@ SmallPtrSet<const BasicBlock *, 16> collectUnsupportedLoopBlocks(Function &F) {
   return Unsupported;
 }
 
+// Whether every path from \p From reaches \p To, which post-dominates it and
+// is in the same loop \p L, before starting another iteration of L or leaving
+// it. A value defined in L is the same value at both blocks only then.
+bool postDominatesWithinIteration(const BasicBlock &From, const BasicBlock &To,
+                                  const Loop *L) {
+  if (!L)
+    return true;
+  const BasicBlock *Header = L->getHeader();
+  if (&To == Header)
+    return false;
+  SmallPtrSet<const BasicBlock *, 16> Visited;
+  SmallVector<const BasicBlock *, 16> Worklist{&From};
+  while (!Worklist.empty())
+    for (const BasicBlock *Succ : successors(Worklist.pop_back_val())) {
+      if (Succ == &To)
+        continue;
+      // A path that leaves L can come back to To only through the header.
+      if (Succ == Header || !L->contains(Succ))
+        return false;
+      if (Visited.insert(Succ).second)
+        Worklist.push_back(Succ);
+    }
+  return true;
+}
+
 } // namespace
 
 // Build the initial, unoptimized MAIR graph for one LLVM function.
@@ -292,6 +317,7 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
     if (IPDom) {
       ProgramPoint *Succ = OrderedPPs[&Scope][IPDom].front();
       if (!BA.isBwdBarrier(*BB.getTerminator()) &&
+          postDominatesWithinIteration(BB, *IPDom, Scope.getLoop()) &&
           !BA.hasBwdBarrierPath(BB, *IPDom))
         Scope.addEdge(*Succ, *ExitPP, PPEdgeKind::PostDom);
     }

@@ -355,13 +355,14 @@ void addOrMergeObservation(ProgramPoint &Target, const Observation &Obs,
 }
 
 std::optional<AbstractAccess> buildContiguousAggregate(
-    const Observation &Obs, const SCEVAddRecExpr &Recurrence,
-    const SCEV *ExecutionCount, uint64_t AccessSize, ScalarEvolution &SE,
-    const MAIRLoopInfo &Loops, const ProgramPointSite &Site) {
+    MAIRGraph &ExprGraph, const Observation &Obs,
+                         const SCEVAddRecExpr &Recurrence,
+                         const SCEV *ExecutionCount, uint64_t AccessSize,
+                         ScalarEvolution &SE, const MAIRLoopInfo &Loops,
+                         const ProgramPointSite &Site) {
   const auto *Step = dyn_cast<SCEVConstant>(Recurrence.getStepRecurrence(SE));
-  const auto *Count = dyn_cast<SCEVConstant>(ExecutionCount);
   const AbstractAccess *Location = Obs.getContiguousRegion();
-  if (!Step || !Count || !Location)
+  if (!Step || !Location)
     return std::nullopt;
 
   const APInt &StepValue = Step->getAPInt();
@@ -370,62 +371,46 @@ std::optional<AbstractAccess> buildContiguousAggregate(
       AbsoluteStep.getZExtValue() != AccessSize)
     return std::nullopt;
 
-  const APInt &CountValue = Count->getAPInt();
-  if (CountValue.isNegative() || CountValue.getActiveBits() > 64)
+  const auto *Count = dyn_cast<SCEVConstant>(ExecutionCount);
+  uint64_t Trips = 0;
+  if (Count) {
+    const APInt &CountValue = Count->getAPInt();
+    if (CountValue.isNegative() || CountValue.getActiveBits() > 64)
+      return std::nullopt;
+    Trips = CountValue.getZExtValue();
+    if (Trips == 0 || UINT64_MAX / AccessSize < Trips)
+      return std::nullopt;
+  } else if (StepValue.isNegative()) {
     return std::nullopt;
-  uint64_t Trips = CountValue.getZExtValue();
-  if (Trips == 0 || UINT64_MAX / AccessSize < Trips)
-    return std::nullopt;
+  }
 
   std::optional<AbstractValue> StartOffset = representStartOffset(
       Recurrence.getStart(), Location->getBase(), Obs, SE, Loops, Site);
   if (!StartOffset)
     return std::nullopt;
 
-  if (StartOffset->isConstant()) {
-    uint64_t RangeOffset = StartOffset->getConstant();
-    if (StepValue.isNegative()) {
-      uint64_t PreviousTrips = Trips - 1;
-      if (UINT64_MAX / AccessSize < PreviousTrips)
-        return std::nullopt;
-      uint64_t Distance = PreviousTrips * AccessSize;
-      if (RangeOffset < Distance)
-        return std::nullopt;
-      RangeOffset -= Distance;
+  if (Count) {
+    if (StartOffset->isConstant()) {
+      uint64_t RangeOffset = StartOffset->getConstant();
+      if (StepValue.isNegative()) {
+        uint64_t PreviousTrips = Trips - 1;
+        if (UINT64_MAX / AccessSize < PreviousTrips)
+          return std::nullopt;
+        uint64_t Distance = PreviousTrips * AccessSize;
+        if (RangeOffset < Distance)
+          return std::nullopt;
+        RangeOffset -= Distance;
+      }
+      return AbstractAccess(Location->getBase(),
+                            AbstractValue::constant(RangeOffset),
+                            AbstractValue::constant(Trips * AccessSize));
     }
-    return AbstractAccess(Location->getBase(),
-                          AbstractValue::constant(RangeOffset),
+    if (StepValue.isNegative())
+      return std::nullopt;
+    return AbstractAccess(Location->getBase(), *StartOffset,
                           AbstractValue::constant(Trips * AccessSize));
   }
-  if (StepValue.isNegative())
-    return std::nullopt;
-  return AbstractAccess(Location->getBase(), *StartOffset,
-                        AbstractValue::constant(Trips * AccessSize));
-}
-
-std::optional<AbstractAccess>
-buildSymbolicContiguousRange(MAIRGraph &ExprGraph, const Observation &Obs,
-                             const SCEVAddRecExpr &Recurrence,
-                             const SCEV *ExecutionCount, uint64_t AccessSize,
-                             ScalarEvolution &SE, const MAIRLoopInfo &Loops,
-                             const ProgramPointSite &Site) {
-  const auto *Step = dyn_cast<SCEVConstant>(Recurrence.getStepRecurrence(SE));
-  const AbstractAccess *Location = Obs.getContiguousRegion();
-  if (!Step || !Location || isa<SCEVConstant>(ExecutionCount))
-    return std::nullopt;
-
-  const APInt &StepValue = Step->getAPInt();
-  APInt AbsoluteStep = StepValue.abs();
-  // A negative step still covers one interval, but its start moves with the
-  // trip count. Keep that form on the periodic path.
-  if (StepValue.isNegative() || StepValue.isZero() ||
-      AbsoluteStep.getActiveBits() > 64 ||
-      AbsoluteStep.getZExtValue() != AccessSize)
-    return std::nullopt;
-
-  std::optional<AbstractValue> StartOffset = representStartOffset(
-      Recurrence.getStart(), Location->getBase(), Obs, SE, Loops, Site);
-  if (!StartOffset || !StartOffset->isConstant())
+  if (!StartOffset->isConstant())
     return std::nullopt;
 
   const SCEV *SizeSCEV = ExecutionCount;
@@ -543,13 +528,9 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
   // region with no later dependence on LLVM SCEV objects.
   bool IsRangeAggregate = false;
   if (std::optional<AbstractAccess> Range =
-          buildContiguousAggregate(Obs, *Recurrence, ExecutionCount,
-                                   *AccessSize, SE, Loops, Target->Site)) {
-    Aggregate = *Range;
-    IsRangeAggregate = true;
-  } else if (std::optional<AbstractAccess> Range = buildSymbolicContiguousRange(
-                 *G.getParent(), Obs, *Recurrence, ExecutionCount, *AccessSize,
-                 SE, Loops, Target->Site)) {
+          buildContiguousAggregate(
+          *G.getParent(), Obs, *Recurrence, ExecutionCount, *AccessSize, SE,
+          Loops, Target->Site)) {
     Aggregate = *Range;
     IsRangeAggregate = true;
   } else {

@@ -4,6 +4,8 @@
 
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/Support/FormatVariadic.h"
 
 using namespace mair;
 
@@ -323,6 +325,130 @@ exit:
   EXPECT_TRUE(Graph.verify());
   EXPECT_TRUE(runPassOnGraphTree(Pass, Graph, AM).areAllPreserved());
   EXPECT_TRUE(Graph.verify());
+}
+
+TEST(LoopPeriodicObservationCombinePass, PreservesRangeBoundarySelection) {
+  struct BoundaryCase {
+    llvm::StringRef Name;
+    llvm::StringRef Count;
+    llvm::StringRef Start;
+    int64_t Step;
+    bool IsRange;
+  };
+  const BoundaryCase Cases[] = {
+      {"zero count", "0", "0", 2, false},
+      {"constant size overflow", "9223372036854775808", "0", 2, false},
+      {"negative step underflow", "4", "4", -2, false},
+      {"constant count symbolic start", "4", "%start", 2, true},
+      {"negative step symbolic start", "4", "%start", -2, false},
+      {"symbolic count symbolic start", "%count", "%start", 2, false},
+      {"symbolic count negative step", "%count", "6", -2, false},
+  };
+  for (const BoundaryCase &Case : Cases) {
+    SCOPED_TRACE(Case.Name.str());
+    llvm::LLVMContext Ctx;
+    auto M = parseModule(llvm::formatv(R"IR(
+define void @f(ptr %base, i64 %count, i64 %start) {{
+entry:
+  %initial = getelementptr i8, ptr %base, i64 {0}
+  br label %header
+header:
+  %iteration = phi i64 [ 0, %entry ], [ %next, %body ]
+  %offset = phi i64 [ {0}, %entry ], [ %next.offset, %body ]
+  %more = icmp ult i64 %iteration, {1}
+  br i1 %more, label %body, label %exit
+body:
+  %address = getelementptr i8, ptr %base, i64 %offset
+  %value = load i16, ptr %address, align 1
+  %next.offset = add i64 %offset, {2}
+  %next = add nuw i64 %iteration, 1
+  br label %header
+exit:
+  ret void
+}
+)IR",
+                                       Case.Start, Case.Count, Case.Step)
+                             .str(),
+                         Ctx);
+    ASSERT_TRUE(M);
+    ASSERT_FALSE(llvm::verifyModule(*M, &llvm::errs()));
+    llvm::Function &F = *M->getFunction("f");
+    llvm::PassInstrumentationCallbacks PIC;
+    llvm::FunctionAnalysisManager FAM;
+    registerLoopAnalyses(FAM, PIC);
+    MAIRGraph Graph = createGraphWithFunctionAnalyses(F, FAM);
+    ASSERT_EQ(Graph.children().size(), 1u);
+    MAIRGraph &LoopGraph = *Graph.children().front();
+    ProgramPoint *Source = findMutableMemoryProgramPoint(Graph, "body");
+    ASSERT_NE(Source, nullptr);
+    ASSERT_EQ(Source->size(), 1u);
+    llvm::Instruction *Origin = Source->begin()->getInstructions().front();
+    MAIRGraphAnalysisManager AM;
+    registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+    LoopPeriodicObservationCombinePass Pass;
+    EXPECT_FALSE(runPassOnGraphTree(Pass, Graph, AM).areAllPreserved());
+    EXPECT_TRUE(Source->empty());
+    ASSERT_EQ(LoopGraph.getLoopExits().size(), 1u);
+    const ProgramPoint &Target = *LoopGraph.getLoopExits().front();
+    EXPECT_EQ(Target.getParent(), &Graph);
+    EXPECT_TRUE(Target.hasAlwaysGuard());
+    ASSERT_EQ(Target.size(), 1u);
+    const Observation &Combined = *Target.begin();
+    EXPECT_EQ(Combined.getParent(), &Target);
+    EXPECT_EQ(Combined.getInstructions(),
+              (llvm::ArrayRef<llvm::Instruction *>{Origin}));
+    EXPECT_EQ(Combined.getKind(), AccessKind::Read);
+    if (Case.IsRange) {
+      ASSERT_NE(Combined.getContiguousRegion(), nullptr);
+      EXPECT_EQ(*Combined.getContiguousRegion(),
+                AbstractAccess(F.getArg(0), AbstractValue::symbol(*F.getArg(2)),
+                               AbstractValue::constant(8)));
+    } else {
+      const PeriodicRegion *Periodic = Combined.getPeriodicRegion();
+      ASSERT_NE(Periodic, nullptr);
+      EXPECT_EQ(Periodic->getBase(), F.getArg(0));
+      const MAIRScalarExpr &Start = Periodic->getStart();
+      using Kind = MAIRScalarExpr::Kind;
+      EXPECT_TRUE(Start.getType()->isPointerTy());
+      if (Case.Start == "0") {
+        ASSERT_EQ(Start.getKind(), Kind::LLVMValue);
+        EXPECT_EQ(Start.getLLVMValue(), F.getArg(0));
+      } else {
+        ASSERT_EQ(Start.getKind(), Kind::Add);
+        ASSERT_EQ(Start.operands().size(), 2u);
+        ASSERT_EQ(Start.operands()[0].getKind(), Kind::LLVMValue);
+        EXPECT_EQ(Start.operands()[0].getLLVMValue(), F.getArg(0));
+        const MAIRScalarExpr &Offset = Start.operands()[1];
+        if (Case.Start == "%start") {
+          ASSERT_EQ(Offset.getKind(), Kind::LLVMValue);
+          EXPECT_EQ(Offset.getLLVMValue(), F.getArg(2));
+        } else {
+          ASSERT_EQ(Offset.getKind(), Kind::Constant);
+          EXPECT_EQ(Offset.getConstant(), llvm::APInt(64, Case.Start, 10));
+        }
+      }
+      ASSERT_EQ(Periodic->getStride().getKind(), Kind::Constant);
+      EXPECT_EQ(Periodic->getStride().getConstant(),
+                llvm::APInt(64, Case.Step));
+      ASSERT_EQ(Periodic->getAccessSize().getKind(), Kind::Constant);
+      EXPECT_EQ(Periodic->getAccessSize().getConstant(), llvm::APInt(64, 2));
+      const MAIRScalarExpr &Count = Periodic->getTripCount();
+      unsigned CountBits = Case.Count == "0" ? 2u : 65u;
+      ASSERT_EQ(Count.getType()->getIntegerBitWidth(), CountBits);
+      if (Case.Count == "%count") {
+        ASSERT_EQ(Count.getKind(), Kind::ZeroExtend);
+        ASSERT_EQ(Count.operands().size(), 1u);
+        ASSERT_EQ(Count.operands()[0].getKind(), Kind::LLVMValue);
+        EXPECT_EQ(Count.operands()[0].getLLVMValue(), F.getArg(1));
+      } else {
+        ASSERT_EQ(Count.getKind(), Kind::Constant);
+        EXPECT_EQ(Count.getConstant(), llvm::APInt(CountBits, Case.Count, 10));
+      }
+    }
+    EXPECT_TRUE(Graph.verify());
+    EXPECT_TRUE(runPassOnGraphTree(Pass, Graph, AM).areAllPreserved());
+    EXPECT_TRUE(Graph.verify());
+  }
 }
 
 } // namespace

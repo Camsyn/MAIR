@@ -4292,25 +4292,23 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
   // cover a later one and then disappear, taking that check with it.
   if (!ClInstrumentReads || !ClInstrumentWrites) {
     SmallPtrSet<const mair::Observation *, 32> Kept;
-    for (const auto &[PP, Observations] : Opt.getProgramPointObservations()) {
-      (void)PP;
-      for (const mair::Observation *Obs : Observations) {
-        mair::AccessKind Kind = Obs->getKind();
+    for (const mair::ProgramPoint *PP : Opt.getGraph().allProgramPoints()) {
+      for (const mair::Observation &Obs : *PP) {
+        mair::AccessKind Kind = Obs.getKind();
         if (!ClInstrumentReads && Kind == mair::AccessKind::Read)
           continue;
         if (!ClInstrumentWrites && Kind == mair::AccessKind::Write)
           continue;
-        Kept.insert(Obs);
+        Kept.insert(&Obs);
       }
     }
     Opt.retainObservations(Kept);
   }
 
   SmallPtrSet<const Instruction *, 32> MAIRModeledSources;
-  for (const auto &[PP, Observations] : Opt.getProgramPointObservations()) {
-    (void)PP;
-    for (const mair::Observation *Obs : Observations)
-      for (const Instruction *Source : Obs->getInstructions())
+  for (const mair::ProgramPoint *PP : Opt.getGraph().allProgramPoints()) {
+    for (const mair::Observation &Obs : *PP)
+      for (const Instruction *Source : Obs.getInstructions())
         MAIRModeledSources.insert(Source);
   }
 
@@ -4362,19 +4360,18 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
   SmallVector<const mair::Observation *, 32> MAIRCandidates;
   SmallPtrSet<const mair::Observation *, 32> MAIRTargets;
   SmallPtrSet<const Instruction *, 32> MAIRFallbackSources;
-  for (const auto &[PP, Observations] : Opt.getProgramPointObservations()) {
-    (void)PP;
-    for (const mair::Observation *Obs : Observations) {
+  for (const mair::ProgramPoint *PP : Opt.getGraph().allProgramPoints()) {
+    for (const mair::Observation &Obs : *PP) {
       // TODO: Treat memory intrinsics as ordinary observations. They are
       // call-like and skipped here; AddressSanitizer's original lowering
       // instruments them until then.
-      if (Obs->isCallLike())
+      if (Obs.isCallLike())
         continue;
-      if (CanInstrumentViaMAIR(*Obs)) {
-        MAIRCandidates.push_back(Obs);
+      if (CanInstrumentViaMAIR(Obs)) {
+        MAIRCandidates.push_back(&Obs);
         continue;
       }
-      for (const Instruction *Source : Obs->getInstructions())
+      for (const Instruction *Source : Obs.getInstructions())
         MAIRFallbackSources.insert(Source);
     }
   }

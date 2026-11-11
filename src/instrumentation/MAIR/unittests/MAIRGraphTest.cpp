@@ -132,18 +132,15 @@ TEST(MAOpt, BuildsOptimizesAndExposesProgramPointObservations) {
   ASSERT_TRUE(Graph.verify());
   ASSERT_FALSE(Opt.optimize());
 
-  size_t NumMappedAccesses = 0;
-  for (const auto &Entry : Opt.getProgramPointObservations()) {
-    ASSERT_NE(Entry.first, nullptr);
-    EXPECT_EQ(Entry.second.size(),
-              Opt.getProgramPointObservations(*Entry.first).size());
-    for (const Observation *Obs : Entry.second) {
-      ASSERT_NE(Obs, nullptr);
-      EXPECT_EQ(Obs->getInstructions().size(), 1u);
-      ++NumMappedAccesses;
+  size_t NumObservations = 0;
+  for (const ProgramPoint *PP : Opt.getGraph().allProgramPoints()) {
+    for (const Observation &Obs : *PP) {
+      EXPECT_EQ(Obs.getParent(), PP);
+      EXPECT_EQ(Obs.getInstructions().size(), 1u);
+      ++NumObservations;
     }
   }
-  EXPECT_EQ(NumMappedAccesses, 2u);
+  EXPECT_EQ(NumObservations, 2u);
 
   MAOpt<> O1(F, FAM, &PIC, /*KeepFullDebug=*/false);
   O1.build();
@@ -452,9 +449,9 @@ exit:
   ASSERT_FALSE(Opt.optimize());
 
   unsigned LoopLoads = 0;
-  for (const auto &Entry : Opt.getProgramPointObservations())
-    for (const Observation *Obs : Entry.second)
-      for (const llvm::Instruction *Inst : Obs->getInstructions())
+  for (const ProgramPoint *PP : Opt.getGraph().allProgramPoints())
+    for (const Observation &Obs : *PP)
+      for (const llvm::Instruction *Inst : Obs.getInstructions())
         if (llvm::isa<llvm::LoadInst>(Inst) &&
             Inst->getParent()->getName() == "loop")
           ++LoopLoads;

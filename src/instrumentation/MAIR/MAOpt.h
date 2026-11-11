@@ -3,9 +3,7 @@
 #include "MAIR/MAIRPasses.h"
 #include "MAIR/Materialization/MAIRMaterialization.h"
 
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/PassInstrumentation.h"
 #include "llvm/Support/Error.h"
 
@@ -21,15 +19,9 @@ inline bool isMAIROptEnabled() { return std::getenv("MAIR") != nullptr; }
 /// Owns the complete MAIR lifecycle for one mutable LLVM function.
 ///
 /// The barrier policy is a type because it is part of graph construction, not
-/// a run-time optimization choice. Keeping the graph and its pass managers in
-/// this object also makes the program-point-to-observation view valid until
-/// instantiate() consumes the graph.
+/// a run-time optimization choice.
 template <class BarrierTrait = DefaultBarrierTrait> class MAOpt {
 public:
-  using ProgramPointObservations =
-      llvm::DenseMap<const ProgramPoint *,
-                     llvm::SmallVector<const Observation *, 4>>;
-
   MAOpt(llvm::Function &F, llvm::FunctionAnalysisManager &FAM,
         llvm::PassInstrumentationCallbacks *PIC, bool KeepFullDebug,
         MAIROptimizationConfig Config = MAIROptimizationConfig::generic())
@@ -45,7 +37,6 @@ public:
     ModifiedIR = normalizeMAIRLoops(F, FAM);
     Graph = std::make_unique<MAIRGraph>(
         MAIRGraph::template build<BarrierTrait>(F, FAM, Config));
-    rebuildProgramPointObservations();
     return *Graph;
   }
 
@@ -62,7 +53,6 @@ public:
           It = PP.erase(It);
       }
     }
-    rebuildProgramPointObservations();
   }
 
   llvm::Error optimize() {
@@ -84,7 +74,6 @@ public:
     for (MAIRGraph *Scope : Graph->graphs())
       GAM.clear(*Scope, F.getName());
     Optimized = true;
-    rebuildProgramPointObservations();
     return llvm::Error::success();
   }
 
@@ -96,11 +85,7 @@ public:
     if (!Optimized)
       return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                      "MAOpt graph has not been optimized");
-    llvm::Expected<MAIRInstantiationResult> Result =
-        Graph->instantiate(FAM, Backend);
-    if (Result)
-      ProgramPointToObservations.clear();
-    return Result;
+    return Graph->instantiate(FAM, Backend);
   }
 
   MAIRGraph &getGraph() {
@@ -112,33 +97,9 @@ public:
     return *Graph;
   }
 
-  const ProgramPointObservations &getProgramPointObservations() const {
-    assert(Graph && "MAOpt graph has not been built");
-    return ProgramPointToObservations;
-  }
-
   bool hasModifiedIR() const { return ModifiedIR; }
 
-  llvm::ArrayRef<const Observation *>
-  getProgramPointObservations(const ProgramPoint &PP) const {
-    assert(Graph && "MAOpt graph has not been built");
-    const auto It = ProgramPointToObservations.find(&PP);
-    if (It == ProgramPointToObservations.end())
-      return {};
-    return It->second;
-  }
-
 private:
-  void rebuildProgramPointObservations() {
-    ProgramPointToObservations.clear();
-    for (const ProgramPoint *Point : Graph->allProgramPoints()) {
-      const ProgramPoint &PP = *Point;
-      auto &Observations = ProgramPointToObservations[&PP];
-      for (const Observation &Obs : PP)
-        Observations.push_back(&Obs);
-    }
-  }
-
   llvm::Function &F;
   llvm::FunctionAnalysisManager &FAM;
   bool KeepFullDebug;
@@ -148,7 +109,6 @@ private:
   std::unique_ptr<MAIRGraph> Graph;
   MAIRGraphAnalysisManager GAM;
   MAIRGraphPassManager PM;
-  ProgramPointObservations ProgramPointToObservations;
 };
 
 } // namespace mair

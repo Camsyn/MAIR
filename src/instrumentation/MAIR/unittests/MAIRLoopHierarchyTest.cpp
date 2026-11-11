@@ -259,8 +259,6 @@ TEST(MAIRLoopHierarchy, RetainingAnInnerObservationUpdatesTheWholeTree) {
   registerLoopAnalyses(FAM, PIC);
   MAOpt<> Opt(Function, FAM, &PIC, true);
   MAIRGraph &Graph = Opt.build();
-  ASSERT_EQ(Opt.getProgramPointObservations().size(),
-            Graph.allProgramPoints().size());
   ProgramPoint *InnerPoint = findMutableMemoryProgramPoint(Graph, "inner");
   ASSERT_NE(InnerPoint, nullptr);
   ASSERT_EQ(InnerPoint->size(), 1u);
@@ -269,15 +267,35 @@ TEST(MAIRLoopHierarchy, RetainingAnInnerObservationUpdatesTheWholeTree) {
   Keep.insert(Selected);
   Opt.retainObservations(Keep);
   unsigned Count = 0;
-  for (const auto &Entry : Opt.getProgramPointObservations())
-    for (const Observation *Observation : Entry.second) {
-      EXPECT_EQ(Observation, Selected);
+  for (const ProgramPoint *Point : Graph.allProgramPoints())
+    for (const Observation &Obs : *Point) {
+      EXPECT_EQ(&Obs, Selected);
+      EXPECT_EQ(Obs.getParent(), Point);
       ++Count;
     }
   EXPECT_EQ(Count, 1u);
   const MemoryObject *Object = Graph.getMemoryObject(*Function.getArg(0));
   ASSERT_NE(Object, nullptr);
   EXPECT_EQ(llvm::range_size(Object->users()), 1u);
+  EXPECT_TRUE(Graph.verify());
+  const llvm::Instruction *Source = Selected->getInstructions().front();
+  ASSERT_FALSE(Opt.optimize());
+  unsigned OptimizedCount = 0;
+  for (const ProgramPoint *Point : Graph.allProgramPoints())
+    for (const Observation &Obs : *Point) {
+      EXPECT_EQ(Obs.getParent(), Point);
+      ASSERT_EQ(Obs.getInstructions().size(), 1u);
+      EXPECT_EQ(Obs.getInstructions().front(), Source);
+      ++OptimizedCount;
+    }
+  EXPECT_EQ(OptimizedCount, 1u);
+  EXPECT_EQ(llvm::range_size(Object->users()), 1u);
+  EXPECT_TRUE(Graph.verify());
+  Keep.clear();
+  Opt.retainObservations(Keep);
+  for (const ProgramPoint *Point : Graph.allProgramPoints())
+    EXPECT_TRUE(Point->empty());
+  EXPECT_TRUE(Object->use_empty());
   EXPECT_TRUE(Graph.verify());
 }
 

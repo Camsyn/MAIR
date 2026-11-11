@@ -1152,10 +1152,9 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
     Res |= Opt->hasModifiedIR();
 
     SmallPtrSet<const Instruction *, 32> MAIRModeledSources;
-    for (const auto &[PP, Observations] : Opt->getProgramPointObservations()) {
-      (void)PP;
-      for (const mair::Observation *Obs : Observations)
-        for (const Instruction *Source : Obs->getInstructions())
+    for (const mair::ProgramPoint *PP : Opt->getGraph().allProgramPoints()) {
+      for (const mair::Observation &Obs : *PP)
+        for (const Instruction *Source : Obs.getInstructions())
           MAIRModeledSources.insert(Source);
     }
 
@@ -1207,16 +1206,15 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
 
     SmallVector<const mair::Observation *, 32> MAIRCandidates;
     SmallPtrSet<const Instruction *, 32> MAIRFallbackSources;
-    for (const auto &[PP, Observations] : Opt->getProgramPointObservations()) {
-      (void)PP;
-      for (const mair::Observation *Obs : Observations) {
-        if (Obs->isCallLike())
+    for (const mair::ProgramPoint *PP : Opt->getGraph().allProgramPoints()) {
+      for (const mair::Observation &Obs : *PP) {
+        if (Obs.isCallLike())
           continue;
-        if (CanInstrumentViaMAIR(*Obs)) {
-          MAIRCandidates.push_back(Obs);
+        if (CanInstrumentViaMAIR(Obs)) {
+          MAIRCandidates.push_back(&Obs);
           continue;
         }
-        for (const Instruction *Source : Obs->getInstructions())
+        for (const Instruction *Source : Obs.getInstructions())
           MAIRFallbackSources.insert(Source);
       }
     }

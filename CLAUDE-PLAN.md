@@ -63,10 +63,10 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 - 等价性：移动后的 observation 内容、顺序、所属 MemoryObject 与复制版本相同。两点差异需要 review 确认可接受：observation 对象身份在收缩后保持不变（原来是新对象）；MemoryObject use-list 中的相对顺序不再因复制而改变（生产代码只有 verifier 做成员检查，不依赖顺序）。
 - 不做：LIOM、COM、LPOC 的“复制后删除”暂不改用移动，没有测到它们是热点。
 
-### R2 冗余分析改为程序点级位向量可达性
+### R2 冗余分析改为按强连通分量计算的程序点可达性
 
 - 现状：分析按 `(目标程序点, 来源 observation)` 逐条事实传播，每条事实一次集合插入，空间与时间都是 O(程序点数 × observation 数)。
-- 改法：`canPropagate` 只依赖边，不依赖来源，所以可达性是程序点级的。给带 observation 且为 `AlwaysGuard` 的程序点编号，每个程序点保存一个 `BitVector` 表示“哪些来源程序点能到达这里”，按工作表迭代到不动点。查询时沿目标的 `MemoryObject` use-list 找同 base 的候选来源，再查位向量并调用 `Observation::covers`。
+- 改法：`canPropagate` 只依赖边，不依赖来源，所以可达性是程序点级的。把“启用的边”反向后用 LLVM 的 `scc_iterator` 求强连通分量；反向图的分量按“前驱先出”的顺序给出，因此一遍扫描即可得到每个分量的“可到达它的来源程序点集合”（`SparseBitVector`），不需要迭代到不动点。同一分量内的程序点共享一个集合；程序点只有在环上才能到达自己。查询时沿目标的 `MemoryObject` use-list 找同 base 的候选来源，再查集合并调用 `Observation::covers`。
 - 等价性：`covers` 本来就要求同一 base，`ExcludedSources`、同程序点排除、延迟删除的顺序都不变，因此每次查询的布尔结果不变。
 - 接口变化：`AvailableObservationSet` 和 `RedundantObservationInfo::getIn` 被 `RedundantObservationInfo::isCovered` 取代（两者都没有测试或其他调用方）。
 

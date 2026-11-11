@@ -1,6 +1,8 @@
 #include "MAIR/Analysis/RedundantObservationAnalysis.h"
 
-#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/SCCIterator.h"
+#include "llvm/ADT/SmallVector.h"
 
 using namespace llvm;
 
@@ -8,30 +10,58 @@ namespace mair {
 
 AnalysisKey RedundantObservationAnalysis::Key;
 
-bool AvailableObservationSet::insert(const Observation &Obs) {
-  return Sources.insert(&Obs);
-}
-
-bool AvailableObservationSet::covers(
+bool RedundantObservationInfo::isCovered(
     const Observation &Obs,
     const DenseSet<const Observation *> &ExcludedSources) const {
-  return llvm::any_of(Sources, [&](const Observation *Source) {
-    return !ExcludedSources.contains(Source) &&
-           Source->getParent() != Obs.getParent() && Source->covers(Obs);
-  });
-}
-
-const AvailableObservationSet &
-RedundantObservationInfo::getIn(const ProgramPoint &PP) const {
-  return InSets.find(&PP)->second;
+  const ProgramPoint *Target = Obs.getParent();
+  const SparseBitVector<> &Sources =
+      ReachingSources[ComponentOf[PointIndex.find(Target)->second]];
+  if (Sources.empty())
+    return false;
+  // Only an observation of the same memory object can cover Obs. The use-list
+  // also holds observations of other scopes, which have no index here.
+  for (const Observation &Source : Obs.getMemoryObject().users()) {
+    const ProgramPoint *SourcePoint = Source.getParent();
+    if (SourcePoint == Target)
+      continue;
+    auto It = PointIndex.find(SourcePoint);
+    if (It == PointIndex.end() || !Sources.test(It->second))
+      continue;
+    if (!ExcludedSources.contains(&Source) && Source.covers(Obs))
+      return true;
+  }
+  return false;
 }
 
 namespace {
 
-struct PendingFact {
-  const ProgramPoint *Destination = nullptr;
-  const Observation *Source = nullptr;
+// A program point in the graph of enabled edges, with the edges reversed.
+struct ReachNode {
+  SmallVector<ReachNode *, 4> Preds;
 };
+
+} // namespace
+
+} // namespace mair
+
+namespace llvm {
+
+template <> struct GraphTraits<mair::ReachNode *> {
+  using NodeRef = mair::ReachNode *;
+  using ChildIteratorType = SmallVectorImpl<mair::ReachNode *>::iterator;
+
+  static NodeRef getEntryNode(NodeRef Node) { return Node; }
+  static ChildIteratorType child_begin(NodeRef Node) {
+    return Node->Preds.begin();
+  }
+  static ChildIteratorType child_end(NodeRef Node) { return Node->Preds.end(); }
+};
+
+} // namespace llvm
+
+namespace mair {
+
+namespace {
 
 // PostDom coverage compares two uses of a value that dominates both. The
 // value can denote different addresses when its definition and the earlier
@@ -73,34 +103,60 @@ RedundantObservationInfo
 RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
   (void)AM;
   RedundantObservationInfo Result;
-  SmallVector<PendingFact, 32> Worklist;
+  const unsigned NumPoints = G.size();
+  unsigned Index = 0;
+  for (const ProgramPoint &PP : G)
+    Result.PointIndex[&PP] = Index++;
+
+  // The extra node precedes every program point in the reversed graph, so one
+  // traversal from it visits all of them.
+  std::vector<ReachNode> Nodes(NumPoints + 1);
+  ReachNode &Root = Nodes[NumPoints];
+  BitVector IsSource(NumPoints);
+  Index = 0;
   for (const ProgramPoint &PP : G) {
-    Result.InSets.try_emplace(&PP);
-    if (!PP.hasAlwaysGuard())
-      continue;
-    for (const Observation &Obs : PP) {
-      // A local observation becomes available only after its program point,
-      // so seed it at each allowed child rather than in the source point's IN.
-      for (const ProgramPointEdge &Edge : PP.children())
-        if (canPropagate(G, PP, Edge))
-          Worklist.push_back({&Edge.getNode(), &Obs});
-    }
-  }
-
-  // Propagate only the newly discovered (program point, observation) fact.
-  // Set insertion is both the visited check and the fixed-point condition:
-  // cycles terminate because an identical fact is never forwarded twice.
-  while (!Worklist.empty()) {
-    PendingFact Fact = Worklist.pop_back_val();
-    AvailableObservationSet &In = Result.InSets.find(Fact.Destination)->second;
-    if (!In.insert(*Fact.Source))
-      continue;
-
+    ReachNode &Node = Nodes[Index];
+    // A guarded program point may not execute, so it cannot be a witness.
+    if (PP.hasAlwaysGuard() && !PP.empty())
+      IsSource.set(Index);
     // Edge kinds are filtered at every hop because sanitizer configurations
     // may allow Dom coverage while rejecting PostDom coverage.
-    for (const ProgramPointEdge &Edge : Fact.Destination->children())
-      if (canPropagate(G, *Fact.Destination, Edge))
-        Worklist.push_back({&Edge.getNode(), Fact.Source});
+    for (const ProgramPointEdge &Edge : PP.children())
+      if (canPropagate(G, PP, Edge))
+        Nodes[Result.PointIndex.lookup(&Edge.getNode())].Preds.push_back(&Node);
+    Root.Preds.push_back(&Node);
+    ++Index;
+  }
+
+  // Components of the reversed graph come out with predecessors first, so the
+  // set of every predecessor outside a component is final when it is read.
+  Result.ComponentOf.assign(NumPoints, 0);
+  for (auto SCC = scc_begin(&Root); !SCC.isAtEnd(); ++SCC) {
+    if (SCC->front() == &Root)
+      continue;
+    const unsigned Component = Result.ReachingSources.size();
+    for (const ReachNode *Node : *SCC)
+      Result.ComponentOf[Node - Nodes.data()] = Component;
+
+    SparseBitVector<> Sources;
+    const bool HasCycle = SCC.hasCycle();
+    for (const ReachNode *Node : *SCC) {
+      const unsigned Point = Node - Nodes.data();
+      // A local observation becomes available only after its program point,
+      // so a program point reaches itself only around a cycle.
+      if (HasCycle && IsSource.test(Point))
+        Sources.set(Point);
+      for (const ReachNode *PredNode : Node->Preds) {
+        const unsigned Pred = PredNode - Nodes.data();
+        const unsigned PredComponent = Result.ComponentOf[Pred];
+        if (PredComponent == Component)
+          continue;
+        Sources |= Result.ReachingSources[PredComponent];
+        if (IsSource.test(Pred))
+          Sources.set(Pred);
+      }
+    }
+    Result.ReachingSources.push_back(std::move(Sources));
   }
 
   return Result;

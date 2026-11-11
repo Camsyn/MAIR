@@ -177,9 +177,8 @@ unsigned doInterROE(MAIRGraph &G, const RedundantObservationInfo &Info) {
   // Query one post-intra data-flow snapshot while excluding observations
   // already selected by this phase from serving as later witnesses.
   for (ProgramPoint &PP : G) {
-    const AvailableObservationSet &In = Info.getIn(PP);
     for (Observation &Obs : PP) {
-      if (!In.covers(Obs, ExcludedSources))
+      if (!Info.isCovered(Obs, ExcludedSources))
         continue;
       ExcludedSources.insert(&Obs);
       Redundant.push_back(&Obs);

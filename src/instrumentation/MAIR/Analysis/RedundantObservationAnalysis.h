@@ -4,26 +4,30 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SparseBitVector.h"
+
+#include <vector>
 
 namespace mair {
 
-class AvailableObservationSet {
-  llvm::SmallSetVector<const Observation *, 8> Sources;
-
-public:
-  bool insert(const Observation &Obs);
-  bool covers(const Observation &Obs,
-              const llvm::DenseSet<const Observation *> &ExcludedSources) const;
-};
-
+/// Which program points can witness the observations of which others.
+///
+/// A source program point reaches a target when a path of one or more typed
+/// edges enabled by the graph configuration leads from it to the target. This
+/// is a may-union over paths, not a CFG intersection. Program points in one
+/// strongly connected component are reached by the same sources, so the sets
+/// are stored per component.
 class RedundantObservationInfo {
-  llvm::DenseMap<const ProgramPoint *, AvailableObservationSet> InSets;
+  llvm::DenseMap<const ProgramPoint *, unsigned> PointIndex;
+  std::vector<unsigned> ComponentOf;
+  std::vector<llvm::SparseBitVector<>> ReachingSources;
 
 public:
-  /// Deletable facts are a may-union over sources reachable through every
-  /// typed edge enabled by the graph configuration, not a CFG intersection.
-  const AvailableObservationSet &getIn(const ProgramPoint &PP) const;
+  /// Whether an observation that is not in \p ExcludedSources, and whose
+  /// program point reaches the program point of \p Obs, covers \p Obs.
+  bool
+  isCovered(const Observation &Obs,
+            const llvm::DenseSet<const Observation *> &ExcludedSources) const;
 
 private:
   friend class RedundantObservationAnalysis;

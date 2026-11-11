@@ -1139,8 +1139,7 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
   bool Res = false;
   bool SanitizeFunction = F.hasFnAttribute(Attribute::SanitizeThread);
   const DataLayout &DL = F.getParent()->getDataLayout();
-  SmallPtrSet<const Instruction *, 32> MAIRHandledSources;
-  SmallPtrSet<const mair::Observation *, 32> MAIRTargets;
+  mair::MAIRObservationSelection MAIRSelection;
   std::unique_ptr<mair::MAOpt<TsanMAIRBarrierTrait>> Opt;
 
   if (ClInstrumentMemoryAccesses && SanitizeFunction) {
@@ -1151,12 +1150,7 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
     Opt->build();
     Res |= Opt->hasModifiedIR();
 
-    SmallPtrSet<const Instruction *, 32> MAIRModeledSources;
-    for (const mair::ProgramPoint *PP : Opt->getGraph().allProgramPoints()) {
-      for (const mair::Observation &Obs : *PP)
-        for (const Instruction *Source : Obs.getInstructions())
-          MAIRModeledSources.insert(Source);
-    }
+    auto MAIRModeledSources = mair::collectModeledSources(Opt->getGraph());
 
     if (Error Err = Opt->optimize())
       report_fatal_error(Twine(toString(std::move(Err))));
@@ -1204,30 +1198,9 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
              PointerMayBeCaptured(AI, /*ReturnCaptures=*/true);
     };
 
-    SmallVector<const mair::Observation *, 32> MAIRCandidates;
-    SmallPtrSet<const Instruction *, 32> MAIRFallbackSources;
-    for (const mair::ProgramPoint *PP : Opt->getGraph().allProgramPoints()) {
-      for (const mair::Observation &Obs : *PP) {
-        if (Obs.isCallLike())
-          continue;
-        if (CanInstrumentViaMAIR(Obs)) {
-          MAIRCandidates.push_back(&Obs);
-          continue;
-        }
-        for (const Instruction *Source : Obs.getInstructions())
-          MAIRFallbackSources.insert(Source);
-      }
-    }
-    for (const mair::Observation *Obs : MAIRCandidates) {
-      const Instruction *Source = Obs->getInstructions().front();
-      if (!MAIRFallbackSources.contains(Source))
-        MAIRTargets.insert(Obs);
-    }
-
-    MAIRHandledSources = MAIRModeledSources;
-    for (const Instruction *Source : MAIRFallbackSources)
-      MAIRHandledSources.erase(Source);
-    Opt->retainObservations(MAIRTargets);
+    MAIRSelection = mair::selectMaterializableObservations(
+        Opt->getGraph(), MAIRModeledSources, CanInstrumentViaMAIR);
+    Opt->retainObservations(MAIRSelection.Targets);
   }
 
   __xsan::TsanToInstrument Targets;
@@ -1239,7 +1212,7 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
   // The native load/store list is fallback-only. Optimized Observation
   // objects from MAOpt own the primary instrumentation target set.
   if (ClInstrumentMemoryAccesses && SanitizeFunction) {
-    if (!MAIRTargets.empty()) {
+    if (!MAIRSelection.Targets.empty()) {
 
       class ThreadSanitizerBackend final : public mair::MAIRObservationBackend {
         XsanThreadSanitizer &TSan;
@@ -1271,7 +1244,7 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
     }
 
     for (const auto &II : AllLoadsAndStores)
-      if (!MAIRHandledSources.contains(II.Inst))
+      if (!MAIRSelection.HandledSources.contains(II.Inst))
         Res |= instrumentLoadOrStore(II, DL);
   }
 

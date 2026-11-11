@@ -4305,12 +4305,7 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
     Opt.retainObservations(Kept);
   }
 
-  SmallPtrSet<const Instruction *, 32> MAIRModeledSources;
-  for (const mair::ProgramPoint *PP : Opt.getGraph().allProgramPoints()) {
-    for (const mair::Observation &Obs : *PP)
-      for (const Instruction *Source : Obs.getInstructions())
-        MAIRModeledSources.insert(Source);
-  }
+  auto MAIRModeledSources = mair::collectModeledSources(Opt.getGraph());
 
   if (Error Err = Opt.optimize())
     report_fatal_error(Twine(toString(std::move(Err))));
@@ -4357,34 +4352,9 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
            !IsElidedByNativeAsanOpt(*Source);
   };
 
-  SmallVector<const mair::Observation *, 32> MAIRCandidates;
-  SmallPtrSet<const mair::Observation *, 32> MAIRTargets;
-  SmallPtrSet<const Instruction *, 32> MAIRFallbackSources;
-  for (const mair::ProgramPoint *PP : Opt.getGraph().allProgramPoints()) {
-    for (const mair::Observation &Obs : *PP) {
-      // TODO: Treat memory intrinsics as ordinary observations. They are
-      // call-like and skipped here; AddressSanitizer's original lowering
-      // instruments them until then.
-      if (Obs.isCallLike())
-        continue;
-      if (CanInstrumentViaMAIR(Obs)) {
-        MAIRCandidates.push_back(&Obs);
-        continue;
-      }
-      for (const Instruction *Source : Obs.getInstructions())
-        MAIRFallbackSources.insert(Source);
-    }
-  }
-  for (const mair::Observation *Obs : MAIRCandidates) {
-    const Instruction *Source = Obs->getInstructions().front();
-    if (!MAIRFallbackSources.contains(Source))
-      MAIRTargets.insert(Obs);
-  }
-
-  SmallPtrSet<const Instruction *, 32> MAIRHandledSources = MAIRModeledSources;
-  for (const Instruction *Source : MAIRFallbackSources)
-    MAIRHandledSources.erase(Source);
-  Opt.retainObservations(MAIRTargets);
+  auto MAIRSelection = mair::selectMaterializableObservations(
+      Opt.getGraph(), MAIRModeledSources, CanInstrumentViaMAIR);
+  Opt.retainObservations(MAIRSelection.Targets);
 
   AsanToInstrument Targets;
   if (!collectTargetsToIntrument(F, TLI, TTI, Targets))
@@ -4397,15 +4367,16 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
 
   unsigned NumFallbackOperands = llvm::count_if(
       OperandsToInstrument, [&](InterestingMemoryOperand &Operand) {
-        return !MAIRHandledSources.contains(Operand.getInsn());
+        return !MAIRSelection.HandledSources.contains(Operand.getInsn());
       });
   bool UseCalls =
       InstrumentationWithCallsThreshold >= 0 &&
-      MAIRTargets.size() + NumFallbackOperands + IntrinToInstrument.size() >
+                  MAIRSelection.Targets.size() + NumFallbackOperands +
+                          IntrinToInstrument.size() >
           (unsigned)InstrumentationWithCallsThreshold;
 
   int NumInstrumented = 0;
-  if (!MAIRTargets.empty()) {
+  if (!MAIRSelection.Targets.empty()) {
 
     class AddressSanitizerBackend final : public mair::MAIRObservationBackend {
       XsanAddressSanitizer &ASan;
@@ -4442,7 +4413,7 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
   }
 
   for (auto &Operand : OperandsToInstrument) {
-    if (MAIRHandledSources.contains(Operand.getInsn()))
+    if (MAIRSelection.HandledSources.contains(Operand.getInsn()))
       continue;
     if (!suppressInstrumentationSiteForDebug(NumInstrumented))
       instrumentMop(ObjSizeVis, Operand, UseCalls, F.getDataLayout(), RTCI);

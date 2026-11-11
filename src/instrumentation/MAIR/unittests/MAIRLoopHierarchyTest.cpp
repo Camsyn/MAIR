@@ -299,6 +299,159 @@ TEST(MAIRLoopHierarchy, RetainingAnInnerObservationUpdatesTheWholeTree) {
   EXPECT_TRUE(Graph.verify());
 }
 
+TEST(MAIRLoopHierarchy, SourceSelectionPreservesConflictsAndCollectionTiming) {
+  llvm::LLVMContext Ctx;
+  auto Module = parseModule(R"IR(
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+define void @f(ptr %p, ptr %q, i1 %again) {
+entry:
+  call void @llvm.memset.p0.i64(ptr %p, i8 0, i64 4, i1 false)
+  %read = load i32, ptr %p, align 4
+  br label %loop
+loop:
+  %redundant = load i32, ptr %p, align 4
+  br i1 %again, label %loop, label %exit
+exit:
+  store i32 %read, ptr %q, align 4
+  %readwrite = atomicrmw add ptr %q, i32 1 monotonic
+  ret void
+}
+)IR",
+                            Ctx);
+  ASSERT_TRUE(Module);
+  llvm::Function &Function = *Module->getFunction("f");
+  llvm::BasicBlock &Block = Function.getEntryBlock();
+  llvm::BasicBlock &LoopBlock = *std::next(Function.begin());
+  llvm::BasicBlock &ExitBlock = Function.back();
+  llvm::Instruction &Call = Block.front();
+  llvm::Instruction &Read = *std::next(Block.begin());
+  llvm::Instruction &Redundant = LoopBlock.front();
+  llvm::Instruction &Write = ExitBlock.front();
+  llvm::Instruction &ReadWrite = *std::next(ExitBlock.begin());
+  const llvm::DataLayout &DL = Module->getDataLayout();
+  unsigned PredicateCalls = 0;
+  auto CanInstrument = [&](const Observation &Obs) {
+    ++PredicateCalls;
+    EXPECT_FALSE(Obs.isCallLike());
+    return Obs.getInstructions().size() == 1;
+  };
+
+  for (bool Reversed : {false, true}) {
+    SCOPED_TRACE(Reversed);
+    MAIRGraph Graph(Function);
+    ProgramPoint &Point = Graph.createBBProgramPoint(Block, true);
+    auto AddConflict = [&] {
+      Point.addObservation(Observation(
+          {&Read, &Redundant},
+          AbstractAccess(Function.getArg(0), AbstractValue::constant(0),
+                         AbstractValue::constant(4)),
+          AccessKind::Read));
+    };
+    if (Reversed)
+      AddConflict();
+    const Observation &ReadObs =
+        Point.addObservation(Observation::fromInstruction(Read, DL));
+    const Observation &RedundantObs =
+        Point.addObservation(Observation::fromInstruction(Redundant, DL));
+    const Observation &WriteObs =
+        Point.addObservation(Observation::fromInstruction(Write, DL));
+    const Observation &CallObs =
+        Point.addObservation(Observation::fromInstruction(Call, DL));
+    if (!Reversed)
+      AddConflict();
+    ASSERT_TRUE(Graph.verify());
+    auto Modeled = collectModeledSources(Graph);
+    ASSERT_EQ(Modeled.size(), 4u);
+    PredicateCalls = 0;
+    auto Result =
+        selectMaterializableObservations(Graph, Modeled, CanInstrument);
+    EXPECT_EQ(PredicateCalls, 4u);
+    ASSERT_EQ(Result.Targets.size(), 1u);
+    EXPECT_TRUE(Result.Targets.contains(&WriteObs));
+    EXPECT_FALSE(Result.Targets.contains(&ReadObs));
+    EXPECT_FALSE(Result.Targets.contains(&RedundantObs));
+    EXPECT_FALSE(Result.Targets.contains(&CallObs));
+    ASSERT_EQ(Result.HandledSources.size(), 2u);
+    EXPECT_TRUE(Result.HandledSources.contains(&Write));
+    EXPECT_TRUE(Result.HandledSources.contains(&Call));
+    EXPECT_FALSE(Result.HandledSources.contains(&Read));
+    EXPECT_FALSE(Result.HandledSources.contains(&Redundant));
+  }
+
+  {
+    MAIRGraph Graph(Function, MAIROptimizationConfig::forAddressSanitizer());
+    ProgramPoint &CallPoint = Graph.createInstProgramPoint(Block, Call);
+    ProgramPoint &ReadPoint = Graph.createInstProgramPoint(Block, Read);
+    ProgramPoint &RedundantPoint =
+        Graph.createInstProgramPoint(LoopBlock, Redundant);
+    Graph.addEdge(CallPoint, ReadPoint, PPEdgeKind::Dom);
+    Graph.addEdge(ReadPoint, RedundantPoint, PPEdgeKind::Dom);
+    auto Modeled = collectModeledSources(Graph);
+    ASSERT_EQ(Modeled.size(), 3u);
+    MAIRGraphAnalysisManager AM;
+    EXPECT_FALSE(
+        RedundantObservationEliminationPass().run(Graph, AM).areAllPreserved());
+    EXPECT_TRUE(ReadPoint.empty());
+    EXPECT_TRUE(RedundantPoint.empty());
+    ASSERT_EQ(CallPoint.size(), 1u);
+    EXPECT_EQ(collectModeledSources(Graph).size(), 1u);
+    ASSERT_TRUE(Graph.verify());
+    PredicateCalls = 0;
+    auto Result =
+        selectMaterializableObservations(Graph, Modeled, CanInstrument);
+    EXPECT_EQ(PredicateCalls, 0u);
+    EXPECT_TRUE(Result.Targets.empty());
+    ASSERT_EQ(Result.HandledSources.size(), 3u);
+    for (const llvm::Instruction *Source : {&Call, &Read, &Redundant})
+      EXPECT_TRUE(Result.HandledSources.contains(Source));
+  }
+
+  for (bool InstrumentReads : {false, true}) {
+    for (bool InstrumentWrites : {false, true}) {
+      SCOPED_TRACE(InstrumentReads);
+      SCOPED_TRACE(InstrumentWrites);
+      llvm::PassInstrumentationCallbacks PIC;
+      llvm::FunctionAnalysisManager FAM;
+      registerLoopAnalyses(FAM, PIC);
+      MAOpt<> Opt(Function, FAM, &PIC, true,
+                  MAIROptimizationConfig::forAddressSanitizer());
+      MAIRGraph &Graph = Opt.build();
+      ASSERT_EQ(Graph.children().size(), 1u);
+      EXPECT_EQ(collectModeledSources(Graph).size(), 5u);
+      llvm::SmallPtrSet<const Observation *, 32> Kept;
+      for (const ProgramPoint *Point : Graph.allProgramPoints()) {
+        for (const Observation &Obs : *Point) {
+          if ((!InstrumentReads && Obs.isRead()) ||
+              (!InstrumentWrites && Obs.isWrite()))
+            continue;
+          Kept.insert(&Obs);
+        }
+      }
+      Opt.retainObservations(Kept);
+      auto Modeled = collectModeledSources(Graph);
+      EXPECT_EQ(Modeled.size(),
+                1u + 2u * InstrumentReads + 2u * InstrumentWrites);
+      EXPECT_EQ(Modeled.contains(&Read), InstrumentReads);
+      EXPECT_EQ(Modeled.contains(&Redundant), InstrumentReads);
+      EXPECT_EQ(Modeled.contains(&Write), InstrumentWrites);
+      EXPECT_EQ(Modeled.contains(&Call), InstrumentWrites);
+      EXPECT_TRUE(Modeled.contains(&ReadWrite));
+      PredicateCalls = 0;
+      auto Result =
+          selectMaterializableObservations(Graph, Modeled, CanInstrument);
+      EXPECT_EQ(Result.Targets.size(),
+                1u + 2u * InstrumentReads + InstrumentWrites);
+      EXPECT_EQ(PredicateCalls, Result.Targets.size());
+      EXPECT_EQ(Result.HandledSources.size(), Modeled.size());
+      for (const llvm::Instruction *Source : Modeled)
+        EXPECT_TRUE(Result.HandledSources.contains(Source));
+      for (const Observation *Obs : Kept)
+        EXPECT_EQ(Result.Targets.contains(Obs), !Obs->isCallLike());
+      EXPECT_TRUE(Graph.verify());
+    }
+  }
+}
+
 TEST(MAIRLoopHierarchy, IrreducibleCyclesStillBuild) {
   llvm::LLVMContext Ctx;
   auto Module = parseModule(R"IR(

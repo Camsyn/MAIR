@@ -2,6 +2,7 @@
 
 #include "MAIR/MAIR.h"
 
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Format.h"
@@ -41,7 +42,6 @@ struct Visit {
 };
 
 struct FunctionStats {
-  std::string Name;
   std::vector<Visit> Visits;
 };
 
@@ -90,38 +90,25 @@ const char *fieldName(int Index) {
   return Names[Index];
 }
 
-bool hasAction(const std::array<uint64_t, FieldCount> &Counts) {
-  for (int Index = Preheader; Index < FieldCount; ++Index)
-    if (Counts[Index] != 0)
-      return true;
-  return false;
-}
-
-Visit &findVisit(FunctionStats &Fn, StringRef Pass) {
-  for (Visit &Item : Fn.Visits)
-    if (Item.Pass == Pass)
-      return Item;
+unsigned findVisit(FunctionStats &Fn, StringRef Pass) {
+  for (unsigned Index = 0; Index < Fn.Visits.size(); ++Index)
+    if (Fn.Visits[Index].Pass == Pass)
+      return Index;
   Fn.Visits.push_back(Visit{Pass.str(), {}});
-  return Fn.Visits.back();
+  return Fn.Visits.size() - 1;
 }
 
 void printCounts(raw_ostream &OS,
-                 const std::array<uint64_t, FieldCount> &Counts,
-                 bool ActionsOnly) {
+                 const std::array<uint64_t, FieldCount> &Counts) {
   for (int Index = 0; Index < FieldCount; ++Index) {
     if (Counts[Index] == 0)
-      continue;
-    if (ActionsOnly && Index == In)
       continue;
     OS << "  " << fieldName(Index) << " " << Counts[Index];
   }
 }
 
 void printVisit(raw_ostream &OS, StringRef Pass,
-                const std::array<uint64_t, FieldCount> &Counts,
-                bool ActionsOnly) {
-  if (ActionsOnly && !hasAction(Counts))
-    return;
+                const std::array<uint64_t, FieldCount> &Counts) {
   bool Any = false;
   for (uint64_t Count : Counts)
     if (Count != 0)
@@ -129,18 +116,8 @@ void printVisit(raw_ostream &OS, StringRef Pass,
   if (!Any)
     return;
   OS << format("    %-16s", Pass.str().c_str());
-  printCounts(OS, Counts, ActionsOnly);
+  printCounts(OS, Counts);
   OS << "\n";
-}
-
-std::array<uint64_t, FieldCount> totalCounts(StringRef Pass) {
-  std::array<uint64_t, FieldCount> Sum{};
-  for (const FunctionStats &Fn : Functions)
-    for (const Visit &Item : Fn.Visits)
-      if (Item.Pass == Pass)
-        for (int Index = 0; Index < FieldCount; ++Index)
-          Sum[Index] += Item.Counts[Index];
-  return Sum;
 }
 
 void printLog() {
@@ -160,18 +137,17 @@ void printLog() {
   errs() << "  functions " << Functions.size() << "\n";
   errs() << "  total\n";
 
-  StringMap<unsigned> SeenPasses;
-  std::vector<std::string> PassOrder;
+  MapVector<std::string, std::array<uint64_t, FieldCount>, StringMap<unsigned>>
+      Totals;
   for (const FunctionStats &Fn : Functions) {
     for (const Visit &Item : Fn.Visits) {
-      if (SeenPasses.contains(Item.Pass))
-        continue;
-      SeenPasses[Item.Pass] = 1;
-      PassOrder.push_back(Item.Pass);
+      auto &Sum = Totals[Item.Pass];
+      for (int Index = 0; Index < FieldCount; ++Index)
+        Sum[Index] += Item.Counts[Index];
     }
   }
-  for (const std::string &Pass : PassOrder)
-    printVisit(errs(), Pass, totalCounts(Pass), /*ActionsOnly=*/false);
+  for (const auto &Item : Totals)
+    printVisit(errs(), Item.first, Item.second);
 }
 
 struct LogPrinter {
@@ -211,17 +187,11 @@ MAIRStatScope::MAIRStatScope(StringRef Pass, unsigned Ordinal, StringRef Func) {
   auto It = FunctionIndex.find(Func);
   if (It == FunctionIndex.end()) {
     FunctionIndex[Func] = Functions.size();
-    Functions.push_back(FunctionStats{Func.str(), {}});
+    Functions.push_back(FunctionStats{});
     It = FunctionIndex.find(Func);
   }
   FunctionStats &Fn = Functions[It->second];
-  findVisit(Fn, Label);
-  unsigned VisitIndex = 0;
-  for (const Visit &Item : Fn.Visits) {
-    if (Item.Pass == Label)
-      break;
-    ++VisitIndex;
-  }
+  unsigned VisitIndex = findVisit(Fn, Label);
   static ActiveVisit Storage;
   Storage = ActiveVisit{It->second, VisitIndex};
   Current = &Storage;

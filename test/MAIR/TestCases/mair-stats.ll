@@ -1,5 +1,6 @@
 ; RUN: mair-opt -mair-stats -passes='default<O1>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=O1
 ; RUN: mair-opt -mair-stats -passes='default<Og>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=OG
+; RUN: mair-opt -passes='default<O1>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=OFF --allow-empty
 
 ; The inner loop synthesizes one 128-byte read. The second invariant-motion
 ; visit must hoist that read. LLVM -stats cannot show the two visits apart.
@@ -49,3 +50,5 @@ exit:
 ; OG: lpoc{{.*}}range 1
 ; OG: liom#2{{.*}}preheader 1
 ; OG-NOT: repeated_row32
+
+; OFF-NOT: {{.}}

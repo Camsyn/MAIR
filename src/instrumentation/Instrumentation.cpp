@@ -374,6 +374,12 @@ BasicBlock *splitKnownCriticalEdge(BasicBlock *From, BasicBlock *To,
       CriticalEdgeSplittingOptions(DT, LI, MSSAU, PDT)
           .setMergeIdenticalEdges()
           .setPreserveLCSSA();
+  // LLVM used to create LCSSA PHIs in the split loop-exit block with only one
+  // incoming entry even when multiple edges from From were redirected there.
+  // This wrapper formerly repaired the missing entries. LLVM PR #131744 fixes
+  // their creation (ecc35456d79a, 2025-04-03); our LLVM 23 includes it.
+  //
+  // https://github.com/llvm/llvm-project/pull/131744
   return SplitKnownCriticalEdge(LatchTerm, SuccNum, Options, BBName);
 }
 

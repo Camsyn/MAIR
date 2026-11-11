@@ -148,8 +148,7 @@ int main(int argc, char **argv) {
       continue;
 
     normalizeMAIRLoops(F, FAM);
-    Graphs.push_back(MAIRGraph::build<DefaultBarrierTrait>(F, FAM));
-    MAIRGraph &Graph = Graphs.back();
+    MAIRGraph Graph = MAIRGraph::build<DefaultBarrierTrait>(F, FAM);
     if (!Graph.verify(&errs())) {
       errs() << "invalid MAIRGraph for function " << F.getName() << "\n";
       Graph.print(errs());
@@ -173,6 +172,8 @@ int main(int argc, char **argv) {
     } else if (!DisableOutput && !EmitLLVM) {
       dumpMAIR(Graph, *OutputOS);
     }
+    if (!DisableOutput && EmitLLVM)
+      Graphs.push_back(std::move(Graph));
   }
 
   if (!DisableOutput && EmitLLVM && !Graphs.empty()) {

@@ -11,6 +11,7 @@
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/ConstantRange.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/CycleInfo.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -132,50 +133,23 @@ void verifyNaturalLoops(const LoopInfo &LI) {
   }
 }
 
-// Blocks on a backedge that is not a natural-loop latch. LoopInfo does not
-// represent these cycles, so they have no MAIR loop scope of their own.
-SmallPtrSet<const BasicBlock *, 16>
-collectUnsupportedLoopBlocks(const Function &F, const DominatorTree &DT,
-                             const LoopInfo &LI) {
+// Blocks of irreducible cycles. LoopInfo does not represent these cycles, so
+// they have no MAIR loop scope of their own.
+//
+// TODO: Non-standard loops are not optimized yet. Observations in the cycle
+// stay where they are; represent and optimize the region later.
+SmallPtrSet<const BasicBlock *, 16> collectUnsupportedLoopBlocks(Function &F) {
+  CycleInfo Cycles;
+  Cycles.compute(F);
   SmallPtrSet<const BasicBlock *, 16> Unsupported;
-  SmallPtrSet<const BasicBlock *, 32> Visited;
-  SmallPtrSet<const BasicBlock *, 32> Active;
-  SmallVector<std::pair<const BasicBlock *, const_succ_iterator>, 16> Stack;
-  for (const BasicBlock &Start : F) {
-    if (!Visited.insert(&Start).second)
-      continue;
-    Active.insert(&Start);
-    Stack.emplace_back(&Start, succ_begin(&Start));
-    while (!Stack.empty()) {
-      const BasicBlock *Block = Stack.back().first;
-      auto &NextSuccessor = Stack.back().second;
-      if (NextSuccessor == succ_end(Block)) {
-        Active.erase(Block);
-        Stack.pop_back();
-        continue;
-      }
-      const BasicBlock *Successor = *NextSuccessor++;
-      if (!Active.contains(Successor)) {
-        if (Visited.insert(Successor).second) {
-          Active.insert(Successor);
-          Stack.emplace_back(Successor, succ_begin(Successor));
-        }
-        continue;
-      }
-      const Loop *Loop = LI.getLoopFor(Successor);
-      if (DT.dominates(Successor, Block) && Loop &&
-          Loop->getHeader() == Successor && Loop->contains(Block))
-        continue;
-      // TODO: Non-standard loops are not optimized yet. Observations in the
-      // cycle stay where they are; represent and optimize the region later.
-      bool InCycle = false;
-      for (const auto &Frame : Stack) {
-        if (Frame.first == Successor)
-          InCycle = true;
-        if (InCycle)
-          Unsupported.insert(Frame.first);
-      }
-    }
+  SmallVector<const Cycle *, 8> Worklist(Cycles.toplevel_cycles());
+  while (!Worklist.empty()) {
+    const Cycle *C = Worklist.pop_back_val();
+    if (C->isReducible())
+      append_range(Worklist, C->children());
+    else
+      // The blocks of a cycle include those of its sub-cycles.
+      Unsupported.insert_range(C->blocks());
   }
   return Unsupported;
 }
@@ -196,7 +170,7 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
                            MAIROptimizationConfig Config) {
   verifyNaturalLoops(LI);
   SmallPtrSet<const BasicBlock *, 16> Unsupported =
-      collectUnsupportedLoopBlocks(F, DT, LI);
+      collectUnsupportedLoopBlocks(F);
   MAIRGraph Graph(F, Config);
   for (const BasicBlock *BB : Unsupported)
     Graph.addUnsupportedLoopBlock(*BB);

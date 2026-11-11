@@ -473,4 +473,58 @@ exit:
   EXPECT_TRUE(Graph.verify());
 }
 
+TEST(MAIRLoopHierarchy, EveryBlockOfAnIrreducibleCycleIsPinned) {
+  llvm::LLVMContext Ctx;
+  // The cycle {A, B, C, D} is entered at A and at D. %q advances once per
+  // trip, so B covers C only by going around the cycle to another address.
+  auto Module = parseModule(R"IR(
+define void @f(ptr %p, i1 %c, i1 %c1, i1 %c2) {
+entry:
+  br i1 %c, label %A, label %D
+A:
+  %q = phi ptr [ %p, %entry ], [ %q.next, %D ]
+  br i1 %c1, label %B, label %C
+B:
+  store i32 1, ptr %q, align 4
+  br i1 %c2, label %D, label %exit
+C:
+  store i32 2, ptr %q, align 4
+  br label %D
+D:
+  %qd = phi ptr [ %p, %entry ], [ %q, %B ], [ %q, %C ]
+  %q.next = getelementptr inbounds i32, ptr %qd, i64 1
+  br label %A
+exit:
+  ret void
+}
+)IR",
+                            Ctx);
+  ASSERT_TRUE(Module);
+  llvm::Function &Function = *Module->getFunction("f");
+  MAIRGraph Graph = buildGraph(Function);
+  ASSERT_TRUE(Graph.verify());
+
+  for (const llvm::BasicBlock &BB : Function) {
+    const bool InCycle = BB.getName() != "entry" && BB.getName() != "exit";
+    EXPECT_EQ(Graph.isUnsupportedLoopBlock(&BB), InCycle) << BB.getName().str();
+  }
+  for (llvm::StringRef Block : {"B", "C"}) {
+    ProgramPoint *PP = findMutableMemoryProgramPoint(Graph, Block);
+    ASSERT_NE(PP, nullptr);
+    ASSERT_EQ(PP->size(), 1u);
+    EXPECT_FALSE(PP->begin()->isDeletable());
+    EXPECT_FALSE(PP->begin()->isMovable());
+    EXPECT_FALSE(PP->begin()->isMergeable());
+  }
+
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, nullptr);
+  MAIRGraphPassManager PM;
+  buildMAIRGraphO1Pipeline(PM);
+  PM.run(Graph, AM);
+  EXPECT_EQ(observationCount(Graph, "B"), 1u);
+  EXPECT_EQ(observationCount(Graph, "C"), 1u);
+  EXPECT_TRUE(Graph.verify());
+}
+
 } // namespace

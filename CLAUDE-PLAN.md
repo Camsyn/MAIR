@@ -301,3 +301,28 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 - 这些测试只编译到 IR 再 FileCheck，不链接也不运行，所以不需要 sanitizer 套件的 runtime 配置。
 - 结果：`ninja -C build check-mair` 现在跑 216 项单元测试和 40 项 lit（39 通过、1 unsupported），其中 12 项是迁过来的；ASan、TSan 套件里不再有 `mair-*` 用例。迁移后把其中一个用例的期望改错，确认它会失败，再改回。
 
+## 8. 对外部审查意见的处理（2026-11-12）
+
+审查报告在 `.archive/claude_refactor_review_20261112_1937/`，范围 `29342887..6d134c3b`。三条意见都复现了，事实上都成立。
+
+| 意见 | 结论 | 处理 |
+| --- | --- | --- |
+| P1：ASan 打开 PostDom 覆盖后，不终止的循环里唯一的检查可能永远不执行 | 现象成立，但不是 ASan 特有，也不是这次改动才有 | 不退回 Dom-only；按维护者决定采用“环一定终止”的假设并写明（`e8c62ff9`） |
+| P2：64 个环时 `DenseMap<uint64_t>` 的保留键导致崩溃 | 成立 | `bdfbc8cc`，改用 `std::map`；测试 `HandlesManyIteratedCycles` 覆盖 63/64/65 层 |
+| P3：稀疏图上 ROE 每次查询扫整条 use-list | 成立 | `72d07b78`，在“可达来源的 observation”和“use-list”中枚举较小的一边 |
+
+### P1 的判断
+
+- 复现：审查的 PoC（两个原子读，`witness` 后支配 `header`）在 HEAD 上确实只在 `witness` 留一个检查。
+- 同样的缺口在基线里就有，且不限于 ASan：把 PoC 换成普通读，基线的 generic/TSan 配置同样只留 `witness` 的 observation；带 guard 下沉到循环出口（`liom`）在循环不退出时同样永不执行，ASan 也走这条路径。所以只把 ASan 退回 Dom-only 并不能消除这类缺口。
+- 审查说得对的一点：我在 `15862f21` 加的“指令不保证返回”barrier 只管单条指令，证明不了循环终止，不能当作终止性证明。那个 barrier 仍然保留，它解决的是另一件事（调用可能 `exit` 或抛异常）。
+- 决定（维护者）：假设环一定终止，ASan 继续使用 PostDom 覆盖。假设写在 `PPEdgeKind` 的注释和 `docs/mair-loops.md` 的“终止假设”一节，被接受的行为由 `test/MAIR/TestCases/asan/mair-nonterminating-loop.ll` 固定。
+- 没有做的：按 `mustprogress` / `willreturn` 或 SCEV 的回边次数上界去证明循环有限。调查时看过这些接口，在假设之下不需要。
+
+### 验证
+
+- `ninja -C build check-mair`：217 项单元测试通过；lit 41 项中 40 通过、1 unsupported。
+- ASan 全量 lit（带 MAIR）522 项：318 通过、198 unsupported、1 XFAIL、5 XPASS（与最初基线相同的 5 个），没有失败。数量比上一节少 7，是因为 `mair-*` 用例已迁到 MAIR 套件。
+- TSan 全量 lit 376 项：286 通过、89 unsupported、1 XFAIL。
+- P3：4000 个 switch 分支的 `roe`，基线 0.89 s、修复前 6.27 s、修复后 0.69 s；1500 个菱形的 `simplifygraph,roe` 仍约 1.1–1.2 s。与修复前逐字节比较 378 组一致。耗时为 Debug 构建下的单次测量。
+

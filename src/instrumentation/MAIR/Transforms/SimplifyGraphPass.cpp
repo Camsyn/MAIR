@@ -64,15 +64,10 @@ MergeCandidate findMergeCandidate(MAIRGraph &G) {
 } // namespace
 
 PreservedAnalyses SimplifyGraphPass::run(MAIRGraph &G,
-                                         MAIRGraphAnalysisManager &AM) {
-#if LLVM_ENABLE_STATS
-  NumInputProgramPoints += MAIRStat::compute(G).getNumProgramPoints();
-#else
-  (void)AM;
-#endif
-  MAIRStatScope Scope("simplify", Ordinal, mairStatFunctionName(G));
-  if (mairStatsEnabled())
-    MAIRStatScope::add("in", MAIRStat::compute(G).getNumProgramPoints());
+                                         MAIRGraphAnalysisManager &) {
+  const unsigned NumInputs = MAIRStat::compute(G).getNumProgramPoints();
+  NumInputProgramPoints += NumInputs;
+  MAIRStatScope Scope("simplify", Ordinal, G, NumInputs);
   bool Changed = false;
 
   // Contract one mutual Dom/PostDom pair at a time. Rewiring can expose a new
@@ -84,7 +79,7 @@ PreservedAnalyses SimplifyGraphPass::run(MAIRGraph &G,
       break;
     G.contractProgramPoint(*Candidate.Into, *Candidate.From);
     ++NumMergedProgramPoints;
-    MAIRStatScope::add("merged");
+    MAIRStatScope::add(MAIRStatField::Merged);
     Changed = true;
   }
 

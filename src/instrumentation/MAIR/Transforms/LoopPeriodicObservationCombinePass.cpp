@@ -573,10 +573,10 @@ void commitAggregate(MAIRGraph &G, Observation &Obs, AggregatePlan Plan,
   ++NumAggregatedObservations;
   if (Plan.IsRange) {
     ++NumRangeAggregates;
-    MAIRStatScope::add("range");
+    MAIRStatScope::add(MAIRStatField::Range);
   } else {
     ++NumPeriodicAggregates;
-    MAIRStatScope::add("periodic");
+    MAIRStatScope::add(MAIRStatField::Periodic);
   }
 }
 
@@ -604,12 +604,9 @@ bool aggregateObservations(MAIRGraph &G, MAIRLoopInfo &Loops,
 PreservedAnalyses
 LoopPeriodicObservationCombinePass::run(MAIRGraph &G,
                                         MAIRGraphAnalysisManager &AM) {
-#if LLVM_ENABLE_STATS
-  NumInputObservations += MAIRStat::compute(G).getNumObservations();
-#endif
-  MAIRStatScope Scope("lpoc", Ordinal, mairStatFunctionName(G));
-  if (mairStatsEnabled())
-    MAIRStatScope::add("in", MAIRStat::compute(G).getNumObservations());
+  const unsigned NumInputs = MAIRStat::compute(G).getNumObservations();
+  NumInputObservations += NumInputs;
+  MAIRStatScope Scope("lpoc", Ordinal, G, NumInputs);
   MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
   bool Changed = aggregateObservations(G, Loops, MergeEquivalentObservations);
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();

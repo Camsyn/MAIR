@@ -195,12 +195,9 @@ unsigned doInterROE(MAIRGraph &G, const RedundantObservationInfo &Info) {
 PreservedAnalyses
 RedundantObservationEliminationPass::run(MAIRGraph &G,
                                          MAIRGraphAnalysisManager &AM) {
-#if LLVM_ENABLE_STATS
-  NumInputObservations += MAIRStat::compute(G).getNumObservations();
-#endif
-  MAIRStatScope Scope("roe", Ordinal, mairStatFunctionName(G));
-  if (mairStatsEnabled())
-    MAIRStatScope::add("in", MAIRStat::compute(G).getNumObservations());
+  const unsigned NumInputs = MAIRStat::compute(G).getNumObservations();
+  NumInputObservations += NumInputs;
+  MAIRStatScope Scope("roe", Ordinal, G, NumInputs);
   const unsigned NumEliminatedIntra = doIntraROE(G);
 
   // Intra elimination changes the source set. Compute this pass's inter
@@ -213,9 +210,9 @@ RedundantObservationEliminationPass::run(MAIRGraph &G,
   NumEliminatedObservations += NumEliminated;
   NumEliminatedIntraObservations += NumEliminatedIntra;
   NumEliminatedInterObservations += NumEliminatedInter;
-  MAIRStatScope::add("intra", NumEliminatedIntra);
-  MAIRStatScope::add("inter", NumEliminatedInter);
-  MAIRStatScope::add("eliminated", NumEliminated);
+  MAIRStatScope::add(MAIRStatField::Intra, NumEliminatedIntra);
+  MAIRStatScope::add(MAIRStatField::Inter, NumEliminatedInter);
+  MAIRStatScope::add(MAIRStatField::Eliminated, NumEliminated);
   return NumEliminated == 0 ? PreservedAnalyses::all()
                             : PreservedAnalyses::none();
 }

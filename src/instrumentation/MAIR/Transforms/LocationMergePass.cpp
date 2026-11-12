@@ -116,7 +116,7 @@ bool mergeConcreteRange(ProgramPoint &PP, ObservationIterator Begin,
     Next = PP.erase(Next);
     Changed = true;
     ++NumMergedObservations;
-    MAIRStatScope::add("merged");
+    MAIRStatScope::add(MAIRStatField::Merged);
   }
   return Changed;
 }
@@ -135,7 +135,7 @@ bool mergeNonConcreteRange(ProgramPoint &PP, ObservationIterator Begin,
       Next = std::next(Current);
       Changed = true;
       ++NumMergedObservations;
-      MAIRStatScope::add("merged");
+      MAIRStatScope::add(MAIRStatField::Merged);
     }
   }
   return Changed;
@@ -168,14 +168,9 @@ bool mergeLocations(ProgramPoint &PP, ScalarEvolution *SE) {
 
 PreservedAnalyses LocationMergePass::run(MAIRGraph &G,
                                          MAIRGraphAnalysisManager &AM) {
-#if LLVM_ENABLE_STATS
-  NumInputObservations += MAIRStat::compute(G).getNumObservations();
-#else
-  (void)AM;
-#endif
-  MAIRStatScope Scope("locationmerge", Ordinal, mairStatFunctionName(G));
-  if (mairStatsEnabled())
-    MAIRStatScope::add("in", MAIRStat::compute(G).getNumObservations());
+  const unsigned NumInputs = MAIRStat::compute(G).getNumObservations();
+  NumInputObservations += NumInputs;
+  MAIRStatScope Scope("locationmerge", Ordinal, G, NumInputs);
   ScalarEvolution *SE = nullptr;
   if (AM.isPassRegistered<LoopAnalysis>()) {
     MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);

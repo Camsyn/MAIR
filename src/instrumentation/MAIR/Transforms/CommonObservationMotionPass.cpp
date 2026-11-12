@@ -132,10 +132,10 @@ void moveObservationsToTarget(ProgramPoint &Target,
 
   if (isSink(Direction)) {
     ++NumSunkObservations;
-    MAIRStatScope::add("sunk");
+    MAIRStatScope::add(MAIRStatField::Sunk);
   } else {
     ++NumHoistedObservations;
-    MAIRStatScope::add("hoisted");
+    MAIRStatScope::add(MAIRStatField::Hoisted);
   }
 }
 
@@ -205,16 +205,11 @@ bool moveCommonObservationsToFixedPoint(MAIRGraph &G,
 
 } // namespace
 
-PreservedAnalyses
-CommonObservationMotionPass::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
-#if LLVM_ENABLE_STATS
-  NumInputObservations += MAIRStat::compute(G).getNumObservations();
-#else
-  (void)AM;
-#endif
-  MAIRStatScope Scope("common", Ordinal, mairStatFunctionName(G));
-  if (mairStatsEnabled())
-    MAIRStatScope::add("in", MAIRStat::compute(G).getNumObservations());
+PreservedAnalyses CommonObservationMotionPass::run(MAIRGraph &G,
+                                                   MAIRGraphAnalysisManager &) {
+  const unsigned NumInputs = MAIRStat::compute(G).getNumObservations();
+  NumInputObservations += NumInputs;
+  MAIRStatScope Scope("common", Ordinal, G, NumInputs);
   bool Changed = moveCommonObservationsToFixedPoint(G, MotionDirection::Hoist);
   Changed |= moveCommonObservationsToFixedPoint(G, MotionDirection::Sink);
 

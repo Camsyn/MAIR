@@ -2,26 +2,42 @@
 
 #include "llvm/ADT/StringRef.h"
 
+#include <cstdint>
+
 namespace mair {
 
 class MAIRGraph;
 
-/// Whether `-mair-stats` was requested. Independent of LLVM `-stats`.
-bool mairStatsEnabled();
+/// The counters a pass can report. `-mair-stats` prints them in this order.
+enum class MAIRStatField : uint8_t {
+  In,
+  Preheader,
+  Exit,
+  Range,
+  Periodic,
+  Merged,
+  Intra,
+  Inter,
+  Eliminated,
+  Hoisted,
+  Sunk,
+};
 
 /// Remember which default pipeline produced the counts. First call wins.
 void noteMAIRPipeline(llvm::StringRef Pipeline);
 
-/// Function name of the root graph. Child loop graphs do not store it.
-llvm::StringRef mairStatFunctionName(const MAIRGraph &G);
-
-/// One pass visit. Nested graph visits are sequential, not re-entrant.
+/// One visit of a pass to one graph, reported by `-mair-stats` (which is
+/// independent of LLVM `-stats`). Nested graph visits are sequential, not
+/// re-entrant.
 class MAIRStatScope {
 public:
-  MAIRStatScope(llvm::StringRef Pass, unsigned Ordinal, llvm::StringRef Func);
+  /// \p NumInputs is what the pass starts from: the observations, or for
+  /// graph simplification the program points, of \p G.
+  MAIRStatScope(llvm::StringRef Pass, unsigned Ordinal, const MAIRGraph &G,
+                uint64_t NumInputs);
   ~MAIRStatScope();
 
-  static void add(llvm::StringRef Field, uint64_t N = 1);
+  static void add(MAIRStatField Field, uint64_t N = 1);
 
   MAIRStatScope(const MAIRStatScope &) = delete;
   MAIRStatScope &operator=(const MAIRStatScope &) = delete;

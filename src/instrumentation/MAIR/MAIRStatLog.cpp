@@ -3,6 +3,7 @@
 #include "MAIR/MAIR.h"
 
 #include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Format.h"
@@ -21,20 +22,12 @@ namespace {
 cl::opt<bool> ClMAIRStats("mair-stats",
                           cl::desc("Print a readable MAIR pass summary"));
 
-enum Field {
-  In = 0,
-  Preheader,
-  Exit,
-  Range,
-  Periodic,
-  Merged,
-  Intra,
-  Inter,
-  Eliminated,
-  Hoisted,
-  Sunk,
-  FieldCount
-};
+const char *const FieldNames[] = {"in",         "preheader", "exit",  "range",
+                                  "periodic",   "merged",    "intra", "inter",
+                                  "eliminated", "hoisted",   "sunk"};
+constexpr unsigned FieldCount = std::size(FieldNames);
+static_assert(static_cast<unsigned>(MAIRStatField::Sunk) + 1 == FieldCount,
+              "every MAIR stat field needs a name");
 
 struct Visit {
   std::string Pass;
@@ -57,39 +50,6 @@ struct ActiveVisit {
 
 ActiveVisit *Current = nullptr;
 
-int fieldIndex(StringRef Name) {
-  if (Name == "in")
-    return In;
-  if (Name == "preheader")
-    return Preheader;
-  if (Name == "exit")
-    return Exit;
-  if (Name == "range")
-    return Range;
-  if (Name == "periodic")
-    return Periodic;
-  if (Name == "merged")
-    return Merged;
-  if (Name == "intra")
-    return Intra;
-  if (Name == "inter")
-    return Inter;
-  if (Name == "eliminated")
-    return Eliminated;
-  if (Name == "hoisted")
-    return Hoisted;
-  if (Name == "sunk")
-    return Sunk;
-  return -1;
-}
-
-const char *fieldName(int Index) {
-  static const char *Names[] = {"in",         "preheader", "exit",  "range",
-                                "periodic",   "merged",    "intra", "inter",
-                                "eliminated", "hoisted",   "sunk"};
-  return Names[Index];
-}
-
 unsigned findVisit(FunctionStats &Fn, StringRef Pass) {
   for (unsigned Index = 0; Index < Fn.Visits.size(); ++Index)
     if (Fn.Visits[Index].Pass == Pass)
@@ -100,20 +60,16 @@ unsigned findVisit(FunctionStats &Fn, StringRef Pass) {
 
 void printCounts(raw_ostream &OS,
                  const std::array<uint64_t, FieldCount> &Counts) {
-  for (int Index = 0; Index < FieldCount; ++Index) {
+  for (unsigned Index = 0; Index < FieldCount; ++Index) {
     if (Counts[Index] == 0)
       continue;
-    OS << "  " << fieldName(Index) << " " << Counts[Index];
+    OS << "  " << FieldNames[Index] << " " << Counts[Index];
   }
 }
 
 void printVisit(raw_ostream &OS, StringRef Pass,
                 const std::array<uint64_t, FieldCount> &Counts) {
-  bool Any = false;
-  for (uint64_t Count : Counts)
-    if (Count != 0)
-      Any = true;
-  if (!Any)
+  if (all_of(Counts, [](uint64_t Count) { return Count == 0; }))
     return;
   OS << format("    %-16s", Pass.str().c_str());
   printCounts(OS, Counts);
@@ -142,7 +98,7 @@ void printLog() {
   for (const FunctionStats &Fn : Functions) {
     for (const Visit &Item : Fn.Visits) {
       auto &Sum = Totals[Item.Pass];
-      for (int Index = 0; Index < FieldCount; ++Index)
+      for (unsigned Index = 0; Index < FieldCount; ++Index)
         Sum[Index] += Item.Counts[Index];
     }
   }
@@ -158,30 +114,26 @@ LogPrinter Printer;
 
 } // namespace
 
-bool mairStatsEnabled() { return ClMAIRStats; }
-
 void noteMAIRPipeline(StringRef Name) {
   if (!ClMAIRStats || !Pipeline.empty())
     return;
   Pipeline = Name.str();
 }
 
-StringRef mairStatFunctionName(const MAIRGraph &G) {
-  const MAIRGraph *Cur = &G;
-  while (const MAIRGraph *Parent = Cur->getParent())
-    Cur = Parent;
-  if (const Function *F = Cur->getFunction()) {
-    if (!F->getName().empty())
-      return F->getName();
-    return "<unnamed>";
-  }
-  return "<unknown>";
+// Child loop graphs do not store the function; the root graph does.
+static StringRef getFunctionName(const MAIRGraph &G) {
+  const Function *F = G.getRoot().getFunction();
+  if (!F)
+    return "<unknown>";
+  return F->getName().empty() ? "<unnamed>" : F->getName();
 }
 
-MAIRStatScope::MAIRStatScope(StringRef Pass, unsigned Ordinal, StringRef Func) {
+MAIRStatScope::MAIRStatScope(StringRef Pass, unsigned Ordinal,
+                             const MAIRGraph &G, uint64_t NumInputs) {
   if (!ClMAIRStats)
     return;
   assert(!Current && "MAIR stat scope is not re-entrant");
+  StringRef Func = getFunctionName(G);
   std::string Label =
       Ordinal == 0 ? Pass.str() : (Pass + "#" + Twine(Ordinal)).str();
   auto It = FunctionIndex.find(Func);
@@ -195,6 +147,7 @@ MAIRStatScope::MAIRStatScope(StringRef Pass, unsigned Ordinal, StringRef Func) {
   static ActiveVisit Storage;
   Storage = ActiveVisit{It->second, VisitIndex};
   Current = &Storage;
+  add(MAIRStatField::In, NumInputs);
 }
 
 MAIRStatScope::~MAIRStatScope() {
@@ -203,13 +156,13 @@ MAIRStatScope::~MAIRStatScope() {
   Current = nullptr;
 }
 
-void MAIRStatScope::add(StringRef Field, uint64_t N) {
+void MAIRStatScope::add(MAIRStatField Field, uint64_t N) {
   if (!ClMAIRStats || N == 0)
     return;
   assert(Current && "MAIR stat update outside a pass");
-  int Index = fieldIndex(Field);
-  assert(Index >= 0 && "unknown MAIR stat field");
-  Functions[Current->Function].Visits[Current->Visit].Counts[Index] += N;
+  Functions[Current->Function]
+      .Visits[Current->Visit]
+      .Counts[static_cast<unsigned>(Field)] += N;
 }
 
 } // namespace mair

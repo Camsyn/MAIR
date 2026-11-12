@@ -153,10 +153,10 @@ void commitInvariantMotion(MAIRGraph &G, InvariantMotionPlan Plan,
   moveObservationTo(*Plan.Obs, *Target, MergeEquivalentObservations);
   if (Plan.Kind == InvariantMotionKind::Preheader) {
     ++NumMovedToPreheaders;
-    MAIRStatScope::add("preheader");
+    MAIRStatScope::add(MAIRStatField::Preheader);
   } else {
     ++NumMovedToExits;
-    MAIRStatScope::add("exit");
+    MAIRStatScope::add(MAIRStatField::Exit);
   }
 }
 
@@ -165,12 +165,9 @@ void commitInvariantMotion(MAIRGraph &G, InvariantMotionPlan Plan,
 PreservedAnalyses
 LoopInvariantObservationMotionPass::run(MAIRGraph &G,
                                         MAIRGraphAnalysisManager &AM) {
-#if LLVM_ENABLE_STATS
-  NumInputObservations += MAIRStat::compute(G).getNumObservations();
-#endif
-  MAIRStatScope Scope("liom", Ordinal, mairStatFunctionName(G));
-  if (mairStatsEnabled())
-    MAIRStatScope::add("in", MAIRStat::compute(G).getNumObservations());
+  const unsigned NumInputs = MAIRStat::compute(G).getNumObservations();
+  NumInputObservations += NumInputs;
+  MAIRStatScope Scope("liom", Ordinal, G, NumInputs);
   bool Changed = false;
   MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
   const Loop *ScopedLoop = G.getLoop();

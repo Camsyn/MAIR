@@ -82,7 +82,7 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 
 - SCEV 耗时：600 个串行循环上 `lpoc` 的时间几乎全在 `ScalarEvolution` 内部（`opt -passes='print<scalar-evolution>'` 在同一输入上同样慢），不是 MAIR 的问题。
 - `findValueForSCEV`（LPOC）在回退路径上对整个函数的每条指令调用 `getSCEV`，可能是平方行为，但没有测到，需要真实输入再判断。
-- “值在某点可用”有三份实现（`MAIRLoopInfo::isValueAvailableAt`、COM 的 `isValueAvailableAt`、物化的 `valueAvailableAt`），对非指令值的处理略有不同，可以统一到 `DominatorTree::dominates(const Value*, const Instruction*)`，但要先确认三处接受域一致。
+- “值在某点可用”有三份实现：已在第 6 节 M5 合并。
 - `addressSCEV`（`MAIR.cpp`）与 `regionAddressSCEV`（LPOC）几乎相同，区别是零偏移时用 `getUnknown(Base)` 还是 `getSCEV(Base)`；上一轮审查已指出两者不等价，合并前需要先定语义。
 - 仅被单元测试使用的接口：`MAIRGraph::isAncestor`、`MAIRLoopInfo::getLoopFor`、`MAIRLoopInfo::getTopInvariantLoop`。是否删除由维护者决定。
 - `MAIRGraph::getLoopGraph` 每次调用都线性遍历整棵作用域树，而 LIOM/LPOC 的调用方查询的总是当前图自己的循环，可以直接取 `getLoopPreheader()`。
@@ -112,3 +112,43 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 2. R2 原计划用位向量加工作表迭代，实施时改为按强连通分量一遍算出，计划正文已同步改写。
 3. F0 使程序点内的顺序跟随源码中首次访问的顺序，`test/tsan/TestCases/mair-basic.cpp` 原先期望先 `write` 后 `read`（地址顺序碰巧如此），改为先 `read` 后 `write`。这是产出目标码的可见变化。
 4. F2 没有重新生成 lit golden：现有 lit 用例都没有检查循环内的 PostDom 边，27 项原样通过。
+
+## 6. 可维护性重构（第二轮）
+
+第一轮只做了 bug 修复和性能重构，可读性、去重、复用 LLVM API 这三类被列进第 4 节没有实施。本节补做，全部是不改行为的重构。
+
+- 分支：`claude/mair-refactor-cleanup`，基于 `1482b67a`（第一轮分支 `claude/mair-review-refactor` 的末端），在独立 worktree `.claude/worktrees/mair-refactor` 中完成，没有改动主检出目录。
+- 任务资料（差分脚本、一次性改写脚本、worklog）在该 worktree 的 `.archive/mair_maintainability_refactor_20261112_1452/`，被 `.gitignore` 忽略；删除 worktree 会一并删掉它。
+- 规模：`src/instrumentation/MAIR` 生产代码 17 个文件，+357 / −556 行；测试 +52 行（1 个新单元测试）。
+- 最终状态：`ninja -C build check-mair` 通过，210 项单元测试，lit 27 通过、1 unsupported；ASan 6 项、TSan 5 项 `mair-*` 接入测试通过。其余 sanitizer 测试没有运行。
+
+| 条目 | commit | 做了什么 | 用到的 LLVM API |
+| --- | --- | --- | --- |
+| M1 | `6fa6a493` | 作用域遍历的 const/非 const 两份手写工作表合成一份；六处重复的“找某条边”lambda 收成 `findEdge`；非 const 的代表点 getter 转调 const 版本；移动构造与移动赋值共用 `moveFrom`；`getLoopGraph` 查询自身循环时不再遍历整棵树 | `llvm::depth_first`（复用已有的作用域树 `GraphTraits`） |
+| M2 | `83da3cb6` | 文本 dump、DOT、verifier 各写一遍的站点种类名、边种类名、guard 来源列表，改为共用 `ProgramPointSite::getKindName`、`getEdgeKindName`、`AnyProvenanceExecutedGuard::print`；三个 `toString` 共用一个模板；值名直接打印到流，不再经过临时字符串 | `llvm::ListSeparator` |
+| M3 | `280ef2c9` | 六个 pass 开头重复的 6 行统计样板收进 `MAIRStatScope` 构造函数；统计字段从运行时字符串匹配改为 `MAIRStatField` 枚举，拼错在编译期报错；删除 `mairStatsEnabled`、`mairStatFunctionName` | LLVM 统计量在关闭统计时本身是空操作类，因此去掉了 `#if LLVM_ENABLE_STATS` |
+| M4 | `843caa97` | 三种写法的手写溢出判断换成 LLVM 接口；LPOC 的常量区间大小只算一次；字符串错误不再显式传 `inconvertibleErrorCode` 或经过本地包装 | `checkedAddUnsigned`、`checkedMulUnsigned`、`createStringError(const Twine &)` |
+| M5 | `ffec1eba` | 循环分析、COM、物化三份“值在某点是否可用”合并为 `mair::isValueAvailableAt`（`Value` 与 `AbstractValue` 两个重载） | `DominatorTree::dominates(const Value *, const Instruction *)` |
+| M6 | `0bd31eb3` | `Observation::fromInstruction` 对 load/store/atomicrmw/cmpxchg 的指针与大小不再逐类手写；`lowerExpr` 先按顺序降级操作数再生成指令，四种 min/max 共用一个 helper | `MemoryLocation::get` |
+
+验证方式（每个条目提交前都跑）：
+
+- `ninja -C build check-mair`。
+- `mair-opt` 输出与重构前二进制逐字节比较：36 个输入 × 13 种选项（文本、`-emit-llvm`、`-mair-stats`、`print<stat>`、各 pass 组合）共 546 组，六个条目全部 0 处不同。脚本 `difftest.sh`。
+- M2 另比较 `-emit-dot` 输出 30 组（屏蔽节点地址后），0 处不同。
+- M5、M6 改到物化路径，另用 ASan/TSan 经 MAIR 路径编译接入测试、jsoncpp 和一个循环探针，共 38 次编译，插桩后的 IR 与重构前逐字节一致。
+
+验证的局限：
+
+- 上面 38 次编译没有一次触发标量表达式降级（生成的 IR 里没有 `mair.expr.*`），所以 M6 的 `lowerExpr` 改写只由物化单元测试覆盖，没有端到端差分。
+- 新增的 `LowersExpressionOperandsInOrder` 在旧代码上也通过：旧代码的操作数顺序依赖调用参数求值顺序，clang 恰好从左到右。这个测试固定的是今后的行为，不能证明旧代码有问题。
+- M5 的接受域是靠读代码确认一致的（三处都只接受常量、参数和支配插入点的指令），另有 546 组差分佐证，没有专门的新测试。
+
+这一轮仍然没有做的：
+
+- `addressSCEV` 与 `regionAddressSCEV` 的合并：两者零偏移时语义不同，合并会改变行为。
+- 仅被测试使用的接口（`isAncestor`、`MAIRLoopInfo::getLoopFor`、`getTopInvariantLoop`）的删除：属于接口取舍。
+- min/max 改用 `llvm.smin` 等 intrinsic：会改变产出的 IR。
+- `getExactExecutionCountSCEV` 改用 `ScalarEvolution::getTripCountFromExitCount`：LLVM 的实现在能证明不溢出时会先加一再扩位，得到的 SCEV 形状可能不同，没有证明等价。
+- masked load/store 的操作数下标仍是手写的，没有核对 LLVM 是否有现成访问器。
+- `MAIR.cpp`（约 2000 行）和 `LoopPeriodicObservationCombinePass.cpp`（约 600 行）没有拆分文件。

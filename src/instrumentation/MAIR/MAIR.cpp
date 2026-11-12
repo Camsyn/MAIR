@@ -794,6 +794,34 @@ bool AbstractAccess::contains(const AbstractAccess &Other) const {
   return ThisBegin <= OtherBegin && *OtherEnd <= *ThisEnd;
 }
 
+const SCEV *AbstractAccess::getAddressSCEV(ScalarEvolution &SE,
+                                           ZeroOffsetBase ZeroOffset) const {
+  if (!Base || !Base->getType()->isPointerTy())
+    return nullptr;
+  Type *ByteTy = Type::getInt8Ty(Base->getContext());
+  Value *BaseValue = const_cast<Value *>(Base);
+  if (Offset.isConstant()) {
+    if (Offset.getConstant() == 0)
+      return ZeroOffset == ZeroOffsetBase::Opaque ? SE.getUnknown(BaseValue)
+                                                  : SE.getSCEV(BaseValue);
+    Type *IndexTy = SE.getEffectiveSCEVType(Base->getType());
+    unsigned Width = cast<IntegerType>(IndexTy)->getBitWidth();
+    if (Width < 64 && (Offset.getConstant() >> Width) != 0)
+      return nullptr;
+    const SCEV *Index = SE.getConstant(IndexTy, Offset.getConstant(), true);
+    return SE.getGEPExpr(SE.getUnknown(BaseValue), Index, ByteTy);
+  }
+  if (!Offset.isSymbol())
+    return nullptr;
+  // A pointer-typed symbol is the complete address, not an offset.
+  Value *Symbol = const_cast<Value *>(Offset.getSymbol());
+  if (Symbol->getType()->isPointerTy())
+    return SE.getSCEV(Symbol);
+  if (!Symbol->getType()->isIntegerTy())
+    return nullptr;
+  return SE.getGEPExpr(SE.getUnknown(BaseValue), SE.getSCEV(Symbol), ByteTy);
+}
+
 namespace {
 
 ConstantRange expressionRange(const MAIRScalarExpr &Expr) {
@@ -823,40 +851,15 @@ ConstantRange expressionRange(const MAIRScalarExpr &Expr) {
   }
 }
 
-const SCEV *addressSCEV(const AbstractAccess &Access, ScalarEvolution &SE) {
-  const Value *Base = Access.getBase();
-  if (!Base || !Base->getType()->isPointerTy())
-    return nullptr;
-  Type *ByteTy = Type::getInt8Ty(Base->getContext());
-  Value *BaseValue = const_cast<Value *>(Base);
-  const AbstractValue &Offset = Access.getOffset();
-  if (Offset.isConstant()) {
-    if (Offset.getConstant() == 0)
-      return SE.getUnknown(BaseValue);
-    Type *IndexTy = SE.getEffectiveSCEVType(Base->getType());
-    unsigned Width = cast<IntegerType>(IndexTy)->getBitWidth();
-    if (Width < 64 && (Offset.getConstant() >> Width) != 0)
-      return nullptr;
-    const SCEV *Index = SE.getConstant(IndexTy, Offset.getConstant(), true);
-    return SE.getGEPExpr(SE.getUnknown(BaseValue), Index, ByteTy);
-  }
-  if (!Offset.isSymbol())
-    return nullptr;
-  Value *Symbol = const_cast<Value *>(Offset.getSymbol());
-  if (Symbol->getType()->isPointerTy())
-    return SE.getSCEV(Symbol);
-  if (!Symbol->getType()->isIntegerTy())
-    return nullptr;
-  return SE.getGEPExpr(SE.getUnknown(BaseValue), SE.getSCEV(Symbol), ByteTy);
-}
-
 std::optional<int64_t> constantAddressDelta(const AbstractAccess &A,
                                             const AbstractAccess &B,
                                             const DataLayout *DL,
                                             ScalarEvolution *SE) {
   if (SE) {
-    const SCEV *AddrA = addressSCEV(A, *SE);
-    const SCEV *AddrB = addressSCEV(B, *SE);
+    const SCEV *AddrA =
+        A.getAddressSCEV(*SE, AbstractAccess::ZeroOffsetBase::Opaque);
+    const SCEV *AddrB =
+        B.getAddressSCEV(*SE, AbstractAccess::ZeroOffsetBase::Opaque);
     if (AddrA && AddrB && AddrA->getType() == AddrB->getType()) {
       if (std::optional<APInt> Diff =
               SE->computeConstantDifference(AddrB, AddrA))

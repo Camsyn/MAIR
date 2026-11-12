@@ -77,34 +77,6 @@ std::optional<uint64_t> matchStartOffset(const SCEV *Start,
   return std::nullopt;
 }
 
-const SCEV *regionAddressSCEV(const AbstractAccess &Access,
-                              ScalarEvolution &SE) {
-  const Value *Base = Access.getBase();
-  if (!Base || !Base->getType()->isPointerTy())
-    return nullptr;
-  Type *ByteTy = Type::getInt8Ty(Base->getContext());
-  Value *BaseValue = const_cast<Value *>(Base);
-  const AbstractValue &Offset = Access.getOffset();
-  if (Offset.isConstant()) {
-    if (Offset == 0)
-      return SE.getSCEV(BaseValue);
-    Type *IndexTy = SE.getEffectiveSCEVType(Base->getType());
-    unsigned Width = cast<IntegerType>(IndexTy)->getBitWidth();
-    if (Width < 64 && (Offset.getConstant() >> Width) != 0)
-      return nullptr;
-    const SCEV *Index = SE.getConstant(IndexTy, Offset.getConstant(), true);
-    return SE.getGEPExpr(SE.getUnknown(BaseValue), Index, ByteTy);
-  }
-  if (!Offset.isSymbol())
-    return nullptr;
-  Value *Symbol = const_cast<Value *>(Offset.getSymbol());
-  if (Symbol->getType()->isPointerTy())
-    return SE.getSCEV(Symbol);
-  if (!Symbol->getType()->isIntegerTy())
-    return nullptr;
-  return SE.getGEPExpr(SE.getUnknown(BaseValue), SE.getSCEV(Symbol), ByteTy);
-}
-
 const Value *findValueForSCEV(const SCEV *Expr, const Observation &Obs,
                               ScalarEvolution &SE, const MAIRLoopInfo &Loops,
                               const ProgramPointSite &Site) {
@@ -491,7 +463,8 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
   // original inner pointer — is the recurrence of the parent loop.
   ScalarEvolution &SE = Loops.getSE();
   const SCEVAddRecExpr *Recurrence = nullptr;
-  if (const SCEV *Address = regionAddressSCEV(*Location, SE)) {
+  if (const SCEV *Address = Location->getAddressSCEV(
+          SE, AbstractAccess::ZeroOffsetBase::Analyzed)) {
     if (const auto *AddRec = dyn_cast<SCEVAddRecExpr>(Address))
       if (AddRec->isAffine() && AddRec->getLoop() == G.getLoop())
         Recurrence = AddRec;

@@ -42,6 +42,10 @@
 #include <utility>
 #include <variant>
 
+namespace llvm {
+class SCEV;
+} // namespace llvm
+
 namespace mair {
 
 using llvm::APInt;
@@ -207,6 +211,21 @@ public:
   }
 
   bool contains(const AbstractAccess &Other) const;
+
+  /// How getAddressSCEV expresses the base of an access at offset zero. With
+  /// any other offset the base is always opaque.
+  enum class ZeroOffsetBase : uint8_t {
+    /// The base as an opaque SCEVUnknown, so that two accesses to one base
+    /// differ by exactly their offsets.
+    Opaque,
+    /// ScalarEvolution's own expression for the base, which exposes a
+    /// recurrence when the base advances in a loop.
+    Analyzed,
+  };
+  /// The SCEV of the first accessed byte, or null if the base or the offset
+  /// has no such expression.
+  const llvm::SCEV *getAddressSCEV(llvm::ScalarEvolution &SE,
+                                   ZeroOffsetBase ZeroOffset) const;
 
   static AbstractAccess fromPointerAndSize(const Value &Ptr, AbstractValue Size,
                                            const DataLayout &DL);

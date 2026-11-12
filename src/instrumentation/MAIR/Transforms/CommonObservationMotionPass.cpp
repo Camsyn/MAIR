@@ -27,30 +27,19 @@ namespace mair {
 
 namespace {
 
-bool isValueAvailableAt(const Value *Value, const Instruction &Anchor,
-                        const DominatorTree &DT) {
-  const auto *Def = dyn_cast_or_null<Instruction>(Value);
-  if (!Def)
-    return true;
-  return Def != &Anchor && DT.dominates(Def, &Anchor);
-}
-
 bool isObservationAvailableAt(const Observation &Obs,
                               const ProgramPoint &Target,
                               const DominatorTree &DT) {
   const Instruction &Anchor = Target.getAnchor();
   const AbstractAccess *Location = Obs.getContiguousRegion();
-  if (!Location)
+  if (!Location || Location->hasSizeExpr())
     return false;
-  if (!isValueAvailableAt(Location->getBase(), Anchor, DT))
-    return false;
-  if (Location->hasSizeExpr())
-    return false;
-  if (Location->getOffset().isSymbol() &&
-      !isValueAvailableAt(Location->getOffset().getSymbol(), Anchor, DT))
-    return false;
-  return !Location->getSize().isSymbol() ||
-         isValueAvailableAt(Location->getSize().getSymbol(), Anchor, DT);
+  // An unknown offset or size names no value, so it constrains nothing here.
+  auto IsAvailable = [&](const AbstractValue &V) {
+    return !V.isSymbol() || isValueAvailableAt(*V.getSymbol(), Anchor, DT);
+  };
+  return isValueAvailableAt(*Location->getBase(), Anchor, DT) &&
+         IsAvailable(Location->getOffset()) && IsAvailable(Location->getSize());
 }
 
 enum class MotionDirection { Hoist, Sink };

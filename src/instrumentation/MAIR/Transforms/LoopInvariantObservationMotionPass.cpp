@@ -24,21 +24,13 @@ namespace mair {
 
 namespace {
 
-bool isAbstractValueAvailableAt(const AbstractValue &Value,
-                                const ProgramPointSite &Site,
-                                const MAIRLoopInfo &Loops) {
-  if (Value.isConstant())
-    return true;
-  return Value.isSymbol() && Loops.isValueAvailableAt(*Value.getSymbol(), Site);
-}
-
 bool isRegionAvailableAt(const AbstractAccess &Region,
                          const ProgramPointSite &Site,
                          const MAIRLoopInfo &Loops) {
   return Region.getBase() &&
          Loops.isValueAvailableAt(*Region.getBase(), Site) &&
-         isAbstractValueAvailableAt(Region.getOffset(), Site, Loops) &&
-         isAbstractValueAvailableAt(Region.getSize(), Site, Loops);
+         Loops.isValueAvailableAt(Region.getOffset(), Site) &&
+         Loops.isValueAvailableAt(Region.getSize(), Site);
 }
 
 std::optional<AnyProvenanceExecutedGuard>

@@ -38,29 +38,12 @@ bool isPatchBLoopExit(const BasicBlock &From, const BasicBlock &To,
   return false;
 }
 
-bool valueAvailableAt(const Value &V, const Instruction &At,
-                      DominatorTree &DT) {
-  if (isa<Constant>(&V) || isa<Argument>(&V) || isa<GlobalValue>(&V))
-    return true;
-  const auto *I = dyn_cast<Instruction>(&V);
-  return I && DT.dominates(I, &At);
-}
-
-bool abstractValueAvailableAt(const AbstractValue &V, const Instruction &At,
-                              DominatorTree &DT) {
-  if (V.isUnknown())
-    return false;
-  if (V.isConstant())
-    return true;
-  return valueAvailableAt(*V.getSymbol(), At, DT);
-}
-
 bool expressionAvailableAt(const MAIRScalarExpr &Expr, const Instruction &At,
                            DominatorTree &DT) {
   if (!Expr.isValid())
     return false;
   if (Expr.getKind() == MAIRScalarExpr::Kind::LLVMValue &&
-      !valueAvailableAt(*Expr.getLLVMValue(), At, DT))
+      !isValueAvailableAt(*Expr.getLLVMValue(), At, DT))
     return false;
   return llvm::all_of(Expr.operands(), [&](const MAIRScalarExpr &Operand) {
     return expressionAvailableAt(Operand, At, DT);
@@ -114,12 +97,11 @@ bool validateObservation(const Observation &Obs, const Instruction &Target,
     bool SizeAvailable =
         Region.hasSizeExpr()
             ? expressionAvailableAt(expressionSize(Region), Target, DT)
-            : abstractValueAvailableAt(Region.getSize(), Target, DT);
+            : isValueAvailableAt(Region.getSize(), Target, DT);
     if (!Base || !Base->getType()->isPointerTy() ||
-        (!OffsetIsCompletePointer && !valueAvailableAt(*Base, Target, DT)) ||
+        (!OffsetIsCompletePointer && !isValueAvailableAt(*Base, Target, DT)) ||
         !OffsetHasMaterializableType || !SizeHasMaterializableType ||
-        !abstractValueAvailableAt(Region.getOffset(), Target, DT) ||
-        !SizeAvailable) {
+        !isValueAvailableAt(Region.getOffset(), Target, DT) || !SizeAvailable) {
       Failure = "contiguous region has an unavailable or unknown value";
       return false;
     }
@@ -133,7 +115,7 @@ bool validateObservation(const Observation &Obs, const Instruction &Target,
     if (!ValidateBounds(Region->getBounds()))
       return false;
     if (const Value *Mask = Region->getDynamicMask())
-      if (!valueAvailableAt(*Mask, Target, DT)) {
+      if (!isValueAvailableAt(*Mask, Target, DT)) {
         Failure = "masked region has an unavailable mask";
         return false;
       }

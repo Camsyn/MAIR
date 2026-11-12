@@ -718,6 +718,21 @@ AbstractValue AbstractValue::symbol(const Value &V) {
   return Result;
 }
 
+bool isValueAvailableAt(const Value &V, const Instruction &At,
+                        const DominatorTree &DT) {
+  // Constants and arguments dominate every instruction. Other values, such
+  // as blocks or metadata, are never operands of an observation.
+  return (isa<Instruction>(V) || isa<Argument>(V) || isa<Constant>(V)) &&
+         DT.dominates(&V, &At);
+}
+
+bool isValueAvailableAt(const AbstractValue &V, const Instruction &At,
+                        const DominatorTree &DT) {
+  if (V.isConstant())
+    return true;
+  return V.isSymbol() && isValueAvailableAt(*V.getSymbol(), At, DT);
+}
+
 AbstractAccess AbstractAccess::fromPointerAndSize(const Value &Ptr,
                                                   AbstractValue Size,
                                                   const DataLayout &DL) {

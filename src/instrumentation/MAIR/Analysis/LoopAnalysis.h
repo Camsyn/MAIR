@@ -32,6 +32,8 @@ public:
   llvm::Loop *getLoopFor(const ProgramPoint &PP) const;
   bool isValueAvailableAt(const llvm::Value &V,
                           const ProgramPointSite &Site) const;
+  bool isValueAvailableAt(const AbstractValue &V,
+                          const ProgramPointSite &Site) const;
   bool executesOncePerRelevantIteration(const ProgramPoint &PP,
                                         const llvm::Loop &L) const;
   const llvm::SCEV *getExactExecutionCountSCEV(const ProgramPoint &PP,

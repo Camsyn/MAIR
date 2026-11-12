@@ -28,15 +28,12 @@ Loop *MAIRLoopInfo::getLoopFor(const ProgramPoint &PP) const {
 
 bool MAIRLoopInfo::isValueAvailableAt(const Value &V,
                                       const ProgramPointSite &Site) const {
-  if (!isAvailable())
-    return false;
+  return isAvailable() && mair::isValueAvailableAt(V, Site.getAnchor(), *DT);
+}
 
-  const Instruction &Anchor = Site.getAnchor();
-
-  if (isa<Constant>(&V) || isa<Argument>(&V))
-    return true;
-  const auto *Def = dyn_cast<Instruction>(&V);
-  return Def && DT->dominates(Def, &Anchor);
+bool MAIRLoopInfo::isValueAvailableAt(const AbstractValue &V,
+                                      const ProgramPointSite &Site) const {
+  return isAvailable() && mair::isValueAvailableAt(V, Site.getAnchor(), *DT);
 }
 
 bool MAIRLoopInfo::executesOncePerRelevantIteration(const ProgramPoint &PP,

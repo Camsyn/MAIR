@@ -226,6 +226,14 @@ public:
   void print(raw_ostream &OS) const;
 };
 
+/// Whether an instruction inserted before \p At can use \p V.
+bool isValueAvailableAt(const Value &V, const Instruction &At,
+                        const DominatorTree &DT);
+/// A constant is available everywhere, a symbol where its value is, and an
+/// unknown value nowhere.
+bool isValueAvailableAt(const AbstractValue &V, const Instruction &At,
+                        const DominatorTree &DT);
+
 /// A physical placement for one program point. Edge sites remain virtual
 /// until instantiate() creates a dedicated CFG block in a later stage.
 class ProgramPointSite {

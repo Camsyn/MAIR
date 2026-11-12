@@ -451,4 +451,288 @@ exit:
   }
 }
 
+TEST(MAIRGraphPass, PeriodicCombineRejectsMismatchedProvenanceRecurrences) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, ptr %q) {
+entry:
+  br label %header
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %header ]
+  %pi = getelementptr i8, ptr %p, i64 %i
+  %qi = getelementptr i8, ptr %q, i64 %i
+  %pv = load i8, ptr %pi, align 1
+  %qv = load i8, ptr %qi, align 1
+  %next = add i64 %i, 1
+  %done = icmp eq i64 %next, 4
+  br i1 %done, label %exit, label %header
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  ProgramPoint *Source = nullptr;
+  ProgramPoint *OtherSource = nullptr;
+  llvm::Instruction *PLoad = nullptr;
+  llvm::Instruction *QLoad = nullptr;
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(F, FAM);
+  for (ProgramPoint &PP : testProgramPoints(Graph)) {
+    if (!PP.isMemoryInstSite() || PP.getBasicBlock()->getName() != "header")
+      continue;
+    const llvm::Instruction *I = &PP.getAnchor();
+    if (I->getName() == "pv") {
+      Source = &PP;
+      PLoad = const_cast<llvm::Instruction *>(I);
+    } else if (I->getName() == "qv") {
+      OtherSource = &PP;
+      QLoad = const_cast<llvm::Instruction *>(I);
+    }
+  }
+  ASSERT_NE(Source, nullptr);
+  ASSERT_NE(OtherSource, nullptr);
+  ASSERT_NE(PLoad, nullptr);
+  ASSERT_NE(QLoad, nullptr);
+  while (!Source->empty())
+    Source->erase(Source->begin());
+  while (!OtherSource->empty())
+    OtherSource->erase(OtherSource->begin());
+
+  const llvm::Argument *P = F.getArg(0);
+  Observation Combined(
+      {PLoad, QLoad},
+      AbstractAccess(P, AbstractValue::constant(0), AbstractValue::constant(1)),
+      AccessKind::Read);
+  Source->addObservation(Combined);
+
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+  LoopPeriodicObservationCombinePass Pass;
+  runPassOnGraphTree(Pass, Graph, AM);
+
+  EXPECT_EQ(Source->size(), 1u);
+  const ProgramPoint *Exit = findBlockEntry(Graph, "exit");
+  ASSERT_NE(Exit, nullptr);
+  EXPECT_TRUE(Exit->empty());
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraphPass, PeriodicCombineCanPreserveSingleInstructionProvenance) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  br label %header
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %header ]
+  %pi = getelementptr i8, ptr %p, i64 %i
+  %a = load i8, ptr %pi, align 1
+  %b = load i8, ptr %pi, align 1
+  %next = add i64 %i, 1
+  %done = icmp eq i64 %next, 4
+  br i1 %done, label %exit, label %header
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(F, FAM);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  LoopPeriodicObservationCombinePass Pass(
+      /*MergeEquivalentObservations=*/false);
+  EXPECT_FALSE(runPassOnGraphTree(Pass, Graph, AM).areAllPreserved());
+
+  const ProgramPoint *ExitEntry = findBlockEntry(Graph, "exit");
+  ASSERT_NE(ExitEntry, nullptr);
+  ASSERT_EQ(ExitEntry->size(), 2u);
+  for (const Observation &Obs : *ExitEntry)
+    EXPECT_EQ(Obs.getInstructions().size(), 1u);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraphPass, PeriodicCombineDoesNotCrossCallBarrier) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @barrier() readonly
+
+define void @f(ptr %p) {
+entry:
+  br label %header
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %header ]
+  %pi = getelementptr i8, ptr %p, i64 %i
+  %value = load i8, ptr %pi, align 1
+  call void @barrier()
+  %next = add i64 %i, 1
+  %done = icmp eq i64 %next, 4
+  br i1 %done, label %exit, label %header
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  MAIRGraph Graph = createGraphWithFunctionAnalyses<CallBarrierTrait>(F, FAM);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  LoopPeriodicObservationCombinePass Pass;
+  EXPECT_TRUE(runPassOnGraphTree(Pass, Graph, AM).areAllPreserved());
+
+  const ProgramPoint *Source = findMemoryProgramPoint(Graph, "header");
+  const ProgramPoint *ExitEntry = findBlockEntry(Graph, "exit");
+  ASSERT_NE(Source, nullptr);
+  ASSERT_NE(ExitEntry, nullptr);
+  EXPECT_EQ(Source->size(), 1u);
+  EXPECT_TRUE(ExitEntry->empty());
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraphPass, PeriodicCombineRejectsPrecedingCallBarrier) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @barrier() readonly
+
+define void @f(ptr %p) {
+entry:
+  br label %header
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %header ]
+  call void @barrier()
+  %pi = getelementptr i8, ptr %p, i64 %i
+  %value = load i8, ptr %pi, align 1
+  %next = add i64 %i, 1
+  %done = icmp eq i64 %next, 4
+  br i1 %done, label %exit, label %header
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  MAIRGraph Graph = createGraphWithFunctionAnalyses<CallBarrierTrait>(F, FAM);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  LoopPeriodicObservationCombinePass Pass;
+  EXPECT_TRUE(runPassOnGraphTree(Pass, Graph, AM).areAllPreserved());
+
+  const ProgramPoint *Source = findMemoryProgramPoint(Graph, "header");
+  const ProgramPoint *ExitEntry = findBlockEntry(Graph, "exit");
+  ASSERT_NE(Source, nullptr);
+  ASSERT_NE(ExitEntry, nullptr);
+  EXPECT_EQ(Source->size(), 1u);
+  EXPECT_TRUE(ExitEntry->empty());
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraphPass, PeriodicCombineRejectsFollowingForwardBarrier) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @barrier() readonly
+
+define void @f(ptr %p) {
+entry:
+  br label %header
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %header ]
+  %pi = getelementptr i8, ptr %p, i64 %i
+  %value = load i8, ptr %pi, align 1
+  call void @barrier()
+  %next = add i64 %i, 1
+  %done = icmp eq i64 %next, 4
+  br i1 %done, label %exit, label %header
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  MAIRGraph Graph =
+      createGraphWithFunctionAnalyses<ForwardCallBarrierTrait>(F, FAM);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  LoopPeriodicObservationCombinePass Pass;
+  EXPECT_TRUE(runPassOnGraphTree(Pass, Graph, AM).areAllPreserved());
+
+  const ProgramPoint *Source = findMemoryProgramPoint(Graph, "header");
+  const ProgramPoint *ExitEntry = findBlockEntry(Graph, "exit");
+  ASSERT_NE(Source, nullptr);
+  ASSERT_NE(ExitEntry, nullptr);
+  EXPECT_EQ(Source->size(), 1u);
+  EXPECT_TRUE(ExitEntry->empty());
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(MAIRGraphPass, PeriodicCombineRejectsFollowingReleaseBarrier) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, ptr %flag) {
+entry:
+  br label %header
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %header ]
+  %pi = getelementptr i8, ptr %p, i64 %i
+  %value = load i8, ptr %pi, align 1
+  store atomic i32 1, ptr %flag release, align 4
+  %next = add i64 %i, 1
+  %done = icmp eq i64 %next, 4
+  br i1 %done, label %exit, label %header
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  MAIRGraph Graph =
+      createGraphWithFunctionAnalyses<ForwardReleaseBarrierTrait>(F, FAM);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  LoopPeriodicObservationCombinePass Pass;
+  EXPECT_TRUE(runPassOnGraphTree(Pass, Graph, AM).areAllPreserved());
+
+  const ProgramPoint *Source = findMemoryProgramPoint(Graph, "header");
+  const ProgramPoint *ExitEntry = findBlockEntry(Graph, "exit");
+  ASSERT_NE(Source, nullptr);
+  ASSERT_NE(ExitEntry, nullptr);
+  EXPECT_EQ(Source->size(), 1u);
+  EXPECT_TRUE(ExitEntry->empty());
+  EXPECT_TRUE(Graph.verify());
+}
+
 } // namespace

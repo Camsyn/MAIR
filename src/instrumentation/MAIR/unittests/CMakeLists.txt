@@ -17,6 +17,7 @@ if(EXISTS ${MAIR_GTEST_DIR}/src/gtest-all.cc)
     MAIRGraphTest.cpp
     MAIRLoopHierarchyTest.cpp
     MAIRMaterializationTest.cpp
+    RandomizedSoundnessTest.cpp
     CommonObservationMotionPassTest.cpp
     LocationMergePassTest.cpp
     LoopInvariantObservationMotionPassTest.cpp
@@ -34,6 +35,7 @@ else()
     MAIRGraphTest.cpp
     MAIRLoopHierarchyTest.cpp
     MAIRMaterializationTest.cpp
+    RandomizedSoundnessTest.cpp
     CommonObservationMotionPassTest.cpp
     LocationMergePassTest.cpp
     LoopInvariantObservationMotionPassTest.cpp

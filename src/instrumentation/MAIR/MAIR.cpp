@@ -21,6 +21,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/Value.h"
+#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <optional>
 
@@ -352,12 +353,6 @@ static std::optional<uint64_t> getNonNegativeU64(const APInt &Value) {
   return Value.getZExtValue();
 }
 
-static std::optional<uint64_t> checkedEnd(uint64_t Begin, uint64_t Size) {
-  if (UINT64_MAX - Begin < Size)
-    return std::nullopt;
-  return Begin + Size;
-}
-
 static AbstractValue getStoreSize(Type &Ty, const DataLayout &DL) {
   TypeSize Size = DL.getTypeStoreSize(&Ty);
   if (Size.isScalable())
@@ -366,11 +361,10 @@ static AbstractValue getStoreSize(Type &Ty, const DataLayout &DL) {
 }
 
 static AbstractValue getAccessSize(const Value &Value) {
-  const auto *Size = dyn_cast<ConstantInt>(&Value);
-  if (!Size || Size->getValue().isNegative() ||
-      Size->getValue().getActiveBits() > 64)
-    return AbstractValue::symbol(Value);
-  return AbstractValue::constant(Size->getZExtValue());
+  if (const auto *Size = dyn_cast<ConstantInt>(&Value))
+    if (std::optional<uint64_t> Bytes = getNonNegativeU64(Size->getValue()))
+      return AbstractValue::constant(*Bytes);
+  return AbstractValue::symbol(Value);
 }
 
 static std::optional<SmallBitVector> getConstantMask(const Value &Mask) {
@@ -774,10 +768,11 @@ bool AbstractAccess::contains(const AbstractAccess &Other) const {
     return false;
 
   uint64_t ThisBegin = Offset.getConstant();
-  std::optional<uint64_t> ThisEnd = checkedEnd(ThisBegin, Size.getConstant());
+  std::optional<uint64_t> ThisEnd =
+      checkedAddUnsigned(ThisBegin, Size.getConstant());
   uint64_t OtherBegin = Other.Offset.getConstant();
   std::optional<uint64_t> OtherEnd =
-      checkedEnd(OtherBegin, Other.Size.getConstant());
+      checkedAddUnsigned(OtherBegin, Other.Size.getConstant());
   if (!ThisEnd || !OtherEnd)
     return false;
   return ThisBegin <= OtherBegin && *OtherEnd <= *ThisEnd;
@@ -973,9 +968,11 @@ std::optional<AbstractAccess> AbstractAccess::merge(const AbstractAccess &A,
   }
 
   uint64_t ABegin = A.Offset.getConstant();
-  std::optional<uint64_t> AEnd = checkedEnd(ABegin, A.Size.getConstant());
+  std::optional<uint64_t> AEnd =
+      checkedAddUnsigned(ABegin, A.Size.getConstant());
   uint64_t BBegin = B.Offset.getConstant();
-  std::optional<uint64_t> BEnd = checkedEnd(BBegin, B.Size.getConstant());
+  std::optional<uint64_t> BEnd =
+      checkedAddUnsigned(BBegin, B.Size.getConstant());
   if (!AEnd || !BEnd)
     return std::nullopt;
   if (*AEnd < BBegin || *BEnd < ABegin)

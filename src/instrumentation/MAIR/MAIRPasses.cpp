@@ -162,9 +162,7 @@ Error parseMAIRGraphPassPipeline(MAIRGraphPassManager &PM,
   }
 #include "MAIR/PassRegistry.def"
 
-    return createStringError(inconvertibleErrorCode(),
-                             "unknown MAIRGraph pass '%s'",
-                             PassName.str().c_str());
+    return createStringError("unknown MAIRGraph pass '" + PassName + "'");
   }
   return Error::success();
 }

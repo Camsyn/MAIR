@@ -11,6 +11,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
+#include "llvm/Support/CheckedArithmetic.h"
 
 using namespace llvm;
 
@@ -372,14 +373,18 @@ std::optional<AbstractAccess> buildContiguousAggregate(
     return std::nullopt;
 
   const auto *Count = dyn_cast<SCEVConstant>(ExecutionCount);
-  uint64_t Trips = 0;
+  // Bytes covered by all trips when the trip count is a constant.
+  uint64_t RangeSize = 0;
   if (Count) {
     const APInt &CountValue = Count->getAPInt();
-    if (CountValue.isNegative() || CountValue.getActiveBits() > 64)
+    if (CountValue.isNegative() || CountValue.getActiveBits() > 64 ||
+        CountValue.isZero())
       return std::nullopt;
-    Trips = CountValue.getZExtValue();
-    if (Trips == 0 || UINT64_MAX / AccessSize < Trips)
+    std::optional<uint64_t> Size =
+        checkedMulUnsigned(CountValue.getZExtValue(), AccessSize);
+    if (!Size)
       return std::nullopt;
+    RangeSize = *Size;
   } else if (StepValue.isNegative()) {
     return std::nullopt;
   }
@@ -393,22 +398,21 @@ std::optional<AbstractAccess> buildContiguousAggregate(
     if (StartOffset->isConstant()) {
       uint64_t RangeOffset = StartOffset->getConstant();
       if (StepValue.isNegative()) {
-        uint64_t PreviousTrips = Trips - 1;
-        if (UINT64_MAX / AccessSize < PreviousTrips)
-          return std::nullopt;
-        uint64_t Distance = PreviousTrips * AccessSize;
+        // The last trip starts one access short of the whole range below
+        // the first.
+        uint64_t Distance = RangeSize - AccessSize;
         if (RangeOffset < Distance)
           return std::nullopt;
         RangeOffset -= Distance;
       }
       return AbstractAccess(Location->getBase(),
                             AbstractValue::constant(RangeOffset),
-                            AbstractValue::constant(Trips * AccessSize));
+                            AbstractValue::constant(RangeSize));
     }
     if (StepValue.isNegative())
       return std::nullopt;
     return AbstractAccess(Location->getBase(), *StartOffset,
-                          AbstractValue::constant(Trips * AccessSize));
+                          AbstractValue::constant(RangeSize));
   }
   if (!StartOffset->isConstant())
     return std::nullopt;

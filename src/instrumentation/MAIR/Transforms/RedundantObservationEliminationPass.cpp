@@ -6,10 +6,10 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Support/CheckedArithmetic.h"
 
 #include <array>
 #include <iterator>
-#include <limits>
 #include <optional>
 
 using namespace llvm;
@@ -48,16 +48,15 @@ using WitnessesByLevel = std::array<CoveringWitness, 256>;
 using WitnessesByAtomicity = std::array<WitnessesByLevel, 2>;
 
 std::optional<ConcreteRange> getConcreteRange(const Observation &Obs) {
-  const AbstractAccess *Region = Obs.getContiguousRegion();
-  if (!Region || !Region->getOffset().isConstant() ||
-      !Region->getSize().isConstant())
+  if (!Obs.hasConcreteRange())
     return std::nullopt;
-
-  uint64_t Begin = Region->getOffset().getConstant();
-  uint64_t Size = Region->getSize().getConstant();
-  if (Size > std::numeric_limits<uint64_t>::max() - Begin)
+  const AbstractAccess &Region = *Obs.getContiguousRegion();
+  uint64_t Begin = Region.getOffset().getConstant();
+  std::optional<uint64_t> End =
+      checkedAddUnsigned(Begin, Region.getSize().getConstant());
+  if (!End)
     return std::nullopt;
-  return ConcreteRange{Begin, Begin + Size};
+  return ConcreteRange{Begin, *End};
 }
 
 bool compareForCoverage(const Observation &LHS, const Observation &RHS) {

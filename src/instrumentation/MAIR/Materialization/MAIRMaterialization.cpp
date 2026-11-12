@@ -14,10 +14,6 @@ using namespace llvm;
 namespace mair {
 namespace {
 
-Error materializationError(const Twine &Message) {
-  return createStringError(inconvertibleErrorCode(), Message);
-}
-
 struct EdgeCursor {
   const BasicBlock *From = nullptr;
   const BasicBlock *To = nullptr;
@@ -160,9 +156,9 @@ Expected<MAIRMaterializationPlan> buildPlan(const MAIRGraph &Graph, Function &F,
                                             DominatorTree &DT, LoopInfo &LI) {
   MAIRMaterializationPlan Plan;
   if (!Graph.isLive())
-    return materializationError("cannot instantiate an already consumed graph");
+    return createStringError("cannot instantiate an already consumed graph");
   if (!Graph.verify())
-    return materializationError("cannot instantiate an invalid MAIRGraph");
+    return createStringError("cannot instantiate an invalid MAIRGraph");
 
   for (const ProgramPoint *Point : Graph.allProgramPoints()) {
     const ProgramPoint &PP = *Point;
@@ -174,35 +170,34 @@ Expected<MAIRMaterializationPlan> buildPlan(const MAIRGraph &Graph, Function &F,
       const BasicBlock *From = PP.getEdgeFrom();
       const BasicBlock *To = PP.getEdgeTo();
       if (!From || !To || From->getParent() != &F || To->getParent() != &F)
-        return materializationError("edge site is outside the graph function");
+        return createStringError("edge site is outside the graph function");
       unsigned SuccNo = GetSuccessorNumber(From, To);
       if (!isCriticalEdge(From->getTerminator(), SuccNo,
                           /*AllowIdenticalEdges=*/true) ||
           !isPatchBLoopExit(*From, *To, LI))
-        return materializationError(
+        return createStringError(
             "unsupported edge site: expected a critical Patch B loop exit");
       Target = &PP.getAnchor();
     } else {
       const BasicBlock *BB = PP.getBasicBlock();
       const Instruction &Anchor = PP.getAnchor();
       if (!BB || BB->getParent() != &F || Anchor.getParent() != BB)
-        return materializationError(
-            "anchored program point has a stale anchor");
+        return createStringError("anchored program point has a stale anchor");
       BasicBlock::const_iterator FirstInsertion = BB->getFirstInsertionPt();
       if (FirstInsertion == BB->end() ||
           (&Anchor != &*FirstInsertion &&
            !FirstInsertion->comesBefore(&Anchor)))
-        return materializationError(
+        return createStringError(
             "anchored program point has no legal insertion point");
       Target = &Anchor;
     }
 
     std::string Failure;
     if (!validateGuard(PP, *Target, Failure))
-      return materializationError(Failure);
+      return createStringError(Failure);
     for (const Observation &Obs : PP)
       if (!validateObservation(Obs, *Target, DT, Failure))
-        return materializationError(Failure);
+        return createStringError(Failure);
 
     MaterializationUnit Unit{&PP, PP.getSite(), PP.getGuard(), {}};
     for (const Observation &Obs : PP)
@@ -376,11 +371,11 @@ Expected<MAIRInstantiationResult>
 MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
                        MAIRObservationBackend &Backend) {
   if (getParent())
-    return materializationError("instantiate requires the root MAIRGraph");
+    return createStringError("instantiate requires the root MAIRGraph");
   if (!isLive())
-    return materializationError("graph already consumed");
+    return createStringError("graph already consumed");
   if (!MutableF)
-    return materializationError(
+    return createStringError(
         "instantiate requires a graph built from a mutable Function");
   Function &F = *MutableF;
 

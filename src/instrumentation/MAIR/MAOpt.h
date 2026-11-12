@@ -102,11 +102,9 @@ public:
 
   llvm::Error optimize() {
     if (!Graph)
-      return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                     "MAOpt graph has not been built");
+      return llvm::createStringError("MAOpt graph has not been built");
     if (Optimized)
-      return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                     "MAOpt graph has already been optimized");
+      return llvm::createStringError("MAOpt graph has already been optimized");
 
     if (KeepFullDebug)
       buildMAIRGraphOgPipeline(PM);
@@ -114,8 +112,7 @@ public:
       buildMAIRGraphO1Pipeline(PM);
     PM.run(*Graph, GAM);
     if (!Graph->verify())
-      return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                     "MAOpt produced an invalid MAIRGraph");
+      return llvm::createStringError("MAOpt produced an invalid MAIRGraph");
     for (MAIRGraph *Scope : Graph->graphs())
       GAM.clear(*Scope, F.getName());
     Optimized = true;
@@ -125,11 +122,9 @@ public:
   llvm::Expected<MAIRInstantiationResult>
   instantiate(MAIRObservationBackend &Backend) {
     if (!Graph)
-      return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                     "MAOpt graph has not been built");
+      return llvm::createStringError("MAOpt graph has not been built");
     if (!Optimized)
-      return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                     "MAOpt graph has not been optimized");
+      return llvm::createStringError("MAOpt graph has not been optimized");
     return Graph->instantiate(FAM, Backend);
   }
 

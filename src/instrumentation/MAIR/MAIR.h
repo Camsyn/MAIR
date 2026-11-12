@@ -1097,6 +1097,8 @@ private:
   void assertLive(StringRef Operation) const;
   void markConsumed();
   void clearStorage();
+  /// Replace the contents of this root graph with those of \p Other.
+  void moveFrom(MAIRGraph &Other);
   /// Fold each scope's barriers into its ancestors. Descendants are visited
   /// first, so a barrier inside a nested loop reaches the function scope.
   void propagateBarrier();

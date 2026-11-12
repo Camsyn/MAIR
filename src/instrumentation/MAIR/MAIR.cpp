@@ -1,5 +1,6 @@
 #include "MAIR/MAIR.h"
 
+#include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
@@ -451,6 +452,15 @@ static void printEdgeKind(raw_ostream &OS, PPEdgeKind Kind) {
     OS << "pdom";
     break;
   }
+}
+
+// The edge of kind \p Kind to \p Node in \p Edges, or the end of the list.
+template <class EdgeListT>
+static auto findEdge(EdgeListT &Edges, const ProgramPoint &Node,
+                     PPEdgeKind Kind) {
+  return llvm::find_if(Edges, [&](const ProgramPointEdge &Edge) {
+    return &Edge.getNode() == &Node && Edge.getKind() == Kind;
+  });
 }
 
 static void printEdgeList(raw_ostream &OS, ArrayRef<ProgramPointEdge> Edges) {
@@ -1401,15 +1411,11 @@ Observation &ProgramPoint::addObservation(const Observation &A) {
 }
 
 bool ProgramPoint::hasChild(const ProgramPoint &PP, PPEdgeKind Kind) const {
-  return llvm::any_of(children(), [&](const ProgramPointEdge &Edge) {
-    return &Edge.getNode() == &PP && Edge.getKind() == Kind;
-  });
+  return findEdge(Children, PP, Kind) != Children.end();
 }
 
 bool ProgramPoint::hasParent(const ProgramPoint &PP, PPEdgeKind Kind) const {
-  return llvm::any_of(parents(), [&](const ProgramPointEdge &Edge) {
-    return &Edge.getNode() == &PP && Edge.getKind() == Kind;
-  });
+  return findEdge(Parents, PP, Kind) != Parents.end();
 }
 
 bool ProgramPoint::hasCompatibleMergeSemantics(
@@ -1557,39 +1563,15 @@ MAIRGraph::MAIRGraph(MAIRGraph &ParentGraph, const Loop &Loop)
       Resources(ParentGraph.Resources), Parent(&ParentGraph), ScopeLoop(&Loop) {
 }
 
-MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept
-    : F(Other.F), MutableF(Other.MutableF), GraphState(Other.GraphState),
-      OptimizationConfig(Other.OptimizationConfig),
-      GraphAllocator(std::move(Other.GraphAllocator)),
-      LoopPointAllocator(std::move(Other.LoopPointAllocator)),
-      OwnedResources(std::move(Other.OwnedResources)),
-      Resources(Other.Resources), Analyses(std::move(Other.Analyses)),
-      Parent(Other.Parent), ScopeLoop(Other.ScopeLoop),
-      ChildGraphs(std::move(Other.ChildGraphs)),
-      LoopPreheader(Other.LoopPreheader), LoopExits(std::move(Other.LoopExits)),
-      ForwardBarrier(Other.ForwardBarrier),
-      BackwardBarrier(Other.BackwardBarrier),
-      UnsupportedLoopBlocks(std::move(Other.UnsupportedLoopBlocks)),
-      BBEntryRepresentatives(std::move(Other.BBEntryRepresentatives)),
-      BBExitRepresentatives(std::move(Other.BBExitRepresentatives)),
-      ProgramPoints(std::move(Other.ProgramPoints)),
-      NumProgramPoints(Other.NumProgramPoints), NumEdges(Other.NumEdges) {
-  if (Parent)
-    report_fatal_error("cannot move a MAIR loop graph outside its owner");
-  for (ProgramPoint &PP : ProgramPoints)
-    PP.setParent(this);
-  for (auto &Child : ChildGraphs)
-    Child->Parent = this;
-  Other.F = nullptr;
-  Other.MutableF = nullptr;
-  Other.Resources = nullptr;
-  Other.Analyses.clearReferences();
-  Other.GraphState = State::MovedFrom;
-}
+MAIRGraph::MAIRGraph(MAIRGraph &&Other) noexcept { moveFrom(Other); }
 
 MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
-  if (this == &Other)
-    return *this;
+  if (this != &Other)
+    moveFrom(Other);
+  return *this;
+}
+
+void MAIRGraph::moveFrom(MAIRGraph &Other) {
   if (Parent || Other.Parent)
     report_fatal_error("cannot move a MAIR loop graph outside its owner");
   clearStorage();
@@ -1614,6 +1596,7 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   ProgramPoints = std::move(Other.ProgramPoints);
   NumProgramPoints = Other.NumProgramPoints;
   NumEdges = Other.NumEdges;
+  // Program points and loop graphs refer back to the graph that owns them.
   for (ProgramPoint &PP : ProgramPoints)
     PP.setParent(this);
   for (auto &Child : ChildGraphs)
@@ -1623,35 +1606,19 @@ MAIRGraph &MAIRGraph::operator=(MAIRGraph &&Other) noexcept {
   Other.Resources = nullptr;
   Other.Analyses.clearReferences();
   Other.GraphState = State::MovedFrom;
-  return *this;
 }
 
 MAIRGraph::~MAIRGraph() { clearStorage(); }
 
 SmallVector<MAIRGraph *, 8> MAIRGraph::graphs() {
   assertLive("iterate");
-  SmallVector<MAIRGraph *, 8> Result;
-  SmallVector<MAIRGraph *, 8> Pending{this};
-  while (!Pending.empty()) {
-    MAIRGraph *Graph = Pending.pop_back_val();
-    Result.push_back(Graph);
-    for (const auto &Child : llvm::reverse(Graph->ChildGraphs))
-      Pending.push_back(Child.get());
-  }
-  return Result;
+  MAIRScopeTree Tree{this};
+  return SmallVector<MAIRGraph *, 8>(depth_first(&Tree));
 }
 
 SmallVector<const MAIRGraph *, 8> MAIRGraph::graphs() const {
-  assertLive("iterate");
-  SmallVector<const MAIRGraph *, 8> Result;
-  SmallVector<const MAIRGraph *, 8> Pending{this};
-  while (!Pending.empty()) {
-    const MAIRGraph *Graph = Pending.pop_back_val();
-    Result.push_back(Graph);
-    for (const auto &Child : llvm::reverse(Graph->ChildGraphs))
-      Pending.push_back(Child.get());
-  }
-  return Result;
+  SmallVector<MAIRGraph *, 8> Graphs = const_cast<MAIRGraph *>(this)->graphs();
+  return SmallVector<const MAIRGraph *, 8>(Graphs.begin(), Graphs.end());
 }
 
 SmallVector<ProgramPoint *, 16> MAIRGraph::allProgramPoints() {
@@ -1663,11 +1630,9 @@ SmallVector<ProgramPoint *, 16> MAIRGraph::allProgramPoints() {
 }
 
 SmallVector<const ProgramPoint *, 16> MAIRGraph::allProgramPoints() const {
-  SmallVector<const ProgramPoint *, 16> Result;
-  for (const MAIRGraph *Graph : graphs())
-    for (const ProgramPoint &PP : *Graph)
-      Result.push_back(&PP);
-  return Result;
+  SmallVector<ProgramPoint *, 16> Points =
+      const_cast<MAIRGraph *>(this)->allProgramPoints();
+  return SmallVector<const ProgramPoint *, 16>(Points.begin(), Points.end());
 }
 
 MAIRGraph *MAIRGraph::getLoopGraph(const Loop &Loop) {
@@ -1675,6 +1640,8 @@ MAIRGraph *MAIRGraph::getLoopGraph(const Loop &Loop) {
 }
 
 const MAIRGraph *MAIRGraph::getLoopGraph(const Loop &Loop) const {
+  if (ScopeLoop == &Loop)
+    return this;
   for (const MAIRGraph *Graph : getRoot().graphs())
     if (Graph->getLoop() == &Loop)
       return Graph;
@@ -1864,9 +1831,7 @@ MAIRGraph::iterator MAIRGraph::erase(ProgramPoint &PP) {
   // lists but contributes only once to the graph edge count.
   auto RemoveMirror = [](auto &Edges, const ProgramPoint &Neighbor,
                          PPEdgeKind Kind) {
-    auto EdgeIt = llvm::find_if(Edges, [&](const ProgramPointEdge &Edge) {
-      return &Edge.getNode() == &Neighbor && Edge.getKind() == Kind;
-    });
+    auto EdgeIt = findEdge(Edges, Neighbor, Kind);
     assert(EdgeIt != Edges.end() && "MAIR edge lists are not symmetric");
     Edges.erase(EdgeIt);
   };
@@ -1942,10 +1907,8 @@ const ProgramPoint *MAIRGraph::find(StringRef Name) const {
 }
 
 ProgramPoint &MAIRGraph::getBBEntryRepresentative(const BasicBlock &BB) {
-  assertLive("query");
-  ProgramPoint *Representative = BBEntryRepresentatives.lookup(&BB);
-  assert(Representative && "Seems the MAIRGraph is broken.");
-  return *Representative;
+  return const_cast<ProgramPoint &>(
+      std::as_const(*this).getBBEntryRepresentative(BB));
 }
 
 const ProgramPoint &
@@ -1957,10 +1920,8 @@ MAIRGraph::getBBEntryRepresentative(const BasicBlock &BB) const {
 }
 
 ProgramPoint &MAIRGraph::getBBExitRepresentative(const BasicBlock &BB) {
-  assertLive("query");
-  ProgramPoint *Representative = BBExitRepresentatives.lookup(&BB);
-  assert(Representative && "Seems the MAIRGraph is broken.");
-  return *Representative;
+  return const_cast<ProgramPoint &>(
+      std::as_const(*this).getBBExitRepresentative(BB));
 }
 
 const ProgramPoint &
@@ -2036,17 +1997,12 @@ void MAIRGraph::removeEdge(ProgramPoint &From, ProgramPoint &To,
   assertLive("remove an edge from");
   assert(From.getParent() == this && To.getParent() == this &&
          "MAIRGraph edge endpoints must belong to this graph");
-  auto ChildIt =
-      llvm::find_if(From.Children, [&](const ProgramPointEdge &Edge) {
-        return &Edge.getNode() == &To && Edge.getKind() == Kind;
-      });
+  auto ChildIt = findEdge(From.Children, To, Kind);
   if (ChildIt == From.Children.end())
     return;
   From.Children.erase(ChildIt);
 
-  auto ParentIt = llvm::find_if(To.Parents, [&](const ProgramPointEdge &Edge) {
-    return &Edge.getNode() == &From && Edge.getKind() == Kind;
-  });
+  auto ParentIt = findEdge(To.Parents, From, Kind);
   assert(ParentIt != To.Parents.end() && "MAIR edge lists are not symmetric");
   To.Parents.erase(ParentIt);
   --NumEdges;
@@ -2055,12 +2011,8 @@ void MAIRGraph::removeEdge(ProgramPoint &From, ProgramPoint &To,
 bool MAIRGraph::hasEdge(const ProgramPoint &From, const ProgramPoint &To,
                         PPEdgeKind Kind) const {
   assertLive("query");
-  if (From.getParent() != this || To.getParent() != this)
-    return false;
-  for (const ProgramPointEdge &Edge : From.children())
-    if (&Edge.getNode() == &To && Edge.getKind() == Kind)
-      return true;
-  return false;
+  return From.getParent() == this && To.getParent() == this &&
+         From.hasChild(To, Kind);
 }
 
 bool MAIRGraph::isAncestor(const ProgramPoint &Ancestor,

@@ -29,32 +29,11 @@ using namespace mair;
 
 namespace {
 
-std::unique_ptr<Module> parseMaterializationModule(StringRef IR,
-                                                   LLVMContext &Ctx) {
-  SMDiagnostic Err;
-  return parseAssemblyString(IR, Err, Ctx);
-}
-
 std::string printModule(const Module &M) {
   std::string Text;
   raw_string_ostream OS(Text);
   M.print(OS, nullptr);
   return OS.str();
-}
-
-MAIRGraph buildMaterializationGraph(Function &F) {
-  PassInstrumentationCallbacks PIC;
-  FunctionAnalysisManager FAM;
-  FAM.registerPass([&] { return PassInstrumentationAnalysis(&PIC); });
-  FAM.registerPass([] { return DominatorTreeAnalysis(); });
-  FAM.registerPass([] { return llvm::LoopAnalysis(); });
-  FAM.registerPass([] { return AssumptionAnalysis(); });
-  FAM.registerPass([] { return TargetIRAnalysis(); });
-  normalizeMAIRLoops(F, FAM);
-  DominatorTree DT(F);
-  PostDominatorTree PDT(F);
-  LoopInfo LI(DT);
-  return MAIRGraph::build(F, std::move(DT), std::move(PDT), std::move(LI));
 }
 
 void registerMaterializationAnalyses(FunctionAnalysisManager &FAM,
@@ -120,17 +99,17 @@ public:
 
 TEST(MAIRMaterialization, PreservesObservationProperties) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p) {
 entry:
   %v = load volatile i32, ptr %p, align 4
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
-  MAIRGraph Graph = buildMaterializationGraph(F);
+  MAIRGraph Graph = buildGraph(F);
   ASSERT_TRUE(Graph.verify());
 
   PassInstrumentationCallbacks PIC;
@@ -151,7 +130,7 @@ entry:
 
 TEST(MAIRMaterialization, LowersMaskedAccessSemantics) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 declare <4 x i32> @llvm.masked.load.v4i32.p0(ptr, <4 x i1>, <4 x i32>)
 declare void @llvm.masked.store.v4i32.p0(<4 x i32>, ptr, <4 x i1>)
 define void @f(ptr %p, <4 x i1> %mask, <4 x i32> %value) {
@@ -164,10 +143,10 @@ entry:
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
-  MAIRGraph Graph = buildMaterializationGraph(F);
+  MAIRGraph Graph = buildGraph(F);
   ASSERT_TRUE(Graph.verify());
 
   PassInstrumentationCallbacks PIC;
@@ -188,17 +167,17 @@ entry:
 
 TEST(MAIRMaterialization, BackendRejectionLeavesModuleAndGraphLive) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p) {
 entry:
   %v = load i32, ptr %p, align 4
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
-  MAIRGraph Graph = buildMaterializationGraph(F);
+  MAIRGraph Graph = buildGraph(F);
   ASSERT_TRUE(Graph.verify());
 
   PassInstrumentationCallbacks PIC;
@@ -219,14 +198,14 @@ entry:
 
 TEST(MAIRMaterialization, RequiresExplicitMutableFunctionOwnership) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p) {
 entry:
   %v = load i32, ptr %p, align 4
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   const Function &F = *M->getFunction("f");
   MAIRGraph Graph(F);
@@ -250,7 +229,7 @@ entry:
 
 TEST(MAIRMaterialization, RejectsNonCriticalEdgeBeforeMutation) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p) {
 entry:
   %v = load i32, ptr %p, align 4
@@ -259,7 +238,7 @@ exit:
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
   BasicBlock &Entry = F.getEntryBlock();
@@ -287,7 +266,7 @@ exit:
 
 TEST(MAIRMaterialization, RejectsUnavailableScalarLeafBeforeMutation) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p, i64 %n, i1 %take) {
 entry:
   br i1 %take, label %left, label %right
@@ -300,7 +279,7 @@ merge:
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
   BasicBlock *Left = nullptr;
@@ -343,13 +322,13 @@ merge:
 
 TEST(MAIRMaterialization, RejectsPointerContiguousSizeBeforeMutation) {
   LLVMContext Ctx;
-  auto Module = parseMaterializationModule(R"IR(
+  auto Module = parseModule(R"IR(
 define void @f(ptr %base) {
 entry:
   ret void
 }
 )IR",
-                                           Ctx);
+                            Ctx);
   ASSERT_TRUE(Module);
   Function &Func = *Module->getFunction("f");
   Argument &Base = *Func.getArg(0);
@@ -397,7 +376,7 @@ entry:
 
 TEST(MAIRMaterialization, RejectsUnavailableContiguousBaseBeforeMutation) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(i64 %address, i1 %take) {
 entry:
   br i1 %take, label %left, label %right
@@ -410,7 +389,7 @@ merge:
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
   Instruction *Bad = nullptr;
@@ -448,7 +427,7 @@ merge:
 
 void checkCriticalExitMaterialization(bool RepeatedExit, bool Guarded) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p, ptr %q, i64 %n, i1 %take_a, i1 %take_b, i1 %bypass) {
 entry:
   br i1 %bypass, label %other, label %preheader
@@ -478,7 +457,7 @@ exit:
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
   BasicBlock *Header = nullptr;
@@ -602,13 +581,13 @@ TEST(MAIRMaterialization, SplitsRepeatedCriticalExitAndBuildsGuard) {
 
 TEST(MAIRMaterialization, LowersCompletePeriodicExpressionDag) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p, i32 %n, i64 %denom) {
 entry:
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
   BasicBlock &Entry = F.getEntryBlock();
@@ -698,13 +677,13 @@ entry:
 
 TEST(MAIRMaterialization, LowersExpressionOperandsInOrder) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p, i32 %a, i32 %b) {
 entry:
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
   Instruction &Return = *F.getEntryBlock().getTerminator();
@@ -750,14 +729,14 @@ entry:
 
 TEST(MAIRMaterialization, RetargetsMultipleProgramPointsAtOneAnchor) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p) {
 entry:
   %v = load i32, ptr %p, align 4
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
   BasicBlock &Entry = F.getEntryBlock();
@@ -799,7 +778,7 @@ entry:
 
 TEST(MAIRMaterialization, MaterializesAllGuardsBeforeBackendChangesCFG) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p, i1 %first, i1 %second, i1 %bad, i64 %offset) {
 entry:
   br i1 %first, label %first.store, label %first.exit
@@ -819,7 +798,7 @@ finish:
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
   MAIRGraph Graph(F);
@@ -894,7 +873,7 @@ finish:
 TEST(MAIRMaterialization,
      PreservesSharedAnchorOrderAcrossGenericAndBackendSplits) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p, i1 %take, i1 %bad) {
 entry:
   br i1 %take, label %store, label %exit
@@ -905,7 +884,7 @@ exit:
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
   Instruction &Store = F.getEntryBlock().getNextNode()->front();
@@ -966,14 +945,14 @@ exit:
 
 TEST(MAIRMaterialization, InvalidatesFunctionAnalysesAndIsSingleUse) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p) {
 entry:
   %v = load i32, ptr %p, align 4
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
   DominatorTree DT(F);
@@ -1010,7 +989,7 @@ entry:
 
 TEST(MAIRMaterialization, NestedGraphsPrepareOnceAndConsumeEveryBody) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p) {
 entry:
   %before = load i32, ptr %p, align 4
@@ -1035,10 +1014,10 @@ exit:
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
-  MAIRGraph Graph = buildMaterializationGraph(F);
+  MAIRGraph Graph = buildGraph(F);
   auto Graphs = Graph.graphs();
   ASSERT_EQ(Graphs.size(), 3u);
   PassInstrumentationCallbacks PIC;
@@ -1063,7 +1042,7 @@ exit:
 
 TEST(MAIRMaterialization, NestedGuardResetsAtEachInnerLoopInvocation) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p) {
 entry:
   br label %outer
@@ -1095,7 +1074,7 @@ exit:
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
   BasicBlock *Reset = nullptr;
@@ -1110,7 +1089,7 @@ exit:
       Load = &Block.front();
   }
   ASSERT_TRUE(Reset && Target && Load);
-  MAIRGraph Graph = buildMaterializationGraph(F);
+  MAIRGraph Graph = buildGraph(F);
   for (ProgramPoint *Point : Graph.allProgramPoints())
     while (!Point->empty())
       Point->erase(Point->begin());
@@ -1153,7 +1132,7 @@ exit:
 
 TEST(MAIRMaterialization, ExplicitEntryResetHasOneInitialSSAValue) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p, i1 %take) {
 entry:
   br i1 %take, label %access, label %exit
@@ -1164,13 +1143,13 @@ exit:
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
   BasicBlock &Access = *std::next(F.begin());
   BasicBlock &Exit = *std::next(F.begin(), 2);
   Instruction &Load = Access.front();
-  MAIRGraph Graph = buildMaterializationGraph(F);
+  MAIRGraph Graph = buildGraph(F);
   for (ProgramPoint *Point : Graph.allProgramPoints())
     while (!Point->empty())
       Point->erase(Point->begin());
@@ -1196,7 +1175,7 @@ exit:
 
 TEST(MAIRMaterialization, ZeroOffsetUsesBaseWithoutGEP) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p) {
 entry:
   %tmp = alloca i32, align 4
@@ -1205,10 +1184,10 @@ entry:
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
-  MAIRGraph Graph = buildMaterializationGraph(F);
+  MAIRGraph Graph = buildGraph(F);
   ASSERT_TRUE(Graph.verify());
 
   PassInstrumentationCallbacks PIC;
@@ -1228,7 +1207,7 @@ entry:
 
 TEST(MAIRMaterialization, NonZeroOffsetStillLowersGEP) {
   LLVMContext Ctx;
-  auto M = parseMaterializationModule(R"IR(
+  auto M = parseModule(R"IR(
 define void @f(ptr %p) {
 entry:
   %q = getelementptr inbounds i8, ptr %p, i64 4
@@ -1236,10 +1215,10 @@ entry:
   ret void
 }
 )IR",
-                                      Ctx);
+                       Ctx);
   ASSERT_TRUE(M);
   Function &F = *M->getFunction("f");
-  MAIRGraph Graph = buildMaterializationGraph(F);
+  MAIRGraph Graph = buildGraph(F);
   ASSERT_TRUE(Graph.verify());
 
   PassInstrumentationCallbacks PIC;
@@ -1293,7 +1272,7 @@ void expectConstantAccessSize(Function &Function, ConstantSizeBackend &Backend,
 
 void expectLoopAccessSize(StringRef IR, uint64_t Input, uint64_t ExpectedSize) {
   LLVMContext Context;
-  auto Module = parseMaterializationModule(IR, Context);
+  auto Module = parseModule(IR, Context);
   ASSERT_TRUE(Module);
   Function &Function = *Module->getFunction("f");
   PassInstrumentationCallbacks Callbacks;
@@ -1373,13 +1352,13 @@ TEST(MAIRMaterialization, WidensMergedExpressionAccessSizeBeforeAddition) {
          {std::pair<uint64_t, uint64_t>{0, 400}, {200, 600}, {255, 655}}) {
       SCOPED_TRACE(Count);
       LLVMContext Context;
-      auto Module = parseMaterializationModule(R"IR(
+      auto Module = parseModule(R"IR(
 define void @f(ptr %base, i8 %count) {
 entry:
   ret void
 }
 )IR",
-                                               Context);
+                                Context);
       ASSERT_TRUE(Module);
       Function &Function = *Module->getFunction("f");
       MAIRGraph Graph(Function);
@@ -1425,13 +1404,13 @@ entry:
 
 TEST(MAIRMaterialization, RejectsWrappingMultiplyExpressionSizeMerge) {
   LLVMContext Context;
-  auto Module = parseMaterializationModule(R"IR(
+  auto Module = parseModule(R"IR(
 define void @f(ptr %base, i8 %count) {
 entry:
   ret void
 }
 )IR",
-                                           Context);
+                            Context);
   ASSERT_TRUE(Module);
   Function &Function = *Module->getFunction("f");
   MAIRGraph Graph(Function);
@@ -1457,13 +1436,13 @@ entry:
 
 TEST(MAIRMaterialization, RejectsWrappingAddExpressionSizeMerge) {
   LLVMContext Context;
-  auto Module = parseMaterializationModule(R"IR(
+  auto Module = parseModule(R"IR(
 define void @f(ptr %base, i7 %count) {
 entry:
   ret void
 }
 )IR",
-                                           Context);
+                            Context);
   ASSERT_TRUE(Module);
   Function &Function = *Module->getFunction("f");
   MAIRGraph Graph(Function);

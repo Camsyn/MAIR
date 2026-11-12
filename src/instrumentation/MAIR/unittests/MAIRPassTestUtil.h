@@ -22,9 +22,11 @@ inline std::unique_ptr<llvm::Module> parseModule(llvm::StringRef IR,
   return llvm::parseAssemblyString(IR, Err, Ctx);
 }
 
-inline mair::MAIRGraph buildGraph(llvm::Function &F,
-                                  mair::MAIROptimizationConfig Config =
-                                      mair::MAIROptimizationConfig::generic()) {
+/// Build a graph that owns its analyses, after normalizing the loops of \p F.
+template <class BarrierTrait = mair::DefaultBarrierTrait>
+mair::MAIRGraph buildGraph(llvm::Function &F,
+                           mair::MAIROptimizationConfig Config =
+                               mair::MAIROptimizationConfig::generic()) {
   llvm::PassInstrumentationCallbacks PIC;
   llvm::FunctionAnalysisManager FAM;
   FAM.registerPass([&] { return llvm::PassInstrumentationAnalysis(&PIC); });
@@ -36,8 +38,8 @@ inline mair::MAIRGraph buildGraph(llvm::Function &F,
   llvm::DominatorTree DT(F);
   llvm::PostDominatorTree PDT(F);
   llvm::LoopInfo LI(DT);
-  return mair::MAIRGraph::build(F, std::move(DT), std::move(PDT), std::move(LI),
-                                Config);
+  return mair::MAIRGraph::build<BarrierTrait>(F, std::move(DT), std::move(PDT),
+                                              std::move(LI), Config);
 }
 
 inline unsigned observationCount(const mair::MAIRGraph &Graph,

@@ -76,8 +76,8 @@ struct MAIRVerifierSupport {
     if (!OS)
       return;
     *OS << "  edge: ";
-    *OS << From.getName() << " -> " << Edge.getNode().getName() << " (";
-    *OS << (Edge.isDom() ? "dom" : "pdom") << ")\n";
+    *OS << From.getName() << " -> " << Edge.getNode().getName() << " ("
+        << getEdgeKindName(Edge.getKind()) << ")\n";
   }
 
   template <typename T> void WriteTs(const T &V) { Write(V); }

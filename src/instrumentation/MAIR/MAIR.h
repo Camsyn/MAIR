@@ -139,6 +139,9 @@ public:
 
 enum class PPEdgeKind : uint8_t { Dom, PostDom };
 
+/// The spelling of an edge kind in dumps and diagnostics.
+StringRef getEdgeKindName(PPEdgeKind Kind);
+
 class AbstractValue {
 public:
   enum class Kind : uint8_t { Unknown, Symbol, Constant };
@@ -267,6 +270,8 @@ public:
     return !(*this == Other);
   }
 
+  /// The spelling of a site kind in dumps.
+  static StringRef getKindName(Kind K);
   void print(raw_ostream &OS) const;
 };
 
@@ -296,6 +301,8 @@ public:
   bool operator!=(const AnyProvenanceExecutedGuard &Other) const {
     return !(*this == Other);
   }
+  /// Print the provenance list as `any(%a, %b)`.
+  void print(raw_ostream &OS) const;
 };
 
 using ProgramPointGuard = std::variant<AlwaysGuard, AnyProvenanceExecutedGuard>;

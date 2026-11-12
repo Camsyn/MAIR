@@ -4,6 +4,7 @@
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
@@ -334,12 +335,15 @@ static AccessKind mergeKind(AccessKind LHS, AccessKind RHS) {
   return AccessKind::ReadWrite;
 }
 
-static std::string getPrintedValueName(const Value &V) {
-  std::string Name;
-  raw_string_ostream OS(Name);
-  V.printAsOperand(OS, false);
-  OS.flush();
-  return Name;
+static void printValueName(raw_ostream &OS, const Value &V) {
+  V.printAsOperand(OS, /*PrintType=*/false);
+}
+
+template <class T> static std::string printToString(const T &Object) {
+  std::string Text;
+  raw_string_ostream OS(Text);
+  Object.print(OS);
+  return Text;
 }
 
 static std::optional<uint64_t> getNonNegativeU64(const APInt &Value) {
@@ -426,32 +430,19 @@ static void printAbstractValue(raw_ostream &OS, const AbstractValue &Value) {
     OS << Value.getConstant();
     return;
   }
-  OS << getPrintedValueName(*Value.getSymbol());
+  printValueName(OS, *Value.getSymbol());
 }
 
-static void printAccessKind(raw_ostream &OS, AccessKind Kind) {
+static StringRef getAccessKindName(AccessKind Kind) {
   switch (Kind) {
   case AccessKind::Read:
-    OS << "read";
-    break;
+    return "read";
   case AccessKind::Write:
-    OS << "write";
-    break;
+    return "write";
   case AccessKind::ReadWrite:
-    OS << "read/write";
-    break;
+    return "read/write";
   }
-}
-
-static void printEdgeKind(raw_ostream &OS, PPEdgeKind Kind) {
-  switch (Kind) {
-  case PPEdgeKind::Dom:
-    OS << "dom";
-    break;
-  case PPEdgeKind::PostDom:
-    OS << "pdom";
-    break;
-  }
+  llvm_unreachable("unknown access kind");
 }
 
 // The edge of kind \p Kind to \p Node in \p Edges, or the end of the list.
@@ -464,18 +455,23 @@ static auto findEdge(EdgeListT &Edges, const ProgramPoint &Node,
 }
 
 static void printEdgeList(raw_ostream &OS, ArrayRef<ProgramPointEdge> Edges) {
-  bool First = true;
-  for (const ProgramPointEdge &Edge : Edges) {
-    if (!First)
-      OS << ", ";
-    OS << Edge.getNode().getName() << "(";
-    printEdgeKind(OS, Edge.getKind());
-    OS << ")";
-    First = false;
-  }
+  ListSeparator Separator;
+  for (const ProgramPointEdge &Edge : Edges)
+    OS << Separator << Edge.getNode().getName() << "("
+       << getEdgeKindName(Edge.getKind()) << ")";
 }
 
 } // namespace
+
+StringRef getEdgeKindName(PPEdgeKind Kind) {
+  switch (Kind) {
+  case PPEdgeKind::Dom:
+    return "dom";
+  case PPEdgeKind::PostDom:
+    return "pdom";
+  }
+  llvm_unreachable("unknown MAIR program point edge kind");
+}
 
 ProgramPointSite ProgramPointSite::anchored(const Instruction &Anchor, Kind K) {
   assert(K != Kind::Edge && "an anchored site cannot have edge kind");
@@ -498,39 +494,52 @@ ProgramPointSite ProgramPointSite::edge(const BasicBlock &From,
   return Site;
 }
 
+StringRef ProgramPointSite::getKindName(Kind K) {
+  switch (K) {
+  case Kind::MemoryInst:
+    return "memory";
+  case Kind::BasicBlockEntry:
+    return "bb.entry";
+  case Kind::BasicBlockExit:
+    return "bb.exit";
+  case Kind::Edge:
+    return "edge";
+  }
+  llvm_unreachable("unknown MAIR program point site kind");
+}
+
 void ProgramPointSite::print(raw_ostream &OS) const {
-  if (!isEdge()) {
-    switch (SiteKind) {
-    case Kind::MemoryInst:
-      OS << "memory(";
-      break;
-    case Kind::BasicBlockEntry:
-      OS << "bb.entry(";
-      break;
-    case Kind::BasicBlockExit:
-      OS << "bb.exit(";
-      break;
-    case Kind::Edge:
-      llvm_unreachable("handled edge program point site");
-    }
-    getBasicBlock()->printAsOperand(OS, false);
+  auto PrintBlock = [&](const BasicBlock *BB) {
+    if (BB)
+      BB->printAsOperand(OS, false);
+    else
+      OS << "null";
+  };
+  OS << getKindName(SiteKind) << "(";
+  if (isEdge()) {
+    PrintBlock(From);
+    OS << " -> ";
+    PrintBlock(To);
+  } else {
+    PrintBlock(getBasicBlock());
     if (SiteKind == Kind::MemoryInst) {
       OS << ", ";
-      getAnchor().printAsOperand(OS, false);
+      printValueName(OS, getAnchor());
     }
-    OS << ")";
-    return;
   }
-  OS << "edge(";
-  if (From)
-    From->printAsOperand(OS, false);
-  else
-    OS << "null";
-  OS << " -> ";
-  if (To)
-    To->printAsOperand(OS, false);
-  else
-    OS << "null";
+  OS << ")";
+}
+
+void AnyProvenanceExecutedGuard::print(raw_ostream &OS) const {
+  OS << "any(";
+  ListSeparator Separator;
+  for (const Instruction *I : Provenance) {
+    OS << Separator;
+    if (I)
+      printValueName(OS, *I);
+    else
+      OS << "null";
+  }
   OS << ")";
 }
 
@@ -608,7 +617,7 @@ void MAIRScalarExpr::print(raw_ostream &OS, bool Signed) const {
   }
   if (Node->Kind == Kind::LLVMValue) {
     if (Node->LLVMValue)
-      OS << getPrintedValueName(*Node->LLVMValue);
+      printValueName(OS, *Node->LLVMValue);
     else
       OS << "<null>";
     return;
@@ -985,7 +994,7 @@ void AbstractAccess::print(raw_ostream &OS) const {
     return;
   }
   if (Base)
-    OS << getPrintedValueName(*Base);
+    printValueName(OS, *Base);
   else
     OS << "unknown";
   if (Offset.isConstant()) {
@@ -1058,7 +1067,7 @@ void MaskedRegion::print(raw_ostream &OS) const {
   printAbstractValue(OS, Bounds.getSize());
   OS << ", mask ";
   if (!IsConstant) {
-    OS << getPrintedValueName(*DynamicMask);
+    printValueName(OS, *DynamicMask);
     return;
   }
   OS << "<";
@@ -1262,13 +1271,7 @@ DebugLoc Observation::getStableDebugLoc() const {
   return DebugLoc();
 }
 
-std::string Observation::toString() const {
-  std::string S;
-  raw_string_ostream OS(S);
-  print(OS);
-  OS.flush();
-  return S;
-}
+std::string Observation::toString() const { return printToString(*this); }
 
 Observation Observation::fromInstruction(const Instruction &I,
                                          const DataLayout &DL) {
@@ -1341,8 +1344,7 @@ Observation Observation::fromInstruction(const Instruction &I,
 }
 
 void Observation::print(raw_ostream &OS) const {
-  OS << "o: ";
-  printAccessKind(OS, Kind);
+  OS << "o: " << getAccessKindName(Kind);
   if (isVolatile())
     OS << " volatile";
   if (isAtomic())
@@ -1486,19 +1488,13 @@ void ProgramPoint::mergeRepresentationFrom(const ProgramPoint &Other) {
   RepresentedBlocks.insert_range(Other.RepresentedBlocks);
 }
 
-std::string ProgramPoint::toString() const {
-  std::string S;
-  raw_string_ostream OS(S);
-  print(OS);
-  OS.flush();
-  return S;
-}
+std::string ProgramPoint::toString() const { return printToString(*this); }
 
 void ProgramPoint::print(raw_ostream &OS) const {
   OS << Name << ": ";
   if (const auto *LoopPP = dyn_cast<LoopProgramPoint>(this)) {
     OS << (LoopPP->isLoopPreheader() ? "loop-preheader=" : "loop-exit=");
-    OS << getPrintedValueName(*LoopPP->getLoopGraph().getLoop()->getHeader());
+    printValueName(OS, *LoopPP->getLoopGraph().getLoop()->getHeader());
     OS << ", ";
   }
   if (isEdgeSite() || !hasAlwaysGuard()) {
@@ -1506,18 +1502,8 @@ void ProgramPoint::print(raw_ostream &OS) const {
     Site.print(OS);
     if (const auto *ExecutionGuard =
             std::get_if<AnyProvenanceExecutedGuard>(&Guard)) {
-      OS << ", guard=any(";
-      bool First = true;
-      for (const Instruction *I : ExecutionGuard->getProvenance()) {
-        if (!First)
-          OS << ", ";
-        if (I)
-          OS << getPrintedValueName(*I);
-        else
-          OS << "null";
-        First = false;
-      }
-      OS << ")";
+      OS << ", guard=";
+      ExecutionGuard->print(OS);
       if (const BasicBlock *Reset = ExecutionGuard->getResetBlock()) {
         OS << ", reset=";
         Reset->printAsOperand(OS, false);
@@ -2052,23 +2038,19 @@ const MemoryObject *MAIRGraph::getMemoryObject(const Value &Base) const {
   return Resources->MemoryObjects.lookup(&Base);
 }
 
-std::string MAIRGraph::toString() const {
-  std::string S;
-  raw_string_ostream OS(S);
-  print(OS);
-  OS.flush();
-  return S;
-}
+std::string MAIRGraph::toString() const { return printToString(*this); }
 
 void MAIRGraph::print(raw_ostream &OS) const {
   assertLive("print");
   OS << "mair graph";
   if (F) {
     OS << " of fn ";
-    OS << getPrintedValueName(*F);
+    printValueName(OS, *F);
   }
-  if (ScopeLoop)
-    OS << " of loop " << getPrintedValueName(*ScopeLoop->getHeader());
+  if (ScopeLoop) {
+    OS << " of loop ";
+    printValueName(OS, *ScopeLoop->getHeader());
+  }
   OS << " {\n";
   for (const ProgramPoint &PP : ProgramPoints) {
     PP.print(OS);

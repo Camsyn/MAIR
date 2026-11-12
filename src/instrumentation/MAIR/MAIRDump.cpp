@@ -24,30 +24,6 @@ struct MAIRGraphDOTView {
       : Graph(Graph), Nodes(Graph.allProgramPoints()) {}
 };
 
-static StringRef getProgramPointSiteKindName(ProgramPoint::SiteKind Kind) {
-  switch (Kind) {
-  case ProgramPoint::SiteKind::MemoryInst:
-    return "memory";
-  case ProgramPoint::SiteKind::BasicBlockEntry:
-    return "bb.entry";
-  case ProgramPoint::SiteKind::BasicBlockExit:
-    return "bb.exit";
-  case ProgramPoint::SiteKind::Edge:
-    return "edge";
-  }
-  llvm_unreachable("unknown MAIR program point site kind");
-}
-
-static StringRef getProgramPointEdgeKindName(PPEdgeKind Kind) {
-  switch (Kind) {
-  case PPEdgeKind::Dom:
-    return "dom";
-  case PPEdgeKind::PostDom:
-    return "pdom";
-  }
-  llvm_unreachable("unknown MAIR program point edge kind");
-}
-
 namespace {
 class MAIRLLVMWriter final : public AssemblyAnnotationWriter {
   DenseMap<const Instruction *, SmallVector<const ProgramPoint *, 2>>
@@ -114,7 +90,7 @@ struct DOTGraphTraits<const mair::MAIRGraphDOTView *>
     std::string Label;
     raw_string_ostream OS(Label);
     OS << PP->getName() << "\\n";
-    OS << mair::getProgramPointSiteKindName(PP->getSiteKind());
+    OS << mair::ProgramPointSite::getKindName(PP->getSiteKind());
     if (const auto *LoopPP = dyn_cast<mair::LoopProgramPoint>(PP))
       OS << (LoopPP->isLoopPreheader() ? " loop.preheader" : " loop.exit");
     if (const BasicBlock *BB = PP->getBasicBlock())
@@ -125,18 +101,8 @@ struct DOTGraphTraits<const mair::MAIRGraphDOTView *>
     }
     if (const auto *Guard =
             std::get_if<mair::AnyProvenanceExecutedGuard>(&PP->getGuard())) {
-      OS << "\\nguard=any(";
-      bool First = true;
-      for (const Instruction *I : Guard->getProvenance()) {
-        if (!First)
-          OS << ", ";
-        if (I)
-          I->printAsOperand(OS, false);
-        else
-          OS << "null";
-        First = false;
-      }
-      OS << ")";
+      OS << "\\nguard=";
+      Guard->print(OS);
     }
     for (const mair::Observation &Obs : PP->observations())
       OS << "\\n" << Obs.toString();
@@ -164,7 +130,7 @@ struct DOTGraphTraits<const mair::MAIRGraphDOTView *>
     std::string Attrs;
     raw_string_ostream OS(Attrs);
     mair::PPEdgeKind Kind = I.getKind();
-    OS << "label=\"" << mair::getProgramPointEdgeKindName(Kind) << "\"";
+    OS << "label=\"" << mair::getEdgeKindName(Kind) << "\"";
     if (Kind == mair::PPEdgeKind::Dom)
       OS << ", color=blue";
     else

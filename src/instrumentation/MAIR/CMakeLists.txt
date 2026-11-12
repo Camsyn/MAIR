@@ -11,7 +11,10 @@ set(MAIR_SOURCES
   MAIR.cpp
   MAIRBarrierAnalysis.cpp
   MAIRDump.cpp
+  MAIRGraphBuilder.cpp
+  MAIRObservation.cpp
   MAIRPasses.cpp
+  MAIRRegion.cpp
   MAIRStatLog.cpp
   Materialization/MAIRMaterialization.cpp
   Verifier.cpp

@@ -23,7 +23,7 @@ MAIR 用循环层次限制普通优化的范围。每个函数有一个根图，
 
 构图前使用 LLVM `LoopSimplifyPass` 建立真实 preheader 和 dedicated exits，再取得构图依赖的分析。构图本身不修改 LLVM IR。直接调用构图 API 的调用者也必须满足这些前提。不能形成这些边界时直接报告错误，不创建假边界。不可归约环先不优化：构图用 LLVM `CycleInfo` 找出每个不可归约环，环里所有块（包括嵌在其中的自然循环）的 Observation 保持原位。其余自然循环仍按原规则优化。TODO：以后再表示并优化这种非标准循环。
 
-循环 body 图描述一次迭代。PostDom 边只在“同一次迭代内必然到达”时建立：从块出发的每条路径都必须先到达它的后支配者，之后才能回到循环 header 或离开循环（`postDominatesWithinIteration`，`src/instrumentation/MAIR/MAIR.cpp`）。只靠绕回边成立的后支配不建边，因为循环内定义的地址到下一次迭代已经是另一个值。Dom 边不需要这条限制。
+循环 body 图描述一次迭代。PostDom 边只在“同一次迭代内必然到达”时建立：从块出发的每条路径都必须先到达它的后支配者，之后才能回到循环 header 或离开循环（`postDominatesWithinIteration`，`src/instrumentation/MAIR/MAIRGraphBuilder.cpp`）。只靠绕回边成立的后支配不建边，因为循环内定义的地址到下一次迭代已经是另一个值。Dom 边不需要这条限制。
 
 每个优化阶段按子图优先顺序执行，随后处理父图。普通冗余删除、位置合并和公共 Observation 移动继续使用本层 MAIR。它们不能沿父子图链接复用检查。循环不变量移动和周期合并可以显式导出到父图中的循环边界，嵌套导出每次只跨一层，逐层重新证明。内层周期合并会把新的区间观察放到父图的循环出口，而父层第一次不变外提此时已经结束。`default<Og>` 和 `default<O1>` 都在周期合并后再跑一次不变外提，让外层循环重新证明这条观察。
 

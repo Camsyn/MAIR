@@ -46,6 +46,15 @@ public:
   ProgramPoint *getPreheaderExit(const llvm::Loop &L) const;
   std::optional<MAIRLoopExit> describeUniqueExit(const llvm::Loop &L) const;
   ProgramPoint *getUniqueExitEntry(const llvm::Loop &L) const;
+  /// Where an observation that leaves \p L through its unique exit is placed:
+  /// the exit block entry if only \p L reaches that block, otherwise the exit
+  /// edge. Empty if \p L has no unique exit.
+  std::optional<ProgramPointSite> getExitSite(const llvm::Loop &L) const;
+  /// The program point of the parent graph at \p Site, from getExitSite, with
+  /// \p Guard: the exit boundary of \p L if it fits, otherwise the first match
+  /// in list order. Null if there is none yet.
+  ProgramPoint *findExitPoint(const llvm::Loop &L, const ProgramPointSite &Site,
+                              const ProgramPointGuard &Guard) const;
   /// ScalarEvolution must come from the same FAM generation as the graph's
   /// borrowed LoopInfo; mixing snapshots would invalidate SCEV loop identity.
   llvm::ScalarEvolution &getSE() const;

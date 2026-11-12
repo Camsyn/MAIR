@@ -408,35 +408,13 @@ std::optional<AbstractAccess> buildContiguousAggregate(
   return Range;
 }
 
-struct AggregateTarget {
-  ProgramPointSite Site;
-  ProgramPoint *Point = nullptr;
-};
-
 struct AggregatePlan {
-  AggregateTarget Target;
+  ProgramPointSite TargetSite;
+  // Null if the parent graph has no unguarded program point at the site yet.
+  ProgramPoint *Target = nullptr;
   MemoryRegion Region;
   bool IsRange = false;
 };
-
-std::optional<AggregateTarget>
-getAggregateTarget(MAIRGraph &G, const MAIRLoopInfo &Loops, const Loop &L) {
-  std::optional<MAIRLoopExit> Exit = Loops.describeUniqueExit(L);
-  if (!Exit)
-    return std::nullopt;
-  if (Exit->IsDedicated) {
-    ProgramPoint *PP = Loops.getUniqueExitEntry(L);
-    if (!PP || !PP->hasAlwaysGuard())
-      return std::nullopt;
-    return AggregateTarget{PP->getSite(), PP};
-  }
-
-  ProgramPointSite Site = ProgramPointSite::edge(*Exit->Exiting, *Exit->Exit);
-  for (ProgramPoint &PP : *G.getParent())
-    if (PP.getSite() == Site && PP.hasAlwaysGuard())
-      return AggregateTarget{Site, &PP};
-  return AggregateTarget{Site, nullptr};
-}
 
 std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
                                                 MAIRLoopInfo &Loops,
@@ -481,12 +459,9 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
       Loops.getExactExecutionCountSCEV(PP, RelevantLoop);
   if (!ExecutionCount)
     return std::nullopt;
-  if (!Loops.getUniqueExitEntry(RelevantLoop) ||
-      !Loops.canSinkToExit(PP, RelevantLoop))
-    return std::nullopt;
-  std::optional<AggregateTarget> Target =
-      getAggregateTarget(G, Loops, RelevantLoop);
-  if (!Target || !Loops.isValueAvailableAt(*Location->getBase(), Target->Site))
+  std::optional<ProgramPointSite> TargetSite = Loops.getExitSite(RelevantLoop);
+  if (!TargetSite || !Loops.canSinkToExit(PP, RelevantLoop) ||
+      !Loops.isValueAvailableAt(*Location->getBase(), *TargetSite))
     return std::nullopt;
 
   MemoryRegion Aggregate;
@@ -494,10 +469,9 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
   // compact range form. Everything else must survive as an explicit periodic
   // region with no later dependence on LLVM SCEV objects.
   bool IsRangeAggregate = false;
-  if (std::optional<AbstractAccess> Range =
-          buildContiguousAggregate(
+  if (std::optional<AbstractAccess> Range = buildContiguousAggregate(
           *G.getParent(), Obs, *Recurrence, ExecutionCount, *AccessSize, SE,
-          Loops, Target->Site)) {
+          Loops, *TargetSite)) {
     Aggregate = *Range;
     IsRangeAggregate = true;
   } else {
@@ -510,7 +484,7 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
       if (ConstantStride->getAPInt().isZero())
         return std::nullopt;
 
-    SCEVExprConverter Converter(*G.getParent(), Loops, Target->Site);
+    SCEVExprConverter Converter(*G.getParent(), Loops, *TargetSite);
     if (!Converter.canConvert(Start) || !Converter.canConvert(Stride) ||
         !Converter.canConvert(ExecutionCount))
       return std::nullopt;
@@ -525,15 +499,17 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
                                SizeExpr, CountExpr);
   }
 
-  return AggregatePlan{std::move(*Target), std::move(Aggregate),
-                       IsRangeAggregate};
+  return AggregatePlan{
+      *TargetSite,
+      Loops.findExitPoint(RelevantLoop, *TargetSite, AlwaysGuard{}),
+      std::move(Aggregate), IsRangeAggregate};
 }
 
 void commitAggregate(MAIRGraph &G, Observation &Obs, AggregatePlan Plan,
                      bool MergeEquivalentObservations) {
-  ProgramPoint *TargetPP = Plan.Target.Point;
+  ProgramPoint *TargetPP = Plan.Target;
   if (!TargetPP)
-    TargetPP = &G.getParent()->createProgramPoint(Plan.Target.Site);
+    TargetPP = &G.getParent()->createProgramPoint(Plan.TargetSite);
   addOrMergeObservation(*TargetPP, Obs, Plan.Region,
                         MergeEquivalentObservations);
   Obs.getParent()->erase(Obs);

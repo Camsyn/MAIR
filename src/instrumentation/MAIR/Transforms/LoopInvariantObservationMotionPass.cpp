@@ -47,14 +47,6 @@ makeExecutionGuard(const Observation &Obs, BasicBlock *ResetBlock) {
   return AnyProvenanceExecutedGuard(Provenance, ResetBlock);
 }
 
-ProgramPoint *findProgramPoint(MAIRGraph &G, const ProgramPointSite &Site,
-                               const ProgramPointGuard &Guard) {
-  for (ProgramPoint &PP : G)
-    if (PP.getSite() == Site && PP.getGuard() == Guard)
-      return &PP;
-  return nullptr;
-}
-
 void moveObservationTo(Observation &Obs, ProgramPoint &Target,
                        bool MergeEquivalentObservations) {
   Observation *Accumulator = nullptr;
@@ -97,9 +89,8 @@ findInvariantMotionForLoop(MAIRGraph &G, MAIRLoopInfo &Loops,
     return InvariantMotionPlan{&Obs, Preheader, std::nullopt, AlwaysGuard{},
                                InvariantMotionKind::Preheader};
 
-  std::optional<MAIRLoopExit> Exit = Loops.describeUniqueExit(L);
-  ProgramPoint *ExitAncestor = Loops.getUniqueExitEntry(L);
-  if (!Exit || !ExitAncestor || !Loops.canSinkToExit(Source, L))
+  std::optional<ProgramPointSite> TargetSite = Loops.getExitSite(L);
+  if (!TargetSite || !Loops.canSinkToExit(Source, L))
     return std::nullopt;
 
   std::optional<AnyProvenanceExecutedGuard> ExecutionGuard =
@@ -107,14 +98,11 @@ findInvariantMotionForLoop(MAIRGraph &G, MAIRLoopInfo &Loops,
   if (!ExecutionGuard)
     return std::nullopt;
 
-  ProgramPointSite TargetSite =
-      Exit->IsDedicated ? ExitAncestor->getSite()
-                        : ProgramPointSite::edge(*Exit->Exiting, *Exit->Exit);
-  if (!isRegionAvailableAt(Region, TargetSite, Loops))
+  if (!isRegionAvailableAt(Region, *TargetSite, Loops))
     return std::nullopt;
 
   ProgramPointGuard Guard = std::move(*ExecutionGuard);
-  ProgramPoint *Target = findProgramPoint(*G.getParent(), TargetSite, Guard);
+  ProgramPoint *Target = Loops.findExitPoint(L, *TargetSite, Guard);
   std::optional<ProgramPointSite> NewTargetSite;
   if (!Target)
     NewTargetSite = TargetSite;

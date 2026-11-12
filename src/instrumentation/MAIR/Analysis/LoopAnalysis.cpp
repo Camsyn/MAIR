@@ -184,6 +184,34 @@ ProgramPoint *MAIRLoopInfo::getUniqueExitEntry(const Loop &L) const {
   return nullptr;
 }
 
+std::optional<ProgramPointSite> MAIRLoopInfo::getExitSite(const Loop &L) const {
+  std::optional<MAIRLoopExit> Exit = describeUniqueExit(L);
+  ProgramPoint *Boundary = getUniqueExitEntry(L);
+  if (!Exit || !Boundary)
+    return std::nullopt;
+  return Exit->IsDedicated
+             ? Boundary->getSite()
+             : ProgramPointSite::edge(*Exit->Exiting, *Exit->Exit);
+}
+
+ProgramPoint *
+MAIRLoopInfo::findExitPoint(const Loop &L, const ProgramPointSite &Site,
+                            const ProgramPointGuard &Guard) const {
+  ProgramPoint *Boundary = getUniqueExitEntry(L);
+  if (!Boundary)
+    return nullptr;
+  auto Fits = [&](const ProgramPoint &PP) {
+    return PP.getSite() == Site && PP.getGuard() == Guard;
+  };
+  // The entry point of the exit block has the boundary's site and guard too.
+  if (Fits(*Boundary))
+    return Boundary;
+  for (ProgramPoint &PP : *Boundary->getParent())
+    if (Fits(PP))
+      return &PP;
+  return nullptr;
+}
+
 ScalarEvolution &MAIRLoopInfo::getSE() const {
   if (!FAM || !Func)
     report_fatal_error("MAIR LoopAnalysis requires a FunctionAnalysisManager");

@@ -96,7 +96,7 @@ bool validateObservation(const Observation &Obs, const Instruction &Target,
                                      Size.getSymbol()->getType()->isIntegerTy();
     bool SizeAvailable =
         Region.hasSizeExpr()
-            ? expressionAvailableAt(expressionSize(Region), Target, DT)
+            ? expressionAvailableAt(Region.getSizeExpr(), Target, DT)
             : isValueAvailableAt(Region.getSize(), Target, DT);
     if (!Base || !Base->getType()->isPointerTy() ||
         (!OffsetIsCompletePointer && !isValueAvailableAt(*Base, Target, DT)) ||
@@ -418,7 +418,7 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
         Materialized.Address = lowerContiguous(*Contiguous, *BuilderPtr);
         Materialized.AccessSize =
             Contiguous->hasSizeExpr()
-                ? lowerExpr(expressionSize(*Contiguous), *BuilderPtr, ExprCache)
+                ? lowerExpr(Contiguous->getSizeExpr(), *BuilderPtr, ExprCache)
                 : lowerAbstractValue(Contiguous->getSize(), *BuilderPtr);
       } else if (const auto *Masked = std::get_if<MaskedRegion>(&Obs.Region)) {
         Materialized.Address =

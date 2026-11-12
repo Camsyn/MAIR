@@ -347,7 +347,7 @@ std::optional<AbstractAccess>
 mergeExpressionSizedRanges(const AbstractAccess &A, const AbstractAccess &B,
                            MAIRGraph *ExprGraph) {
   if (!ExprGraph || !A.hasSizeExpr() || !B.hasSizeExpr() ||
-      expressionSize(A) != expressionSize(B) || !A.getOffset().isConstant() ||
+      A.getSizeExpr() != B.getSizeExpr() || !A.getOffset().isConstant() ||
       !B.getOffset().isConstant())
     return std::nullopt;
   uint64_t ABegin = A.getOffset().getConstant();
@@ -357,7 +357,7 @@ mergeExpressionSizedRanges(const AbstractAccess &A, const AbstractAccess &B,
   uint64_t Low = std::min(ABegin, BBegin);
   uint64_t High = std::max(ABegin, BBegin);
   uint64_t Delta = High - Low;
-  MAIRScalarExpr SizeExpr = expressionSize(A);
+  MAIRScalarExpr SizeExpr = A.getSizeExpr();
   Type *SizeTy = SizeExpr.getType();
   if (!SizeTy || !SizeTy->isIntegerTy())
     return std::nullopt;
@@ -382,7 +382,7 @@ mergeExpressionSizedRanges(const AbstractAccess &A, const AbstractAccess &B,
                                                       *SizeTy, SizeExpr, Extra);
   AbstractAccess Result(A.getBase(), AbstractValue::constant(Low),
                         AbstractValue());
-  Result.setSizeExprNode(Merged.getOpaqueNode());
+  Result.setSizeExpr(Merged);
   return Result;
 }
 

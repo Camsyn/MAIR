@@ -4838,7 +4838,7 @@ entry:
               Shared);
     AbstractAccess Access(&P, AbstractValue::constant(0),
                           AbstractValue::constant(4));
-    Access.setSizeExprNode(Expr.getOpaqueNode());
+    Access.setSizeExpr(Expr);
     ExprPP.addObservation(Observation({&Load}, Access, AccessKind::Read));
     if (Shared)
       ExprPP.addObservation(Observation({&Load}, Access, AccessKind::Read));
@@ -4892,7 +4892,7 @@ entry:
                                                 ForeignTrips, ForeignTrips);
   AbstractAccess Access(&P, AbstractValue::constant(0),
                         AbstractValue::constant(4));
-  Access.setSizeExprNode(Expr.getOpaqueNode());
+  Access.setSizeExpr(Expr);
   std::string Expected;
   llvm::raw_string_ostream ExpectedOS(Expected);
   for (bool IsEntry : {true, false}) {

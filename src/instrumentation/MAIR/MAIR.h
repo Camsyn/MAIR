@@ -187,13 +187,64 @@ public:
   }
 };
 
+/// An immutable handle into a MAIRGraph-owned typed expression arena.
+/// Expressions store materializable semantics, never Loop or SCEV objects.
+class MAIRScalarExpr {
+public:
+  enum class Kind : uint8_t {
+    Constant,
+    LLVMValue,
+    Add,
+    Mul,
+    UDiv,
+    Truncate,
+    ZeroExtend,
+    SignExtend,
+    SMin,
+    UMin,
+    SMax,
+    UMax,
+  };
+
+private:
+  const MAIRScalarExprNode *Node = nullptr;
+
+  explicit MAIRScalarExpr(const MAIRScalarExprNode &N) : Node(&N) {}
+
+public:
+  MAIRScalarExpr() = default;
+
+  bool isValid() const { return Node != nullptr; }
+  Kind getKind() const;
+  Type *getType() const;
+  const APInt &getConstant() const;
+  const Value *getLLVMValue() const;
+  ArrayRef<MAIRScalarExpr> operands() const;
+  /// The identity of the expression node, for use as a map key.
+  const void *getOpaqueNode() const { return Node; }
+
+  bool operator==(const MAIRScalarExpr &Other) const;
+  bool operator!=(const MAIRScalarExpr &Other) const {
+    return !(*this == Other);
+  }
+
+  void print(raw_ostream &OS, bool Signed = false) const;
+
+private:
+  friend class MAIRGraph;
+  friend class MAIRVerifier;
+  friend struct PeriodicRegion;
+
+  const MAIRScalarExprOwner *getOwner() const;
+};
+
 class AbstractAccess {
   const Value *Base = nullptr;
   AbstractValue Offset;
   AbstractValue Size;
-  // Non-null when Size is an expression owned by the graph. Size is then
-  // unknown; the expression is the access length.
-  const MAIRScalarExprNode *SizeExprNode = nullptr;
+  // Valid when the access length is an expression owned by the graph. Size is
+  // then unknown.
+  MAIRScalarExpr SizeExpr;
 
 public:
   AbstractAccess() = default;
@@ -203,10 +254,13 @@ public:
   const Value *getBase() const { return Base; }
   const AbstractValue &getOffset() const { return Offset; }
   const AbstractValue &getSize() const { return Size; }
-  bool hasSizeExpr() const { return SizeExprNode != nullptr; }
-  const MAIRScalarExprNode *getSizeExprNode() const { return SizeExprNode; }
-  void setSizeExprNode(const void *Node) {
-    SizeExprNode = static_cast<const MAIRScalarExprNode *>(Node);
+  bool hasSizeExpr() const { return SizeExpr.isValid(); }
+  MAIRScalarExpr getSizeExpr() const {
+    assert(hasSizeExpr() && "the access length is not an expression");
+    return SizeExpr;
+  }
+  void setSizeExpr(MAIRScalarExpr Expr) {
+    SizeExpr = Expr;
     Size = AbstractValue();
   }
 
@@ -235,8 +289,10 @@ public:
         MAIRGraph *ExprGraph = nullptr);
 
   bool operator==(const AbstractAccess &Other) const {
+    // Size expressions are compared by identity: equal accesses share the
+    // node, structurally equal expressions built separately do not.
     return Base == Other.Base && Offset == Other.Offset && Size == Other.Size &&
-           SizeExprNode == Other.SizeExprNode;
+           SizeExpr.getOpaqueNode() == Other.SizeExpr.getOpaqueNode();
   }
   bool operator!=(const AbstractAccess &Other) const {
     return !(*this == Other);
@@ -340,61 +396,6 @@ public:
 
 using ProgramPointGuard = std::variant<AlwaysGuard, AnyProvenanceExecutedGuard>;
 
-/// An immutable handle into a MAIRGraph-owned typed expression arena.
-/// Expressions store materializable semantics, never Loop or SCEV objects.
-class MAIRScalarExpr {
-public:
-  enum class Kind : uint8_t {
-    Constant,
-    LLVMValue,
-    Add,
-    Mul,
-    UDiv,
-    Truncate,
-    ZeroExtend,
-    SignExtend,
-    SMin,
-    UMin,
-    SMax,
-    UMax,
-  };
-
-private:
-  const MAIRScalarExprNode *Node = nullptr;
-
-  explicit MAIRScalarExpr(const MAIRScalarExprNode &N) : Node(&N) {}
-
-public:
-  MAIRScalarExpr() = default;
-
-  static MAIRScalarExpr fromNode(const MAIRScalarExprNode *Node) {
-    assert(Node && "missing scalar expression node");
-    return MAIRScalarExpr(*Node);
-  }
-
-  bool isValid() const { return Node != nullptr; }
-  Kind getKind() const;
-  Type *getType() const;
-  const APInt &getConstant() const;
-  const Value *getLLVMValue() const;
-  ArrayRef<MAIRScalarExpr> operands() const;
-  const void *getOpaqueNode() const { return Node; }
-
-  bool operator==(const MAIRScalarExpr &Other) const;
-  bool operator!=(const MAIRScalarExpr &Other) const {
-    return !(*this == Other);
-  }
-
-  void print(raw_ostream &OS, bool Signed = false) const;
-
-private:
-  friend class MAIRGraph;
-  friend class MAIRVerifier;
-  friend struct PeriodicRegion;
-
-  const MAIRScalarExprOwner *getOwner() const;
-};
-
 /// The bytes touched by Start + i * Stride for 0 <= i < TripCount.
 /// Base is only the canonical MemoryObject identity; Start is the complete
 /// address of iteration zero. A zero TripCount denotes the empty region.
@@ -464,10 +465,6 @@ public:
 };
 
 /// A contiguous, masked, or explicitly periodic memory-access region.
-inline MAIRScalarExpr expressionSize(const AbstractAccess &Access) {
-  return MAIRScalarExpr::fromNode(Access.getSizeExprNode());
-}
-
 using MemoryRegion = std::variant<AbstractAccess, MaskedRegion, PeriodicRegion>;
 
 class ProgramPointEdge {

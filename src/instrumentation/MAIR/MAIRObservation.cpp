@@ -412,7 +412,7 @@ void Observation::print(raw_ostream &OS) const {
     Obs->print(OS);
     OS << ", ";
     if (Obs->hasSizeExpr())
-      expressionSize(*Obs).print(OS);
+      Obs->getSizeExpr().print(OS);
     else
       printAbstractValue(OS, Obs->getSize());
     return;

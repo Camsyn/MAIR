@@ -363,7 +363,7 @@ entry:
   MAIRScalarExpr SizeExpr = Graph.createBinaryExpr(
       MAIRScalarExpr::Kind::Add, *Base.getType(), BaseExpr, One);
   AbstractAccess Region(&Base, AbstractValue::constant(0), AbstractValue());
-  Region.setSizeExprNode(SizeExpr.getOpaqueNode());
+  Region.setSizeExpr(SizeExpr);
   Point.addObservation(Observation({}, Region, AccessKind::Read));
 
   std::string Diagnostics;
@@ -723,7 +723,7 @@ entry:
       Graph.createBinaryExpr(MAIRScalarExpr::Kind::Mul, I64, WideA, WideB);
   AbstractAccess Range(F.getArg(0), AbstractValue::constant(0),
                        AbstractValue());
-  Range.setSizeExprNode(Size.getOpaqueNode());
+  Range.setSizeExpr(Size);
   PP.addObservation(Observation({}, Range, AccessKind::Read));
   ASSERT_TRUE(Graph.verify());
 
@@ -1393,10 +1393,10 @@ entry:
           MAIRScalarExpr::Kind::Add, SizeType, Constant, Extended);
       AbstractAccess First(Function.getArg(0), AbstractValue::constant(0),
                            AbstractValue());
-      First.setSizeExprNode(Size.getOpaqueNode());
+      First.setSizeExpr(Size);
       AbstractAccess Second(Function.getArg(0), AbstractValue::constant(200),
                             AbstractValue());
-      Second.setSizeExprNode(Size.getOpaqueNode());
+      Second.setSizeExpr(Size);
       auto Merged =
           Reverse
               ? AbstractAccess::merge(Second, First, nullptr, nullptr, &Graph)
@@ -1447,10 +1447,10 @@ entry:
       Graph.createBinaryExpr(MAIRScalarExpr::Kind::Mul, SizeType, Five, Sum);
   AbstractAccess First(Function.getArg(0), AbstractValue::constant(0),
                        AbstractValue());
-  First.setSizeExprNode(Size.getOpaqueNode());
+  First.setSizeExpr(Size);
   AbstractAccess Second(Function.getArg(0), AbstractValue::constant(5),
                         AbstractValue());
-  Second.setSizeExprNode(Size.getOpaqueNode());
+  Second.setSizeExpr(Size);
   EXPECT_FALSE(AbstractAccess::merge(First, Second, nullptr, nullptr, &Graph));
   EXPECT_FALSE(AbstractAccess::merge(Second, First, nullptr, nullptr, &Graph));
 }
@@ -1478,10 +1478,10 @@ entry:
       Graph.createBinaryExpr(MAIRScalarExpr::Kind::Add, SizeType, Sum, Hundred);
   AbstractAccess First(Function.getArg(0), AbstractValue::constant(0),
                        AbstractValue());
-  First.setSizeExprNode(Size.getOpaqueNode());
+  First.setSizeExpr(Size);
   AbstractAccess Second(Function.getArg(0), AbstractValue::constant(100),
                         AbstractValue());
-  Second.setSizeExprNode(Size.getOpaqueNode());
+  Second.setSizeExpr(Size);
   EXPECT_FALSE(AbstractAccess::merge(First, Second, nullptr, nullptr, &Graph));
   EXPECT_FALSE(AbstractAccess::merge(Second, First, nullptr, nullptr, &Graph));
 }

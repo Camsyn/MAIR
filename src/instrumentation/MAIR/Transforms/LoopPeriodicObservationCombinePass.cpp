@@ -404,7 +404,7 @@ std::optional<AbstractAccess> buildContiguousAggregate(
   AbstractAccess Range(Location->getBase(),
                        AbstractValue::constant(StartOffset->getConstant()),
                        AbstractValue());
-  Range.setSizeExprNode(SizeExpr.getOpaqueNode());
+  Range.setSizeExpr(SizeExpr);
   return Range;
 }
 

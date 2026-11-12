@@ -490,7 +490,7 @@ void MAIRVerifier::verifyObservation(const ProgramPoint &PP,
 
   if (const AbstractAccess *Region = Obs.getContiguousRegion())
     if (Region->hasSizeExpr()) {
-      MAIRScalarExpr Size = expressionSize(*Region);
+      MAIRScalarExpr Size = Region->getSizeExpr();
       verifyScalarExpr(Size, Obs, PP);
       Check(Size.getType()->isIntegerTy(),
             "contiguous region size is not integer typed", Obs, PP);

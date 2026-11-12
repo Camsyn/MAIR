@@ -484,11 +484,9 @@ MemoryObject &MAIRGraph::getOrCreateMemoryObject(const Value &Base) {
 void MAIRGraph::registerObservation(Observation &Obs) {
   const Value *Base = Obs.getBase();
   assert(Base && "cannot add a base-less observation to a MAIRGraph");
-  OptimizationConfig.initializeObservation(Obs);
-  if (const ProgramPoint *PP = Obs.getParent())
-    if (isUnsupportedLoopBlock(PP->getBasicBlock()))
-      Obs.setOptimizationProperties(/*CanMerge=*/false, /*CanMove=*/false,
-                                    /*CanDelete=*/false, Obs.getLevel());
+  assert(Obs.getParent() && Obs.getParent()->getParent() == this &&
+         "an observation is registered with the graph of its program point");
+  Obs.refreshOptimizationProperties();
   Obs.setMemoryObject(&getOrCreateMemoryObject(*Base));
 }
 

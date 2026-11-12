@@ -46,6 +46,21 @@ A:
 
 TODO：上例两处写可以先提到 `H`（每轮必执行其一），再由周期合并移出循环；这需要公共 Observation 上提能越过空块 `X`。
 
+### 终止假设
+
+MAIR 假设环一定会终止，即后支配者最终会被执行到。沿 PostDom 边的覆盖和下沉到循环出口都建立在这条假设上，对所有 sanitizer 一样（约定写在 `PPEdgeKind` 的注释里，`src/instrumentation/MAIR/MAIR.h`）。下例中 `witness` 后支配 `header`，`%late` 的 Observation 覆盖 `%early` 的；如果 `%repeat` 一直为真，控制流永远停在 `header`，`%early` 就没有被观测。这是已接受的行为，不做终止性证明。
+
+```llvm
+header:
+  %early = load i32, ptr %p
+  br i1 %repeat, label %header, label %witness
+witness:
+  %late = load i32, ptr %p         ; 后支配 header
+  br i1 %finish, label %exit, label %header
+```
+
+假设只针对环。单条可能不返回的指令（可能 `exit` 或抛异常的调用）不在假设之内，仍由各 sanitizer 的 barrier trait 处理。
+
 barrier 也要考虑重复执行：被覆盖的一端所在块如果能在不经过见证块的情况下再次执行，它自己块内的 barrier 就落在见证和被覆盖访问之间，同样阻断这条边（`MAIRBarrierAnalysisCore::hasBarrierPath`，`src/instrumentation/MAIR/MAIRBarrierAnalysis.cpp`）。
 
 每个优化阶段按子图优先顺序执行，随后处理父图。普通冗余删除、位置合并和公共 Observation 移动继续使用本层 MAIR。它们不能沿父子图链接复用检查。循环不变量移动和周期合并可以显式导出到父图中的循环边界，嵌套导出每次只跨一层，逐层重新证明。内层周期合并会把新的区间观察放到父图的循环出口，而父层第一次不变外提此时已经结束。`default<Og>` 和 `default<O1>` 都在周期合并后再跑一次不变外提，让外层循环重新证明这条观察。
@@ -89,4 +104,5 @@ Observation 合并保留完整来源指令序列及重复项。若右项严格�
 - `test/MAIR/TestCases/mair-stats.ll`：`-mair-stats` 把第二次不变外提和内层区间合并分开打印。
 - `src/instrumentation/MAIR/unittests`：图边界、方向 barrier、整树生命周期和 guard 物化回归。其中 `KeepsAccessCoveredOnlyInALaterIteration`、`EliminatesInvariantAccessCoveredInALaterIteration`、`IrreducibleCyclesAreOptimizedWithinOneIteration`、`CountsBarriersOfAnEndpointThatRunsAgain`、`DoesNotHoistAnAccessTheLoopCanExitWithout` 对应上面几条规则。
 - `src/instrumentation/MAIR/unittests/RandomizedSoundnessTest.cpp`：随机生成带嵌套循环和不可归约环的函数，随机执行，要求每次写都有同地址、中间无 barrier 的 Observation，且每个 Observation 都有这样的写。
+- `test/MAIR/TestCases/asan/mair-nonterminating-loop.ll`：终止假设下，ASan 的检查只留在后支配者处。
 - `test/MAIR/TestCases/asan/mair-may-not-return.c`、`mair-atomic.cpp`：ASan 的检查不会落到可能不返回的调用之后；PostDom 覆盖对 ASan 生效。

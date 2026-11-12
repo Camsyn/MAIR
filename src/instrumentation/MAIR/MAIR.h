@@ -138,6 +138,24 @@ public:
   void initializeObservation(Observation &Obs) const;
 };
 
+/// Dom: the parent runs before the child whenever the child runs.
+/// PostDom: the parent runs after the child on every path to a return.
+///
+/// MAIR assumes that cycles terminate, so that a post-dominator is in fact
+/// reached. Without the assumption the witness below would not do:
+///
+///   header:
+///     %early = load i32, ptr %p
+///     br i1 %repeat, label %header, label %witness
+///   witness:
+///     %late = load i32, ptr %p         ; post-dominates header
+///     br i1 %finish, label %exit, label %header
+///
+/// The observation of %late covers the one of %early. If %repeat stays true,
+/// control never leaves header and %early goes unobserved. Coverage along
+/// PostDom edges and sinking to a loop exit both rest on this assumption, for
+/// every sanitizer. A single instruction that may not return, such as a call
+/// that may exit or throw, is not assumed away: barrier traits handle it.
 enum class PPEdgeKind : uint8_t { Dom, PostDom };
 
 /// The spelling of an edge kind in dumps and diagnostics.

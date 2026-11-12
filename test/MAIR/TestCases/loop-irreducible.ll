@@ -1,8 +1,10 @@
 ; RUN: mair-opt -passes='default<O1>' %s | FileCheck %s
 
-; A non-standard cycle is not a reason to reject the function. Observations
-; inside it stay at their original blocks. A separate natural loop is still
-; optimized.
+; An irreducible cycle is not a reason to reject the function. It gets no
+; loop scope, so invariant motion and periodic combination do not apply to
+; it, but its observations are optimized like any others as long as no
+; iteration of the cycle lies between them. A natural loop around it is
+; still a scope of its own.
 
 define void @keep_irreducible_period(ptr %p, i1 %entry.sel, i1 %cycle.sel,
                                      i1 %again) {
@@ -37,12 +39,14 @@ exit:
 }
 
 define i32 @side_entry(i32 %n, ptr %p) {
+; %p is the same address in every trip of the cycle {header, body, mid}, and
+; mid runs after body within one trip, so the write in mid covers the rest.
 ; CHECK-LABEL: mair graph of fn @side_entry {
 ; CHECK-NOT:   loop-preheader
-; CHECK:       o: read ptr %p, 4
+; CHECK-NOT:   o:
 ; CHECK:       o: write ptr %p, 4
-; CHECK:       o: read ptr %p, 4
-; CHECK:       o: write ptr %p, 4
+; CHECK-NOT:   o:
+; CHECK:       }
 entry:
   %zero = icmp eq i32 %n, 0
   br i1 %zero, label %mid, label %header
@@ -67,4 +71,37 @@ mid:
 
 exit:
   ret i32 0
+}
+
+define void @variant_address(ptr %p, i1 %c, i1 %c1, i1 %c2) {
+; The cycle {A, B, C, D} is entered at A and at D. %q advances once per trip,
+; and B post-dominates C only by going around the cycle, so the write in B
+; does not cover the one in C.
+; CHECK-LABEL: mair graph of fn @variant_address {
+; CHECK-NOT:   loop-preheader
+; CHECK:       o: write ptr %q, 4
+; CHECK:       o: write ptr %q, 4
+; CHECK:       }
+entry:
+  br i1 %c, label %A, label %D
+
+A:
+  %q = phi ptr [ %p, %entry ], [ %q.next, %D ]
+  br i1 %c1, label %B, label %C
+
+B:
+  store i32 1, ptr %q, align 4
+  br i1 %c2, label %D, label %exit
+
+C:
+  store i32 2, ptr %q, align 4
+  br label %D
+
+D:
+  %qd = phi ptr [ %p, %entry ], [ %q, %B ], [ %q, %C ]
+  %q.next = getelementptr inbounds i32, ptr %qd, i64 1
+  br label %A
+
+exit:
+  ret void
 }

@@ -45,50 +45,84 @@ void verifyNaturalLoops(const LoopInfo &LI) {
   }
 }
 
-// Blocks of irreducible cycles. LoopInfo does not represent these cycles, so
-// they have no MAIR loop scope of their own.
+// The outermost cycle of \p From of which another iteration can start before
+// control reaches \p To, which post-dominates it; null if there is none.
 //
-// TODO: Non-standard loops are not optimized yet. Observations in the cycle
-// stay where they are; represent and optimize the region later.
-SmallPtrSet<const BasicBlock *, 16> collectUnsupportedLoopBlocks(Function &F) {
-  CycleInfo Cycles;
-  Cycles.compute(F);
-  SmallPtrSet<const BasicBlock *, 16> Unsupported;
-  SmallVector<const Cycle *, 8> Worklist(Cycles.toplevel_cycles());
-  while (!Worklist.empty()) {
-    const Cycle *C = Worklist.pop_back_val();
-    if (C->isReducible())
-      append_range(Worklist, C->children());
-    else
-      // The blocks of a cycle include those of its sub-cycles.
-      Unsupported.insert_range(C->blocks());
-  }
-  return Unsupported;
-}
+//   H:                                  ; %p = &base[%i]
+//     br i1 (%i < 3), label %X, label %B
+//   X:
+//     br label %A
+//   B:
+//     store i32 1, ptr %p               ; writes base[i] for i >= 3
+//     br i1 %done, label %exit, label %A
+//   A:
+//     store i32 2, ptr %p               ; writes base[i] in every iteration
+//     br label %H
+//
+// The function returns only from B, so B post-dominates A. Yet for %i < 3
+// control goes from A around the backedge to H before it reaches B, and %p is
+// another address by then. Deleting A's observation as "covered by B" would
+// leave the writes of base[0..2] unobserved.
+//
+// Post-dominance around a backedge is still as good as any other for an
+// address that does not change with the loop. So the edge is kept and records
+// the cycle; a pass relates two observations along it only if they are
+// invariant in that cycle (ProgramPointEdge::isOpenTo).
+//
+// LLVM cycles generalize natural loops to irreducible control flow, where a
+// cycle has several entries and LLVM picks the one its DFS reaches first as
+// the header. One rule then serves loops and irreducible cycles alike. A path
+// iterates a cycle C of From when it
+//   - enters the header of C, or
+//   - leaves C: it can come back only through an entry, and outside of C the
+//     values C defined belong to an iteration that is over.
+// Every circuit of C that avoids its header lies in a nested cycle, so a path
+// with neither event keeps what C defined outside its nested cycles. A path
+// that iterates C iterates the cycles of From inside C as well, so the
+// outermost one stands for all of them.
+//
+// Dominance needs no rule. If W dominates T, then after the last definition
+// of a value before T control has passed W again, because a path that
+// reached T without doing so would bypass W altogether.
+//
+// TODO: Both stores above could instead move to H, which runs one of them in
+// every iteration, and periodic combination could then take the result out
+// of the loop. That needs common observation motion to hoist across the
+// empty block X.
+const Cycle *iteratedCycleBetween(const BasicBlock &From, const BasicBlock &To,
+                                  const CycleInfo &Cycles) {
+  const Cycle *Innermost = Cycles.getCycle(&From);
+  if (!Innermost)
+    return nullptr;
+  const Cycle *Outermost = Innermost;
+  while (const Cycle *Parent = Outermost->getParentCycle())
+    Outermost = Parent;
 
-// Whether every path from \p From reaches \p To, which post-dominates it and
-// is in the same loop \p L, before starting another iteration of L or leaving
-// it. A value defined in L is the same value at both blocks only then.
-bool postDominatesWithinIteration(const BasicBlock &From, const BasicBlock &To,
-                                  const Loop *L) {
-  if (!L)
-    return true;
-  const BasicBlock *Header = L->getHeader();
-  if (&To == Header)
-    return false;
+  const Cycle *Iterated = nullptr;
   SmallPtrSet<const BasicBlock *, 16> Visited;
   SmallVector<const BasicBlock *, 16> Worklist{&From};
   while (!Worklist.empty())
     for (const BasicBlock *Succ : successors(Worklist.pop_back_val())) {
-      if (Succ == &To)
+      if (!Visited.insert(Succ).second)
         continue;
-      // A path that leaves L can come back to To only through the header.
-      if (Succ == Header || !L->contains(Succ))
-        return false;
-      if (Visited.insert(Succ).second)
+      // The outermost cycle of From that stepping to Succ iterates.
+      const Cycle *Event = nullptr;
+      for (const Cycle *C = Innermost; C; C = C->getParentCycle()) {
+        if (C->contains(Succ)) {
+          if (C->getHeader() == Succ)
+            Event = C;
+          break;
+        }
+        Event = C;
+      }
+      if (Event && (!Iterated || Event->contains(Iterated)))
+        Iterated = Event;
+      if (Iterated == Outermost)
+        return Iterated;
+      if (Succ != &To)
         Worklist.push_back(Succ);
     }
-  return true;
+  return Iterated;
 }
 
 } // namespace
@@ -106,12 +140,18 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
                            MAIRBarrierAnalysisCore &BA,
                            MAIROptimizationConfig Config) {
   verifyNaturalLoops(LI);
-  SmallPtrSet<const BasicBlock *, 16> Unsupported =
-      collectUnsupportedLoopBlocks(F);
   MAIRGraph Graph(F, Config);
-  for (const BasicBlock *BB : Unsupported)
-    Graph.addUnsupportedLoopBlock(*BB);
   Graph.Analyses.bind(DT, PDT, LI);
+  Graph.Analyses.Cycles = std::make_unique<CycleInfo>();
+  Graph.Analyses.Cycles->compute(F);
+  const CycleInfo &Cycles = *Graph.Analyses.Cycles;
+  // Only natural loops get a scope of their own. The blocks of an irreducible
+  // cycle stay in the enclosing scope, where the ordinary rules apply to
+  // them; post-dominance edges record the cycles they iterate.
+  //
+  // TODO: An irreducible cycle has no preheader, single header or trip count,
+  // so invariant motion and periodic combination do not apply to it. Explore
+  // them if such cycles turn out to matter.
   DenseMap<const Loop *, MAIRGraph *> LoopGraphs;
   for (const Loop *Loop : LI.getLoopsInPreorder()) {
     MAIRGraph *Parent = Loop->getParentLoop()
@@ -229,9 +269,9 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
     if (IPDom) {
       ProgramPoint *Succ = OrderedPPs[&Scope][IPDom].front();
       if (!BA.isBwdBarrier(*BB.getTerminator()) &&
-          postDominatesWithinIteration(BB, *IPDom, Scope.getLoop()) &&
           !BA.hasBwdBarrierPath(BB, *IPDom))
-        Scope.addEdge(*Succ, *ExitPP, PPEdgeKind::PostDom);
+        Scope.addEdge(*Succ, *ExitPP, PPEdgeKind::PostDom,
+                      iteratedCycleBetween(BB, *IPDom, Cycles));
     }
   }
 

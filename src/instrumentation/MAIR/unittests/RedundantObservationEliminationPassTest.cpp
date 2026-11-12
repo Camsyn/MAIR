@@ -2,6 +2,8 @@
 #include "MAIR/Transforms/SimplifyGraphPass.h"
 #include "MAIRPassTestUtil.h"
 
+#include "llvm/IR/Instructions.h"
+
 using namespace mair;
 
 namespace {
@@ -395,22 +397,65 @@ exit:
         return BB;
     llvm_unreachable("missing block");
   };
-  // Post-dominance that holds only by starting another iteration is not an
-  // edge of the loop body graph.
-  EXPECT_FALSE(Body.hasEdge(Body.getBBEntryRepresentative(Block("B")),
-                            Body.getBBExitRepresentative(Block("A")),
-                            PPEdgeKind::PostDom));
-  EXPECT_FALSE(Body.hasEdge(Body.getBBEntryRepresentative(Block("H")),
-                            Body.getBBExitRepresentative(Block("A")),
-                            PPEdgeKind::PostDom));
-  // Post-dominance inside one iteration still is.
-  EXPECT_TRUE(Body.hasEdge(Body.getBBEntryRepresentative(Block("A")),
-                           Body.getBBExitRepresentative(Block("X")),
-                           PPEdgeKind::PostDom));
+  // Post-dominance that holds only by starting another iteration names the
+  // loop it iterates: H post-dominates A through the backedge.
+  const ProgramPointEdge *AroundBackedge =
+      Body.getBBEntryRepresentative(Block("H"))
+          .findChild(Body.getBBExitRepresentative(Block("A")),
+                     PPEdgeKind::PostDom);
+  ASSERT_NE(AroundBackedge, nullptr);
+  ASSERT_NE(AroundBackedge->getIteratedCycle(), nullptr);
+  EXPECT_EQ(AroundBackedge->getIteratedCycle()->getHeader(), &Block("H"));
+  // Post-dominance inside one iteration does not.
+  const ProgramPointEdge *WithinIteration =
+      Body.getBBEntryRepresentative(Block("A"))
+          .findChild(Body.getBBExitRepresentative(Block("X")),
+                     PPEdgeKind::PostDom);
+  ASSERT_NE(WithinIteration, nullptr);
+  EXPECT_EQ(WithinIteration->getIteratedCycle(), nullptr);
 
   MAIRGraphAnalysisManager AM;
   runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM);
   EXPECT_EQ(observationCount(Graph, "A"), 1u);
+  EXPECT_EQ(observationCount(Graph, "B"), 1u);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(RedundantObservationEliminationPass,
+     EliminatesInvariantAccessCoveredInALaterIteration) {
+  llvm::LLVMContext Ctx;
+  // The loop of KeepsAccessCoveredOnlyInALaterIteration with a fixed address:
+  // B covers A although it runs an iteration later, because %base is the
+  // same bytes in every iteration.
+  auto M = parseModule(R"IR(
+define void @f(ptr %base, i64 %n) {
+entry:
+  br label %H
+H:
+  %i = phi i64 [ 0, %entry ], [ %i.next, %A ]
+  %c = icmp ult i64 %i, 3
+  br i1 %c, label %X, label %B
+X:
+  br label %A
+B:
+  store i32 1, ptr %base, align 4
+  %c2 = icmp eq i64 %i, %n
+  br i1 %c2, label %exit, label %A
+A:
+  store i32 2, ptr %base, align 4
+  %i.next = add i64 %i, 1
+  br label %H
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  MAIRGraph Graph = buildGraph(*M->getFunction("f"),
+                               MAIROptimizationConfig::forThreadSanitizer());
+  MAIRGraphAnalysisManager AM;
+  runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM);
+  EXPECT_EQ(observationCount(Graph, "A"), 0u);
   EXPECT_EQ(observationCount(Graph, "B"), 1u);
   EXPECT_TRUE(Graph.verify());
 }

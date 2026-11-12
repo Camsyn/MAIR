@@ -70,9 +70,15 @@ static auto findEdge(EdgeListT &Edges, const ProgramPoint &Node,
 
 static void printEdgeList(raw_ostream &OS, ArrayRef<ProgramPointEdge> Edges) {
   ListSeparator Separator;
-  for (const ProgramPointEdge &Edge : Edges)
+  for (const ProgramPointEdge &Edge : Edges) {
     OS << Separator << Edge.getNode().getName() << "("
-       << getEdgeKindName(Edge.getKind()) << ")";
+       << getEdgeKindName(Edge.getKind());
+    if (const Cycle *Iterated = Edge.getIteratedCycle()) {
+      OS << " iter ";
+      printValueName(OS, *Iterated->getHeader());
+    }
+    OS << ")";
+  }
 }
 
 } // namespace
@@ -211,12 +217,16 @@ Observation &ProgramPoint::addObservation(const Observation &A) {
   return Node;
 }
 
-bool ProgramPoint::hasChild(const ProgramPoint &PP, PPEdgeKind Kind) const {
-  return findEdge(Children, PP, Kind) != Children.end();
+const ProgramPointEdge *ProgramPoint::findChild(const ProgramPoint &PP,
+                                                PPEdgeKind Kind) const {
+  auto It = findEdge(Children, PP, Kind);
+  return It == Children.end() ? nullptr : &*It;
 }
 
-bool ProgramPoint::hasParent(const ProgramPoint &PP, PPEdgeKind Kind) const {
-  return findEdge(Parents, PP, Kind) != Parents.end();
+const ProgramPointEdge *ProgramPoint::findParent(const ProgramPoint &PP,
+                                                 PPEdgeKind Kind) const {
+  auto It = findEdge(Parents, PP, Kind);
+  return It == Parents.end() ? nullptr : &*It;
 }
 
 bool ProgramPoint::hasCompatibleMergeSemantics(
@@ -267,16 +277,8 @@ void ProgramPoint::takeObservationsFrom(ProgramPoint &Other) {
          "observations can only move between program points of one graph");
   if (Other.empty())
     return;
-  // Optimization properties depend on the program point only through whether
-  // its block is in an unsupported cycle.
-  const MAIRGraph &Graph = *getParent();
-  const bool Repin = Graph.isUnsupportedLoopBlock(getBasicBlock()) !=
-                     Graph.isUnsupportedLoopBlock(Other.getBasicBlock());
-  for (Observation &Obs : Other.Observations) {
+  for (Observation &Obs : Other.Observations)
     Obs.setParent(this);
-    if (Repin)
-      Obs.refreshOptimizationProperties();
-  }
   Observations.splice(Observations.begin(), Other.Observations);
   NumObservations += Other.NumObservations;
   Other.NumObservations = 0;
@@ -375,7 +377,6 @@ void MAIRGraph::moveFrom(MAIRGraph &Other) {
   LoopExits = std::move(Other.LoopExits);
   ForwardBarrier = Other.ForwardBarrier;
   BackwardBarrier = Other.BackwardBarrier;
-  UnsupportedLoopBlocks = std::move(Other.UnsupportedLoopBlocks);
   BBEntryRepresentatives = std::move(Other.BBEntryRepresentatives);
   BBExitRepresentatives = std::move(Other.BBExitRepresentatives);
   ProgramPoints = std::move(Other.ProgramPoints);
@@ -437,14 +438,6 @@ bool MAIRGraph::containsBlock(const BasicBlock &BB) const {
   assertLive("query");
   return BB.getParent() == F &&
          (!hasLoopInfo() || getLoopInfo().getLoopFor(&BB) == ScopeLoop);
-}
-
-void MAIRGraph::addUnsupportedLoopBlock(const BasicBlock &BB) {
-  getRoot().UnsupportedLoopBlocks.insert(&BB);
-}
-
-bool MAIRGraph::isUnsupportedLoopBlock(const BasicBlock *BB) const {
-  return BB && getRoot().UnsupportedLoopBlocks.contains(BB);
 }
 
 void MAIRGraph::markConsumed() {
@@ -666,7 +659,6 @@ void MAIRGraph::clearStorage() {
   NumEdges = 0;
   LoopPreheader = nullptr;
   LoopExits.clear();
-  UnsupportedLoopBlocks.clear();
 }
 
 void MAIRGraph::clear() {
@@ -752,27 +744,42 @@ void MAIRGraph::contractProgramPoint(ProgramPoint &Into, ProgramPoint &From) {
   for (const ProgramPointEdge &Edge : Incoming) {
     ProgramPoint &Pred = Edge.getNode();
     if (&Pred != &Into)
-      addEdge(Pred, Into, Edge.getKind());
+      addEdge(Pred, Into, Edge.getKind(), Edge.getIteratedCycle());
   }
   for (const ProgramPointEdge &Edge : Outgoing) {
     ProgramPoint &Succ = Edge.getNode();
     if (&Succ != &Into)
-      addEdge(Into, Succ, Edge.getKind());
+      addEdge(Into, Succ, Edge.getKind(), Edge.getIteratedCycle());
   }
 
   replaceProgramPoint(From, Into);
   erase(From);
 }
 
-void MAIRGraph::addEdge(ProgramPoint &From, ProgramPoint &To, PPEdgeKind Kind) {
+void MAIRGraph::addEdge(ProgramPoint &From, ProgramPoint &To, PPEdgeKind Kind,
+                        const Cycle *Iterated) {
   assertLive("add an edge to");
   if (From.getParent() != this || To.getParent() != this)
     report_fatal_error("MAIRGraph edge endpoints must belong to this graph");
-  if (hasEdge(From, To, Kind))
+  assert((!Iterated || Kind == PPEdgeKind::PostDom) &&
+         "only a post-dominance edge can cross an iteration");
+  auto ChildIt = findEdge(From.Children, To, Kind);
+  if (ChildIt == From.Children.end()) {
+    From.Children.push_back(ProgramPointEdge(To, Kind, Iterated));
+    To.Parents.push_back(ProgramPointEdge(From, Kind, Iterated));
+    ++NumEdges;
     return;
-  From.Children.push_back(ProgramPointEdge(To, Kind));
-  To.Parents.push_back(ProgramPointEdge(From, Kind));
-  ++NumEdges;
+  }
+  // The edge exists. Keep the outer of the two cycles: an observation that is
+  // invariant in it is invariant in the other too.
+  if (!Iterated || (ChildIt->Iterated && ChildIt->Iterated->contains(Iterated)))
+    return;
+  assert((!ChildIt->Iterated || Iterated->contains(ChildIt->Iterated)) &&
+         "cycles iterated along one edge must be nested");
+  auto ParentIt = findEdge(To.Parents, From, Kind);
+  assert(ParentIt != To.Parents.end() && "MAIR edge lists are not symmetric");
+  ChildIt->Iterated = Iterated;
+  ParentIt->Iterated = Iterated;
 }
 
 void MAIRGraph::removeEdge(ProgramPoint &From, ProgramPoint &To,

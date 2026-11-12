@@ -10,12 +10,26 @@ namespace mair {
 
 AnalysisKey RedundantObservationAnalysis::Key;
 
+// Edges that iterate a cycle beyond this many distinct ones stay closed.
+static constexpr unsigned MaxTrackedCycles = 64;
+
+uint64_t RedundantObservationInfo::closedCycles(const Observation &Obs) const {
+  uint64_t Closed = 0;
+  for (unsigned I = 0; I < IteratedCycles.size(); ++I)
+    if (!Obs.isInvariantIn(*IteratedCycles[I]))
+      Closed |= uint64_t(1) << I;
+  return Closed;
+}
+
 bool RedundantObservationInfo::isCovered(
     const Observation &Obs,
     const DenseSet<const Observation *> &ExcludedSources) const {
   const ProgramPoint *Target = Obs.getParent();
+  // A covering observation names the same bytes through the same values, so
+  // the cycles that are closed to Obs are closed to it as well.
+  const Reachability &Reach = ByClosedCycles.find(closedCycles(Obs))->second;
   const SparseBitVector<> &Sources =
-      ReachingSources[ComponentOf[PointIndex.find(Target)->second]];
+      Reach.ReachingSources[Reach.ComponentOf[PointIndex.find(Target)->second]];
   if (Sources.empty())
     return false;
   // Only an observation of the same memory object can cover Obs. The use-list
@@ -108,57 +122,90 @@ RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
   for (const ProgramPoint &PP : G)
     Result.PointIndex[&PP] = Index++;
 
-  // The extra node precedes every program point in the reversed graph, so one
-  // traversal from it visits all of them.
-  std::vector<ReachNode> Nodes(NumPoints + 1);
-  ReachNode &Root = Nodes[NumPoints];
+  // An edge is identified by its ends here. Closed is the bit of the cycle it
+  // iterates, if any.
+  struct EnabledEdge {
+    unsigned From, To;
+    uint64_t Closed;
+  };
+  SmallVector<EnabledEdge, 32> Edges;
   BitVector IsSource(NumPoints);
   Index = 0;
   for (const ProgramPoint &PP : G) {
-    ReachNode &Node = Nodes[Index];
     // A guarded program point may not execute, so it cannot be a witness.
     if (PP.hasAlwaysGuard() && !PP.empty())
       IsSource.set(Index);
-    // Edge kinds are filtered at every hop because sanitizer configurations
-    // may allow Dom coverage while rejecting PostDom coverage.
-    for (const ProgramPointEdge &Edge : PP.children())
-      if (canPropagate(G, PP, Edge))
-        Nodes[Result.PointIndex.lookup(&Edge.getNode())].Preds.push_back(&Node);
-    Root.Preds.push_back(&Node);
+    for (const ProgramPointEdge &Edge : PP.children()) {
+      if (!canPropagate(G, PP, Edge))
+        continue;
+      uint64_t Closed = 0;
+      if (const Cycle *Iterated = Edge.getIteratedCycle()) {
+        auto It = find(Result.IteratedCycles, Iterated);
+        const unsigned CycleIndex = It - Result.IteratedCycles.begin();
+        if (It == Result.IteratedCycles.end()) {
+          if (CycleIndex >= MaxTrackedCycles)
+            continue;
+          Result.IteratedCycles.push_back(Iterated);
+        }
+        Closed = uint64_t(1) << CycleIndex;
+      }
+      Edges.push_back(
+          {Index, Result.PointIndex.lookup(&Edge.getNode()), Closed});
+    }
     ++Index;
   }
 
-  // Components of the reversed graph come out with predecessors first, so the
-  // set of every predecessor outside a component is final when it is read.
-  Result.ComponentOf.assign(NumPoints, 0);
-  for (auto SCC = scc_begin(&Root); !SCC.isAtEnd(); ++SCC) {
-    if (SCC->front() == &Root)
-      continue;
-    const unsigned Component = Result.ReachingSources.size();
-    for (const ReachNode *Node : *SCC)
-      Result.ComponentOf[Node - Nodes.data()] = Component;
+  auto Compute = [&](uint64_t Closed) {
+    RedundantObservationInfo::Reachability Reach;
+    // The extra node precedes every program point in the reversed graph, so
+    // one traversal from it visits all of them.
+    std::vector<ReachNode> Nodes(NumPoints + 1);
+    ReachNode &Root = Nodes[NumPoints];
+    for (const EnabledEdge &Edge : Edges)
+      if (!(Edge.Closed & Closed))
+        Nodes[Edge.To].Preds.push_back(&Nodes[Edge.From]);
+    for (unsigned Point = 0; Point < NumPoints; ++Point)
+      Root.Preds.push_back(&Nodes[Point]);
 
-    SparseBitVector<> Sources;
-    const bool HasCycle = SCC.hasCycle();
-    for (const ReachNode *Node : *SCC) {
-      const unsigned Point = Node - Nodes.data();
-      // A local observation becomes available only after its program point,
-      // so a program point reaches itself only around a cycle.
-      if (HasCycle && IsSource.test(Point))
-        Sources.set(Point);
-      for (const ReachNode *PredNode : Node->Preds) {
-        const unsigned Pred = PredNode - Nodes.data();
-        const unsigned PredComponent = Result.ComponentOf[Pred];
-        if (PredComponent == Component)
-          continue;
-        Sources |= Result.ReachingSources[PredComponent];
-        if (IsSource.test(Pred))
-          Sources.set(Pred);
+    // Components of the reversed graph come out with predecessors first, so
+    // the set of every predecessor outside a component is final when read.
+    Reach.ComponentOf.assign(NumPoints, 0);
+    for (auto SCC = scc_begin(&Root); !SCC.isAtEnd(); ++SCC) {
+      if (SCC->front() == &Root)
+        continue;
+      const unsigned Component = Reach.ReachingSources.size();
+      for (const ReachNode *Node : *SCC)
+        Reach.ComponentOf[Node - Nodes.data()] = Component;
+
+      SparseBitVector<> Sources;
+      const bool HasCycle = SCC.hasCycle();
+      for (const ReachNode *Node : *SCC) {
+        const unsigned Point = Node - Nodes.data();
+        // A local observation becomes available only after its program
+        // point, so a program point reaches itself only around a cycle.
+        if (HasCycle && IsSource.test(Point))
+          Sources.set(Point);
+        for (const ReachNode *PredNode : Node->Preds) {
+          const unsigned Pred = PredNode - Nodes.data();
+          const unsigned PredComponent = Reach.ComponentOf[Pred];
+          if (PredComponent == Component)
+            continue;
+          Sources |= Reach.ReachingSources[PredComponent];
+          if (IsSource.test(Pred))
+            Sources.set(Pred);
+        }
       }
+      Reach.ReachingSources.push_back(std::move(Sources));
     }
-    Result.ReachingSources.push_back(std::move(Sources));
-  }
+    return Reach;
+  };
 
+  for (const ProgramPoint &PP : G)
+    for (const Observation &Obs : PP) {
+      const uint64_t Closed = Result.closedCycles(Obs);
+      if (!Result.ByClosedCycles.count(Closed))
+        Result.ByClosedCycles.try_emplace(Closed, Compute(Closed));
+    }
   return Result;
 }
 

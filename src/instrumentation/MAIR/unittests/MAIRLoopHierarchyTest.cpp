@@ -473,12 +473,18 @@ exit:
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(MAIRLoopHierarchy, EveryBlockOfAnIrreducibleCycleIsPinned) {
+TEST(MAIRLoopHierarchy, IrreducibleCyclesAreOptimizedWithinOneIteration) {
   llvm::LLVMContext Ctx;
-  // The cycle {A, B, C, D} is entered at A and at D. %q advances once per
-  // trip, so B covers C only by going around the cycle to another address.
+  // The cycle {A, B, C, D} is entered at A and at D, so no LoopInfo loop
+  // describes it. Its blocks stay in the function scope and are optimized
+  // like any others, except across an iteration of the cycle.
+  //
+  // @variant: %q advances once per trip. B post-dominates C only by going
+  // around the cycle, where %q is another address, so B must not cover C.
+  // @invariant: the same shape with a fixed address; B does cover C.
+  // @same_trip: M post-dominates B and C within one trip and covers both.
   auto Module = parseModule(R"IR(
-define void @f(ptr %p, i1 %c, i1 %c1, i1 %c2) {
+define void @variant(ptr %p, i1 %c, i1 %c1, i1 %c2) {
 entry:
   br i1 %c, label %A, label %D
 A:
@@ -497,34 +503,130 @@ D:
 exit:
   ret void
 }
+define void @invariant(ptr %p, i1 %c, i1 %c1, i1 %c2) {
+entry:
+  br i1 %c, label %A, label %D
+A:
+  br i1 %c1, label %B, label %C
+B:
+  store i32 1, ptr %p, align 4
+  br i1 %c2, label %D, label %exit
+C:
+  store i32 2, ptr %p, align 4
+  br label %D
+D:
+  br label %A
+exit:
+  ret void
+}
+define void @same_trip(ptr %p, i1 %c, i1 %c1, i1 %c2) {
+entry:
+  br i1 %c, label %A, label %D
+A:
+  %q = phi ptr [ %p, %entry ], [ %q.next, %D ]
+  br i1 %c1, label %B, label %C
+B:
+  store i32 1, ptr %q, align 4
+  br label %M
+C:
+  store i32 2, ptr %q, align 4
+  br label %M
+M:
+  store i32 3, ptr %q, align 4
+  br i1 %c2, label %D, label %exit
+D:
+  %qd = phi ptr [ %p, %entry ], [ %q, %M ]
+  %q.next = getelementptr inbounds i32, ptr %qd, i64 1
+  br label %A
+exit:
+  ret void
+}
 )IR",
                             Ctx);
   ASSERT_TRUE(Module);
-  llvm::Function &Function = *Module->getFunction("f");
-  MAIRGraph Graph = buildGraph(Function);
-  ASSERT_TRUE(Graph.verify());
+  auto Block = [](llvm::Function &F,
+                  llvm::StringRef Name) -> llvm::BasicBlock & {
+    for (llvm::BasicBlock &BB : F)
+      if (BB.getName() == Name)
+        return BB;
+    llvm_unreachable("missing block");
+  };
+  auto PostDomEdge = [&](MAIRGraph &Graph, llvm::Function &F,
+                         llvm::StringRef From, llvm::StringRef To) {
+    return Graph.getBBEntryRepresentative(Block(F, To))
+        .findChild(Graph.getBBExitRepresentative(Block(F, From)),
+                   PPEdgeKind::PostDom);
+  };
 
-  for (const llvm::BasicBlock &BB : Function) {
-    const bool InCycle = BB.getName() != "entry" && BB.getName() != "exit";
-    EXPECT_EQ(Graph.isUnsupportedLoopBlock(&BB), InCycle) << BB.getName().str();
-  }
-  for (llvm::StringRef Block : {"B", "C"}) {
-    ProgramPoint *PP = findMutableMemoryProgramPoint(Graph, Block);
-    ASSERT_NE(PP, nullptr);
-    ASSERT_EQ(PP->size(), 1u);
-    EXPECT_FALSE(PP->begin()->isDeletable());
-    EXPECT_FALSE(PP->begin()->isMovable());
-    EXPECT_FALSE(PP->begin()->isMergeable());
-  }
+  {
+    llvm::Function &F = *Module->getFunction("variant");
+    MAIRGraph Graph =
+        buildGraph(F, MAIROptimizationConfig::forThreadSanitizer());
+    ASSERT_TRUE(Graph.verify());
+    EXPECT_TRUE(Graph.children().empty());
+    for (llvm::StringRef Name : {"B", "C"}) {
+      ProgramPoint *PP = findMutableMemoryProgramPoint(Graph, Name);
+      ASSERT_NE(PP, nullptr);
+      EXPECT_TRUE(PP->begin()->isDeletable());
+    }
 
-  MAIRGraphAnalysisManager AM;
-  registerMAIRGraphAnalyses(AM, nullptr);
-  MAIRGraphPassManager PM;
-  buildMAIRGraphO1Pipeline(PM);
-  PM.run(Graph, AM);
-  EXPECT_EQ(observationCount(Graph, "B"), 1u);
-  EXPECT_EQ(observationCount(Graph, "C"), 1u);
-  EXPECT_TRUE(Graph.verify());
+    // LLVM picks one of the two entries as the header of the cycle. The step
+    // into it, C -> D or D -> A, starts another trip.
+    const ProgramPointEdge *IntoD = PostDomEdge(Graph, F, "C", "D");
+    const ProgramPointEdge *IntoA = PostDomEdge(Graph, F, "D", "A");
+    ASSERT_NE(IntoD, nullptr);
+    ASSERT_NE(IntoA, nullptr);
+    const llvm::Cycle *Iterated = IntoD->getIteratedCycle()
+                                      ? IntoD->getIteratedCycle()
+                                      : IntoA->getIteratedCycle();
+    ASSERT_NE(Iterated, nullptr);
+    EXPECT_NE(IntoD->getIteratedCycle() != nullptr,
+              IntoA->getIteratedCycle() != nullptr);
+    for (const llvm::BasicBlock &BB : F)
+      EXPECT_EQ(Iterated->contains(&BB),
+                BB.getName() != "entry" && BB.getName() != "exit")
+          << BB.getName().str();
+    const Observation &InC =
+        *findMutableMemoryProgramPoint(Graph, "C")->begin();
+    EXPECT_FALSE(InC.isInvariantIn(*Iterated));
+
+    // Leaving the cycle ends the trip as well.
+    const ProgramPointEdge *Leaving = PostDomEdge(Graph, F, "B", "exit");
+    ASSERT_NE(Leaving, nullptr);
+    EXPECT_EQ(Leaving->getIteratedCycle(), Iterated);
+
+    MAIRGraphAnalysisManager AM;
+    registerMAIRGraphAnalyses(AM, nullptr);
+    MAIRGraphPassManager PM;
+    buildMAIRGraphO1Pipeline(PM);
+    PM.run(Graph, AM);
+    EXPECT_EQ(observationCount(Graph, "B"), 1u);
+    EXPECT_EQ(observationCount(Graph, "C"), 1u);
+    EXPECT_TRUE(Graph.verify());
+  }
+  {
+    MAIRGraph Graph = buildGraph(*Module->getFunction("invariant"),
+                                 MAIROptimizationConfig::forThreadSanitizer());
+    MAIRGraphAnalysisManager AM;
+    runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM);
+    EXPECT_EQ(observationCount(Graph, "B"), 1u);
+    EXPECT_EQ(observationCount(Graph, "C"), 0u);
+    EXPECT_TRUE(Graph.verify());
+  }
+  {
+    llvm::Function &F = *Module->getFunction("same_trip");
+    MAIRGraph Graph =
+        buildGraph(F, MAIROptimizationConfig::forThreadSanitizer());
+    const ProgramPointEdge *WithinTrip = PostDomEdge(Graph, F, "B", "M");
+    ASSERT_NE(WithinTrip, nullptr);
+    EXPECT_EQ(WithinTrip->getIteratedCycle(), nullptr);
+    MAIRGraphAnalysisManager AM;
+    runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM);
+    EXPECT_EQ(observationCount(Graph, "B"), 0u);
+    EXPECT_EQ(observationCount(Graph, "C"), 0u);
+    EXPECT_EQ(observationCount(Graph, "M"), 1u);
+    EXPECT_TRUE(Graph.verify());
+  }
 }
 
 } // namespace

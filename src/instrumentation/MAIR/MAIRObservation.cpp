@@ -203,9 +203,6 @@ void Observation::refreshOptimizationProperties() {
   if (ProgramPoint *PP = getParent())
     if (MAIRGraph *Graph = PP->getParent()) {
       Graph->getOptimizationConfig().initializeObservation(*this);
-      if (Graph->isUnsupportedLoopBlock(PP->getBasicBlock()))
-        setOptimizationProperties(/*CanMerge=*/false, /*CanMove=*/false,
-                                  /*CanDelete=*/false, getLevel());
       return;
     }
   MAIROptimizationConfig::generic().initializeObservation(*this);
@@ -232,6 +229,52 @@ bool Observation::hasConcreteRange() const {
   const AbstractAccess *Location = getContiguousRegion();
   return Location && Location->getOffset().isConstant() &&
          Location->getSize().isConstant();
+}
+
+namespace {
+bool isDefinedOutside(const Value *V, const Cycle &C) {
+  const auto *I = dyn_cast_or_null<Instruction>(V);
+  return !I || !C.contains(I->getParent());
+}
+
+bool isDefinedOutside(const AbstractValue &V, const Cycle &C) {
+  return !V.isSymbol() || isDefinedOutside(V.getSymbol(), C);
+}
+
+bool isDefinedOutside(const MAIRScalarExpr &Expr, const Cycle &C) {
+  if (!Expr.isValid())
+    return true;
+  if (Expr.getKind() == MAIRScalarExpr::Kind::LLVMValue)
+    return isDefinedOutside(Expr.getLLVMValue(), C);
+  return llvm::all_of(Expr.operands(), [&](const MAIRScalarExpr &Operand) {
+    return isDefinedOutside(Operand, C);
+  });
+}
+
+bool isDefinedOutside(const AbstractAccess &Access, const Cycle &C) {
+  return isDefinedOutside(Access.getBase(), C) &&
+         isDefinedOutside(Access.getOffset(), C) &&
+         isDefinedOutside(Access.getSize(), C) &&
+         (!Access.hasSizeExpr() || isDefinedOutside(Access.getSizeExpr(), C));
+}
+} // namespace
+
+bool Observation::isInvariantIn(const Cycle &C) const {
+  if (const AbstractAccess *Access = getContiguousRegion())
+    return isDefinedOutside(*Access, C);
+  if (const MaskedRegion *Masked = getMaskedRegion())
+    return isDefinedOutside(Masked->getBounds(), C) &&
+           isDefinedOutside(Masked->getDynamicMask(), C);
+  const PeriodicRegion *Periodic = getPeriodicRegion();
+  return isDefinedOutside(Periodic->getBase(), C) &&
+         isDefinedOutside(Periodic->getStart(), C) &&
+         isDefinedOutside(Periodic->getStride(), C) &&
+         isDefinedOutside(Periodic->getAccessSize(), C) &&
+         isDefinedOutside(Periodic->getTripCount(), C);
+}
+
+bool ProgramPointEdge::isOpenTo(const Observation &Obs) const {
+  return !Iterated || Obs.isInvariantIn(*Iterated);
 }
 
 bool Observation::covers(const Observation &Other) const {

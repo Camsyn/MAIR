@@ -18,6 +18,7 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/CycleInfo.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/Dominators.h"
@@ -468,12 +469,17 @@ public:
 using MemoryRegion = std::variant<AbstractAccess, MaskedRegion, PeriodicRegion>;
 
 class ProgramPointEdge {
+  friend class MAIRGraph;
+
   ProgramPoint *Node = nullptr;
   PPEdgeKind Kind = PPEdgeKind::Dom;
+  const llvm::Cycle *Iterated = nullptr;
 
 public:
   ProgramPointEdge() = default;
-  ProgramPointEdge(ProgramPoint &N, PPEdgeKind K) : Node(&N), Kind(K) {}
+  ProgramPointEdge(ProgramPoint &N, PPEdgeKind K,
+                   const llvm::Cycle *IteratedCycle = nullptr)
+      : Node(&N), Kind(K), Iterated(IteratedCycle) {}
 
   ProgramPoint &getNode() const {
     assert(Node && "MAIR program point edge has no endpoint");
@@ -482,6 +488,15 @@ public:
   PPEdgeKind getKind() const { return Kind; }
   bool isDom() const { return Kind == PPEdgeKind::Dom; }
   bool isPostDom() const { return Kind == PPEdgeKind::PostDom; }
+  /// The outermost cycle of which another iteration may start between the
+  /// post-dominated program point and its post-dominator; null if there is
+  /// none, and always null on a Dom edge. A value defined in that cycle may
+  /// differ at the two ends, so only observations that are invariant in the
+  /// cycle may be related along the edge. See iteratedCycleBetween() in
+  /// MAIR.cpp for the example and the reasoning.
+  const llvm::Cycle *getIteratedCycle() const { return Iterated; }
+  /// Whether \p Obs denotes the same bytes at both ends.
+  bool isOpenTo(const Observation &Obs) const;
 };
 
 /// The operand edge from an Observation user to a MemoryObject, analogous to
@@ -736,6 +751,9 @@ public:
   void eraseFromParent();
 
   bool hasConcreteRange() const;
+  /// Whether no value the region refers to is defined in \p C, so that the
+  /// region denotes the same bytes in every iteration of \p C.
+  bool isInvariantIn(const llvm::Cycle &C) const;
   static Observation fromInstruction(const Instruction &I,
                                      const DataLayout &DL);
 
@@ -843,8 +861,17 @@ public:
   const_iterator end() const { return Observations.end(); }
   bool empty() const { return NumObservations == 0; }
   unsigned size() const { return NumObservations; }
-  bool hasChild(const ProgramPoint &PP, PPEdgeKind Kind) const;
-  bool hasParent(const ProgramPoint &PP, PPEdgeKind Kind) const;
+  /// The edge of \p Kind to child or parent \p PP; null if there is none.
+  const ProgramPointEdge *findChild(const ProgramPoint &PP,
+                                    PPEdgeKind Kind) const;
+  const ProgramPointEdge *findParent(const ProgramPoint &PP,
+                                     PPEdgeKind Kind) const;
+  bool hasChild(const ProgramPoint &PP, PPEdgeKind Kind) const {
+    return findChild(PP, Kind) != nullptr;
+  }
+  bool hasParent(const ProgramPoint &PP, PPEdgeKind Kind) const {
+    return findParent(PP, Kind) != nullptr;
+  }
   /// Merging preserves execution semantics only for equal guards and equal
   /// anchored kinds, or for program points on the exact same CFG edge.
   bool hasCompatibleMergeSemantics(const ProgramPoint &Other) const;
@@ -917,6 +944,8 @@ private:
     std::unique_ptr<DominatorTree> OwnedDT;
     std::unique_ptr<PostDominatorTree> OwnedPDT;
     std::unique_ptr<LoopInfo> OwnedLI;
+    // Always owned: edges point into it.
+    std::unique_ptr<llvm::CycleInfo> Cycles;
     const DominatorTree *DT = nullptr;
     const PostDominatorTree *PDT = nullptr;
     const LoopInfo *LI = nullptr;
@@ -953,8 +982,6 @@ private:
   SmallVector<LoopProgramPoint *, 2> LoopExits;
   bool ForwardBarrier = false;
   bool BackwardBarrier = false;
-  // Blocks that form a non-standard cycle. Only the root graph stores them.
-  llvm::SmallPtrSet<const llvm::BasicBlock *, 8> UnsupportedLoopBlocks;
   DenseMap<const BasicBlock *, ProgramPoint *> BBEntryRepresentatives;
   DenseMap<const BasicBlock *, ProgramPoint *> BBExitRepresentatives;
   ProgramPointListType ProgramPoints;
@@ -997,8 +1024,6 @@ public:
   bool hasForwardBarrier() const { return ForwardBarrier; }
   bool hasBackwardBarrier() const { return BackwardBarrier; }
   bool containsBlock(const BasicBlock &BB) const;
-  void addUnsupportedLoopBlock(const llvm::BasicBlock &BB);
-  bool isUnsupportedLoopBlock(const llvm::BasicBlock *BB) const;
   const MAIROptimizationConfig &getOptimizationConfig() const {
     return OptimizationConfig;
   }
@@ -1110,7 +1135,8 @@ public:
   const ProgramPoint &getBBExitRepresentative(const BasicBlock &BB) const;
   void replaceProgramPoint(ProgramPoint &From, ProgramPoint &Into);
 
-  void addEdge(ProgramPoint &From, ProgramPoint &To, PPEdgeKind Kind);
+  void addEdge(ProgramPoint &From, ProgramPoint &To, PPEdgeKind Kind,
+               const llvm::Cycle *Iterated = nullptr);
   void removeEdge(ProgramPoint &From, ProgramPoint &To, PPEdgeKind Kind);
   bool hasEdge(const ProgramPoint &From, const ProgramPoint &To,
                PPEdgeKind Kind) const;

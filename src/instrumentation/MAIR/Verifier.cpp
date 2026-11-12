@@ -657,6 +657,11 @@ void MAIRVerifier::verifyChildEdge(const ProgramPoint &From,
         "child edge appears more than once", From);
   Check(countParentEdge(To, From, Edge.getKind()) == 1,
         "child edge is missing from destination parent list", From);
+  Check(Edge.isPostDom() || !Edge.getIteratedCycle(),
+        "dominance edge iterates a cycle", From);
+  if (const ProgramPointEdge *Mirror = To.findParent(From, Edge.getKind()))
+    Check(Mirror->getIteratedCycle() == Edge.getIteratedCycle(),
+          "edge and its mirror iterate different cycles", From);
 }
 
 void MAIRVerifier::verifyParentEdge(const ProgramPoint &To,

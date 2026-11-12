@@ -70,11 +70,17 @@ bool collectNeighborBlocks(const BasicBlock &BB, MotionDirection Direction,
 
 bool findCommonObservations(ArrayRef<ProgramPoint *> NeighborPPs,
                             ProgramPoint &Target,
+                            ArrayRef<const ProgramPointEdge *> CycleEdges,
                             SmallVectorImpl<Observation *> &Matches) {
   assert(!NeighborPPs.empty() &&
          "common motion requires neighbor program points");
   for (Observation &Candidate : *NeighborPPs.front()) {
     if (!Candidate.isMovable() || !Candidate.isContiguous())
+      continue;
+    // The copies are equivalent, so one of them answers for all.
+    if (any_of(CycleEdges, [&](const ProgramPointEdge *Edge) {
+          return !Edge->isOpenTo(Candidate);
+        }))
       continue;
 
     Matches.clear();
@@ -154,15 +160,23 @@ bool moveOneCommonObservation(MAIRGraph &G, const BasicBlock &BB,
                                            : G.getBBExitRepresentative(BB);
   if (!Target.hasAlwaysGuard())
     return false;
-  if (!all_of(NeighborPPs, [&](ProgramPoint *Neighbor) {
-        return Neighbor != &Target && Neighbor->hasAlwaysGuard() &&
-               Neighbor->hasParent(Target, Kind);
-      }))
-    return false;
+  // Sinking around a backedge would evaluate the address with the values of
+  // the next iteration, so an edge that iterates a cycle takes only
+  // observations that are invariant in it.
+  SmallVector<const ProgramPointEdge *, 4> CycleEdges;
+  for (ProgramPoint *Neighbor : NeighborPPs) {
+    if (Neighbor == &Target || !Neighbor->hasAlwaysGuard())
+      return false;
+    const ProgramPointEdge *Edge = Neighbor->findParent(Target, Kind);
+    if (!Edge)
+      return false;
+    if (Edge->getIteratedCycle())
+      CycleEdges.push_back(Edge);
+  }
 
   // 4. Find one observation common to every neighbor program point.
   SmallVector<Observation *, 4> Matches;
-  if (!findCommonObservations(NeighborPPs, Target, Matches))
+  if (!findCommonObservations(NeighborPPs, Target, CycleEdges, Matches))
     return false;
 
   // 5. Move the common observations to Target. The fixed-point loop restarts

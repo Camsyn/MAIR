@@ -28,20 +28,38 @@ bool RedundantObservationInfo::isCovered(
   // A covering observation names the same bytes through the same values, so
   // the cycles that are closed to Obs are closed to it as well.
   const Reachability &Reach = ByClosedCycles.find(closedCycles(Obs))->second;
-  const SparseBitVector<> &Sources =
-      Reach.ReachingSources[Reach.ComponentOf[PointIndex.find(Target)->second]];
+  const unsigned Component = Reach.ComponentOf[PointIndex.find(Target)->second];
+  const SparseBitVector<> &Sources = Reach.ReachingSources[Component];
   if (Sources.empty())
     return false;
-  // Only an observation of the same memory object can cover Obs. The use-list
-  // also holds observations of other scopes, which have no index here.
-  for (const Observation &Source : Obs.getMemoryObject().users()) {
+  auto Covers = [&](const Observation &Source) {
+    return !ExcludedSources.contains(&Source) && Source.covers(Obs);
+  };
+
+  // A witness is an observation of the same memory object at a reaching
+  // program point. Enumerate whichever of the two sets is smaller: a hot
+  // object can have thousands of uses that do not reach Target, and Target
+  // can be reached by thousands of observations of other objects.
+  const MemoryObject &Object = Obs.getMemoryObject();
+  if (Reach.NumReachingObservations[Component] < Object.getNumUses()) {
+    for (unsigned SourceIndex : Sources) {
+      const ProgramPoint *SourcePoint = Points[SourceIndex];
+      if (SourcePoint == Target)
+        continue;
+      for (const Observation &Source : *SourcePoint)
+        if (&Source.getMemoryObject() == &Object && Covers(Source))
+          return true;
+    }
+    return false;
+  }
+  // The use-list also holds observations of other scopes, which have no
+  // index here.
+  for (const Observation &Source : Object.users()) {
     const ProgramPoint *SourcePoint = Source.getParent();
     if (SourcePoint == Target)
       continue;
     auto It = PointIndex.find(SourcePoint);
-    if (It == PointIndex.end() || !Sources.test(It->second))
-      continue;
-    if (!ExcludedSources.contains(&Source) && Source.covers(Obs))
+    if (It != PointIndex.end() && Sources.test(It->second) && Covers(Source))
       return true;
   }
   return false;
@@ -117,8 +135,11 @@ RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
   RedundantObservationInfo Result;
   const unsigned NumPoints = G.size();
   unsigned Index = 0;
-  for (const ProgramPoint &PP : G)
+  Result.Points.reserve(NumPoints);
+  for (const ProgramPoint &PP : G) {
     Result.PointIndex[&PP] = Index++;
+    Result.Points.push_back(&PP);
+  }
 
   // An edge is identified by its ends here. Closed is the bit of the cycle it
   // iterates, if any.
@@ -193,6 +214,10 @@ RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
             Sources.set(Pred);
         }
       }
+      unsigned NumObservations = 0;
+      for (unsigned Source : Sources)
+        NumObservations += Result.Points[Source]->size();
+      Reach.NumReachingObservations.push_back(NumObservations);
       Reach.ReachingSources.push_back(std::move(Sources));
     }
     return Reach;

@@ -25,9 +25,12 @@ class RedundantObservationInfo {
   struct Reachability {
     std::vector<unsigned> ComponentOf;
     std::vector<llvm::SparseBitVector<>> ReachingSources;
+    /// Per component, the number of observations in its reaching sources.
+    std::vector<unsigned> NumReachingObservations;
   };
 
   llvm::DenseMap<const ProgramPoint *, unsigned> PointIndex;
+  std::vector<const ProgramPoint *> Points;
   /// The cycles iterated along the edges of the graph. Bit I of a mask closes
   /// the edges that iterate IteratedCycles[I].
   llvm::SmallVector<const llvm::Cycle *, 4> IteratedCycles;

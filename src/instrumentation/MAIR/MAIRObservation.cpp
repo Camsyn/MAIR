@@ -116,8 +116,10 @@ void MemoryUse::set(MemoryObject *NewObject) {
     return;
   removeFromList();
   Object = NewObject;
-  if (Object)
+  if (Object) {
     addToList(&Object->UseList);
+    ++Object->NumUses;
+  }
 }
 
 void MemoryUse::addToList(MemoryUse **List) {
@@ -135,6 +137,7 @@ void MemoryUse::removeFromList() {
   *Prev = Next;
   if (Next)
     Next->Prev = Prev;
+  --Object->NumUses;
   Object = nullptr;
   Next = nullptr;
   Prev = nullptr;

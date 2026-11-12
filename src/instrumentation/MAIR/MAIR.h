@@ -573,6 +573,7 @@ class MemoryObject {
 
   const Value *Base = nullptr;
   unsigned ID = 0;
+  unsigned NumUses = 0;
   MemoryUse *UseList = nullptr;
 
 public:
@@ -597,6 +598,7 @@ public:
   /// objects use this rather than addresses, which vary between runs.
   unsigned getID() const { return ID; }
   bool use_empty() const { return UseList == nullptr; }
+  unsigned getNumUses() const { return NumUses; }
 
   use_iterator use_begin() { return use_iterator(UseList); }
   use_iterator use_end() { return use_iterator(); }

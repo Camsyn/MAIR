@@ -690,6 +690,58 @@ entry:
   EXPECT_EQ(NumUMaxCmps, 1u);
 }
 
+TEST(MAIRMaterialization, LowersExpressionOperandsInOrder) {
+  LLVMContext Ctx;
+  auto M = parseMaterializationModule(R"IR(
+define void @f(ptr %p, i32 %a, i32 %b) {
+entry:
+  ret void
+}
+)IR",
+                                      Ctx);
+  ASSERT_TRUE(M);
+  Function &F = *M->getFunction("f");
+  Instruction &Return = *F.getEntryBlock().getTerminator();
+  Type &I64 = *Type::getInt64Ty(Ctx);
+
+  MAIRGraph Graph(F);
+  ProgramPoint &PP = Graph.createProgramPoint(ProgramPointSite::anchored(
+      Return, ProgramPoint::SiteKind::BasicBlockExit));
+  MAIRScalarExpr WideA =
+      Graph.createUnaryExpr(MAIRScalarExpr::Kind::ZeroExtend, I64,
+                            Graph.createValueExpr(*F.getArg(1)));
+  MAIRScalarExpr WideB =
+      Graph.createUnaryExpr(MAIRScalarExpr::Kind::SignExtend, I64,
+                            Graph.createValueExpr(*F.getArg(2)));
+  MAIRScalarExpr Size =
+      Graph.createBinaryExpr(MAIRScalarExpr::Kind::Mul, I64, WideA, WideB);
+  AbstractAccess Range(F.getArg(0), AbstractValue::constant(0),
+                       AbstractValue());
+  Range.setSizeExprNode(Size.getOpaqueNode());
+  PP.addObservation(Observation({}, Range, AccessKind::Read));
+  ASSERT_TRUE(Graph.verify());
+
+  PassInstrumentationCallbacks PIC;
+  FunctionAnalysisManager FAM;
+  registerMaterializationAnalyses(FAM, PIC);
+  RecordingBackend Backend;
+  auto Result = Graph.instantiate(FAM, Backend);
+  if (!Result) {
+    ADD_FAILURE() << toString(Result.takeError());
+    return;
+  }
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // The emitted instructions must not depend on how the compiler orders the
+  // evaluation of call arguments: left operand first, then right, then use.
+  std::vector<std::string> Names;
+  for (const Instruction &I : F.getEntryBlock())
+    if (I.getName().starts_with("mair.expr"))
+      Names.push_back(I.getName().str());
+  EXPECT_EQ(Names, (std::vector<std::string>{"mair.expr.zext", "mair.expr.sext",
+                                             "mair.expr.mul"}));
+}
+
 TEST(MAIRMaterialization, RetargetsMultipleProgramPointsAtOneAnchor) {
   LLVMContext Ctx;
   auto M = parseMaterializationModule(R"IR(

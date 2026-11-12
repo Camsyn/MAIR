@@ -5,6 +5,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
@@ -1290,22 +1291,15 @@ Observation Observation::fromInstruction(const Instruction &I,
   const Value *Ptr = nullptr;
   AbstractValue Size = AbstractValue::unknown();
   AccessKind Kind = AccessKind::Read;
-  if (const auto *LI = dyn_cast<LoadInst>(&I)) {
-    Ptr = LI->getPointerOperand();
-    Size = getStoreSize(*LI->getType(), DL);
-    Kind = AccessKind::Read;
-  } else if (const auto *SI = dyn_cast<StoreInst>(&I)) {
-    Ptr = SI->getPointerOperand();
-    Size = getStoreSize(*SI->getValueOperand()->getType(), DL);
-    Kind = AccessKind::Write;
-  } else if (const auto *RMW = dyn_cast<AtomicRMWInst>(&I)) {
-    Ptr = RMW->getPointerOperand();
-    Size = getStoreSize(*RMW->getValOperand()->getType(), DL);
-    Kind = AccessKind::ReadWrite;
-  } else if (const auto *XCHG = dyn_cast<AtomicCmpXchgInst>(&I)) {
-    Ptr = XCHG->getPointerOperand();
-    Size = getStoreSize(*XCHG->getCompareOperand()->getType(), DL);
-    Kind = AccessKind::ReadWrite;
+  if (isa<LoadInst, StoreInst, AtomicRMWInst, AtomicCmpXchgInst>(I)) {
+    // LLVM knows the pointer and the store size of these accesses.
+    MemoryLocation Location = MemoryLocation::get(&I);
+    Ptr = Location.Ptr;
+    if (Location.Size.hasValue() && !Location.Size.isScalable())
+      Size = AbstractValue::constant(Location.Size.getValue().getFixedValue());
+    Kind = isa<LoadInst>(I)    ? AccessKind::Read
+           : isa<StoreInst>(I) ? AccessKind::Write
+                               : AccessKind::ReadWrite;
   } else if (isa<AnyMemTransferInst>(I)) {
     report_fatal_error(
         "Observation::fromInstruction cannot represent a memory transfer");

@@ -196,82 +196,62 @@ Value *lowerExpr(const MAIRScalarExpr &Expr, IRBuilder<> &Builder,
   if (Value *Cached = Cache.lookup(Key))
     return Cached;
 
+  // Lower the operands first and in order. As call arguments their order,
+  // and with it the order of the emitted instructions, would be unspecified.
+  SmallVector<Value *, 2> Ops;
+  for (const MAIRScalarExpr &Operand : Expr.operands())
+    Ops.push_back(lowerExpr(Operand, Builder, Cache));
+
+  auto LowerMinMax = [&](CmpInst::Predicate Predicate, StringRef Name) {
+    Value *Compare = Builder.CreateICmp(Predicate, Ops[0], Ops[1],
+                                        "mair.expr." + Name + ".cmp");
+    return Builder.CreateSelect(Compare, Ops[0], Ops[1], "mair.expr." + Name);
+  };
+
   using Kind = MAIRScalarExpr::Kind;
+  Type *Ty = Expr.getType();
   Value *Result = nullptr;
   switch (Expr.getKind()) {
   case Kind::Constant:
-    Result = ConstantInt::get(Expr.getType(), Expr.getConstant());
+    Result = ConstantInt::get(Ty, Expr.getConstant());
     break;
   case Kind::LLVMValue:
     Result = const_cast<Value *>(Expr.getLLVMValue());
     break;
-  case Kind::Add: {
-    Value *LHS = lowerExpr(Expr.operands()[0], Builder, Cache);
-    Value *RHS = lowerExpr(Expr.operands()[1], Builder, Cache);
-    if (Expr.getType()->isPointerTy())
-      Result = Builder.CreateGEP(Type::getInt8Ty(Builder.getContext()), LHS,
-                                 RHS, "mair.expr.gep");
-    else
-      Result = Builder.CreateAdd(LHS, RHS, "mair.expr.add");
+  case Kind::Add:
+    // A pointer-typed add is a pointer plus a byte offset.
+    Result = Ty->isPointerTy()
+                 ? Builder.CreateGEP(Type::getInt8Ty(Builder.getContext()),
+                                     Ops[0], Ops[1], "mair.expr.gep")
+                 : Builder.CreateAdd(Ops[0], Ops[1], "mair.expr.add");
     break;
-  }
   case Kind::Mul:
-    Result = Builder.CreateMul(lowerExpr(Expr.operands()[0], Builder, Cache),
-                               lowerExpr(Expr.operands()[1], Builder, Cache),
-                               "mair.expr.mul");
+    Result = Builder.CreateMul(Ops[0], Ops[1], "mair.expr.mul");
     break;
   case Kind::UDiv:
-    Result = Builder.CreateUDiv(lowerExpr(Expr.operands()[0], Builder, Cache),
-                                lowerExpr(Expr.operands()[1], Builder, Cache),
-                                "mair.expr.udiv");
+    Result = Builder.CreateUDiv(Ops[0], Ops[1], "mair.expr.udiv");
     break;
   case Kind::Truncate:
-    Result = Builder.CreateTrunc(lowerExpr(Expr.operands()[0], Builder, Cache),
-                                 Expr.getType(), "mair.expr.trunc");
+    Result = Builder.CreateTrunc(Ops[0], Ty, "mair.expr.trunc");
     break;
   case Kind::ZeroExtend:
-    Result = Builder.CreateZExt(lowerExpr(Expr.operands()[0], Builder, Cache),
-                                Expr.getType(), "mair.expr.zext");
+    Result = Builder.CreateZExt(Ops[0], Ty, "mair.expr.zext");
     break;
   case Kind::SignExtend:
-    Result = Builder.CreateSExt(lowerExpr(Expr.operands()[0], Builder, Cache),
-                                Expr.getType(), "mair.expr.sext");
+    Result = Builder.CreateSExt(Ops[0], Ty, "mair.expr.sext");
     break;
   case Kind::SMin:
-  case Kind::UMin:
-  case Kind::SMax:
-  case Kind::UMax: {
-    Value *LHS = lowerExpr(Expr.operands()[0], Builder, Cache);
-    Value *RHS = lowerExpr(Expr.operands()[1], Builder, Cache);
-    bool IsSigned =
-        Expr.getKind() == Kind::SMin || Expr.getKind() == Kind::SMax;
-    bool IsMin = Expr.getKind() == Kind::SMin || Expr.getKind() == Kind::UMin;
-    StringRef KindName = "umin";
-    switch (Expr.getKind()) {
-    case Kind::SMin:
-      KindName = "smin";
-      break;
-    case Kind::UMin:
-      KindName = "umin";
-      break;
-    case Kind::SMax:
-      KindName = "smax";
-      break;
-    case Kind::UMax:
-      KindName = "umax";
-      break;
-    default:
-      llvm_unreachable("not a min/max expression");
-    }
-    CmpInst::Predicate Predicate =
-        IsSigned ? (IsMin ? CmpInst::ICMP_SLT : CmpInst::ICMP_SGT)
-                 : (IsMin ? CmpInst::ICMP_ULT : CmpInst::ICMP_UGT);
-    Value *Compare = Builder.CreateICmp(
-        Predicate, LHS, RHS, Twine("mair.expr.") + KindName + ".cmp");
-    Result = Builder.CreateSelect(Compare, LHS, RHS,
-                                  (Twine("mair.expr.") + KindName));
+    Result = LowerMinMax(CmpInst::ICMP_SLT, "smin");
     break;
-  }
+  case Kind::UMin:
+    Result = LowerMinMax(CmpInst::ICMP_ULT, "umin");
+    break;
+  case Kind::SMax:
+    Result = LowerMinMax(CmpInst::ICMP_SGT, "smax");
+    break;
+  case Kind::UMax:
+    Result = LowerMinMax(CmpInst::ICMP_UGT, "umax");
+    break;
   }
   Cache[Key] = Result;
   return Result;

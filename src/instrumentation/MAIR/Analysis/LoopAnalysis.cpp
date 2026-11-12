@@ -67,19 +67,22 @@ const SCEV *MAIRLoopInfo::getExactExecutionCountSCEV(const ProgramPoint &PP,
       !BackedgeTakenCount->getType()->isIntegerTy())
     return nullptr;
 
-  unsigned Width =
-      cast<IntegerType>(BackedgeTakenCount->getType())->getBitWidth();
-  IntegerType *WideType =
-      IntegerType::get(L.getHeader()->getContext(), Width + 1);
-  const SCEV *Count = getSE().getZeroExtendExpr(BackedgeTakenCount, WideType);
-
   BasicBlock *Exiting = L.getExitingBlock();
   const BasicBlock *SiteBlock = PP.getBasicBlock();
   if (!Exiting || !SiteBlock)
     return nullptr;
+
+  // Both counts are one bit wider than the backedge-taken count, so the trip
+  // count of a loop whose backedge count is all ones does not wrap.
+  // A site before the exit test also runs in the iteration that leaves the
+  // loop: that is the trip count. A site after it runs once per backedge.
   if (DT->dominates(SiteBlock, Exiting))
-    Count = getSE().getAddExpr(Count, getSE().getOne(WideType));
-  return Count;
+    return getSE().getTripCountFromExitCount(BackedgeTakenCount);
+  unsigned Width =
+      cast<IntegerType>(BackedgeTakenCount->getType())->getBitWidth();
+  return getSE().getZeroExtendExpr(
+      BackedgeTakenCount,
+      IntegerType::get(L.getHeader()->getContext(), Width + 1));
 }
 
 bool MAIRLoopInfo::isLoopInvariant(const Value *V, const Loop &L) const {

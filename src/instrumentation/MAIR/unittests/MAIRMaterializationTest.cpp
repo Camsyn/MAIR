@@ -13,6 +13,7 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassInstrumentation.h"
@@ -676,18 +677,23 @@ entry:
   EXPECT_NE(Text.find("mair.expr.smax"), std::string::npos);
   EXPECT_NE(Text.find("mair.expr.umax"), std::string::npos);
 
+  // Both observations share the region, so every expression is lowered once.
+  // Min and max become calls to the LLVM intrinsics.
   unsigned NumGEPs = 0;
-  unsigned NumSMaxCmps = 0;
-  unsigned NumUMaxCmps = 0;
+  DenseMap<Intrinsic::ID, unsigned> NumMinMax;
   for (const BasicBlock &BB : F)
     for (const Instruction &I : BB) {
       NumGEPs += I.getName().starts_with("mair.expr.gep");
-      NumSMaxCmps += I.getName().starts_with("mair.expr.smax.cmp");
-      NumUMaxCmps += I.getName().starts_with("mair.expr.umax.cmp");
+      if (const auto *II = dyn_cast<IntrinsicInst>(&I))
+        if (II->getName().starts_with("mair.expr."))
+          ++NumMinMax[II->getIntrinsicID()];
     }
   EXPECT_EQ(NumGEPs, 1u);
-  EXPECT_EQ(NumSMaxCmps, 1u);
-  EXPECT_EQ(NumUMaxCmps, 1u);
+  EXPECT_EQ(NumMinMax.size(), 4u);
+  EXPECT_EQ(NumMinMax.lookup(Intrinsic::smin), 1u);
+  EXPECT_EQ(NumMinMax.lookup(Intrinsic::umin), 1u);
+  EXPECT_EQ(NumMinMax.lookup(Intrinsic::smax), 1u);
+  EXPECT_EQ(NumMinMax.lookup(Intrinsic::umax), 1u);
 }
 
 TEST(MAIRMaterialization, LowersExpressionOperandsInOrder) {

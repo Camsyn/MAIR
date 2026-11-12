@@ -202,12 +202,6 @@ Value *lowerExpr(const MAIRScalarExpr &Expr, IRBuilder<> &Builder,
   for (const MAIRScalarExpr &Operand : Expr.operands())
     Ops.push_back(lowerExpr(Operand, Builder, Cache));
 
-  auto LowerMinMax = [&](CmpInst::Predicate Predicate, StringRef Name) {
-    Value *Compare = Builder.CreateICmp(Predicate, Ops[0], Ops[1],
-                                        "mair.expr." + Name + ".cmp");
-    return Builder.CreateSelect(Compare, Ops[0], Ops[1], "mair.expr." + Name);
-  };
-
   using Kind = MAIRScalarExpr::Kind;
   Type *Ty = Expr.getType();
   Value *Result = nullptr;
@@ -241,16 +235,20 @@ Value *lowerExpr(const MAIRScalarExpr &Expr, IRBuilder<> &Builder,
     Result = Builder.CreateSExt(Ops[0], Ty, "mair.expr.sext");
     break;
   case Kind::SMin:
-    Result = LowerMinMax(CmpInst::ICMP_SLT, "smin");
+    Result = Builder.CreateBinaryIntrinsic(Intrinsic::smin, Ops[0], Ops[1], {},
+                                           "mair.expr.smin");
     break;
   case Kind::UMin:
-    Result = LowerMinMax(CmpInst::ICMP_ULT, "umin");
+    Result = Builder.CreateBinaryIntrinsic(Intrinsic::umin, Ops[0], Ops[1], {},
+                                           "mair.expr.umin");
     break;
   case Kind::SMax:
-    Result = LowerMinMax(CmpInst::ICMP_SGT, "smax");
+    Result = Builder.CreateBinaryIntrinsic(Intrinsic::smax, Ops[0], Ops[1], {},
+                                           "mair.expr.smax");
     break;
   case Kind::UMax:
-    Result = LowerMinMax(CmpInst::ICMP_UGT, "umax");
+    Result = Builder.CreateBinaryIntrinsic(Intrinsic::umax, Ops[0], Ops[1], {},
+                                           "mair.expr.umax");
     break;
   }
   Cache[Key] = Result;

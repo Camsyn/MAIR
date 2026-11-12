@@ -1310,8 +1310,11 @@ struct AsanMAIRBarrierTrait {
   static bool isForwardBarrier(const Instruction &I) {
     return isa<CallBase>(I) && !isa<AnyMemIntrinsic>(I) && I.mayWriteToMemory();
   }
+  // A later check stands in for an earlier access only if it is certain to
+  // run, so an instruction that may throw or never return ends that reach.
   static bool isBackwardBarrier(const Instruction &I) {
-    return isForwardBarrier(I);
+    return isForwardBarrier(I) ||
+           !isGuaranteedToTransferExecutionToSuccessor(&I);
   }
 };
 

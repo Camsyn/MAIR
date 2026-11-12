@@ -126,7 +126,7 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 | --- | --- | --- | --- |
 | M1 | `6fa6a493` | 作用域遍历的 const/非 const 两份手写工作表合成一份；六处重复的“找某条边”lambda 收成 `findEdge`；非 const 的代表点 getter 转调 const 版本；移动构造与移动赋值共用 `moveFrom`；`getLoopGraph` 查询自身循环时不再遍历整棵树 | `llvm::depth_first`（复用已有的作用域树 `GraphTraits`） |
 | M2 | `83da3cb6` | 文本 dump、DOT、verifier 各写一遍的站点种类名、边种类名、guard 来源列表，改为共用 `ProgramPointSite::getKindName`、`getEdgeKindName`、`AnyProvenanceExecutedGuard::print`；三个 `toString` 共用一个模板；值名直接打印到流，不再经过临时字符串 | `llvm::ListSeparator` |
-| M3 | `280ef2c9` | 六个 pass 开头重复的 6 行统计样板收进 `MAIRStatScope` 构造函数；统计字段从运行时字符串匹配改为 `MAIRStatField` 枚举，拼错在编译期报错；删除 `mairStatsEnabled`、`mairStatFunctionName` | LLVM 统计量在关闭统计时本身是空操作类，因此去掉了 `#if LLVM_ENABLE_STATS` |
+| M3 | `280ef2c9` | 六个 pass 开头重复的 6 行统计样板收进 `MAIRStatScope` 构造函数；统计字段从运行时字符串匹配改为 `MAIRStatField` 枚举，拼错在编译期报错；删除 `mairStatsEnabled`、`mairStatFunctionName`。**这个提交引入了一处性能回归，见第 9 节** | LLVM 统计量在关闭统计时本身是空操作类，因此去掉了 `#if LLVM_ENABLE_STATS`（这个推理是错的：空操作类不会阻止参数求值） |
 | M4 | `843caa97` | 三种写法的手写溢出判断换成 LLVM 接口；LPOC 的常量区间大小只算一次；字符串错误不再显式传 `inconvertibleErrorCode` 或经过本地包装 | `checkedAddUnsigned`、`checkedMulUnsigned`、`createStringError(const Twine &)` |
 | M5 | `ffec1eba` | 循环分析、COM、物化三份“值在某点是否可用”合并为 `mair::isValueAvailableAt`（`Value` 与 `AbstractValue` 两个重载） | `DominatorTree::dominates(const Value *, const Instruction *)` |
 | M6 | `0bd31eb3` | `Observation::fromInstruction` 对 load/store/atomicrmw/cmpxchg 的指针与大小不再逐类手写；`lowerExpr` 先按顺序降级操作数再生成指令，四种 min/max 共用一个 helper | `MemoryLocation::get` |
@@ -216,3 +216,30 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 - `RedundantObservationEliminationPass.cpp` 里注释说被钉住的 observation 可以作见证者，代码却把它跳过了；这是注释与实现不一致，不是重构。
 
 任务资料在 worktree 的 `.archive/mair_dedup_refactor_20261112_1705/`，被 `.gitignore` 忽略。
+
+## 9. 审查发现的回归及修正
+
+另一位 Agent 审查了 `1482b67a..60bdfd89`（报告在主检出目录的 `.archive/claude_refactor_review_20261112_1755/review.md`），确认一项 P2 性能回归，没有发现新增的正确性缺陷。回归属实，已修正。
+
+- 问题：M3（`280ef2c9`）把六个 pass 的输入计数 `MAIRStat::compute(G)` 挪到了统计开关判断之前。在 Release 构建（`NDEBUG`，LLVM 统计被编译掉）且不传 `-mair-stats` 时，没有任何地方使用这个计数，但每次 pass 访问图仍会遍历全部程序点。M3 之前这次遍历在 `#if LLVM_ENABLE_STATS` 和 `mairStatsEnabled()` 之后。
+- 我当时的错误：认为 `NoopStatistic` 是空操作，所以可以去掉条件编译。空操作的是 `+=` 本身，它的参数仍然会被求值。
+- 为什么差分没有发现：546 组差分比较的是输出，这个回归只多做了无用功，不改变输出；而且差分用的是 Debug 构建，那里 LLVM 统计本来就是开着的。
+- 修正（`4d1d46f9`）：`MAIRStatScope` 的构造函数改为接收 LLVM 统计量和一个计数回调，只有在 LLVM 统计被编译进来或 `-mair-stats` 打开时才调用回调，两处共用同一次计数。六个 pass 的调用点仍是一条语句。`mairStatsEnabled()` 重新公开。
+
+验证：
+
+- 用 `-O2 -DNDEBUG` 编译六个 pass 并检查 IR（`check_release_ir.py`）：修正前的 LIOM 在入口块无条件调用 `compute`；修正后六个 pass 都先查询 `mairStatsEnabled`，入口块里没有 `compute`。
+- 另配了一个 Release 构建目录：修正前后的 `mair-opt` 在 546 组输入上输出逐字节一致（含 `-mair-stats`）；Debug 构建同样一致。
+- 新增单元测试 `MAIRStatLog.CountsPassInputsOnlyWhenStatisticsConsumeThem`，在 Debug 和 Release 下各跑过：统计被编译掉且未开 `-mair-stats` 时回调不被调用。两种构建下 211 项单元测试全部通过，lit 27 通过、1 unsupported。
+
+局限：
+
+- 没有测量这次遍历实际花多少时间，所以不知道回归有多大，也不知道修正省了多少。
+- 新测试没有覆盖“`-mair-stats` 打开时计数被记录”这一支；那一支由现有的 `mair-stats*.ll` lit 用例和 546 组差分覆盖。
+
+审查报告里另外两条记录我没有改动：
+
+- M6 之后 `Observation::fromInstruction(I, DL)` 对 load/store/atomic 用的是指令所属模块的 DataLayout，并要求指令已挂在函数里，传入的 `DL` 参数对这几类指令不再起作用。仓库里的调用方传的就是模块的 DataLayout，行为一致，但这个公开接口对任意输入不再等价。
+- N2 值得补一个“符号窄位先加后扩”的专项测试。
+
+任务资料在 worktree 的 `.archive/mair_stat_gating_fix_20261112_1810/`，被 `.gitignore` 忽略。

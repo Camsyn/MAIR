@@ -202,7 +202,7 @@ RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
     for (const Observation &Obs : PP) {
       const uint64_t Closed = Result.closedCycles(Obs);
       if (!Result.ByClosedCycles.count(Closed))
-        Result.ByClosedCycles.try_emplace(Closed, Compute(Closed));
+        Result.ByClosedCycles.emplace(Closed, Compute(Closed));
     }
   return Result;
 }

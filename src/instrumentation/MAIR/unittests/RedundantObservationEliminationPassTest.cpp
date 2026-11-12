@@ -998,4 +998,57 @@ exit:
   EXPECT_EQ(Run("cycle_side").first, 1u);
 }
 
+// Nested irreducible cycles: each level is entered at its header and at its
+// latch. The store in the innermost block uses a pointer defined inside every
+// cycle; the one in the second innermost latch is outside the innermost.
+std::string nestedIrreducibleCycles(unsigned Depth) {
+  std::string IR;
+  llvm::raw_string_ostream OS(IR);
+  OS << "define void @f(i1 %c) {\nentry:\n"
+     << "  br i1 %c, label %header0, label %latch0\n";
+  for (unsigned I = 0; I < Depth; ++I) {
+    OS << "header" << I << ":\n";
+    if (I + 1 < Depth)
+      OS << "  br i1 %c, label %header" << I + 1 << ", label %latch" << I + 1
+         << "\n";
+    else
+      OS << "  br label %body\n";
+  }
+  OS << "body:\n  %p = alloca i32\n  store i32 1, ptr %p, align 4\n"
+     << "  br label %latch" << Depth - 1 << "\n";
+  for (unsigned I = Depth; I-- > 0;) {
+    OS << "latch" << I << ":\n";
+    if (I + 2 == Depth)
+      OS << "  %q = alloca i32\n  store i32 2, ptr %q, align 4\n";
+    OS << "  br i1 %c, label %header" << I << ", label %";
+    if (I)
+      OS << "latch" << I - 1;
+    else
+      OS << "exit";
+    OS << "\n";
+  }
+  OS << "exit:\n  ret void\n}\n";
+  return IR;
+}
+
+TEST(RedundantObservationEliminationPass, HandlesManyIteratedCycles) {
+  // With 64 cycles the first store is variant in all of them and the second
+  // in all but one; 65 exceeds what the analysis tracks.
+  for (unsigned Depth : {63u, 64u, 65u}) {
+    llvm::LLVMContext Ctx;
+    auto M = parseModule(nestedIrreducibleCycles(Depth), Ctx);
+    ASSERT_TRUE(M);
+    MAIRGraph Graph = buildGraph(*M->getFunction("f"),
+                                 MAIROptimizationConfig::forThreadSanitizer());
+    ASSERT_TRUE(Graph.verify());
+    MAIRGraphAnalysisManager AM;
+    runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM);
+    unsigned Kept = 0;
+    for (const ProgramPoint &PP : testProgramPoints(Graph))
+      Kept += PP.size();
+    EXPECT_EQ(Kept, 2u) << "depth " << Depth;
+    EXPECT_TRUE(Graph.verify());
+  }
+}
+
 } // namespace

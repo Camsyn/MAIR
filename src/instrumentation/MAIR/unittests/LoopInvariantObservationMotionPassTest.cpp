@@ -887,4 +887,47 @@ exit:
   EXPECT_TRUE(Graph.verify());
 }
 
+TEST(LoopInvariantObservationMotionPass,
+     HoistsFromALoopWithoutExitsOnlyWhatEveryIterationRuns) {
+  llvm::LLVMContext Ctx;
+  // Neither loop can be left, so "dominates every exiting block" is vacuous.
+  // @always reads in every iteration; @maybe may spin without ever reading.
+  auto M = parseModule(R"IR(
+define void @always(ptr %p) {
+entry:
+  br label %loop
+loop:
+  %value = load i32, ptr %p, align 4
+  br label %loop
+}
+define void @maybe(ptr %p, i1 %c) {
+entry:
+  br label %loop
+loop:
+  br i1 %c, label %S, label %latch
+S:
+  %value = load i32, ptr %p, align 4
+  br label %latch
+latch:
+  br label %loop
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  for (llvm::StringRef Name : {"always", "maybe"}) {
+    MAIRGraph Graph =
+        createGraphWithFunctionAnalyses(*M->getFunction(Name), FAM);
+    MAIRGraphAnalysisManager AM;
+    registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+    runPassOnGraphTree(LoopInvariantObservationMotionPass(), Graph, AM);
+    const bool Hoisted = Name == "always";
+    EXPECT_EQ(observationCount(Graph, "entry"), Hoisted ? 1u : 0u)
+        << Name.str();
+    EXPECT_TRUE(Graph.verify());
+  }
+}
+
 } // namespace

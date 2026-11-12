@@ -127,6 +127,39 @@ ProgramPoint *MAIRLoopInfo::getPreheaderExit(const Loop &L) const {
   return Body ? Body->getLoopPreheader() : nullptr;
 }
 
+// An observation may move to the preheader with an always guard only if every
+// entry of the loop executes its source before the loop is left.
+//
+//   Ho:                                 ; outer header, %p = &base[%j]
+//     br label %Hi
+//   Hi:                                 ; inner header
+//     br i1 (%j > 5), label %S, label %Lo.latch
+//   S:
+//     store i32 0, ptr %p
+//     br i1 %done, label %exit, label %Hi.latch
+//   Hi.latch:
+//     br label %Hi
+//   Lo.latch:                           ; %j.next = %j + 1
+//     br label %Ho
+//
+// S post-dominates the inner preheader Ho: the function returns only from S.
+// Still, for %j <= 5 the inner loop is left through Hi without running S, and
+// control comes back around the outer backedge with another %p. Observing %p
+// in Ho would report base[0..5], which the program never writes.
+//
+// The condition is therefore that the source block dominates every exiting
+// block: then no exit can be taken before the source has run. It implies
+// post-dominance of the preheader, because every path from the preheader to a
+// return leaves the loop through an exiting block, so post-dominance is not
+// checked separately. A loop without exits can only be left by running
+// forever, so there the source must dominate every latch instead: each
+// iteration runs it. As with post-dominance, an iteration that never ends may
+// be observed without having run the source.
+//
+// TODO: The observation above can still leave the loop. It needs an "S has
+// executed" indicator, which the guarded sink provides for a loop with one
+// exit. Loops with several exits, like Hi, need a guarded copy on each exit
+// edge and the CFG rewrite that goes with it.
 bool MAIRLoopInfo::canHoistToPreheader(const ProgramPoint &PP,
                                        const Loop &L) const {
   if (!isAvailable() || PP.getParent() != Graph || Graph->getLoop() != &L ||
@@ -135,18 +168,14 @@ bool MAIRLoopInfo::canHoistToPreheader(const ProgramPoint &PP,
     return false;
 
   const BasicBlock *Source = PP.getBasicBlock();
-  BasicBlock *Preheader = L.getLoopPreheader();
-  if (!Source || !Preheader || !L.contains(Source) ||
-      !DT->dominates(Preheader, Source) || !PDT->dominates(Source, Preheader))
+  if (!Source || !L.getLoopPreheader() || !L.contains(Source))
     return false;
-
-  // Post-dominance alone lets control leave the loop without reaching Source
-  // and come back through an enclosing loop. Each entry of the loop executes
-  // Source only if no exit can be taken before it.
-  SmallVector<BasicBlock *, 4> ExitingBlocks;
-  L.getExitingBlocks(ExitingBlocks);
-  return all_of(ExitingBlocks, [&](const BasicBlock *Exiting) {
-    return DT->dominates(Source, Exiting);
+  SmallVector<BasicBlock *, 4> IterationEnds;
+  L.getExitingBlocks(IterationEnds);
+  if (IterationEnds.empty())
+    L.getLoopLatches(IterationEnds);
+  return all_of(IterationEnds, [&](const BasicBlock *End) {
+    return DT->dominates(Source, End);
   });
 }
 

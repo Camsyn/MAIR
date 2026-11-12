@@ -3177,7 +3177,7 @@ entry:
       Run("asan_atomic", MAIROptimizationConfig::forAddressSanitizer()));
 }
 
-TEST(MAIROptimizationConfig, AddressSanitizerRejectsPostDomCoverage) {
+TEST(MAIROptimizationConfig, AddressSanitizerUsesPostDomCoverage) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -3203,8 +3203,8 @@ entry:
   MAIRGraphAnalysisManager AM;
   registerMAIRGraphAnalyses(AM, &PIC);
   RedundantObservationEliminationPass Pass;
-  EXPECT_TRUE(Pass.run(Graph, AM).areAllPreserved());
-  EXPECT_EQ(Earlier.size(), 1u);
+  EXPECT_FALSE(Pass.run(Graph, AM).areAllPreserved());
+  EXPECT_EQ(Earlier.size(), 0u);
   EXPECT_EQ(Later.size(), 1u);
   EXPECT_TRUE(Graph.verify());
 }

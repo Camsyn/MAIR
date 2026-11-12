@@ -110,8 +110,6 @@ enum class AccessProperty : uint8_t {
 };
 LLVM_ENABLE_BITMASK_ENUMS_IN_NAMESPACE();
 
-enum class PPEdgeKind : uint8_t;
-
 /// Sanitizer-specific legality rules shared by every MAIR optimization pass.
 /// Region geometry remains a property of Observation; this configuration
 /// controls which semantic distinctions an observer must preserve.
@@ -120,15 +118,14 @@ class MAIROptimizationConfig {
   uint8_t WriteLevel = 2;
   uint8_t ReadWriteLevel = 3;
   bool IgnoreAtomic = false;
-  bool DomCoverageOnly = false;
   bool AllowRelocation = true;
 
   explicit MAIROptimizationConfig(uint8_t ReadLevel, uint8_t WriteLevel,
                                   uint8_t ReadWriteLevel, bool IgnoreAtomic,
-                                  bool DomCoverageOnly, bool AllowRelocation)
+                                  bool AllowRelocation)
       : ReadLevel(ReadLevel), WriteLevel(WriteLevel),
         ReadWriteLevel(ReadWriteLevel), IgnoreAtomic(IgnoreAtomic),
-        DomCoverageOnly(DomCoverageOnly), AllowRelocation(AllowRelocation) {}
+        AllowRelocation(AllowRelocation) {}
 
 public:
   MAIROptimizationConfig() = default;
@@ -137,7 +134,6 @@ public:
   static MAIROptimizationConfig forAddressSanitizer();
   static MAIROptimizationConfig forThreadSanitizer();
 
-  bool allowsCoverageAlong(PPEdgeKind Kind) const;
   uint8_t getLevel(AccessKind Kind) const;
   void initializeObservation(Observation &Obs) const;
 };

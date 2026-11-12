@@ -144,7 +144,6 @@ MAIROptimizationConfig MAIROptimizationConfig::generic() {
   return MAIROptimizationConfig(/*ReadLevel=*/1, /*WriteLevel=*/2,
                                 /*ReadWriteLevel=*/3,
                                 /*IgnoreAtomic=*/false,
-                                /*DomCoverageOnly=*/false,
                                 /*AllowRelocation=*/true);
 }
 
@@ -152,7 +151,6 @@ MAIROptimizationConfig MAIROptimizationConfig::forAddressSanitizer() {
   return MAIROptimizationConfig(/*ReadLevel=*/1, /*WriteLevel=*/1,
                                 /*ReadWriteLevel=*/1,
                                 /*IgnoreAtomic=*/true,
-                                /*DomCoverageOnly=*/true,
                                 /*AllowRelocation=*/true);
 }
 
@@ -160,12 +158,7 @@ MAIROptimizationConfig MAIROptimizationConfig::forThreadSanitizer() {
   return MAIROptimizationConfig(/*ReadLevel=*/1, /*WriteLevel=*/2,
                                 /*ReadWriteLevel=*/3,
                                 /*IgnoreAtomic=*/false,
-                                /*DomCoverageOnly=*/false,
                                 /*AllowRelocation=*/true);
-}
-
-bool MAIROptimizationConfig::allowsCoverageAlong(PPEdgeKind Kind) const {
-  return !DomCoverageOnly || Kind == PPEdgeKind::Dom;
 }
 
 uint8_t MAIROptimizationConfig::getLevel(AccessKind Kind) const {

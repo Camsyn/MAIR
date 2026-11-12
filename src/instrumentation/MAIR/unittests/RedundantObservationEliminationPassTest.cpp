@@ -144,7 +144,7 @@ exit:
 }
 
 TEST(RedundantObservationEliminationPass,
-     AddressSanitizerKeepsPostDominatedRead) {
+     AddressSanitizerEliminatesPostDominatedRead) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define i32 @f(ptr %p, i1 %take) {
@@ -163,10 +163,12 @@ exit:
   MAIRGraph Graph = buildGraph(*M->getFunction("f"),
                                MAIROptimizationConfig::forAddressSanitizer());
   MAIRGraphAnalysisManager AM;
-  EXPECT_TRUE(
+  // ASan checks may already land after the access they guard, so a later
+  // check that is certain to run covers an earlier one, as it does for TSan.
+  EXPECT_FALSE(
       runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM)
           .areAllPreserved());
-  EXPECT_EQ(observationCount(Graph, "then"), 1u);
+  EXPECT_EQ(observationCount(Graph, "then"), 0u);
   EXPECT_EQ(observationCount(Graph, "exit"), 1u);
   EXPECT_TRUE(Graph.verify());
 }
@@ -201,7 +203,7 @@ entry:
 }
 
 TEST(RedundantObservationEliminationPass,
-     AddressSanitizerReadCoversLaterWrite) {
+     AddressSanitizerReadAndWriteCoverEachOther) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define void @f(ptr %p) {
@@ -225,7 +227,9 @@ entry:
     if (!PP.empty())
       Kept = &PP;
   ASSERT_NE(Kept, nullptr);
-  EXPECT_EQ(Kept->begin()->getKind(), AccessKind::Read);
+  // ASan does not tell reads from writes, so each covers the other. The
+  // earlier one is examined first and goes.
+  EXPECT_EQ(Kept->begin()->getKind(), AccessKind::Write);
   EXPECT_TRUE(Graph.verify());
 }
 

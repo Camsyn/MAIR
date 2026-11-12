@@ -101,8 +101,6 @@ bool sameLoopForPostDom(const ProgramPoint &From, const ProgramPoint &To,
 
 bool canPropagate(const MAIRGraph &G, const ProgramPoint &From,
                   const ProgramPointEdge &Edge) {
-  if (!G.getOptimizationConfig().allowsCoverageAlong(Edge.getKind()))
-    return false;
   // Some unit-test graphs are built without analyses. A graph that has no
   // LoopInfo keeps the previous coverage rule.
   if (Edge.getKind() == PPEdgeKind::PostDom && G.hasLoopInfo() &&

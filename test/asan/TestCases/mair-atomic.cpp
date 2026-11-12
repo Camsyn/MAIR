@@ -7,6 +7,11 @@ int f(std::atomic<int> *p) {
          p->load(std::memory_order_relaxed);
 }
 
+// The two loads need one check. Atomic observations stay at their access, and
+// the second, which is certain to run, covers the first.
 // CHECK-LABEL: define {{.*}} @_Z1f
+// CHECK: load atomic i32
 // CHECK-COUNT-1: call void @__asan_report_load4
-// CHECK-COUNT-2: load atomic i32
+// CHECK: load atomic i32
+// CHECK-NOT: call void @__asan_report_load4
+// CHECK: ret i32

@@ -880,4 +880,118 @@ entry:
   EXPECT_EQ(Atomic.size(), 1u);
 }
 
+struct CallIsBarrier {
+  static bool isForwardBarrier(const llvm::Instruction &I) {
+    return llvm::isa<llvm::CallBase>(I);
+  }
+  static bool isBackwardBarrier(const llvm::Instruction &I) {
+    return isForwardBarrier(I);
+  }
+};
+
+TEST(MAIRBarrierAnalysis, CountsBarriersOfAnEndpointThatRunsAgain) {
+  llvm::LLVMContext Ctx;
+  // @latch_side: B post-dominates H, but H can run again before B does, and
+  // then the call in H lies between the earlier store and the store in B.
+  // @plain: the same loop without the call; B covers the store in H.
+  // @cycle_side: entry dominates A, but A can run again without entry, and
+  // then the call in A lies between the store in entry and the store in A.
+  auto M = parseModule(R"IR(
+declare void @barrier()
+define void @latch_side(ptr %p, i64 %n) {
+entry:
+  br label %H
+H:
+  %i = phi i64 [ 0, %entry ], [ %i.next, %A ]
+  call void @barrier()
+  store i32 0, ptr %p, align 4
+  %c = icmp ult i64 %i, 3
+  br i1 %c, label %A, label %B
+B:
+  store i32 1, ptr %p, align 4
+  %c2 = icmp eq i64 %i, %n
+  br i1 %c2, label %exit, label %A
+A:
+  %i.next = add i64 %i, 1
+  br label %H
+exit:
+  ret void
+}
+define void @plain(ptr %p, i64 %n) {
+entry:
+  br label %H
+H:
+  %i = phi i64 [ 0, %entry ], [ %i.next, %A ]
+  store i32 0, ptr %p, align 4
+  %c = icmp ult i64 %i, 3
+  br i1 %c, label %A, label %B
+B:
+  store i32 1, ptr %p, align 4
+  %c2 = icmp eq i64 %i, %n
+  br i1 %c2, label %exit, label %A
+A:
+  %i.next = add i64 %i, 1
+  br label %H
+exit:
+  ret void
+}
+define void @cycle_side(ptr %p, i1 %c, i1 %c1) {
+entry:
+  store i32 0, ptr %p, align 4
+  br i1 %c, label %A, label %D
+A:
+  store i32 1, ptr %p, align 4
+  call void @barrier()
+  br label %D
+D:
+  br i1 %c1, label %A, label %exit
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  auto Block = [](llvm::Function &F,
+                  llvm::StringRef Name) -> const llvm::BasicBlock & {
+    for (const llvm::BasicBlock &BB : F)
+      if (BB.getName() == Name)
+        return BB;
+    llvm_unreachable("missing block");
+  };
+  auto Run = [&](llvm::StringRef Name) {
+    llvm::PassInstrumentationCallbacks PIC;
+    llvm::FunctionAnalysisManager FAM;
+    registerLoopAnalyses(FAM, PIC);
+    MAIRGraph Graph = createGraphWithFunctionAnalyses<CallIsBarrier>(
+        *M->getFunction(Name), FAM,
+        MAIROptimizationConfig::forThreadSanitizer());
+    EXPECT_TRUE(Graph.verify());
+    MAIRGraphAnalysisManager AM;
+    runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM);
+    EXPECT_TRUE(Graph.verify());
+    return std::make_pair(
+        observationCount(Graph, Name == "cycle_side" ? "A" : "H"),
+        observationCount(Graph, "B"));
+  };
+
+  {
+    llvm::Function &F = *M->getFunction("latch_side");
+    MAIRBarrierAnalysis<CallIsBarrier> Analysis;
+    EXPECT_TRUE(Analysis.hasBwdBarrierPath(Block(F, "H"), Block(F, "B")));
+    // Dominance is unaffected: no call runs between a store in H and the
+    // next store in B.
+    EXPECT_FALSE(Analysis.hasFwdBarrierPath(Block(F, "H"), Block(F, "B")));
+  }
+  {
+    llvm::Function &F = *M->getFunction("cycle_side");
+    MAIRBarrierAnalysis<CallIsBarrier> Analysis;
+    EXPECT_TRUE(Analysis.hasFwdBarrierPath(Block(F, "entry"), Block(F, "A")));
+  }
+  // The store in H stays; it covers the one in B by dominance.
+  EXPECT_EQ(Run("latch_side"), std::make_pair(1u, 0u));
+  // Without the call, B covers H first.
+  EXPECT_EQ(Run("plain"), std::make_pair(0u, 1u));
+  EXPECT_EQ(Run("cycle_side").first, 1u);
+}
+
 } // namespace

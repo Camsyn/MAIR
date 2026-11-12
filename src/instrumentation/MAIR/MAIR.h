@@ -507,7 +507,7 @@ public:
   /// none, and always null on a Dom edge. A value defined in that cycle may
   /// differ at the two ends, so only observations that are invariant in the
   /// cycle may be related along the edge. See iteratedCycleBetween() in
-  /// MAIR.cpp for the example and the reasoning.
+  /// MAIRGraphBuilder.cpp for the example and the reasoning.
   const llvm::Cycle *getIteratedCycle() const { return Iterated; }
   /// Whether \p Obs denotes the same bytes at both ends.
   bool isOpenTo(const Observation &Obs) const;

@@ -292,7 +292,7 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 - 调查中发现一个真实问题：ASan 的反向 barrier 只包括“可能写内存的调用”，所以只读但可能不返回的调用不算 barrier，访问的唯一检查可能落到这种调用之后而永远不执行。这在打开 PostDom 覆盖之前就存在（图收缩同样会造成）。`15862f21` 把任何不保证把控制流交给后继的指令都算作 ASan 的反向 barrier，测试是 `test/MAIR/TestCases/asan/mair-may-not-return.c`；jsoncpp 的检查数不受影响。
 - 仍然存在、且不是本轮引入的限制：检查落在访问之后时，足够野的访问会先触发 SEGV 而不是 ASan 报告（`high-address-dereference.c` 因此在 MAIR 下标为 unsupported）。
 
-## 7. MAIR 的 sanitizer 接入测试迁到 `test/MAIR`（2026-11-12）
+## 11. MAIR 的 sanitizer 接入测试迁到 `test/MAIR`（2026-11-12）
 
 直接针对 MAIR 的 lit 测试不放在 `test/asan`、`test/tsan` 下。原来的 12 个 `mair-*` 接入测试（ASan 7 个、TSan 5 个）移到 `test/MAIR/TestCases/asan/` 和 `test/MAIR/TestCases/tsan/`，文件名不变，前文提到的 `test/asan/TestCases/mair-*`、`test/tsan/TestCases/mair-*` 都指迁移后的位置。
 
@@ -301,7 +301,7 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 - 这些测试只编译到 IR 再 FileCheck，不链接也不运行，所以不需要 sanitizer 套件的 runtime 配置。
 - 结果：`ninja -C build check-mair` 现在跑 216 项单元测试和 40 项 lit（39 通过、1 unsupported），其中 12 项是迁过来的；ASan、TSan 套件里不再有 `mair-*` 用例。迁移后把其中一个用例的期望改错，确认它会失败，再改回。
 
-## 8. 对外部审查意见的处理（2026-11-12）
+## 12. 对外部审查意见的处理（2026-11-12）
 
 审查报告在 `.archive/claude_refactor_review_20261112_1937/`，范围 `29342887..6d134c3b`。三条意见都复现了，事实上都成立。
 
@@ -322,7 +322,25 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 ### 验证
 
 - `ninja -C build check-mair`：217 项单元测试通过；lit 41 项中 40 通过、1 unsupported。
-- ASan 全量 lit（带 MAIR）522 项：318 通过、198 unsupported、1 XFAIL、5 XPASS（与最初基线相同的 5 个），没有失败。数量比上一节少 7，是因为 `mair-*` 用例已迁到 MAIR 套件。
+- ASan 全量 lit（带 MAIR）522 项：318 通过、198 unsupported、1 XFAIL、5 XPASS（与最初基线相同的 5 个），没有失败。数量比第 10 节少 7，是因为 `mair-*` 用例已迁到 MAIR 套件。
 - TSan 全量 lit 376 项：286 通过、89 unsupported、1 XFAIL。
 - P3：4000 个 switch 分支的 `roe`，基线 0.89 s、修复前 6.27 s、修复后 0.69 s；1500 个菱形的 `simplifygraph,roe` 仍约 1.1–1.2 s。与修复前逐字节比较 378 组一致。耗时为 Debug 构建下的单次测量。
+
+## 13. 两条分支的线性合并（2026-11-12）
+
+`claude/mair-review-refactor` 在 `1482b67a` 之后的 12 个提交被 rebase 到 `claude/mair-refactor-cleanup`（`ce60093b`）之上，历史是一条直线，没有 merge 提交；`main` 随后快进到合并结果。rebase 前的两个分支头留有本地标签 `backup/review-refactor-pre-rebase`（`89accea3`）和 `backup/refactor-cleanup-pre-rebase`（`ce60093b`），没有推送。
+
+冲突及处理：
+
+- `MAIR.cpp` 已在第 7 节 N4 被拆分，本分支对它的改动逐块移植到新位置：`iteratedCycleBetween` 和建图处的调用进 `MAIRGraphBuilder.cpp`；`Observation::isInvariantIn`、`ProgramPointEdge::isOpenTo`、ASan 配置、`MemoryObject` 使用计数进 `MAIRObservation.cpp`；边的打印、查找、`addEdge`、收缩留在 `MAIR.cpp`。第 8 节 D1 集中起来的“不可约环钉住”逻辑随 F3 的返工一并删除。
+- 大小表达式的访问改用第 8 节 D5 的 `AbstractAccess::getSizeExpr()`。
+- 两边都往同一批测试文件末尾追加了测试（第 8 节 D6 还把按 pass 的测试挪了位置），两边的测试全部保留。
+- 本文件两边各加了章节，全部保留；本分支的三节顺延为第 10–12 节，文中的交叉引用已同步。`docs/mair-loops.md` 取返工后的写法，路径改指拆分后的文件。
+
+验证（合并结果上重新构建全部目标后）：
+
+- `ninja -C build check-mair`：219 项单元测试通过；lit 41 项中 40 通过、1 unsupported。
+- ASan 全量 lit 522 项：318 通过、198 unsupported、1 XFAIL、5 XPASS（与最初基线相同的 5 个），没有失败。TSan 全量 lit 376 项：286 通过、89 unsupported、1 XFAIL。MSan、XSan 的测试没有运行，只确认插件能构建。
+- `mair-opt` 输出：合并结果与本分支 rebase 前逐字节比较 378 组输入×pipeline 全部相同；`claude/mair-refactor-cleanup` 的分支头与分叉点比较同样 378 组全部相同。
+- rebase 过程中在每个发生冲突的提交上都跑过 `check-mair`；没有冲突、自动应用的提交没有逐个单独构建。
 

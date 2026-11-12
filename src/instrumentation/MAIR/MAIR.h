@@ -245,6 +245,12 @@ public:
   void print(raw_ostream &OS) const;
 };
 
+/// The index of \p Ptr if it is a GEP with one index that steps \p Base by
+/// single bytes, so that the index is the byte offset from \p Base. Null
+/// otherwise.
+const Value *getByteOffsetIndex(const Value &Ptr, const Value &Base,
+                                const DataLayout &DL);
+
 /// Whether an instruction inserted before \p At can use \p V.
 bool isValueAvailableAt(const Value &V, const Instruction &At,
                         const DominatorTree &DT);

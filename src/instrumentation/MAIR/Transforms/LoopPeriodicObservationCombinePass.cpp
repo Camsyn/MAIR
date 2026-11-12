@@ -129,21 +129,11 @@ representStartOffset(const SCEV *Start, const Value *ExpectedBase,
   if (!StartPtr || !ExpectedBase)
     return std::nullopt;
 
-  if (const auto *GEP = dyn_cast<GEPOperator>(StartPtr)) {
-    const Module *M = Site.getAnchor().getModule();
-    if (!M)
-      return std::nullopt;
-    const DataLayout &DL = M->getDataLayout();
-    TypeSize Stride = DL.getTypeAllocSize(GEP->getSourceElementType());
-    const Value *PointerOp = GEP->getPointerOperand()->stripPointerCasts();
-    if (Stride.isFixed() && Stride.getFixedValue() == 1 &&
-        PointerOp == ExpectedBase && GEP->getNumIndices() == 1) {
-      const Value *Index = GEP->getOperand(1);
-      if (Index->getType()->isIntegerTy() &&
-          Loops.isValueAvailableAt(*Index, Site))
-        return AbstractValue::symbol(*Index);
-    }
-  }
+  if (const Value *Index = getByteOffsetIndex(*StartPtr, *ExpectedBase,
+                                              Site.getAnchor().getDataLayout()))
+    if (Index->getType()->isIntegerTy() &&
+        Loops.isValueAvailableAt(*Index, Site))
+      return AbstractValue::symbol(*Index);
   if (StartPtr->getType()->isPointerTy() &&
       getUnderlyingObject(StartPtr) == ExpectedBase)
     return AbstractValue::symbol(*StartPtr);

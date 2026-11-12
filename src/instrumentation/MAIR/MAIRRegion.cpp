@@ -171,6 +171,18 @@ bool isValueAvailableAt(const AbstractValue &V, const Instruction &At,
   return V.isSymbol() && isValueAvailableAt(*V.getSymbol(), At, DT);
 }
 
+const Value *getByteOffsetIndex(const Value &Ptr, const Value &Base,
+                                const DataLayout &DL) {
+  const auto *GEP = dyn_cast<GEPOperator>(&Ptr);
+  if (!GEP || GEP->getNumIndices() != 1 ||
+      GEP->getPointerOperand()->stripPointerCasts() != &Base)
+    return nullptr;
+  TypeSize Stride = DL.getTypeAllocSize(GEP->getSourceElementType());
+  if (!Stride.isFixed() || Stride.getFixedValue() != 1)
+    return nullptr;
+  return GEP->getOperand(1);
+}
+
 AbstractAccess AbstractAccess::fromPointerAndSize(const Value &Ptr,
                                                   AbstractValue Size,
                                                   const DataLayout &DL) {
@@ -188,20 +200,14 @@ AbstractAccess AbstractAccess::fromPointerAndSize(const Value &Ptr,
 
   // gep i8 p, %i has byte offset %i. The GEP itself is not the offset: %i and
   // %i+1 are symbolic byte offsets of the same object.
-  if (const auto *GEP = dyn_cast<GEPOperator>(&Ptr)) {
-    TypeSize Stride = DL.getTypeAllocSize(GEP->getSourceElementType());
-    const Value *PointerOp = GEP->getPointerOperand()->stripPointerCasts();
-    if (Stride.isFixed() && Stride.getFixedValue() == 1 &&
-        PointerOp == Underlying && GEP->getNumIndices() == 1) {
-      const Value *Index = GEP->getOperand(1);
-      if (const auto *ConstIndex = dyn_cast<ConstantInt>(Index)) {
-        if (std::optional<uint64_t> IndexOffset =
-                getNonNegativeU64(ConstIndex->getValue()))
-          return AbstractAccess(Underlying,
-                                AbstractValue::constant(*IndexOffset), Size);
-      } else if (Index->getType()->isIntegerTy()) {
-        return AbstractAccess(Underlying, AbstractValue::symbol(*Index), Size);
-      }
+  if (const Value *Index = getByteOffsetIndex(Ptr, *Underlying, DL)) {
+    if (const auto *ConstIndex = dyn_cast<ConstantInt>(Index)) {
+      if (std::optional<uint64_t> IndexOffset =
+              getNonNegativeU64(ConstIndex->getValue()))
+        return AbstractAccess(Underlying, AbstractValue::constant(*IndexOffset),
+                              Size);
+    } else if (Index->getType()->isIntegerTy()) {
+      return AbstractAccess(Underlying, AbstractValue::symbol(*Index), Size);
     }
   }
 

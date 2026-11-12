@@ -175,3 +175,44 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 - `LoopPeriodicObservationCombinePass.cpp`（约 600 行）没有拆分。
 
 任务资料在 worktree 的 `.archive/mair_followup_refactor_20261112_1557/`，被 `.gitignore` 忽略。
+
+## 8. 去重（第四轮）
+
+第三轮之后又做了一遍只读审查，列出 6 项不改行为的重构和一组需要取舍的接口问题。维护者要求先做前 5 项。
+
+- 分支仍是 `claude/mair-refactor-cleanup`，接在第三轮之后。
+- 最终状态：`ninja -C build check-mair` 通过，210 项单元测试，lit 27 通过、1 unsupported；ASan 6 项、TSan 5 项 `mair-*` 接入测试通过。其余 sanitizer 测试没有运行。
+
+| 条目 | commit | 做了什么 |
+| --- | --- | --- |
+| D4 | `c915af6d` | `MAIRGraph::registerObservation` 不再重复“按配置初始化，再在不可约环块里全部置否”，改为调用 `Observation::refreshOptimizationProperties` |
+| D3 | `2b629572` | “单下标、单字节步长的 GEP，其下标就是字节偏移”的匹配收成 `getByteOffsetIndex`，`AbstractAccess::fromPointerAndSize` 和 LPOC 共用 |
+| D2 | `c266f536` | 循环出口目标的解析收进 `MAIRLoopInfo::getExitSite` 和 `findExitPoint`，LIOM 和 LPOC 共用；多个程序点匹配时选中的仍是原来那个 |
+| D5 | `5d3579df` | `MAIRScalarExpr` 的定义挪到 `AbstractAccess` 之前，区间大小表达式直接以 `MAIRScalarExpr` 存取（`setSizeExpr`/`getSizeExpr`），去掉 `void*` 入参、`fromNode` 和自由函数 `expressionSize` |
+| D1a | `ebc80b62` | `MAIRGraphTest.cpp` 和 `MAIRMaterializationTest.cpp` 不再各带一份模块解析、建图和分析注册，改用 `MAIRPassTestUtil.h`；`buildGraph` 增加 barrier trait 模板参数 |
+| D1b | `6f650f17` | `MAIRGraphTest.cpp` 里 52 个按 pass 归类的测试移到各 pass 的测试文件，套件名和测试名不变；与留下的图测试共用的 helper 移到 `MAIRPassTestUtil.h`。`MAIRGraphTest.cpp` 从 6208 行降到 3896 行 |
+
+验证：
+
+- D2–D5 每项提交前都跑 `check-mair` 和 546 组 `mair-opt` 逐字节差分，全部 0 处不同；参考二进制是第四轮开始前的构建。最后一个提交上又跑了一遍差分，仍是 0 处不同。
+- D1a、D1b 只动测试。测试二进制列出的 210 个测试名在搬迁前后是同一个集合；用 `check_tests.py` 逐个比较了搬迁前后每个 `TEST` 块的内容，忽略空白后全部相同。
+- D5 改了约 20 处测试调用（`X.setSizeExprNode(E.getOpaqueNode())` 改为 `X.setSizeExpr(E)`），是机械替换。
+
+局限：
+
+- D2 的 `findExitPoint` 仍是在父图里线性查找，每个被移动的 observation 查一次。这是原有行为，没有测过它是否成为热点。
+- D1b 之后 `MAIRPassTestUtil.h` 里的 helper 是在全局命名空间里的 `inline` 函数，原来它们在匿名命名空间里。
+
+与另一条分支的关系：第一轮的分支 `claude/mair-review-refactor` 在本分支分叉之后又有了 3 个提交（`6844880d`、`46dc514b`、`9af0f6ad`，修改循环提升判据、PostDom 边和 barrier 计数）。本分支没有包含它们。试合并显示 3 个文件冲突：`MAIR.cpp`（本分支已把它拆成四个文件）和两个 pass 测试文件（本分支往里搬了测试）。两条分支不能再快进合并，需要手工解决冲突。
+
+第四轮审查里列出、这一轮没有做的：
+
+- ASan 和 TSan 接入层的重复（两个几乎相同的 backend 类、`CanInstrumentViaMAIR` 的相同前半段）。
+- `MAIR.h` 末尾的 10 个 `GraphTraits` 特化，生产代码只用到一个。
+- 没有生产调用方的公开接口；只有测试在用的“图拥有分析结果”的 `build` 重载。
+- `MAIROptimizationConfig` 里恒为 `true` 的 `AllowRelocation`，以及完全相同的 `generic()` 和 `forThreadSanitizer()`。
+- `RedundantObservationAnalysis` 注册成分析却从不经分析管理器查询。
+- pass 的注册名和统计标签是两套名字。
+- `RedundantObservationEliminationPass.cpp` 里注释说被钉住的 observation 可以作见证者，代码却把它跳过了；这是注释与实现不一致，不是重构。
+
+任务资料在 worktree 的 `.archive/mair_dedup_refactor_20261112_1705/`，被 `.gitignore` 忽略。

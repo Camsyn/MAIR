@@ -83,10 +83,10 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 - SCEV 耗时：600 个串行循环上 `lpoc` 的时间几乎全在 `ScalarEvolution` 内部（`opt -passes='print<scalar-evolution>'` 在同一输入上同样慢），不是 MAIR 的问题。
 - `findValueForSCEV`（LPOC）在回退路径上对整个函数的每条指令调用 `getSCEV`，可能是平方行为，但没有测到，需要真实输入再判断。
 - “值在某点可用”有三份实现：已在第 6 节 M5 合并。
-- `addressSCEV`（`MAIR.cpp`）与 `regionAddressSCEV`（LPOC）几乎相同，区别是零偏移时用 `getUnknown(Base)` 还是 `getSCEV(Base)`；上一轮审查已指出两者不等价，合并前需要先定语义。
+- `addressSCEV` 与 `regionAddressSCEV`（LPOC）几乎相同，只在零偏移时不同：已在第 7 节 N1 合并，用参数区分两种行为。
 - 仅被单元测试使用的接口：`MAIRGraph::isAncestor`、`MAIRLoopInfo::getLoopFor`、`MAIRLoopInfo::getTopInvariantLoop`。是否删除由维护者决定。
 - `MAIRGraph::getLoopGraph` 每次调用都线性遍历整棵作用域树，而 LIOM/LPOC 的调用方查询的总是当前图自己的循环，可以直接取 `getLoopPreheader()`。
-- min/max 表达式用 `icmp`+`select` 降级，可改用 `llvm.smin` 等 intrinsic；这会改变产出的 IR 文本和现有测试期望，不属于等价重构。
+- min/max 表达式用 `icmp`+`select` 降级：已在第 7 节 N3 改用 `llvm.smin` 等 intrinsic。
 - SimplifyGraph 每次收缩后从头扫描，理论上是平方的；在测试输入上不是热点（9000 个程序点约 0.15 s），且改成增量扫描需要证明候选顺序不变，暂不动。
 
 ## 5. 实施记录
@@ -144,11 +144,34 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 - 新增的 `LowersExpressionOperandsInOrder` 在旧代码上也通过：旧代码的操作数顺序依赖调用参数求值顺序，clang 恰好从左到右。这个测试固定的是今后的行为，不能证明旧代码有问题。
 - M5 的接受域是靠读代码确认一致的（三处都只接受常量、参数和支配插入点的指令），另有 546 组差分佐证，没有专门的新测试。
 
-这一轮仍然没有做的：
+这一轮没有做、随后在第 7 节按要求补做的四项：合并两份地址 SCEV 构造、min/max 改用 intrinsic、执行次数改用 `getTripCountFromExitCount`、拆分 `MAIR.cpp`。
 
-- `addressSCEV` 与 `regionAddressSCEV` 的合并：两者零偏移时语义不同，合并会改变行为。
+## 7. 后续四项（第三轮）
+
+第二轮把这四项列为“不做”，理由是会改变行为或属于结构取舍。维护者明确要求做，并指定地址 SCEV 的合并用参数控制零偏移时的行为。
+
+- 分支仍是 `claude/mair-refactor-cleanup`，接在第二轮之后。
+- 最终状态：`ninja -C build check-mair` 通过，210 项单元测试，lit 27 通过、1 unsupported；ASan 6 项、TSan 5 项 `mair-*` 接入测试通过。其余 sanitizer 测试没有运行。
+
+| 条目 | commit | 做了什么 | 是否改变产出 |
+| --- | --- | --- | --- |
+| N1 | `71fc632a` | 两份地址 SCEV 构造合并为 `AbstractAccess::getAddressSCEV(SE, ZeroOffsetBase)`。`Opaque` 把零偏移的 base 当作不透明的 `SCEVUnknown`（区间合并用），`Analyzed` 用 ScalarEvolution 自己的表达式（LPOC 找递推用） | 否：546 组逐字节一致 |
+| N2 | `f9212360` | `getExactExecutionCountSCEV` 中“站点在出口判断之前”的一支改用 `ScalarEvolution::getTripCountFromExitCount`；“之后”的一支仍是 backedge 次数零扩展 | 理论上可能，实测没有：546 组逐字节一致，其中包含带 `+1` 的符号执行次数 |
+| N3 | `c75e7e51` | min/max 表达式的降级从 `icmp`+`select` 改为 `llvm.smin`/`umin`/`smax`/`umax` | 是：这类表达式物化出的 IR 从两条指令变为一次 intrinsic 调用，值相同 |
+| N4 | `c55265aa` | `MAIR.cpp`（2073 行）按职责拆成 `MAIRGraphBuilder.cpp`（241 行，建图）、`MAIRRegion.cpp`（535 行，标量表达式与各类区域）、`MAIRObservation.cpp`（429 行，observation 与优化配置）和 `MAIR.cpp`（863 行，程序点与图容器），共用的少量定义放在 `MAIRInternal.h`（76 行） | 否：546 组逐字节一致 |
+
+验证与局限：
+
+- N1、N2、N4 用与第二轮相同的 546 组 `mair-opt` 差分，参考二进制是第三轮开始前的构建。
+- N2 的等价性只在差分输入上成立。LLVM 在能证明加一不溢出时会先加再扩位，这样的循环会得到形状不同（值相同）的表达式；差分输入里没有出现，所以没有观察到，也没有新增针对它的测试。
+- N3 没有任何端到端覆盖：546 组差分和 32 次 ASan/TSan 编译都不产生 min/max 表达式，只有物化单元测试 `LowersCompletePeriodicExpressionDag` 覆盖，其断言已从统计 `icmp` 改为统计四种 intrinsic 各出现一次。
+- N4 用脚本切分并断言各片段能原样拼回原文件；另用 `check_split.py` 比较拆分前后的代码行多重集，差异只有 include、命名空间括号、新头文件里的声明，以及 6 个共享 helper 的链接属性（`static` 改为 `inline` 或外部链接）。
+- N4 连带把 `docs/mair-loops.md` 里指向 `postDominatesWithinIteration` 的路径改为 `MAIRGraphBuilder.cpp`。`docs/dev-MAIR/2-ConstructMAIRGraph.md` 里还有两处提到 `MAIR.cpp`，那是标明“不是当前规范”的历史设计记录，没有改。
+
+仍然没有做的：
+
 - 仅被测试使用的接口（`isAncestor`、`MAIRLoopInfo::getLoopFor`、`getTopInvariantLoop`）的删除：属于接口取舍。
-- min/max 改用 `llvm.smin` 等 intrinsic：会改变产出的 IR。
-- `getExactExecutionCountSCEV` 改用 `ScalarEvolution::getTripCountFromExitCount`：LLVM 的实现在能证明不溢出时会先加一再扩位，得到的 SCEV 形状可能不同，没有证明等价。
 - masked load/store 的操作数下标仍是手写的，没有核对 LLVM 是否有现成访问器。
-- `MAIR.cpp`（约 2000 行）和 `LoopPeriodicObservationCombinePass.cpp`（约 600 行）没有拆分文件。
+- `LoopPeriodicObservationCombinePass.cpp`（约 600 行）没有拆分。
+
+任务资料在 worktree 的 `.archive/mair_followup_refactor_20261112_1557/`，被 `.gitignore` 忽略。

@@ -1,4 +1,4 @@
-// RUN: env MAIR=1 %clangxx_tsan -O0 -S -emit-llvm %s -o - | FileCheck %s
+// RUN: env MAIR=1 %clangxx -tsan -O0 -S -emit-llvm %s -o - | FileCheck %s
 
 void copy(char *dst, char *src, long n) { __builtin_memcpy(dst, src, n); }
 

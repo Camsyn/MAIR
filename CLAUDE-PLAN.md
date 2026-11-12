@@ -289,5 +289,15 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 
 - 来历：`DomCoverageOnly` 是 2026-07-17 的 `3531db9a` 引入的，目的是保证检查在访问之前（后面的检查不能顶替前面的）。2026-11-10 的 `64af7808` 放开了 ASan 的 observation 移动，图收缩本来就会把检查沉到访问之后，`mair-check-order.cpp` 也已明确接受这一点。所以这个限制已经保护不了任何顺序，只是白白多留检查，结论与你的判断一致。
 - 改动：删掉这个开关，所有配置都沿两种边传播覆盖。jsoncpp 三个翻译单元在 `-O1` 下的 ASan 检查数：不开 MAIR 为 2361/1230/1022，原配置 2214/1176/994，打开 PostDom 覆盖后 2192/1160/981。
-- 调查中发现一个真实问题：ASan 的反向 barrier 只包括“可能写内存的调用”，所以只读但可能不返回的调用不算 barrier，访问的唯一检查可能落到这种调用之后而永远不执行。这在打开 PostDom 覆盖之前就存在（图收缩同样会造成）。`15862f21` 把任何不保证把控制流交给后继的指令都算作 ASan 的反向 barrier，测试是 `test/asan/TestCases/mair-may-not-return.c`；jsoncpp 的检查数不受影响。
+- 调查中发现一个真实问题：ASan 的反向 barrier 只包括“可能写内存的调用”，所以只读但可能不返回的调用不算 barrier，访问的唯一检查可能落到这种调用之后而永远不执行。这在打开 PostDom 覆盖之前就存在（图收缩同样会造成）。`15862f21` 把任何不保证把控制流交给后继的指令都算作 ASan 的反向 barrier，测试是 `test/MAIR/TestCases/asan/mair-may-not-return.c`；jsoncpp 的检查数不受影响。
 - 仍然存在、且不是本轮引入的限制：检查落在访问之后时，足够野的访问会先触发 SEGV 而不是 ASan 报告（`high-address-dereference.c` 因此在 MAIR 下标为 unsupported）。
+
+## 7. MAIR 的 sanitizer 接入测试迁到 `test/MAIR`（2026-11-12）
+
+直接针对 MAIR 的 lit 测试不放在 `test/asan`、`test/tsan` 下。原来的 12 个 `mair-*` 接入测试（ASan 7 个、TSan 5 个）移到 `test/MAIR/TestCases/asan/` 和 `test/MAIR/TestCases/tsan/`，文件名不变，前文提到的 `test/asan/TestCases/mair-*`、`test/tsan/TestCases/mair-*` 都指迁移后的位置。
+
+- `test/MAIR/lit.cfg.py` 增加 `.c`、`.cpp` 后缀和 `%clang`、`%clangxx` 两个替换（指向 `build/xclang`）；`check-mair` 增加对 `xclang` 的依赖，后者会带上各 sanitizer 插件。
+- TSan 测试的 `%clang_tsan`、`%clangxx_tsan` 改为 `%clang -tsan`、`%clangxx -tsan`。`mair-ignore.c` 的内容是 LLVM IR，改名为 `mair-ignore.ll`，不再需要 `-x ir`。
+- 这些测试只编译到 IR 再 FileCheck，不链接也不运行，所以不需要 sanitizer 套件的 runtime 配置。
+- 结果：`ninja -C build check-mair` 现在跑 216 项单元测试和 40 项 lit（39 通过、1 unsupported），其中 12 项是迁过来的；ASan、TSan 套件里不再有 `mair-*` 用例。迁移后把其中一个用例的期望改错，确认它会失败，再改回。
+

@@ -3,4 +3,5 @@
 config.test_source_root = "@MAIR_LIT_SOURCE_DIR@"
 config.test_exec_root = "@CMAKE_CURRENT_BINARY_DIR@/TestCases"
 config.mair_opt = "@MAIR_OPT_PATH@"
+config.xclang = "@MAIR_XCLANG_PATH@"
 lit_config.load_config(config, "@MAIR_LIT_CONFIG_DIR@/lit.cfg.py")

@@ -89,4 +89,4 @@ Observation 合并保留完整来源指令序列及重复项。若右项严格�
 - `test/MAIR/TestCases/mair-stats.ll`：`-mair-stats` 把第二次不变外提和内层区间合并分开打印。
 - `src/instrumentation/MAIR/unittests`：图边界、方向 barrier、整树生命周期和 guard 物化回归。其中 `KeepsAccessCoveredOnlyInALaterIteration`、`EliminatesInvariantAccessCoveredInALaterIteration`、`IrreducibleCyclesAreOptimizedWithinOneIteration`、`CountsBarriersOfAnEndpointThatRunsAgain`、`DoesNotHoistAnAccessTheLoopCanExitWithout` 对应上面几条规则。
 - `src/instrumentation/MAIR/unittests/RandomizedSoundnessTest.cpp`：随机生成带嵌套循环和不可归约环的函数，随机执行，要求每次写都有同地址、中间无 barrier 的 Observation，且每个 Observation 都有这样的写。
-- `test/asan/TestCases/mair-may-not-return.c`、`mair-atomic.cpp`：ASan 的检查不会落到可能不返回的调用之后；PostDom 覆盖对 ASan 生效。
+- `test/MAIR/TestCases/asan/mair-may-not-return.c`、`mair-atomic.cpp`：ASan 的检查不会落到可能不返回的调用之后；PostDom 覆盖对 ASan 生效。

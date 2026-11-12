@@ -1,4 +1,4 @@
-// RUN: env MAIR=1 %clangxx_tsan -O1 -S -emit-llvm %s -o - | FileCheck %s
+// RUN: env MAIR=1 %clangxx -tsan -O1 -S -emit-llvm %s -o - | FileCheck %s
 
 int g;
 

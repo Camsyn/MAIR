@@ -1,6 +1,7 @@
 set(MAIR_LIT_CONFIG_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(MAIR_LIT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/TestCases)
 set(MAIR_OPT_PATH ${XSAN_OUTPUT_BINDIR}/mair-opt)
+set(MAIR_XCLANG_PATH ${XSAN_OUTPUT_BINDIR}/xclang)
 
 configure_lit_site_cfg(
   ${CMAKE_CURRENT_SOURCE_DIR}/lit.site.cfg.py.in
@@ -9,7 +10,7 @@ configure_lit_site_cfg(
 add_lit_testsuite(check-mair
   "Running MAIR tests"
   ${CMAKE_CURRENT_BINARY_DIR}
-  DEPENDS mair-opt
+  DEPENDS mair-opt xclang
 )
 add_dependencies(check-mair check-mair-unit)
 

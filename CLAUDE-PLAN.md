@@ -23,6 +23,8 @@
 
 ### F1 LIOM 把并非每次进入循环都执行的 observation 提升到 preheader（误报）
 
+> 下面是第一轮的修法。按 review 意见返工后的最终做法见第 10 节。
+
 - 复现：`-passes=liom liom_outer_backedge.ll`。内层循环里的 `store %p` 只在 `%j > 5` 时执行，却被提升到内层 preheader 且使用 `AlwaysGuard`，于是 `%j <= 5` 的每轮外层迭代都会观测一个程序从未访问的地址。
 - 影响：所有配置。ASan 表现为误报，TSan 表现为虚假的竞争访问。
 - 根因：`MAIRLoopInfo::canHoistToPreheader`（`Analysis/LoopAnalysis.cpp`）用 `PDT->dominates(Source, Preheader)` 证明“进入循环必执行”。后支配只保证“最终会执行”，这条路径可以先离开内层循环、绕外层回边再回来。
@@ -30,6 +32,8 @@
 - 不损失合法提升：若 Source 不支配某个 exiting block，就存在一条进入循环后不经过 Source 直接离开的路径，原提升本来就不成立。
 
 ### F2 PostDom 冗余消除跨越循环回边（漏报）
+
+> 下面是第一轮的修法。按 review 意见返工后的最终做法见第 10 节。
 
 - 复现：`-passes=roe pdom_backedge.ll`。块 A 在 `%i < 3` 时写 `base[i]`，其 observation 被块 B 的同名 `%p` 写“覆盖”并删除；但 B 只有绕回边进入下一轮迭代才会执行，那时 `%p` 已是另一个地址。`base[0..2]` 的写不再被观测。
 - 影响：允许 PostDom 覆盖的配置，即 generic 与 TSan。ASan 配置为 `DomCoverageOnly`，不受影响。
@@ -39,6 +43,8 @@
 - 连带影响：含循环的 lit golden 中 `preds/succs` 列表会变化，用 `utils/update_mair_test_checks.py` 重新生成并逐项核对。
 
 ### F3 不可约环的块识别不完整（漏报）
+
+> 下面是第一轮的修法。按 review 意见返工后的最终做法见第 10 节。
 
 - 复现：`-O1 irreducible_variant.ll`。不可约环 `{A,B,C,D}` 中块 C 没有被标记为 unsupported，其 observation 被跨“迭代”的后支配者删除。
 - 根因：`collectUnsupportedLoopBlocks`（`MAIR.cpp`）用手写 DFS，只标记发现非自然回边那一刻 DFS 栈上的块；环上经由其他路径访问的块被漏掉。
@@ -243,3 +249,45 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 - N2 值得补一个“符号窄位先加后扩”的专项测试。
 
 任务资料在 worktree 的 `.archive/mair_stat_gating_fix_20261112_1810/`，被 `.gitignore` 忽略。
+
+## 10. 按 review 意见返工（2026-11-12）
+
+第一轮对 F2、F3 的修法过于保守（F2 直接不建跨迭代的 PostDom 边，F3 把不可约环的块整体钉住）。本轮改为根因修复，并回答了 F1 和 ASan 配置的两个问题。任务资料在 `.archive/mair_review_followup_20261112_1607/`。
+
+最终状态：`ninja -C build check-mair` 通过，216 项单元测试，lit 27 通过、1 unsupported。ASan 全量 lit（带 MAIR）529 项：325 通过、198 unsupported、1 XFAIL、5 XPASS；这 5 个 XPASS 在改动前的基线里就存在，除此之外没有失败。TSan 全量 lit 381 项：291 通过、89 unsupported、1 XFAIL（在 `c3a267c1` 上跑的，其后的 `15862f21` 只改 ASan，之后只重跑了 5 项 `mair-*`）。MSan、XSan 没有运行。
+
+### F1：后支配 preheader 的条件确实多余（`6844880d`）
+
+- “来源块支配每个 exiting block”蕴含“来源块后支配 preheader”：从 preheader 到返回的每条路径都要经过某个 exiting block。因此删掉了后支配树查询。
+- 唯一的例外是没有出口的循环，此时前一个条件为空真，而旧的后支配条件实际起了作用（差分发现 `loop-hierarchy.ll` 的 `@no_exit` 行为变了）。改为要求来源块支配每个 latch，并补了测试 `HoistsFromALoopWithoutExitsOnlyWhatEveryIterationRuns`。改后与前一提交逐字节比较 378 组一致。
+- 例子和推理写在 `MAIRLoopInfo::canHoistToPreheader` 的注释里，测试是 `DoesNotHoistAnAccessTheLoopCanExitWithout`。
+- 没有实现的部分：带“S 执行过”indicator 的外提。单出口循环已有带 guard 的下沉可用；例子里的多出口循环需要在每条出口边放带 guard 的副本并改写 CFG，只记了 TODO。
+
+### F2 与 F3：PostDom 边记录它迭代的环（`46dc514b`）
+
+- 两个 bug 是同一个问题：后支配者可能要等某个环开始新一轮迭代之后才到达，而环内定义的值那时已经变了。
+- 做法：图持有 LLVM `CycleInfo`；每条 PostDom 边记录“两端之间可能开始新一轮迭代的最外层环”，判据是存在一条路径在到达后支配者之前进入该环的 header 或离开该环。沿这种边，只有在该环内不变的 observation 才能被关联。地址不随循环变化时照常按 PostDom 优化，地址随迭代变化时才关闭。
+- 自然循环和不可约环走同一条规则。不可约环的块不再被钉住，留在外围层按普通规则优化；它没有 preheader、唯一 header 和 trip count，LIOM/LPOC 不适用，记了 TODO。
+- 冗余分析按“对该 observation 关闭的环集合”各算一份可达性；公共 observation 下沉遵守同一规则。
+- 例子和推理写在 `iteratedCycleBetween` 的注释里。测试：`KeepsAccessCoveredOnlyInALaterIteration`（地址随迭代变，保留）、`EliminatesInvariantAccessCoveredInALaterIteration`（地址不变，照常删除）、`IrreducibleCyclesAreOptimizedWithinOneIteration`、`test/MAIR/TestCases/loop-irreducible.ll`。
+- 与前一提交比较 378 组：保留的 observation 只在不可约环用例上变化（`loop-irreducible.ll` 7 条变 4 条，`irreducible_hole.ll` 3 条变 1 条，都是地址不变的访问重新被删除），其余差异只是边列表多了 `iter` 标注。jsoncpp 在 `-O1` 下保留的 observation 数不变。
+- 没有实现的部分：把例子里两处写上提到共同前驱再由周期合并移出循环，记了 TODO（需要公共 observation 上提能越过空块）。
+
+### 新发现：重复执行的端点块里的 barrier 没被计入（`9af0f6ad`）
+
+- `hasBarrierPath` 跳过两端的块。被覆盖的一端所在块如果能在不经过见证块的情况下再次执行，它块内的 barrier 就落在见证和被覆盖访问之间。循环 header 开头的调用就是这样，夹在 header 里较早的写和后支配它的写之间。
+- 这个问题在最初的基线里就有；第一轮 F2 去掉跨迭代的边时把后向的情形一并挡住了，本轮恢复这些边后由随机测试重新暴露。前向的情形（不可约环）与 F2 无关。
+- 测试：`CountsBarriersOfAnEndpointThatRunsAgain`。
+
+### 随机化健全性测试（`561e382e`）
+
+- `RandomizedSoundnessTest.cpp` 生成带嵌套循环和不可约环的小函数，随机执行，检查两条性质：每次写都有同地址、中间无 barrier 的 observation；每个 observation 都有这样的写。
+- 做过变异检查：分别关掉环不变性规则、上一条 barrier 规则、外提的出口支配规则，测试都会失败。
+- 它不覆盖 LPOC、LocationMerge、区间和大小的推理，也不覆盖物化。
+
+### ASan 为什么不用 PostDom 覆盖（`c3a267c1`、`15862f21`）
+
+- 来历：`DomCoverageOnly` 是 2026-07-17 的 `3531db9a` 引入的，目的是保证检查在访问之前（后面的检查不能顶替前面的）。2026-11-10 的 `64af7808` 放开了 ASan 的 observation 移动，图收缩本来就会把检查沉到访问之后，`mair-check-order.cpp` 也已明确接受这一点。所以这个限制已经保护不了任何顺序，只是白白多留检查，结论与你的判断一致。
+- 改动：删掉这个开关，所有配置都沿两种边传播覆盖。jsoncpp 三个翻译单元在 `-O1` 下的 ASan 检查数：不开 MAIR 为 2361/1230/1022，原配置 2214/1176/994，打开 PostDom 覆盖后 2192/1160/981。
+- 调查中发现一个真实问题：ASan 的反向 barrier 只包括“可能写内存的调用”，所以只读但可能不返回的调用不算 barrier，访问的唯一检查可能落到这种调用之后而永远不执行。这在打开 PostDom 覆盖之前就存在（图收缩同样会造成）。`15862f21` 把任何不保证把控制流交给后继的指令都算作 ASan 的反向 barrier，测试是 `test/asan/TestCases/mair-may-not-return.c`；jsoncpp 的检查数不受影响。
+- 仍然存在、且不是本轮引入的限制：检查落在访问之后时，足够野的访问会先触发 SEGV 而不是 ASan 报告（`high-address-dereference.c` 因此在 MAIR 下标为 unsupported）。

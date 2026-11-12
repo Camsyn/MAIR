@@ -10,7 +10,7 @@ Sanitizer 需要决定在程序执行中的哪些位置、以何种访问语义�
 
 MAIR 每层的包含关系为 `MAIRGraph -> ProgramPoint (PP) -> Observation (o)`。函数根图唯一拥有自然循环的子图，嵌套循环逐层拥有；每层只包含本层直接内容。PP 承载位置与执行条件，Observation 描述要观测的内存行为。它们类比 LLVM 的 `CFG -> BasicBlock -> Instruction` 包含关系，但不一一映射；一个 basic block 可产生多个 PP，PP 内 Observation 的列表顺序不表示原指令执行次序。
 
-`LoopProgramPoint` 在父图中关联循环 body：每个循环有一个位于真实 preheader `BBExit` 的 `LoopPreheader`，以及零个或多个位于 dedicated exit `BBEntry` 的 `LoopExit`。普通优化边限于同层；只有循环专用变换经过独立证明，才可将 Observation 导出到父层。构图前需由 LLVM LoopSimplify 建立这些真实边界；当前不可归约环明确拒绝。具体生命周期、遍历与输入约束见 [循环结构说明](docs/mair-loops.md)。
+`LoopProgramPoint` 在父图中关联循环 body：每个循环有一个位于真实 preheader `BBExit` 的 `LoopPreheader`，以及零个或多个位于 dedicated exit `BBEntry` 的 `LoopExit`。普通优化边限于同层；只有循环专用变换经过独立证明，才可将 Observation 导出到父层。构图前需由 LLVM LoopSimplify 建立这些真实边界；不可归约环不建立循环层，其块留在外围层，PostDom 边记录它可能迭代的环。具体生命周期、遍历与输入约束见 [循环结构说明](docs/mair-loops.md)。
 
 令 $L$ 为符号内存区域的集合，$T=\{r,w,rw\}$ 为访问类型集合。一个 Observation $o$ 的核心描述是
 
@@ -108,7 +108,7 @@ $$
 
 其中 $E^D$ 与 $E^P$ 分别记录沿 dominance 方向和沿 post-dominance 方向可传播的候选事实。初始边结合控制流结构与对应方向的 barrier 条件构造；变换后仍保留边的方向语义，但不要求每条边都重新等同于原始控制流的直接支配关系。
 
-Sanitizer 策略还决定访问类型的覆盖关系、Observation 是否可删除、合并或移动，以及哪些边可用于覆盖传播。这些条件彼此独立。例如当前 ASan 策略把读写类型视为同一覆盖级别，仅允许沿 $E^D$ 传播覆盖，且不移动 Observation；当前 TSan 策略使用 $r\preceq_s w\preceq_s rw$，并允许两种方向在各自条件下传播。两者仍需检查区域、属性与执行条件。
+Sanitizer 策略还决定访问类型的覆盖关系、Observation 是否可删除、合并或移动，以及哪些边可用于覆盖传播。这些条件彼此独立。例如当前 ASan 策略把读写类型视为同一覆盖级别，当前 TSan 策略使用 $r\preceq_s w\preceq_s rw$；两者都允许移动普通 Observation，并沿两种方向在各自的 barrier 条件下传播覆盖。两者仍需检查区域、属性与执行条件。
 
 记 $E^{\mathrm{cov}}_{f,s}\subseteq E^D_{f,s}\cup E^P_{f,s}$ 为逐边通过当前策略检查的覆盖传播边集。每条边的两端必须属于同层 MAIR，父子图之间没有普通传播边。跨 PP 覆盖可以使用 $(E^{\mathrm{cov}}_{f,s})^+$，但这种可达性**只是候选关系**。只有独立保留的 Observation $o_1$ 对目标 Observation $o_2$ 满足 sanitizer 特定的 $\operatorname{covers}_s(o_1,o_2)$，且相应动态实例的区域与效果确实匹配，$o_1$ 才能作为删除 $o_2$ 的见证。$\operatorname{covers}_s$ 要求 $o_2$ 可删除，并要求区域包含、类型覆盖及属性兼容；$o_1$ 自身不可删除时仍可作为见证。区域包含必须针对被配对的动态实例解释。静态值相同本身不足以跨迭代证明覆盖。
 

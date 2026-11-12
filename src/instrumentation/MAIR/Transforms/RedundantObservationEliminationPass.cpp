@@ -194,9 +194,9 @@ unsigned doInterROE(MAIRGraph &G, const RedundantObservationInfo &Info) {
 PreservedAnalyses
 RedundantObservationEliminationPass::run(MAIRGraph &G,
                                          MAIRGraphAnalysisManager &AM) {
-  const unsigned NumInputs = MAIRStat::compute(G).getNumObservations();
-  NumInputObservations += NumInputs;
-  MAIRStatScope Scope("roe", Ordinal, G, NumInputs);
+  MAIRStatScope Scope("roe", Ordinal, G, NumInputObservations, [&] {
+    return MAIRStat::compute(G).getNumObservations();
+  });
   const unsigned NumEliminatedIntra = doIntraROE(G);
 
   // Intra elimination changes the source set. Compute this pass's inter

@@ -168,9 +168,9 @@ bool mergeLocations(ProgramPoint &PP, ScalarEvolution *SE) {
 
 PreservedAnalyses LocationMergePass::run(MAIRGraph &G,
                                          MAIRGraphAnalysisManager &AM) {
-  const unsigned NumInputs = MAIRStat::compute(G).getNumObservations();
-  NumInputObservations += NumInputs;
-  MAIRStatScope Scope("locationmerge", Ordinal, G, NumInputs);
+  MAIRStatScope Scope("locationmerge", Ordinal, G, NumInputObservations, [&] {
+    return MAIRStat::compute(G).getNumObservations();
+  });
   ScalarEvolution *SE = nullptr;
   if (AM.isPassRegistered<LoopAnalysis>()) {
     MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);

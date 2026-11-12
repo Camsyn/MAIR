@@ -145,9 +145,9 @@ void commitInvariantMotion(MAIRGraph &G, InvariantMotionPlan Plan,
 PreservedAnalyses
 LoopInvariantObservationMotionPass::run(MAIRGraph &G,
                                         MAIRGraphAnalysisManager &AM) {
-  const unsigned NumInputs = MAIRStat::compute(G).getNumObservations();
-  NumInputObservations += NumInputs;
-  MAIRStatScope Scope("liom", Ordinal, G, NumInputs);
+  MAIRStatScope Scope("liom", Ordinal, G, NumInputObservations, [&] {
+    return MAIRStat::compute(G).getNumObservations();
+  });
   bool Changed = false;
   MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
   const Loop *ScopedLoop = G.getLoop();

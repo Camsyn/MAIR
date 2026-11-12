@@ -196,9 +196,9 @@ bool moveCommonObservationsToFixedPoint(MAIRGraph &G,
 
 PreservedAnalyses CommonObservationMotionPass::run(MAIRGraph &G,
                                                    MAIRGraphAnalysisManager &) {
-  const unsigned NumInputs = MAIRStat::compute(G).getNumObservations();
-  NumInputObservations += NumInputs;
-  MAIRStatScope Scope("common", Ordinal, G, NumInputs);
+  MAIRStatScope Scope("common", Ordinal, G, NumInputObservations, [&] {
+    return MAIRStat::compute(G).getNumObservations();
+  });
   bool Changed = moveCommonObservationsToFixedPoint(G, MotionDirection::Hoist);
   Changed |= moveCommonObservationsToFixedPoint(G, MotionDirection::Sink);
 

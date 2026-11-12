@@ -128,10 +128,11 @@ static StringRef getFunctionName(const MAIRGraph &G) {
   return F->getName().empty() ? "<unnamed>" : F->getName();
 }
 
-MAIRStatScope::MAIRStatScope(StringRef Pass, unsigned Ordinal,
-                             const MAIRGraph &G, uint64_t NumInputs) {
-  if (!ClMAIRStats)
-    return;
+bool mairStatsEnabled() { return ClMAIRStats; }
+
+void MAIRStatScope::begin(StringRef Pass, unsigned Ordinal, const MAIRGraph &G,
+                          uint64_t NumInputs) {
+  assert(ClMAIRStats && "a MAIR stat scope begins only under -mair-stats");
   assert(!Current && "MAIR stat scope is not re-entrant");
   StringRef Func = getFunctionName(G);
   std::string Label =

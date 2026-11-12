@@ -3,6 +3,7 @@
 #include "MAIR/MAIR.h"
 #include "MAIR/MAIRBarrierAnalysis.h"
 #include "MAIR/MAIRDump.h"
+#include "MAIR/MAIRStatLog.h"
 #include "MAIR/MAOpt.h"
 #include "MAIR/Transforms/CommonObservationMotionPass.h"
 #include "MAIR/Transforms/LocationMergePass.h"
@@ -3893,4 +3894,25 @@ entry:
   ASSERT_TRUE(Earliest.mergeWith(Covering));
   EXPECT_EQ(Earliest.getInstruction(), &Second);
   EXPECT_EQ(Earliest.getStableDebugLoc().get(), AtAnchor.get());
+}
+
+TEST(MAIRStatLog, CountsPassInputsOnlyWhenStatisticsConsumeThem) {
+  // Counting walks the whole graph, so a pass must not pay for it when
+  // neither LLVM statistics nor -mair-stats will use the result.
+  struct InputCounter {
+    uint64_t Total = 0;
+    void operator+=(uint64_t N) { Total += N; }
+  } Counter;
+  unsigned Calls = 0;
+  MAIRGraph Graph;
+  ASSERT_FALSE(mairStatsEnabled());
+  {
+    MAIRStatScope Scope("test", /*Ordinal=*/0, Graph, Counter, [&] {
+      ++Calls;
+      return 7u;
+    });
+  }
+  const bool StatisticsCompiledIn = LLVM_ENABLE_STATS;
+  EXPECT_EQ(Calls, StatisticsCompiledIn ? 1u : 0u);
+  EXPECT_EQ(Counter.Total, StatisticsCompiledIn ? 7u : 0u);
 }

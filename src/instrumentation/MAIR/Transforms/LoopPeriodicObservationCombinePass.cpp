@@ -547,9 +547,9 @@ bool aggregateObservations(MAIRGraph &G, MAIRLoopInfo &Loops,
 PreservedAnalyses
 LoopPeriodicObservationCombinePass::run(MAIRGraph &G,
                                         MAIRGraphAnalysisManager &AM) {
-  const unsigned NumInputs = MAIRStat::compute(G).getNumObservations();
-  NumInputObservations += NumInputs;
-  MAIRStatScope Scope("lpoc", Ordinal, G, NumInputs);
+  MAIRStatScope Scope("lpoc", Ordinal, G, NumInputObservations, [&] {
+    return MAIRStat::compute(G).getNumObservations();
+  });
   MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
   bool Changed = aggregateObservations(G, Loops, MergeEquivalentObservations);
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();

@@ -65,9 +65,9 @@ MergeCandidate findMergeCandidate(MAIRGraph &G) {
 
 PreservedAnalyses SimplifyGraphPass::run(MAIRGraph &G,
                                          MAIRGraphAnalysisManager &) {
-  const unsigned NumInputs = MAIRStat::compute(G).getNumProgramPoints();
-  NumInputProgramPoints += NumInputs;
-  MAIRStatScope Scope("simplify", Ordinal, G, NumInputs);
+  MAIRStatScope Scope("simplify", Ordinal, G, NumInputProgramPoints, [&] {
+    return MAIRStat::compute(G).getNumProgramPoints();
+  });
   bool Changed = false;
 
   // Contract one mutual Dom/PostDom pair at a time. Rewiring can expose a new

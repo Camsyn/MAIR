@@ -4,6 +4,7 @@
 #include "MAIR/MAIRStatLog.h"
 
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/CheckedArithmetic.h"
@@ -108,6 +109,13 @@ unsigned doIntraROE(MAIRGraph &G) {
 
   // Phase 1 considers only observations from the same ProgramPoint.  Sorting
   // makes each base's concrete contiguous observations one interval-sweep run.
+  //
+  // The sort is stable, so of observations with equal ranges and levels the
+  // first in the list stays. In default<O1>, which the sanitizers run, motion
+  // merges such observations into one and keeps all their sources. Without
+  // merging, in default<Og>, invariant motion and periodic combination append
+  // them in the list order of the loop's graph, which follows the block
+  // layout, not necessarily the order their sources run in.
   for (ProgramPoint &PP : G) {
     PP.sort(compareForCoverage);
 
@@ -165,14 +173,59 @@ unsigned doIntraROE(MAIRGraph &G) {
   return eraseObservations(Redundant);
 }
 
+/// The program points of \p G, each after every program point it reaches
+/// along Dom edges: a postorder of the Dom edges, which are acyclic.
+SmallVector<ProgramPoint *, 32> dominatedFirst(MAIRGraph &G) {
+  SmallVector<ProgramPoint *, 32> Order;
+  Order.reserve(G.size());
+  SmallPtrSet<const ProgramPoint *, 32> Visited;
+  // A program point and the index of the next child edge to look at.
+  SmallVector<std::pair<ProgramPoint *, unsigned>, 16> Stack;
+  for (ProgramPoint &Root : G) {
+    if (!Visited.insert(&Root).second)
+      continue;
+    Stack.push_back({&Root, 0});
+    while (!Stack.empty()) {
+      auto &[PP, Next] = Stack.back();
+      ArrayRef<ProgramPointEdge> Children = PP->children();
+      if (Next == Children.size()) {
+        Order.push_back(PP);
+        Stack.pop_back();
+        continue;
+      }
+      const ProgramPointEdge &Edge = Children[Next++];
+      if (Edge.isDom() && Visited.insert(&Edge.getNode()).second)
+        Stack.push_back({&Edge.getNode(), 0});
+    }
+  }
+  return Order;
+}
+
 unsigned doInterROE(MAIRGraph &G, const RedundantObservationInfo &Info) {
   DenseSet<const Observation *> ExcludedSources;
   SmallVector<Observation *, 16> Redundant;
 
   // Query one post-intra data-flow snapshot while excluding observations
   // already selected by this phase from serving as later witnesses.
-  for (ProgramPoint &PP : G) {
-    for (Observation &Obs : PP) {
+  //
+  // The order decides which of two observations that cover each other
+  // stays: the one examined second, because the first is removed and no
+  // longer witnesses. Of two observations with equal levels where A dominates B
+  // and B post-dominates A, A stays, as it runs first:
+  //
+  //   entry: %a = load i32, ptr %p   ; stays
+  //          br i1 %c, label %then, label %join
+  //   then:  br label %join
+  //   join:  %b = load i32, ptr %p   ; removed
+  //
+  // So every program point is examined before the program points that
+  // reach it along Dom edges. The list order of the graph follows the block
+  // layout, which need not be a dominance order. Program points that no Dom
+  // path connects keep the order of the traversal; any order is sound, it
+  // only picks the survivor. Observations of one program point never witness
+  // each other here, so their order does not matter.
+  for (ProgramPoint *PP : dominatedFirst(G)) {
+    for (Observation &Obs : *PP) {
       if (!Info.isCovered(Obs, ExcludedSources))
         continue;
       ExcludedSources.insert(&Obs);

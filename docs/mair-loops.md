@@ -69,6 +69,8 @@ barrier 也要考虑重复执行：被覆盖的一端所在块如果能在不经
 
 `default<O1>` 在首次不变量移动前先做冗余删除。循环展开可能在同一条件块中留下多次相同访问；先消除重复观察，才能在下沉时只保留一个来源 guard。若先逐项下沉，来源不同会生成不同 guarded ProgramPoint，随后冗余分析也不会把它们作为无条件覆盖来源。冗余删除只保留原有覆盖见证及其来源，不拼接被删除观察的 provenance，因此不改变保留检查的源位置规则。消冗余仍遵守既有层次、覆盖和 sanitizer 规则。`default<Og>` 不改变既有优化顺序。
 
+两个 Observation 互相覆盖时（层次相同，例如 ASan 下的读和写，或 TSan 下的两个读；`A` 支配 `B` 且 `B` 后支配 `A`），保留先执行的 `A`，删掉 `B`，与读写无关。层次不同时只有高层次的一方能覆盖，规则不变：泛型配置和 TSan 下，先读后写仍保留写。跨 ProgramPoint 消冗余按 Dom 边的后序访问 ProgramPoint，即每个 ProgramPoint 都先于沿 Dom 边能到达它的 ProgramPoint 被检查；先检查的被覆盖者删除后不再作为见证，所以支配者留下（`doInterROE`，`src/instrumentation/MAIR/Transforms/RedundantObservationEliminationPass.cpp`）。图的链表顺序跟随基本块布局，不一定是支配顺序，不能直接用。顺序只决定互相覆盖的两者谁留下，不影响正确性：被删除的 Observation 在被删时总有一个尚未被删除的见证（`ExcludedSources`），与访问顺序无关。同一 ProgramPoint 内的消冗余按稳定排序保留链表中靠前的一个；`default<O1>` 的移动 pass 会把区域和层次相同的 Observation 合并（保留全部来源），只有不合并的 `default<Og>` 才会在同一 ProgramPoint 留下多个，顺序是循环子图的链表顺序。测试：`test/MAIR/TestCases/redundant-observation-elimination.ll` 的 `earlier_*`、`later_write_covers_earlier_read`、`dominator_laid_out_later`，单元测试 `AddressSanitizerKeepsTheDominatorOfMutuallyCoveringAccesses`、`ThreadSanitizerKeepsTheLaterWriteOverADominatingRead`。
+
 周期合并也直接按本图 ProgramPoint 的原顺序遍历。聚合目标属于父图，提交不增删本图 ProgramPoint，因此不需要快照；内层仍先递增迭代器再删除当前 Observation。来源指针查询使用 LLVM 的 `getLoadStorePointerOperand`，仅接受 load/store，并保留空指针检查。
 
 优化输入统计按每次本层 pass 调用累计；Observation 导出后再次作为父层输入，会再次计入该统计，这不表示重复物化。`print<stat>` 则汇总当前整树的 ProgramPoint 和 Observation 数量。
@@ -120,4 +122,5 @@ ASan 按 Observation 的区域检查，而不是按来源指令逐个检查（`X
 - `src/instrumentation/MAIR/unittests`：图边界、方向 barrier、整树生命周期和 guard 物化回归。其中 `KeepsAccessCoveredOnlyInALaterIteration`、`EliminatesInvariantAccessCoveredInALaterIteration`、`IrreducibleCyclesAreOptimizedWithinOneIteration`、`CountsBarriersOfAnEndpointThatRunsAgain`、`DoesNotHoistAnAccessTheLoopCanExitWithout` 对应上面几条规则。
 - `src/instrumentation/MAIR/unittests/RandomizedSoundnessTest.cpp`：随机生成带嵌套循环和不可归约环的函数，随机执行，要求每次写都有同地址、中间无 barrier 的 Observation，且每个 Observation 都有这样的写。
 - `test/MAIR/TestCases/asan/mair-nonterminating-loop.ll`：终止假设下，ASan 的检查只留在后支配者处。
-- `test/MAIR/TestCases/asan/mair-may-not-return.c`、`mair-atomic.cpp`：ASan 的检查不会落到可能不返回的调用之后；PostDom 覆盖对 ASan 生效。
+- `test/MAIR/TestCases/asan/mair-may-not-return.c`：ASan 的检查不会落到可能不返回的调用之后。`mair-nonterminating-loop.ll` 同时说明 PostDom 覆盖对 ASan 生效。
+- `test/MAIR/TestCases/asan/mair-atomic.cpp`：两个互相覆盖的原子读只留第一个的检查。

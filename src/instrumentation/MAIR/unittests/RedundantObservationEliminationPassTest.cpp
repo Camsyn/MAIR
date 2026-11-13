@@ -78,7 +78,7 @@ exit:
 }
 
 TEST(RedundantObservationEliminationPass,
-     RedundantEliminationDeletesEarlierSameLoopRead) {
+     RedundantEliminationKeepsEarlierSameLoopRead) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 define i32 @f(ptr %base, i64 %n) {
@@ -111,7 +111,8 @@ exit:
         PP.getBasicBlock()->getName() == "loop" && !PP.empty())
       Kept = &PP;
   ASSERT_NE(Kept, nullptr);
-  EXPECT_EQ(Kept->begin()->getInstructions().front()->getName(), "second");
+  // The reads cover each other; the first, which dominates the second, stays.
+  EXPECT_EQ(Kept->begin()->getInstructions().front()->getName(), "first");
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -228,8 +229,81 @@ entry:
       Kept = &PP;
   ASSERT_NE(Kept, nullptr);
   // ASan does not tell reads from writes, so each covers the other. The
-  // earlier one is examined first and goes.
-  EXPECT_EQ(Kept->begin()->getKind(), AccessKind::Write);
+  // earlier one, which dominates the other, stays.
+  EXPECT_EQ(Kept->begin()->getKind(), AccessKind::Read);
+  EXPECT_TRUE(Graph.verify());
+}
+
+// Each pair below covers each other across a diamond: the first access
+// dominates the second, which post-dominates it. With equal levels the
+// dominator stays, whichever access writes.
+TEST(RedundantObservationEliminationPass,
+     AddressSanitizerKeepsTheDominatorOfMutuallyCoveringAccesses) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @read_write(ptr %p, i1 %c) {
+entry:
+  %first = load i32, ptr %p, align 4
+  br i1 %c, label %then, label %join
+then:
+  br label %join
+join:
+  store i32 %first, ptr %p, align 4
+  ret void
+}
+define void @write_read(ptr %p, i1 %c) {
+entry:
+  store i32 0, ptr %p, align 4
+  br i1 %c, label %then, label %join
+then:
+  br label %join
+join:
+  %second = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  for (const char *Function : {"read_write", "write_read"}) {
+    MAIRGraph Graph = buildGraph(*M->getFunction(Function),
+                                 MAIROptimizationConfig::forAddressSanitizer());
+    MAIRGraphAnalysisManager AM;
+    EXPECT_FALSE(
+        runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM)
+            .areAllPreserved());
+    EXPECT_EQ(observationCount(Graph, "entry"), 1u) << Function;
+    EXPECT_EQ(observationCount(Graph, "join"), 0u) << Function;
+    EXPECT_TRUE(Graph.verify());
+  }
+}
+
+// TSan levels differ: only the write covers the read, so it stays even when it
+// runs second.
+TEST(RedundantObservationEliminationPass,
+     ThreadSanitizerKeepsTheLaterWriteOverADominatingRead) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i1 %c) {
+entry:
+  %first = load i32, ptr %p, align 4
+  br i1 %c, label %then, label %join
+then:
+  br label %join
+join:
+  store i32 %first, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  MAIRGraph Graph = buildGraph(*M->getFunction("f"),
+                               MAIROptimizationConfig::forThreadSanitizer());
+  MAIRGraphAnalysisManager AM;
+  EXPECT_FALSE(
+      runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM)
+          .areAllPreserved());
+  EXPECT_EQ(observationCount(Graph, "entry"), 0u);
+  EXPECT_EQ(observationCount(Graph, "join"), 1u);
   EXPECT_TRUE(Graph.verify());
 }
 
@@ -922,7 +996,8 @@ TEST(MAIRBarrierAnalysis, CountsBarriersOfAnEndpointThatRunsAgain) {
   llvm::LLVMContext Ctx;
   // @latch_side: B post-dominates H, but H can run again before B does, and
   // then the call in H lies between the earlier store and the store in B.
-  // @plain: the same loop without the call; B covers the store in H.
+  // @plain: the same loop without the call, and with a load in H, which only
+  // the store in B can cover.
   // @cycle_side: entry dominates A, but A can run again without entry, and
   // then the call in A lies between the store in entry and the store in A.
   auto M = parseModule(R"IR(
@@ -951,7 +1026,7 @@ entry:
   br label %H
 H:
   %i = phi i64 [ 0, %entry ], [ %i.next, %A ]
-  store i32 0, ptr %p, align 4
+  %v = load i32, ptr %p, align 4
   %c = icmp ult i64 %i, 3
   br i1 %c, label %A, label %B
 B:
@@ -1018,7 +1093,7 @@ exit:
   }
   // The store in H stays; it covers the one in B by dominance.
   EXPECT_EQ(Run("latch_side"), std::make_pair(1u, 0u));
-  // Without the call, B covers H first.
+  // Without the call, B covers H.
   EXPECT_EQ(Run("plain"), std::make_pair(0u, 1u));
   EXPECT_EQ(Run("cycle_side").first, 1u);
 }

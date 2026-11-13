@@ -22,9 +22,9 @@ entry:
 define void @remove_identical_symbolic_access(ptr %p, i64 %i) {
 ; CHECK-LABEL: mair graph of fn @remove_identical_symbolic_access {
 ; CHECK:       pp1: preds=
-; CHECK-NOT:     o: read ptr %p + %i, 4
-; CHECK:       pp2: preds=
 ; CHECK-NEXT:    o: read ptr %p + %i, 4
+; CHECK:       pp2: preds=
+; CHECK-NOT:     o: read ptr %p + %i, 4
 entry:
   %pi = getelementptr i8, ptr %p, i64 %i
   %a = load i32, ptr %pi, align 4
@@ -242,9 +242,9 @@ define i32 @same_loop_repeated_read(ptr %base, i64 %n) {
 ; CHECK-LABEL: mair graph of fn @same_loop_repeated_read {
 ; CHECK-LABEL: mair graph of fn @same_loop_repeated_read of loop %loop {
 ; CHECK:       pp3: preds=
-; CHECK-NOT:     o: read ptr %base + %p, 4
-; CHECK:       pp4: preds=
 ; CHECK-NEXT:    o: read ptr %base + %p, 4
+; CHECK:       pp4: preds=
+; CHECK-NOT:     o: read ptr %base + %p, 4
 entry:
   br label %loop
 loop:
@@ -258,4 +258,82 @@ loop:
   br i1 %more, label %loop, label %exit
 exit:
   ret i32 %sum
+}
+
+; Each pair below covers each other across a diamond: the first access
+; dominates the second, which post-dominates it. With equal levels the
+; dominator stays.
+define i32 @earlier_read_covers_later_read(ptr %p, i1 %c) {
+; CHECK-LABEL: mair graph of fn @earlier_read_covers_later_read {
+; CHECK:       pp1: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK:       pp6: preds=
+; CHECK-NOT:     o:
+; CHECK:       }
+entry:
+  %a = load i32, ptr %p, align 4
+  br i1 %c, label %then, label %join
+then:
+  br label %join
+join:
+  %b = load i32, ptr %p, align 4
+  %s = add i32 %a, %b
+  ret i32 %s
+}
+
+define void @earlier_write_covers_later_write(ptr %p, i1 %c) {
+; CHECK-LABEL: mair graph of fn @earlier_write_covers_later_write {
+; CHECK:       pp1: preds=
+; CHECK-NEXT:    o: write ptr %p, 4
+; CHECK:       pp6: preds=
+; CHECK-NOT:     o:
+; CHECK:       }
+entry:
+  store i32 0, ptr %p, align 4
+  br i1 %c, label %then, label %join
+then:
+  br label %join
+join:
+  store i32 1, ptr %p, align 4
+  ret void
+}
+
+; A write has a higher level than a read: only the write covers, so it stays
+; although it runs second.
+define void @later_write_covers_earlier_read(ptr %p, i1 %c) {
+; CHECK-LABEL: mair graph of fn @later_write_covers_earlier_read {
+; CHECK:       pp1: preds=
+; CHECK-NOT:     o:
+; CHECK:       pp6: preds=
+; CHECK-NEXT:    o: write ptr %p, 4
+; CHECK:       }
+entry:
+  %a = load i32, ptr %p, align 4
+  br i1 %c, label %then, label %join
+then:
+  br label %join
+join:
+  store i32 %a, ptr %p, align 4
+  ret void
+}
+
+; The block layout is not a dominance order: %second is laid out before
+; %first, which dominates it. The read in %first still stays.
+define i32 @dominator_laid_out_later(ptr %p, i1 %c) {
+; CHECK-LABEL: mair graph of fn @dominator_laid_out_later {
+; CHECK:       pp3: preds=
+; CHECK-NOT:     o:
+; CHECK:       pp6: preds=
+; CHECK-NEXT:    o: read ptr %p, 4
+; CHECK:       }
+entry:
+  br label %first
+second:
+  %b = load i32, ptr %p, align 4
+  ret i32 %b
+first:
+  %a = load i32, ptr %p, align 4
+  br i1 %c, label %then, label %second
+then:
+  br label %second
 }

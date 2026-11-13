@@ -482,8 +482,6 @@ MAIRObservationSelection selectMaterializableObservations(
       if (Obs.isCallLike())
         continue;
       if (CanInstrument(Obs)) {
-        assert(Obs.getInstructions().size() == 1 &&
-               "materializable observations must have one source");
         Candidates.push_back(&Obs);
         continue;
       }
@@ -493,16 +491,29 @@ MAIRObservationSelection selectMaterializableObservations(
       NativeSources.insert_range(Obs.getInstructions());
     }
   }
-  MAIRObservationSelection Result;
-  for (const Observation *Obs : Candidates) {
-    if (!NativeSources.contains(Obs->getInstructions().front())) {
-      Result.Targets.insert(Obs);
-      continue;
+  // A candidate that shares a source with a fallback falls back too, and its
+  // other sources join the fallback. Repeat until no candidate changes.
+  auto SharesNativeSource = [&](const Observation *Obs) {
+    return any_of(Obs->getInstructions(), [&](const Instruction *I) {
+      return NativeSources.contains(I);
+    });
+  };
+  for (bool Changed = true; Changed;) {
+    Changed = false;
+    for (const Observation *&Obs : Candidates) {
+      if (!Obs || !SharesNativeSource(Obs))
+        continue;
+      MAIRStatScope::add(MAIRStatField::Native);
+      MAIRStatScope::add(MAIRStatField::Shared);
+      NativeSources.insert_range(Obs->getInstructions());
+      Obs = nullptr;
+      Changed = true;
     }
-    // Another observation that falls back carries the same source.
-    MAIRStatScope::add(MAIRStatField::Native);
-    MAIRStatScope::add(MAIRStatField::Shared);
   }
+  MAIRObservationSelection Result;
+  for (const Observation *Obs : Candidates)
+    if (Obs)
+      Result.Targets.insert(Obs);
   MAIRStatScope::add(MAIRStatField::Lowered, Result.Targets.size());
   MAIRStatScope::add(MAIRStatField::Fallback, NativeSources.size());
   Result.HandledSources.insert_range(ModeledSources);

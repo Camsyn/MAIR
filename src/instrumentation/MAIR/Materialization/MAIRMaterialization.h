@@ -17,8 +17,11 @@ struct MAIRObservationSelection {
   llvm::SmallPtrSet<const llvm::Instruction *, 32> HandledSources;
 };
 
-/// Select the observations of \p Graph that \p CanInstrument accepts. Only
-/// single-source observations can be selected. \p ModeledSources are the
+/// Select the observations of \p Graph that \p CanInstrument accepts. A
+/// candidate is dropped when any of its sources also belongs to an
+/// observation that falls back; its other sources then fall back too, so a
+/// source is handled only if every observation carrying it is lowered.
+/// \p ModeledSources are the
 /// accesses the graph held before optimization. Under `-mair-stats` this
 /// reports a `select` visit: how many observations were lowered, how many
 /// fell back and why, and how many source accesses fell back.

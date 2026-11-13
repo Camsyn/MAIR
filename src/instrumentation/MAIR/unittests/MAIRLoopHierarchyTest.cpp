@@ -452,6 +452,82 @@ exit:
   }
 }
 
+// A backend may lower a multi-source observation. When one of its sources
+// also belongs to an observation that falls back, the candidate falls back
+// too, and so do its other sources: a source is handled only if every
+// observation carrying it is lowered.
+TEST(MAIRLoopHierarchy, SourceSelectionHandlesMultiSourceCandidates) {
+  llvm::LLVMContext Ctx;
+  auto Module = parseModule(R"IR(
+define void @f(ptr %p, ptr %q) {
+entry:
+  %a = load i32, ptr %p, align 4
+  %b = load i32, ptr %p, align 4
+  %c = load i32, ptr %p, align 4
+  store i32 %a, ptr %q, align 4
+  ret void
+}
+)IR",
+                            Ctx);
+  ASSERT_TRUE(Module);
+  llvm::Function &Function = *Module->getFunction("f");
+  llvm::BasicBlock &Block = Function.getEntryBlock();
+  auto It = Block.begin();
+  llvm::Instruction &A = *It++;
+  llvm::Instruction &B = *It++;
+  llvm::Instruction &C = *It++;
+  llvm::Instruction &Store = *It;
+  const llvm::DataLayout &DL = Module->getDataLayout();
+  auto Region = [&] {
+    return AbstractAccess(Function.getArg(0), AbstractValue::constant(0),
+                          AbstractValue::constant(4));
+  };
+  // Everything is lowerable except an observation that carries %c.
+  auto CanInstrument = [&](const Observation &Obs) {
+    return !llvm::is_contained(Obs.getInstructions(), &C);
+  };
+
+  {
+    MAIRGraph Graph(Function);
+    ProgramPoint &Point = Graph.createBBProgramPoint(Block, true);
+    const Observation &Merged =
+        Point.addObservation(Observation({&A, &B}, Region(), AccessKind::Read));
+    const Observation &StoreObs =
+        Point.addObservation(Observation::fromInstruction(Store, DL));
+    ASSERT_TRUE(Graph.verify());
+    auto Modeled = collectModeledSources(Graph);
+    auto Result =
+        selectMaterializableObservations(Graph, Modeled, CanInstrument);
+    EXPECT_EQ(Result.Targets.size(), 2u);
+    EXPECT_TRUE(Result.Targets.contains(&Merged));
+    EXPECT_TRUE(Result.Targets.contains(&StoreObs));
+    for (const llvm::Instruction *Source : {&A, &B, &Store})
+      EXPECT_TRUE(Result.HandledSources.contains(Source));
+  }
+
+  {
+    MAIRGraph Graph(Function);
+    ProgramPoint &Point = Graph.createBBProgramPoint(Block, true);
+    // {%a, %b} is lowerable, but %b is also carried by {%b, %c}, which
+    // falls back. Then %a must fall back as well, or nothing checks it.
+    const Observation &Merged =
+        Point.addObservation(Observation({&A, &B}, Region(), AccessKind::Read));
+    Point.addObservation(Observation({&B, &C}, Region(), AccessKind::Read));
+    const Observation &StoreObs =
+        Point.addObservation(Observation::fromInstruction(Store, DL));
+    ASSERT_TRUE(Graph.verify());
+    auto Modeled = collectModeledSources(Graph);
+    auto Result =
+        selectMaterializableObservations(Graph, Modeled, CanInstrument);
+    EXPECT_FALSE(Result.Targets.contains(&Merged));
+    ASSERT_EQ(Result.Targets.size(), 1u);
+    EXPECT_TRUE(Result.Targets.contains(&StoreObs));
+    for (const llvm::Instruction *Source : {&A, &B, &C})
+      EXPECT_FALSE(Result.HandledSources.contains(Source));
+    EXPECT_TRUE(Result.HandledSources.contains(&Store));
+  }
+}
+
 TEST(MAIRLoopHierarchy, IrreducibleCyclesStillBuild) {
   llvm::LLVMContext Ctx;
   auto Module = parseModule(R"IR(

@@ -4,6 +4,7 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/ValueTracking.h"
@@ -54,15 +55,11 @@ bool MAIRScalarExpr::operator==(const MAIRScalarExpr &Other) const {
     return true;
   if (!Node || !Other.Node || Node->Kind != Other.Node->Kind ||
       Node->ResultType != Other.Node->ResultType ||
-      Node->LLVMValue != Other.Node->LLVMValue ||
-      Node->Operands.size() != Other.Node->Operands.size())
+      Node->LLVMValue != Other.Node->LLVMValue)
     return false;
   if (Node->Kind == Kind::Constant && Node->Constant != Other.Node->Constant)
     return false;
-  for (size_t I = 0; I < Node->Operands.size(); ++I)
-    if (Node->Operands[I] != Other.Node->Operands[I])
-      return false;
-  return true;
+  return llvm::equal(Node->Operands, Other.Node->Operands);
 }
 
 void MAIRScalarExpr::print(raw_ostream &OS, bool Signed) const {
@@ -160,8 +157,7 @@ bool isValueAvailableAt(const Value &V, const Instruction &At,
                         const DominatorTree &DT) {
   // Constants and arguments dominate every instruction. Other values, such
   // as blocks or metadata, are never operands of an observation.
-  return (isa<Instruction>(V) || isa<Argument>(V) || isa<Constant>(V)) &&
-         DT.dominates(&V, &At);
+  return isa<Instruction, Argument, Constant>(V) && DT.dominates(&V, &At);
 }
 
 bool isValueAvailableAt(const AbstractValue &V, const Instruction &At,
@@ -483,11 +479,17 @@ unsigned MaskedRegion::getNumLanes() const {
   return MaskType->getElementCount().getKnownMinValue();
 }
 
+/// Whether \p A and \p B mask the same lanes of the same bounds, so that the
+/// masks alone decide containment.
+static bool haveComparableLanes(const MaskedRegion &A, const MaskedRegion &B) {
+  return A.isComparable() && B.isComparable() &&
+         A.getBounds() == B.getBounds() &&
+         A.getElementSize() == B.getElementSize() &&
+         A.getNumLanes() == B.getNumLanes();
+}
+
 bool MaskedRegion::contains(const MaskedRegion &Other) const {
-  if (!IsComparable || !Other.IsComparable)
-    return false;
-  if (Bounds != Other.Bounds || ElementSize != Other.ElementSize ||
-      getNumLanes() != Other.getNumLanes())
+  if (!haveComparableLanes(*this, Other))
     return false;
   if (!IsConstant || !Other.IsConstant)
     return !IsConstant && !Other.IsConstant && DynamicMask == Other.DynamicMask;
@@ -496,10 +498,7 @@ bool MaskedRegion::contains(const MaskedRegion &Other) const {
 
 std::optional<MaskedRegion> MaskedRegion::merge(const MaskedRegion &A,
                                                 const MaskedRegion &B) {
-  if (!A.IsComparable || !B.IsComparable)
-    return std::nullopt;
-  if (A.Bounds != B.Bounds || A.ElementSize != B.ElementSize ||
-      A.getNumLanes() != B.getNumLanes())
+  if (!haveComparableLanes(A, B))
     return std::nullopt;
   if (!A.IsConstant || !B.IsConstant) {
     if (!A.IsConstant && !B.IsConstant && A.DynamicMask == B.DynamicMask)
@@ -530,11 +529,9 @@ void MaskedRegion::print(raw_ostream &OS) const {
     return;
   }
   OS << "<";
-  for (unsigned Lane = 0; Lane < ConstantMask.size(); ++Lane) {
-    if (Lane)
-      OS << ",";
-    OS << (ConstantMask.test(Lane) ? '1' : '0');
-  }
+  ListSeparator Separator(",");
+  for (unsigned Lane = 0; Lane < ConstantMask.size(); ++Lane)
+    OS << Separator << (ConstantMask.test(Lane) ? '1' : '0');
   OS << ">";
 }
 

@@ -198,16 +198,9 @@ LoopProgramPoint::LoopProgramPoint(StringRef Name, ProgramPointSite Site,
   PointKind = ProgramPoint::Kind::Loop;
 }
 
-Observation &ProgramPoint::createObservation(ArrayRef<Instruction *> Insts,
-                                             const MemoryRegion &Region,
-                                             AccessKind Kind,
-                                             AccessProperty Properties) {
-  return *new Observation(Insts, Region, Kind, Properties);
-}
-
 Observation &ProgramPoint::addObservation(const Observation &A) {
-  auto &Node = createObservation(A.getInstructions(), A.getRegion(),
-                                 A.getKind(), A.getProperties());
+  auto &Node = *new Observation(A.getInstructions(), A.getRegion(), A.getKind(),
+                                A.getProperties());
   Observations.push_back(Node);
   Node.setParent(this);
   if (MAIRGraph *Graph = getParent())
@@ -283,10 +276,6 @@ void ProgramPoint::takeObservationsFrom(ProgramPoint &Other) {
   NumObservations += Other.NumObservations;
   Other.NumObservations = 0;
   Sorted = false;
-}
-
-void ProgramPoint::mergeRepresentationFrom(const ProgramPoint &Other) {
-  RepresentedBlocks.insert_range(Other.RepresentedBlocks);
 }
 
 std::string ProgramPoint::toString() const { return printToString(*this); }
@@ -483,10 +472,6 @@ void MAIRGraph::registerObservation(Observation &Obs) {
   Obs.setMemoryObject(&getOrCreateMemoryObject(*Base));
 }
 
-void MAIRGraph::unregisterObservation(Observation &Obs) {
-  Obs.clearMemoryObject();
-}
-
 ProgramPoint &MAIRGraph::createBBProgramPoint(const BasicBlock &BB,
                                               bool IsEntry) {
   assertLive("create a program point on");
@@ -547,44 +532,36 @@ ProgramPoint &MAIRGraph::createEdgeProgramPoint(const BasicBlock &From,
   return createProgramPoint(ProgramPointSite::edge(From, To), std::move(Guard));
 }
 
-MAIRScalarExpr MAIRGraph::createConstantExpr(Type &Ty, const APInt &Value) {
+MAIRScalarExpr MAIRGraph::createExpr(MAIRScalarExpr::Kind Kind, Type &Ty,
+                                     const APInt &Constant,
+                                     const Value *LLVMValue,
+                                     ArrayRef<MAIRScalarExpr> Operands) {
   assertLive("create an expression on");
   auto *Node = new (Resources->ScalarExprAllocator.Allocate())
-      MAIRScalarExprNode(Resources->ScalarExprOwner,
-                         MAIRScalarExpr::Kind::Constant, Ty, Value, nullptr,
-                         {});
+      MAIRScalarExprNode(Resources->ScalarExprOwner, Kind, Ty, Constant,
+                         LLVMValue, Operands);
   return MAIRScalarExpr(*Node);
 }
 
+MAIRScalarExpr MAIRGraph::createConstantExpr(Type &Ty, const APInt &Value) {
+  return createExpr(MAIRScalarExpr::Kind::Constant, Ty, Value, nullptr, {});
+}
+
 MAIRScalarExpr MAIRGraph::createValueExpr(const Value &Value) {
-  assertLive("create an expression on");
-  auto *Node = new (Resources->ScalarExprAllocator.Allocate())
-      MAIRScalarExprNode(Resources->ScalarExprOwner,
-                         MAIRScalarExpr::Kind::LLVMValue, *Value.getType(),
-                         APInt(1, 0), &Value, {});
-  return MAIRScalarExpr(*Node);
+  return createExpr(MAIRScalarExpr::Kind::LLVMValue, *Value.getType(),
+                    APInt(1, 0), &Value, {});
 }
 
 MAIRScalarExpr MAIRGraph::createUnaryExpr(MAIRScalarExpr::Kind Kind,
                                           Type &ResultType,
                                           MAIRScalarExpr Operand) {
-  assertLive("create an expression on");
-  MAIRScalarExpr Operands[] = {Operand};
-  auto *Node = new (Resources->ScalarExprAllocator.Allocate())
-      MAIRScalarExprNode(Resources->ScalarExprOwner, Kind, ResultType,
-                         APInt(1, 0), nullptr, Operands);
-  return MAIRScalarExpr(*Node);
+  return createExpr(Kind, ResultType, APInt(1, 0), nullptr, {Operand});
 }
 
 MAIRScalarExpr MAIRGraph::createBinaryExpr(MAIRScalarExpr::Kind Kind,
                                            Type &ResultType, MAIRScalarExpr LHS,
                                            MAIRScalarExpr RHS) {
-  assertLive("create an expression on");
-  MAIRScalarExpr Operands[] = {LHS, RHS};
-  auto *Node = new (Resources->ScalarExprAllocator.Allocate())
-      MAIRScalarExprNode(Resources->ScalarExprOwner, Kind, ResultType,
-                         APInt(1, 0), nullptr, Operands);
-  return MAIRScalarExpr(*Node);
+  return createExpr(Kind, ResultType, APInt(1, 0), nullptr, {LHS, RHS});
 }
 
 bool MAIRGraph::ownsScalarExpr(MAIRScalarExpr Expr) const {
@@ -598,10 +575,6 @@ MAIRGraph::iterator MAIRGraph::erase(ProgramPoint &PP) {
          "ProgramPoint does not belong to this MAIRGraph");
   if (PP.isLoopProgramPoint())
     report_fatal_error("cannot erase a MAIR loop boundary");
-  auto It = PP.getIterator();
-  unsigned SelfEdges = 0;
-  for (const ProgramPointEdge &Edge : PP.Children)
-    SelfEdges += &Edge.getNode() == &PP;
 
   // Remove each peer's mirror entry directly. A self-edge occurs in both local
   // lists but contributes only once to the graph edge count.
@@ -621,11 +594,13 @@ MAIRGraph::iterator MAIRGraph::erase(ProgramPoint &PP) {
     if (&From != &PP)
       RemoveMirror(From.Children, PP, Edge.getKind());
   }
-  const unsigned IncidentEdges =
-      PP.Children.size() + PP.Parents.size() - SelfEdges;
+  const unsigned SelfEdges =
+      llvm::count_if(PP.Children, [&](const ProgramPointEdge &Edge) {
+        return &Edge.getNode() == &PP;
+      });
+  NumEdges -= PP.Children.size() + PP.Parents.size() - SelfEdges;
   PP.Children.clear();
   PP.Parents.clear();
-  NumEdges -= IncidentEdges;
 
   for (const BasicBlock *BB : PP.RepresentedBlocks) {
     auto EntryIt = BBEntryRepresentatives.find(BB);
@@ -636,8 +611,8 @@ MAIRGraph::iterator MAIRGraph::erase(ProgramPoint &PP) {
       BBExitRepresentatives.erase(ExitIt);
   }
   for (Observation &Obs : PP.Observations)
-    unregisterObservation(Obs);
-  auto Next = ProgramPoints.erase(It);
+    Obs.clearMemoryObject();
+  auto Next = ProgramPoints.erase(PP.getIterator());
   --NumProgramPoints;
   return Next;
 }
@@ -669,7 +644,6 @@ void MAIRGraph::clear() {
 }
 
 ProgramPoint *MAIRGraph::find(StringRef Name) {
-  assertLive("find in");
   return const_cast<ProgramPoint *>(std::as_const(*this).find(Name));
 }
 
@@ -715,7 +689,7 @@ void MAIRGraph::replaceProgramPoint(ProgramPoint &From, ProgramPoint &Into) {
     report_fatal_error("cannot replace a MAIR loop boundary");
   assert(Into.hasCompatibleMergeSemantics(From) &&
          "replacement program points have incompatible semantics");
-  Into.mergeRepresentationFrom(From);
+  Into.RepresentedBlocks.insert_range(From.RepresentedBlocks);
   for (const BasicBlock *BB : From.RepresentedBlocks) {
     auto EntryIt = BBEntryRepresentatives.find(BB);
     if (EntryIt != BBEntryRepresentatives.end() && EntryIt->second == &From)
@@ -815,8 +789,7 @@ bool MAIRGraph::isAncestor(const ProgramPoint &Ancestor,
     return false;
 
   SmallVector<const ProgramPoint *, 8> Worklist{&Ancestor};
-  SmallPtrSet<const ProgramPoint *, 16> Visited;
-  Visited.insert(&Ancestor);
+  SmallPtrSet<const ProgramPoint *, 16> Visited{&Ancestor};
   while (!Worklist.empty()) {
     const ProgramPoint &Current = *Worklist.pop_back_val();
     for (const ProgramPointEdge &Edge : Current.children()) {

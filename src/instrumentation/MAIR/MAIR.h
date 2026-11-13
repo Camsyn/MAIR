@@ -910,13 +910,9 @@ private:
   static ObservationListType ProgramPoint::*getSublistAccess(Observation *) {
     return &ProgramPoint::Observations;
   }
-  Observation &createObservation(ArrayRef<Instruction *> Insts,
-                                 const MemoryRegion &Region, AccessKind Kind,
-                                 AccessProperty Properties);
   /// Move every observation of \p Other, which belongs to the same graph, to
   /// the front of this list. The observations keep their identity and order.
   void takeObservationsFrom(ProgramPoint &Other);
-  void mergeRepresentationFrom(const ProgramPoint &Other);
 };
 
 class LoopProgramPoint final : public ProgramPoint {
@@ -1191,7 +1187,9 @@ private:
   ProgramPoint &addProgramPoint(ProgramPoint &PP);
   MemoryObject &getOrCreateMemoryObject(const Value &Base);
   void registerObservation(Observation &Obs);
-  void unregisterObservation(Observation &Obs);
+  MAIRScalarExpr createExpr(MAIRScalarExpr::Kind Kind, Type &Ty,
+                            const APInt &Constant, const Value *LLVMValue,
+                            ArrayRef<MAIRScalarExpr> Operands);
   void contractProgramPoint(ProgramPoint &Into, ProgramPoint &From);
 
   /// Construct the raw MAIR graph once dominance and barrier analyses are

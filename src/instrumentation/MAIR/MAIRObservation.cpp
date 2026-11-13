@@ -107,8 +107,7 @@ Observation makeObservation(const Instruction &I, const Value &Ptr,
   AbstractAccess Obs =
       AbstractAccess::fromPointerAndSize(Ptr, std::move(Size), DL);
   Instruction *Inst = const_cast<Instruction *>(&I);
-  return Observation(ArrayRef<Instruction *>(&Inst, 1), std::move(Obs), Kind,
-                     getInstructionProperties(I));
+  return Observation(Inst, std::move(Obs), Kind, getInstructionProperties(I));
 }
 
 void MemoryUse::set(MemoryObject *NewObject) {
@@ -345,14 +344,10 @@ bool Observation::mergeWith(const Observation &Other, ScalarEvolution *SE) {
       return false;
   }
 
-  if (PrependOther) {
-    SmallVector<Instruction *, 2> OrderedInsts;
-    OrderedInsts.append(Other.Insts.begin(), Other.Insts.end());
-    OrderedInsts.append(Insts.begin(), Insts.end());
-    Insts = std::move(OrderedInsts);
-  } else {
+  if (PrependOther)
+    Insts.insert(Insts.begin(), Other.Insts.begin(), Other.Insts.end());
+  else
     Insts.append(Other.Insts);
-  }
 
   Kind = ::mair::mergeKind(Kind, Other.Kind);
   Properties |= Other.Properties;
@@ -363,11 +358,9 @@ bool Observation::mergeWith(const Observation &Other, ScalarEvolution *SE) {
 }
 
 DebugLoc Observation::getStableDebugLoc() const {
-  for (const Instruction *I : Insts) {
-    const DebugLoc &Loc = I->getStableDebugLoc();
-    if (Loc)
+  for (const Instruction *I : Insts)
+    if (const DebugLoc &Loc = I->getStableDebugLoc())
       return Loc;
-  }
   return DebugLoc();
 }
 
@@ -384,9 +377,12 @@ Observation Observation::fromInstruction(const Instruction &I,
     Ptr = Location.Ptr;
     if (Location.Size.hasValue() && !Location.Size.isScalable())
       Size = AbstractValue::constant(Location.Size.getValue().getFixedValue());
-    Kind = isa<LoadInst>(I)    ? AccessKind::Read
-           : isa<StoreInst>(I) ? AccessKind::Write
-                               : AccessKind::ReadWrite;
+    if (isa<LoadInst>(I))
+      Kind = AccessKind::Read;
+    else if (isa<StoreInst>(I))
+      Kind = AccessKind::Write;
+    else
+      Kind = AccessKind::ReadWrite;
   } else if (isa<AnyMemTransferInst>(I)) {
     report_fatal_error(
         "Observation::fromInstruction cannot represent a memory transfer");
@@ -419,8 +415,7 @@ Observation Observation::fromInstruction(const Instruction &I,
             : MaskedRegion(Bounds, Mask, ElementStoreSize.getFixedValue(),
                            /*Comparable=*/!isa<Constant>(Mask));
     Instruction *Inst = const_cast<Instruction *>(&I);
-    return Observation(ArrayRef<Instruction *>(&Inst, 1),
-                       MemoryRegion(std::move(Region)), Kind,
+    return Observation(Inst, MemoryRegion(std::move(Region)), Kind,
                        getInstructionProperties(I));
   } else if (I.mayReadFromMemory() && I.mayWriteToMemory()) {
     Kind = AccessKind::ReadWrite;

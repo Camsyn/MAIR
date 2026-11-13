@@ -2,10 +2,30 @@
 
 #include "MAIR/MAIR.h"
 
+#include "llvm/ADT/STLFunctionalExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Support/Error.h"
 
 namespace mair {
+
+/// The observations a sanitizer lowers through MAIR, and the source accesses
+/// MAIR now owns. A source is owned unless some observation that cannot be
+/// lowered still carries it; that source falls back to native lowering.
+struct MAIRObservationSelection {
+  llvm::SmallPtrSet<const Observation *, 32> Targets;
+  llvm::SmallPtrSet<const llvm::Instruction *, 32> HandledSources;
+};
+
+/// Select the observations of \p Graph that \p CanInstrument accepts. Only
+/// single-source observations can be selected. \p ModeledSources are the
+/// accesses the graph held before optimization. Under `-mair-stats` this
+/// reports a `select` visit: how many observations were lowered, how many
+/// fell back and why, and how many source accesses fell back.
+MAIRObservationSelection selectMaterializableObservations(
+    const MAIRGraph &Graph,
+    const llvm::SmallPtrSetImpl<const llvm::Instruction *> &ModeledSources,
+    llvm::function_ref<bool(const Observation &)> CanInstrument);
 
 struct PlannedObservation {
   const Observation *Source = nullptr;

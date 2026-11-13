@@ -75,6 +75,8 @@ barrier 也要考虑重复执行：被覆盖的一端所在块如果能在不经
 
 宿主 LLVM 的 `-stats` 在 Release 构建里不会打印。要看每个 pass 实际改了什么，用 `-mair-stats`。`xclang -mair-stats` 会把它转成 `-mllvm -mair-stats`；`mair-opt -mair-stats` 直接认这个选项。每个编译单元在 stderr 打一块汇总，不按函数展开，避免 C++ mangled 名字淹没构建日志。`default<O1>` / `default<Og>` 里重复出现的 pass 带 `#1`、`#2`，所以第二次不变外提不会和第一次混在一起。`in` 仍按每次本层调用累计；比较效果看 `preheader`、`exit`、`range`、`periodic`、`merged`、`intra`、`inter`、`hoisted`、`sunk`。
 
+sanitizer 编译还会多一行 `select`，在优化之后统计 lowering 去向：`in` 是非 call-like 的终态 Observation，`lowered` 交给 MAIR 物化，`native` 退回 sanitizer 自己逐访问插桩；`multi`（多源，合并产物）、`symbolic`（非常量偏移/大小或非连续区间，含 periodic）、`vector`、`shared`（来源同时被一个退回的 Observation 持有）说明退回原因，其余退回原因是 sanitizer 自身判定（如 ASan 安全栈访问、TSan 未逃逸 alloca）。`fallback` 是退回 native 的来源指令数。实现在 `selectMaterializableObservations`（`src/instrumentation/MAIR/Materialization/MAIRMaterialization.cpp`），测试 `test/MAIR/TestCases/asan/mair-select-stats.c`。
+
 统计汇总按函数首次出现的顺序遍历各函数的 pass visits，以 pass 标签首次出现的位置决定行顺序；不是全局事件时间顺序。汇总阶段一次累计，保持 ordinal、字段顺序及只含 `in` 的行，全零行不打印。
 
 循环 barrier 摘要来自构图时的 LLVM 指令，并包含子循环。导出 Observation 不会抹掉摘要。当前最小规则是：提升、下沉和周期合并都要求循环中正向、反向均无 barrier。任一迭代中的 barrier 都阻止相应导出，不需要逐动态回边路径查询。这是保守条件，并未放宽既有必执行、SSA 可用性、精确计数、affine recurrence 或 guard 条件。提升到 preheader 的必执行条件是：来源块支配循环的每个 exiting block，即任何出口都只能在来源块执行之后走到（`MAIRLoopInfo::canHoistToPreheader`，`src/instrumentation/MAIR/Analysis/LoopAnalysis.cpp`，例子写在该函数的注释里）。这个条件蕴含“来源块后支配 preheader”，所以不再单独查后支配树；反过来不成立，控制流可以不经过来源块就离开内层循环，再从外层循环绕回来。没有出口的循环改为要求来源块支配每个 latch。不满足条件的访问仍可用“来源执行过”的 guard 下沉到唯一出口；多出口循环需要在每条出口边放带 guard 的副本并改写 CFG，尚未实现。ASan 允许搬动普通 Observation，检查可以落在实际访问之后，因此也和 TSan 一样沿 PostDom 边传播覆盖。前提是后面的检查一定会执行：ASan 的反向 barrier 除了可能写内存的调用，还包括任何不保证把控制流交给后继的指令（可能抛异常或不返回的调用）。原子访问仍然不能搬。

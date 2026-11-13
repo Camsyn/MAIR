@@ -27,40 +27,6 @@ collectModeledSources(const MAIRGraph &Graph) {
   return Sources;
 }
 
-struct MAIRObservationSelection {
-  llvm::SmallPtrSet<const Observation *, 32> Targets;
-  llvm::SmallPtrSet<const llvm::Instruction *, 32> HandledSources;
-};
-
-inline MAIRObservationSelection selectMaterializableObservations(
-    const MAIRGraph &Graph,
-    const llvm::SmallPtrSetImpl<const llvm::Instruction *> &ModeledSources,
-    llvm::function_ref<bool(const Observation &)> CanInstrument) {
-  llvm::SmallVector<const Observation *, 32> Candidates;
-  llvm::SmallPtrSet<const llvm::Instruction *, 32> NativeSources;
-  for (const ProgramPoint *Point : Graph.allProgramPoints()) {
-    for (const Observation &Obs : *Point) {
-      if (Obs.isCallLike())
-        continue;
-      if (CanInstrument(Obs)) {
-        assert(Obs.getInstructions().size() == 1 &&
-               "materializable observations must have one source");
-        Candidates.push_back(&Obs);
-      } else {
-        NativeSources.insert_range(Obs.getInstructions());
-      }
-    }
-  }
-  MAIRObservationSelection Result;
-  for (const Observation *Obs : Candidates)
-    if (!NativeSources.contains(Obs->getInstructions().front()))
-      Result.Targets.insert(Obs);
-  Result.HandledSources.insert_range(ModeledSources);
-  for (const llvm::Instruction *Source : NativeSources)
-    Result.HandledSources.erase(Source);
-  return Result;
-}
-
 /// Owns the complete MAIR lifecycle for one mutable LLVM function.
 ///
 /// The barrier policy is a type because it is part of graph construction, not

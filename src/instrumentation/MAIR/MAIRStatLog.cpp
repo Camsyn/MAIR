@@ -23,11 +23,12 @@ namespace {
 cl::opt<bool> ClMAIRStats("mair-stats",
                           cl::desc("Print a readable MAIR pass summary"));
 
-const char *const FieldNames[] = {"in",         "preheader", "exit",  "range",
-                                  "periodic",   "merged",    "intra", "inter",
-                                  "eliminated", "hoisted",   "sunk"};
+const char *const FieldNames[] = {
+    "in",     "preheader", "exit",       "range",    "periodic", "merged",
+    "intra",  "inter",     "eliminated", "hoisted",  "sunk",     "lowered",
+    "native", "multi",     "vector",     "symbolic", "shared",   "fallback"};
 constexpr unsigned FieldCount = std::size(FieldNames);
-static_assert(static_cast<unsigned>(MAIRStatField::Sunk) + 1 == FieldCount,
+static_assert(static_cast<unsigned>(MAIRStatField::Fallback) + 1 == FieldCount,
               "every MAIR stat field needs a name");
 
 struct Visit {

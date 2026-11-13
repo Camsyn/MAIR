@@ -1,5 +1,7 @@
 #include "MAIR/Materialization/MAIRMaterialization.h"
+#include "MAIR/MAIRStatLog.h"
 
+#include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/DomTreeUpdater.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -9,7 +11,14 @@
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
 
+#include <optional>
+
 using namespace llvm;
+
+#define DEBUG_TYPE "mair-materialization"
+
+STATISTIC(NumSelectionInputs,
+          "Number of observations a sanitizer selects lowering for");
 
 namespace mair {
 namespace {
@@ -433,6 +442,72 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
     report_fatal_error("Patch C produced invalid LLVM IR");
   FAM.invalidate(F, PreservedAnalyses::none());
   markConsumed();
+  return Result;
+}
+
+namespace {
+
+/// Why a sanitizer could not lower \p Obs through MAIR, for `-mair-stats`.
+/// Only reasons visible on the observation itself are named.
+std::optional<MAIRStatField> classifyNativeObservation(const Observation &Obs) {
+  if (Obs.getInstructions().size() > 1)
+    return MAIRStatField::Multi;
+  if (!Obs.hasConcreteRange() || !Obs.isContiguous())
+    return MAIRStatField::Symbolic;
+  const Instruction *Source = Obs.getInstruction();
+  if (Source && isa<LoadInst, StoreInst>(Source) &&
+      getLoadStoreType(Source)->isVectorTy())
+    return MAIRStatField::Vector;
+  return std::nullopt;
+}
+
+} // namespace
+
+MAIRObservationSelection selectMaterializableObservations(
+    const MAIRGraph &Graph,
+    const SmallPtrSetImpl<const Instruction *> &ModeledSources,
+    function_ref<bool(const Observation &)> CanInstrument) {
+  MAIRStatScope Scope("select", /*Ordinal=*/0, Graph, NumSelectionInputs, [&] {
+    uint64_t N = 0;
+    for (const ProgramPoint *Point : Graph.allProgramPoints())
+      N += count_if(*Point,
+                    [](const Observation &Obs) { return !Obs.isCallLike(); });
+    return N;
+  });
+
+  SmallVector<const Observation *, 32> Candidates;
+  SmallPtrSet<const Instruction *, 32> NativeSources;
+  for (const ProgramPoint *Point : Graph.allProgramPoints()) {
+    for (const Observation &Obs : *Point) {
+      if (Obs.isCallLike())
+        continue;
+      if (CanInstrument(Obs)) {
+        assert(Obs.getInstructions().size() == 1 &&
+               "materializable observations must have one source");
+        Candidates.push_back(&Obs);
+        continue;
+      }
+      MAIRStatScope::add(MAIRStatField::Native);
+      if (std::optional<MAIRStatField> Reason = classifyNativeObservation(Obs))
+        MAIRStatScope::add(*Reason);
+      NativeSources.insert_range(Obs.getInstructions());
+    }
+  }
+  MAIRObservationSelection Result;
+  for (const Observation *Obs : Candidates) {
+    if (!NativeSources.contains(Obs->getInstructions().front())) {
+      Result.Targets.insert(Obs);
+      continue;
+    }
+    // Another observation that falls back carries the same source.
+    MAIRStatScope::add(MAIRStatField::Native);
+    MAIRStatScope::add(MAIRStatField::Shared);
+  }
+  MAIRStatScope::add(MAIRStatField::Lowered, Result.Targets.size());
+  MAIRStatScope::add(MAIRStatField::Fallback, NativeSources.size());
+  Result.HandledSources.insert_range(ModeledSources);
+  for (const Instruction *Source : NativeSources)
+    Result.HandledSources.erase(Source);
   return Result;
 }
 

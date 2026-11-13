@@ -22,6 +22,16 @@ enum class MAIRStatField : uint8_t {
   Eliminated,
   Hoisted,
   Sunk,
+  // Sanitizer selection: observations lowered through MAIR or left to native
+  // lowering, why each native one fell back, and the source accesses that
+  // fall back.
+  Lowered,
+  Native,
+  Multi,
+  Vector,
+  Symbolic,
+  Shared,
+  Fallback,
 };
 
 /// Whether `-mair-stats` was requested. Independent of LLVM `-stats`.

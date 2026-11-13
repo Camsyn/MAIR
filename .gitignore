@@ -34,3 +34,5 @@ test-e2e/jsoncpp/build
 test-e2e/jsoncpp/source
 test-e2e/sqlite3/build
 test-e2e/sqlite3/source
+test-e2e/7zip/build
+test-e2e/7zip/source

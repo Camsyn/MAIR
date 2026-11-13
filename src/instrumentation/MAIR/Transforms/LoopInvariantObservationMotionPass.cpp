@@ -65,8 +65,8 @@ void moveObservationTo(Observation &Obs, ProgramPoint &Target,
 enum class InvariantMotionKind { Preheader, Exit };
 
 struct InvariantMotionPlan {
-  Observation *Obs = nullptr;
   ProgramPoint *Target = nullptr;
+  /// Where to create the target program point if Target is null.
   std::optional<ProgramPointSite> NewTargetSite;
   ProgramPointGuard Guard = AlwaysGuard{};
   InvariantMotionKind Kind = InvariantMotionKind::Preheader;
@@ -86,7 +86,7 @@ std::optional<InvariantMotionPlan> findInvariantMotion(MAIRLoopInfo &Loops,
   if (Preheader && Preheader != &Source &&
       Loops.canHoistToPreheader(Source, L) &&
       isRegionAvailableAt(*Region, Preheader->getSite(), Loops))
-    return InvariantMotionPlan{&Obs, Preheader, std::nullopt, AlwaysGuard{},
+    return InvariantMotionPlan{Preheader, std::nullopt, AlwaysGuard{},
                                InvariantMotionKind::Preheader};
 
   std::optional<ProgramPointSite> TargetSite = Loops.getExitSite(L);
@@ -95,31 +95,25 @@ std::optional<InvariantMotionPlan> findInvariantMotion(MAIRLoopInfo &Loops,
 
   std::optional<AnyProvenanceExecutedGuard> ExecutionGuard =
       makeExecutionGuard(Obs, L.getLoopPreheader());
-  if (!ExecutionGuard)
-    return std::nullopt;
-
-  if (!isRegionAvailableAt(*Region, *TargetSite, Loops))
+  if (!ExecutionGuard || !isRegionAvailableAt(*Region, *TargetSite, Loops))
     return std::nullopt;
 
   ProgramPointGuard Guard = std::move(*ExecutionGuard);
   ProgramPoint *Target = Loops.findExitPoint(L, *TargetSite, Guard);
-  std::optional<ProgramPointSite> NewTargetSite;
-  if (!Target)
-    NewTargetSite = TargetSite;
-  return InvariantMotionPlan{&Obs, Target, NewTargetSite, std::move(Guard),
+  return InvariantMotionPlan{Target, TargetSite, std::move(Guard),
                              InvariantMotionKind::Exit};
 }
 
-void commitInvariantMotion(MAIRGraph &G, InvariantMotionPlan Plan,
+void commitInvariantMotion(MAIRGraph &G, Observation &Obs,
+                           InvariantMotionPlan Plan,
                            bool MergeEquivalentObservations) {
-  assert(Plan.Obs && "invariant motion requires an observation");
   ProgramPoint *Target = Plan.Target;
   if (!Target) {
     assert(Plan.NewTargetSite && "new motion target requires a site");
     Target =
         &G.getParent()->createProgramPoint(*Plan.NewTargetSite, Plan.Guard);
   }
-  moveObservationTo(*Plan.Obs, *Target, MergeEquivalentObservations);
+  moveObservationTo(Obs, *Target, MergeEquivalentObservations);
   if (Plan.Kind == InvariantMotionKind::Preheader) {
     ++NumMovedToPreheaders;
     MAIRStatScope::add(MAIRStatField::Preheader);
@@ -153,7 +147,8 @@ LoopInvariantObservationMotionPass::run(MAIRGraph &G,
           findInvariantMotion(Loops, PP, Obs, *ScopedLoop);
       if (!Plan)
         continue;
-      commitInvariantMotion(G, std::move(*Plan), MergeEquivalentObservations);
+      commitInvariantMotion(G, Obs, std::move(*Plan),
+                            MergeEquivalentObservations);
       Changed = true;
     }
   }

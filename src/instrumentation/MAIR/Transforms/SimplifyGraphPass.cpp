@@ -36,11 +36,9 @@ MergeCandidate findMergeCandidate(MAIRGraph &G) {
         continue;
 
       ProgramPoint &PP2 = Edge.getNode();
-      if (&PP1 == &PP2 || isa<LoopProgramPoint>(PP2))
-        continue;
-      if (!PP1.hasCompatibleMergeSemantics(PP2))
-        continue;
-      if (!PP2.hasChild(PP1, PPEdgeKind::PostDom))
+      if (&PP1 == &PP2 || isa<LoopProgramPoint>(PP2) ||
+          !PP1.hasCompatibleMergeSemantics(PP2) ||
+          !PP2.hasChild(PP1, PPEdgeKind::PostDom))
         continue;
       const BasicBlock *PP1Block = PP1.getBasicBlock();
       const BasicBlock *PP2Block = PP2.getBasicBlock();

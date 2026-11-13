@@ -75,19 +75,15 @@ bool findCommonObservations(ArrayRef<ProgramPoint *> NeighborPPs,
         }))
       continue;
 
-    Matches.clear();
-    Matches.push_back(&Candidate);
-    bool Common = true;
+    Matches.assign({&Candidate});
     for (ProgramPoint *Neighbor : drop_begin(NeighborPPs)) {
       Observation *Match =
           findEquivalentMovableObservation(*Neighbor, Candidate);
-      if (!Match) {
-        Common = false;
+      if (!Match)
         break;
-      }
       Matches.push_back(Match);
     }
-    if (!Common)
+    if (Matches.size() != NeighborPPs.size())
       continue;
     // All copies are shared by every neighbor, so their SSA operands must be
     // visible at the common target in a valid, materializable graph.

@@ -30,16 +30,6 @@ namespace mair {
 
 namespace {
 
-std::optional<uint64_t> getConstantAccessSize(const Observation &Obs) {
-  const AbstractAccess *Region = Obs.getContiguousRegion();
-  if (!Region)
-    return std::nullopt;
-  const AbstractValue &Size = Region->getSize();
-  if (!Size.isConstant())
-    return std::nullopt;
-  return Size.getConstant();
-}
-
 std::optional<uint64_t> matchStartOffset(const SCEV *Start,
                                          const Value *ExpectedBase) {
   if (const auto *Unknown = dyn_cast<SCEVUnknown>(Start))
@@ -305,8 +295,8 @@ void addOrMergeObservation(ProgramPoint &Target, const Observation &Obs,
   Target.addObservation(NewObservation);
 }
 
-std::optional<AbstractAccess> buildContiguousAggregate(
-    MAIRGraph &ExprGraph, const Observation &Obs,
+std::optional<AbstractAccess>
+buildContiguousAggregate(MAIRGraph &ExprGraph, const Observation &Obs,
                          const SCEVAddRecExpr &Recurrence,
                          const SCEV *ExecutionCount, uint64_t AccessSize,
                          ScalarEvolution &SE, const MAIRLoopInfo &Loops,
@@ -374,8 +364,8 @@ std::optional<AbstractAccess> buildContiguousAggregate(
     APInt Scale(ScratchBits, AccessSize);
     APInt MaxSize =
         SE.getUnsignedRangeMax(ExecutionCount).zext(ScratchBits) * Scale;
-    unsigned SizeBits = std::max(
-        CountBits, std::max(Scale.getActiveBits(), MaxSize.getActiveBits()));
+    unsigned SizeBits =
+        std::max({CountBits, Scale.getActiveBits(), MaxSize.getActiveBits()});
     if (SizeBits > IntegerType::MAX_INT_BITS)
       return std::nullopt;
     Type *SizeTy =
@@ -409,10 +399,11 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
                                                 ProgramPoint &PP,
                                                 Observation &Obs) {
   const AbstractAccess *Location = Obs.getContiguousRegion();
-  std::optional<uint64_t> AccessSize = getConstantAccessSize(Obs);
-  if (!Obs.isMovable() || !Location || !Location->getBase() || !AccessSize ||
-      *AccessSize == 0 || Obs.getInstructions().empty())
+  if (!Obs.isMovable() || !Location || !Location->getBase() ||
+      !Location->getSize().isConstant() ||
+      Location->getSize().getConstant() == 0 || Obs.getInstructions().empty())
     return std::nullopt;
+  const uint64_t AccessSize = Location->getSize().getConstant();
 
   // Peel one affine AddRec of this loop. A range produced by an inner loop
   // keeps the outer induction as its start, so the address SCEV — not the
@@ -457,7 +448,7 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
   // region with no later dependence on LLVM SCEV objects.
   bool IsRangeAggregate = false;
   if (std::optional<AbstractAccess> Range = buildContiguousAggregate(
-          *G.getParent(), Obs, *Recurrence, ExecutionCount, *AccessSize, SE,
+          *G.getParent(), Obs, *Recurrence, ExecutionCount, AccessSize, SE,
           Loops, *TargetSite)) {
     Aggregate = *Range;
     IsRangeAggregate = true;
@@ -480,7 +471,7 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
     MAIRScalarExpr StrideExpr = Converter.convert(Stride);
     Type *SizeType = Type::getInt64Ty(Start->getType()->getContext());
     MAIRScalarExpr SizeExpr =
-        G.getParent()->createConstantExpr(*SizeType, APInt(64, *AccessSize));
+        G.getParent()->createConstantExpr(*SizeType, APInt(64, AccessSize));
     MAIRScalarExpr CountExpr = Converter.convert(ExecutionCount);
     Aggregate = PeriodicRegion(Location->getBase(), StartExpr, StrideExpr,
                                SizeExpr, CountExpr);

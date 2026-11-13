@@ -115,8 +115,6 @@ Error validateObservation(const Observation &Obs, const Instruction &Target,
 
 Expected<MAIRMaterializationPlan> buildPlan(const MAIRGraph &Graph, Function &F,
                                             DominatorTree &DT, LoopInfo &LI) {
-  if (!Graph.isLive())
-    return createStringError("cannot instantiate an already consumed graph");
   if (!Graph.verify())
     return createStringError("cannot instantiate an invalid MAIRGraph");
 
@@ -233,11 +231,11 @@ Value *lowerExpr(const MAIRScalarExpr &Expr, IRBuilder<> &Builder,
   return Result;
 }
 
-Value *lowerAbstractValue(const AbstractValue &Value, IRBuilder<> &Builder) {
-  if (Value.isConstant())
+Value *lowerAbstractValue(const AbstractValue &V, IRBuilder<> &Builder) {
+  if (V.isConstant())
     return ConstantInt::get(Type::getInt64Ty(Builder.getContext()),
-                            Value.getConstant());
-  return const_cast<class Value *>(Value.getSymbol());
+                            V.getConstant());
+  return const_cast<Value *>(V.getSymbol());
 }
 
 Value *lowerContiguous(const AbstractAccess &Region, IRBuilder<> &Builder) {
@@ -281,14 +279,15 @@ Value *materializeGuard(const ProgramPointGuard &PPGuard, BasicBlock *Target,
     Updater.AddAvailableValue(Reset, ConstantInt::getFalse(Ctx));
     Seen.insert(Reset);
   }
+  BasicBlock *Entry = &F.getEntryBlock();
   bool EntryHasProvenance = false;
   for (Instruction *I : Guard.getProvenance())
-    if (I->getParent() == &F.getEntryBlock())
+    if (I->getParent() == Entry)
       EntryHasProvenance = true;
     else if (Seen.insert(I->getParent()).second)
       Updater.AddAvailableValue(I->getParent(), ConstantInt::getTrue(Ctx));
-  if (Reset != &F.getEntryBlock())
-    Updater.AddAvailableValue(&F.getEntryBlock(),
+  if (Reset != Entry)
+    Updater.AddAvailableValue(Entry,
                               ConstantInt::getBool(Ctx, EntryHasProvenance));
   return Updater.GetValueInMiddleOfBlock(Target);
 }
@@ -313,10 +312,9 @@ lowerObservation(const PlannedObservation &Obs, IRBuilder<> &Builder,
     Materialized.MaskElementSize = Masked->getElementSize();
     if (Masked->isConstantMask()) {
       SmallVector<Constant *, 8> Elements;
-      Type *I1 = Type::getInt1Ty(Builder.getContext());
       for (unsigned Lane = 0; Lane < Masked->getNumLanes(); ++Lane)
-        Elements.push_back(
-            ConstantInt::get(I1, Masked->getConstantMask().test(Lane)));
+        Elements.push_back(ConstantInt::getBool(
+            Builder.getContext(), Masked->getConstantMask().test(Lane)));
       Materialized.Mask = ConstantVector::get(Elements);
     } else {
       Materialized.Mask = const_cast<Value *>(Masked->getDynamicMask());
@@ -404,7 +402,7 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
     if (IsGuarded) {
       Value *Guard = materializeGuard(Unit.Guard, Head, F);
       InsertPt = SplitBlockAndInsertIfThen(Guard, Cursor, /*Unreachable=*/false,
-                                           nullptr, &DTU, &LI, nullptr);
+                                           nullptr, &DTU, &LI);
       // The split moves Cursor into the tail block. Earlier points pending at
       // Cursor emit at the head's new branch, ahead of this guard.
       for (PendingProgramPoint &Point : Pending)

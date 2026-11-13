@@ -21,9 +21,10 @@
 
 #include "asan_init_version.h"
 
-using __sanitizer::uptr;
-using __sanitizer::u64;
+using __sanitizer::sptr;
 using __sanitizer::u32;
+using __sanitizer::u64;
+using __sanitizer::uptr;
 
 extern "C" {
   // This function should be called at the very beginning of the process,
@@ -227,6 +228,23 @@ extern "C" {
   SANITIZER_INTERFACE_ATTRIBUTE void __asan_store16_noabort(uptr p);
   SANITIZER_INTERFACE_ATTRIBUTE void __asan_loadN_noabort(uptr p, uptr size);
   SANITIZER_INTERFACE_ATTRIBUTE void __asan_storeN_noabort(uptr p, uptr size);
+
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_load_periodic(uptr start,
+                                                          sptr stride,
+                                                          uptr size,
+                                                          uptr count);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_store_periodic(uptr start,
+                                                           sptr stride,
+                                                           uptr size,
+                                                           uptr count);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_load_periodic_noabort(uptr start,
+                                                                  sptr stride,
+                                                                  uptr size,
+                                                                  uptr count);
+  SANITIZER_INTERFACE_ATTRIBUTE void __asan_store_periodic_noabort(uptr start,
+                                                                   sptr stride,
+                                                                   uptr size,
+                                                                   uptr count);
 
   SANITIZER_INTERFACE_ATTRIBUTE void __asan_exp_load1(uptr p, u32 exp);
   SANITIZER_INTERFACE_ATTRIBUTE void __asan_exp_load2(uptr p, u32 exp);

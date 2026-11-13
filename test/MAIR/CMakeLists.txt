@@ -13,6 +13,10 @@ add_lit_testsuite(check-mair
   DEPENDS mair-opt xclang
 )
 add_dependencies(check-mair check-mair-unit)
+# The runtime tests in TestCases/asan link and run ASan binaries.
+if(TARGET asan)
+  add_dependencies(check-mair asan)
+endif()
 
 if(NOT TARGET check-all)
   add_custom_target(check-all)

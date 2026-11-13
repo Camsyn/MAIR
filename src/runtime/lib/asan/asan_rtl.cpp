@@ -247,6 +247,62 @@ void __asan_storeN_noabort(uptr addr, uptr size) {
   }
 }
 
+// Periodic checks cover one loop access over all its iterations: the bytes
+// [start + i * stride, start + i * stride + size) for 0 <= i < count. MAIR
+// emits them once outside the loop in place of a check in every iteration.
+// The stride may be negative, so start is the first iteration's address, not
+// necessarily the lowest one.
+//
+// The accesses are first checked through their hull, the bytes from the lowest
+// to the highest accessed one, in a single shadow scan. When the stride does
+// not exceed the access size the hull is exactly the accessed bytes. When it
+// does, the gaps between accesses are in the hull too, so a poisoned hull is
+// only a hint: each access is then checked on its own, and a poisoned byte in a
+// gap is never reported. Strides wider than kMaxHullStride skip the hull; a
+// scan of the gaps would cost more than checking every access.
+static const uptr kMaxHullStride = 1024;
+
+// The first poisoned byte, in iteration order, that a periodic access touches,
+// or 0 if there is none.
+static uptr FindPoisonedPeriodicByte(uptr start, sptr stride, uptr size,
+                                     uptr count) {
+  if (!count || !size)
+    return 0;
+  uptr step = stride < 0 ? -(uptr)stride : (uptr)stride;
+  uptr distance, span;
+  if ((step <= size || step <= kMaxHullStride) &&
+      !__builtin_mul_overflow(count - 1, step, &distance) &&
+      !__builtin_add_overflow(distance, size, &span)) {
+    uptr low = stride < 0 ? start - distance : start;
+    if (!__asan_region_is_poisoned(low, span))
+      return 0;
+  }
+  for (uptr i = 0; i < count; ++i)
+    if (uptr bad = __asan_region_is_poisoned(start + i * (uptr)stride, size))
+      return bad;
+  return 0;
+}
+
+#define ASAN_PERIODIC_ACCESS_CALLBACK(type, is_write)                      \
+  extern "C" NOINLINE INTERFACE_ATTRIBUTE void __asan_##type##_periodic(   \
+      uptr start, sptr stride, uptr size, uptr count) {                    \
+    if (uptr bad = FindPoisonedPeriodicByte(start, stride, size, count)) { \
+      GET_CALLER_PC_BP_SP;                                                 \
+      ReportGenericError(pc, bp, sp, bad, is_write, size, 0, true);        \
+    }                                                                      \
+  }                                                                        \
+  extern "C" NOINLINE INTERFACE_ATTRIBUTE void                             \
+  __asan_##type##_periodic_noabort(uptr start, sptr stride, uptr size,     \
+                                   uptr count) {                           \
+    if (uptr bad = FindPoisonedPeriodicByte(start, stride, size, count)) { \
+      GET_CALLER_PC_BP_SP;                                                 \
+      ReportGenericError(pc, bp, sp, bad, is_write, size, 0, false);       \
+    }                                                                      \
+  }
+
+ASAN_PERIODIC_ACCESS_CALLBACK(load, false)
+ASAN_PERIODIC_ACCESS_CALLBACK(store, true)
+
 // Force the linker to keep the symbols for various ASan interface functions.
 // We want to keep those in the executable in order to let the instrumented
 // dynamic libraries access the symbol even if it is not used by the executable

@@ -21,6 +21,9 @@ RUNS=1000 METRICS_REPEAT=5 JOBS=4 bash test-e2e/jsoncpp/run.sh
 `unsupported`；sanitizer 或工作负载失败会终止运行。短预算运行用于功能验证，
 不能据此推断稳定的性能收益。
 
+每个变体使用独立子 shell，保留调用者的 `ASAN_OPTIONS`、`TSAN_OPTIONS` 和
+对应 symbolizer 设置，避免前一变体清掉后续变体的配置。
+
 后续运行默认复用二进制。编译器、MAIR 插件或构建参数变化后，使用：
 
 ```sh

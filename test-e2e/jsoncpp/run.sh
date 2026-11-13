@@ -246,7 +246,7 @@ EOF
   printf '%s\n' "$driver"
 }
 
-run_one() {
+run_one() (
   local sanitizer=$1
   local variant=$2
   local seeds=$3
@@ -288,7 +288,7 @@ run_one() {
   "$metrics/collect-perf.sh" --label "$sanitizer/$variant" --out "$metrics_out" \
     -- "$driver" "$fuzzer" "$seeds" "$RUNS" "$MAX_LEN" "$runs_root"
   echo "jsoncpp e2e ok: $fuzzer"
-}
+)
 
 print_mair_stats() {
   local stats=$SCRIPT_DIR/build/metrics/mair-stats.txt

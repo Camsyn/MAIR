@@ -32,3 +32,5 @@ test-e2e/re2/build
 test-e2e/re2/source
 test-e2e/jsoncpp/build
 test-e2e/jsoncpp/source
+test-e2e/sqlite3/build
+test-e2e/sqlite3/source

@@ -37,6 +37,7 @@ count_instrumented_mops() {
         sub(/[-+].*$/, "", name)
         if (name ~ /^__asan_report_(exp_)?(load|store)/) c++
         else if (name ~ /^__asan_(load|store)(1|2|4|8|16|N)(_noabort)?$/) c++
+        else if (name ~ /^__asan_(load|store)_periodic(_noabort)?$/) c++
         else if (name ~ /^__asan_(memcpy|memset|memmove)$/) c++
         else if (name ~ /^__tsan_(unaligned_)?(read|write)/) c++
         else if (name ~ /^__tsan_(memcpy|memset|memmove)$/) c++

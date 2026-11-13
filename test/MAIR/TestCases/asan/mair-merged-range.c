@@ -35,6 +35,24 @@ void store_long_pair(long *p) {
   p[1] = 2;
 }
 
+// c alone is only 4-byte aligned, but a sits at the start of the range with
+// 8-byte alignment, so the 16-byte range still takes the fast path.
+// CHECK-LABEL: define {{.*}} @store_record(
+// CHECK-NOT:   __asan_report_store
+// CHECK:       load i16, ptr
+// CHECK:       call void @__asan_report_store16(
+// CHECK-NOT:   __asan_report_store
+// CHECK:       ret void
+struct record {
+  long a;
+  int b, c;
+};
+void store_record(struct record *r) {
+  r->a = 1;
+  r->b = 2;
+  r->c = 3;
+}
+
 // ASan checks reads and writes alike, so a read and a write merge. The range
 // is reported as a store because one of its accesses writes.
 // CHECK-LABEL: define {{.*}} @copy_next(
@@ -90,4 +108,4 @@ int load_indexed(int *p, long i) { return p[i]; }
 
 // Every observation above is lowered through MAIR; none falls back.
 // STATS: MAIR stats
-// STATS: select{{ +}}in 7  lowered 7{{$}}
+// STATS: select{{ +}}in 8  lowered 8{{$}}

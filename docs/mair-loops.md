@@ -102,6 +102,7 @@ Observation 合并保留完整来源指令序列及重复项。若右项严格�
 ASan 按 Observation 的区域检查，而不是按来源指令逐个检查（`XsanAddressSanitizer::instrumentMAIRObservation` 和 `instrumentFunctionViaMAIR` 里的 `CanInstrumentViaMAIR`，`src/instrumentation/llvm23/AddressSanitizer.cpp`）。接受条件：每个来源都是 native ASan 也会检查的 load/store（`getInterestingMemoryOperands` 恰好给出一个操作数、不被安全栈/全局访问优化省掉、不是 scalable 向量）；区域是大小已知的连续区间（偏移可以是符号，大小可以是 trip count 表达式），或 periodic 区域。任一来源不满足时整个 Observation 退回 native，由 native 自己决定每个来源查不查。
 
 - 合并区间没有空洞：`AbstractAccess::merge` 只合并重叠或相邻的区间，`mergeExpressionSizedRanges` 要求区间长度不小于起点差，LIOM/COM/LPOC 只合并相等的区域。所以查整个区间不会查到来源没碰过的字节。
+- 区间起点的对齐取来源对齐的最小值；若某个来源的指针就是起点，或与区间基址只差常量偏移，就用它推出基址和起点的对齐（`struct { long a; int b, c; }` 三个字段合并后仍按 8 字节对齐）。
 - 单个未合并的访问（含固定宽度向量）照旧按 native 方式检查。不超过 16 字节的区间走内联检查：对齐时一次 shadow load，否则查首末两个字节，与 native 对不对齐访问的做法相同；中间至多跨一个 granule，ASan 自己的 redzone 不会这么窄。更长的区间或长度是表达式的区间调用 `__asan_loadN/storeN`，逐字节检查（`__asan_region_is_poisoned`）。
 - periodic 区域调用 `__asan_{load,store}_periodic(start, stride, size, count)`（recover 模式带 `_noabort`，`src/runtime/lib/asan/asan_rtl.cpp`）。runtime 按 stride 符号算出最低地址，count 为 0 不查；先用一次 shadow 扫描查整个外包区间，干净则全部合法；否则（或 stride 超过 1 KiB 时）按迭代顺序逐个访问检查，报告第一个越界访问的地址和单次访问大小，空隙中的 poison 不报。内核 ASan 和 `-asan-force-experiment` 没有这个入口，periodic 区域退回 native。
 - 报告：调试位置取第一个来源（`Observation::getStableDebugLoc`），大小可能是合并后的区间大小。读写合并后按写报告；但若所有来源访问同一地址同一大小、且第一个来源是 load（`x[i]++`），按读报告，与 native 先查到的 load 一致。

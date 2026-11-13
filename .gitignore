@@ -30,3 +30,5 @@ build*/
 test/**/Output/
 test-e2e/re2/build
 test-e2e/re2/source
+test-e2e/jsoncpp/build
+test-e2e/jsoncpp/source

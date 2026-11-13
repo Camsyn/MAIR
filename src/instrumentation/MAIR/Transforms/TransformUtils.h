@@ -15,4 +15,13 @@ inline bool isEquivalentMovableObservation(const Observation &LHS,
          LHS.getRegion() == RHS.getRegion();
 }
 
+/// The first observation of \p PP that is equivalent to \p Needle, if any.
+inline Observation *
+findEquivalentMovableObservation(ProgramPoint &PP, const Observation &Needle) {
+  for (Observation &Obs : PP)
+    if (isEquivalentMovableObservation(Obs, Needle))
+      return &Obs;
+  return nullptr;
+}
+
 } // namespace mair

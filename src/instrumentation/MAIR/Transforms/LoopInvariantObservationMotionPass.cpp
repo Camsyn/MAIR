@@ -49,15 +49,9 @@ makeExecutionGuard(const Observation &Obs, BasicBlock *ResetBlock) {
 
 void moveObservationTo(Observation &Obs, ProgramPoint &Target,
                        bool MergeEquivalentObservations) {
-  Observation *Accumulator = nullptr;
-  if (MergeEquivalentObservations) {
-    for (Observation &Existing : Target)
-      if (isEquivalentMovableObservation(Existing, Obs)) {
-        Accumulator = &Existing;
-        break;
-      }
-  }
-
+  Observation *Accumulator = MergeEquivalentObservations
+                                 ? findEquivalentMovableObservation(Target, Obs)
+                                 : nullptr;
   if (!Accumulator) {
     Target.addObservation(Obs);
   } else {
@@ -78,14 +72,20 @@ struct InvariantMotionPlan {
   InvariantMotionKind Kind = InvariantMotionKind::Preheader;
 };
 
-std::optional<InvariantMotionPlan>
-findInvariantMotionForLoop(MAIRGraph &G, MAIRLoopInfo &Loops,
-                           ProgramPoint &Source, Observation &Obs,
-                           const AbstractAccess &Region, const Loop &L) {
+std::optional<InvariantMotionPlan> findInvariantMotion(MAIRLoopInfo &Loops,
+                                                       ProgramPoint &Source,
+                                                       Observation &Obs,
+                                                       const Loop &L) {
+  if (!Obs.isMovable())
+    return std::nullopt;
+  const AbstractAccess *Region = Obs.getContiguousRegion();
+  if (!Region || !Loops.isLoopInvariant(Obs, L))
+    return std::nullopt;
+
   ProgramPoint *Preheader = Loops.getPreheaderExit(L);
   if (Preheader && Preheader != &Source &&
       Loops.canHoistToPreheader(Source, L) &&
-      isRegionAvailableAt(Region, Preheader->getSite(), Loops))
+      isRegionAvailableAt(*Region, Preheader->getSite(), Loops))
     return InvariantMotionPlan{&Obs, Preheader, std::nullopt, AlwaysGuard{},
                                InvariantMotionKind::Preheader};
 
@@ -98,7 +98,7 @@ findInvariantMotionForLoop(MAIRGraph &G, MAIRLoopInfo &Loops,
   if (!ExecutionGuard)
     return std::nullopt;
 
-  if (!isRegionAvailableAt(Region, *TargetSite, Loops))
+  if (!isRegionAvailableAt(*Region, *TargetSite, Loops))
     return std::nullopt;
 
   ProgramPointGuard Guard = std::move(*ExecutionGuard);
@@ -108,17 +108,6 @@ findInvariantMotionForLoop(MAIRGraph &G, MAIRLoopInfo &Loops,
     NewTargetSite = TargetSite;
   return InvariantMotionPlan{&Obs, Target, NewTargetSite, std::move(Guard),
                              InvariantMotionKind::Exit};
-}
-
-std::optional<InvariantMotionPlan>
-findInvariantMotion(MAIRGraph &G, MAIRLoopInfo &Loops, ProgramPoint &PP,
-                    Observation &Obs, const Loop &ScopedLoop) {
-  if (!Obs.isMovable())
-    return std::nullopt;
-  const AbstractAccess *Region = Obs.getContiguousRegion();
-  if (!Region || !Loops.isLoopInvariant(Obs, ScopedLoop))
-    return std::nullopt;
-  return findInvariantMotionForLoop(G, Loops, PP, Obs, *Region, ScopedLoop);
 }
 
 void commitInvariantMotion(MAIRGraph &G, InvariantMotionPlan Plan,
@@ -161,7 +150,7 @@ LoopInvariantObservationMotionPass::run(MAIRGraph &G,
       continue;
     for (Observation &Obs : llvm::make_early_inc_range(PP)) {
       std::optional<InvariantMotionPlan> Plan =
-          findInvariantMotion(G, Loops, PP, Obs, *ScopedLoop);
+          findInvariantMotion(Loops, PP, Obs, *ScopedLoop);
       if (!Plan)
         continue;
       commitInvariantMotion(G, std::move(*Plan), MergeEquivalentObservations);

@@ -91,11 +91,8 @@ bool MAIRLoopInfo::isLoopInvariant(const Value *V, const Loop &L) const {
 
 bool MAIRLoopInfo::isLoopInvariant(const AbstractValue &Value,
                                    const Loop &L) const {
-  if (Value.isConstant())
-    return true;
-  if (Value.isSymbol())
-    return isLoopInvariant(Value.getSymbol(), L);
-  return false;
+  return Value.isConstant() ||
+         (Value.isSymbol() && isLoopInvariant(Value.getSymbol(), L));
 }
 
 bool MAIRLoopInfo::isLoopInvariant(const Observation &Obs,
@@ -125,6 +122,16 @@ ProgramPoint *MAIRLoopInfo::getPreheaderExit(const Loop &L) const {
     return nullptr;
   MAIRGraph *Body = Graph->getLoopGraph(L);
   return Body ? Body->getLoopPreheader() : nullptr;
+}
+
+const BasicBlock *MAIRLoopInfo::getMotionSource(const ProgramPoint &PP,
+                                                const Loop &L) const {
+  if (!isAvailable() || PP.getParent() != Graph || Graph->getLoop() != &L ||
+      !PP.hasAlwaysGuard() || !PP.getSite().isAnchored() ||
+      Graph->hasForwardBarrier() || Graph->hasBackwardBarrier())
+    return nullptr;
+  const BasicBlock *Source = PP.getBasicBlock();
+  return Source && L.contains(Source) ? Source : nullptr;
 }
 
 // An observation may move to the preheader with an always guard only if every
@@ -162,13 +169,8 @@ ProgramPoint *MAIRLoopInfo::getPreheaderExit(const Loop &L) const {
 // edge and the CFG rewrite that goes with it.
 bool MAIRLoopInfo::canHoistToPreheader(const ProgramPoint &PP,
                                        const Loop &L) const {
-  if (!isAvailable() || PP.getParent() != Graph || Graph->getLoop() != &L ||
-      !PP.hasAlwaysGuard() || !PP.getSite().isAnchored() ||
-      Graph->hasForwardBarrier() || Graph->hasBackwardBarrier())
-    return false;
-
-  const BasicBlock *Source = PP.getBasicBlock();
-  if (!Source || !L.getLoopPreheader() || !L.contains(Source))
+  const BasicBlock *Source = getMotionSource(PP, L);
+  if (!Source || !L.getLoopPreheader())
     return false;
   SmallVector<BasicBlock *, 4> IterationEnds;
   L.getExitingBlocks(IterationEnds);
@@ -180,15 +182,11 @@ bool MAIRLoopInfo::canHoistToPreheader(const ProgramPoint &PP,
 }
 
 bool MAIRLoopInfo::canSinkToExit(const ProgramPoint &PP, const Loop &L) const {
-  if (!isAvailable() || PP.getParent() != Graph || Graph->getLoop() != &L ||
-      !PP.hasAlwaysGuard() || !PP.getSite().isAnchored() ||
-      Graph->hasForwardBarrier() || Graph->hasBackwardBarrier())
+  const BasicBlock *Source = getMotionSource(PP, L);
+  if (!Source)
     return false;
-
-  const BasicBlock *Source = PP.getBasicBlock();
   std::optional<MAIRLoopExit> Exit = describeUniqueExit(L);
-  return Source && L.contains(Source) && Exit &&
-         PDT->dominates(Exit->Exit, Source);
+  return Exit && PDT->dominates(Exit->Exit, Source);
 }
 
 std::optional<MAIRLoopExit>

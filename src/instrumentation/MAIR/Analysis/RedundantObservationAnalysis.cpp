@@ -126,17 +126,14 @@ bool canPropagate(const MAIRGraph &G, const ProgramPoint &From,
                   const ProgramPointEdge &Edge) {
   // Some unit-test graphs are built without analyses. A graph that has no
   // LoopInfo keeps the previous coverage rule.
-  if (Edge.getKind() == PPEdgeKind::PostDom && G.hasLoopInfo() &&
-      !sameLoopForPostDom(From, Edge.getNode(), G.getLoopInfo()))
-    return false;
-  return true;
+  return Edge.getKind() != PPEdgeKind::PostDom || !G.hasLoopInfo() ||
+         sameLoopForPostDom(From, Edge.getNode(), G.getLoopInfo());
 }
 
 } // namespace
 
 RedundantObservationInfo
-RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
-  (void)AM;
+RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &) {
   RedundantObservationInfo Result;
   const unsigned NumPoints = G.size();
   unsigned Index = 0;
@@ -231,7 +228,7 @@ RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
   for (const ProgramPoint &PP : G)
     for (const Observation &Obs : PP) {
       const uint64_t Closed = Result.closedCycles(Obs);
-      if (!Result.ByClosedCycles.count(Closed))
+      if (!Result.ByClosedCycles.contains(Closed))
         Result.ByClosedCycles.try_emplace(Closed, Compute(Closed));
     }
   return Result;

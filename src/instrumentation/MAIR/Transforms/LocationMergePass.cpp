@@ -101,16 +101,14 @@ bool hasSameMergeClass(const Observation &LHS, const Observation &RHS) {
 
 bool mergeConcreteRange(ProgramPoint &PP, ObservationIterator Begin,
                         ObservationIterator End, ScalarEvolution *SE) {
-  bool Changed = false;
   if (Begin == End)
     return false;
 
+  bool Changed = false;
   ObservationIterator Current = Begin;
-  ObservationIterator Next = std::next(Current);
-  while (Next != End) {
+  for (ObservationIterator Next = std::next(Begin); Next != End;) {
     if (!Current->mergeWith(*Next, SE)) {
-      Current = Next;
-      Next = std::next(Current);
+      Current = Next++;
       continue;
     }
     Next = PP.erase(Next);

@@ -61,13 +61,8 @@ std::optional<uint64_t> matchStartOffset(const SCEV *Start,
     }
 
     const auto *Const = dyn_cast<SCEVConstant>(Op);
-    if (!Const)
-      return std::nullopt;
-    if (Const->getAPInt().isNegative())
-      return std::nullopt;
-    if (Const->getAPInt().getActiveBits() > 64)
-      return std::nullopt;
-    if (Offset)
+    if (!Const || Offset || Const->getAPInt().isNegative() ||
+        Const->getAPInt().getActiveBits() > 64)
       return std::nullopt;
     Offset = Const->getAPInt().getZExtValue();
   }
@@ -301,19 +296,12 @@ void addOrMergeObservation(ProgramPoint &Target, const Observation &Obs,
                              Obs.getProperties());
   Target.getParent()->getOptimizationConfig().initializeObservation(
       NewObservation);
-  if (MergeEquivalentObservations) {
-    for (Observation &Existing : Target) {
-      if (&Existing.getMemoryObject() != &Obs.getMemoryObject())
-        continue;
-      if (!Existing.isMergeable() || !NewObservation.isMergeable())
-        continue;
-      if (Existing.getRegion() != Region)
-        continue;
-      bool Merged = Existing.mergeWith(NewObservation);
-      if (Merged)
+  if (MergeEquivalentObservations && NewObservation.isMergeable())
+    for (Observation &Existing : Target)
+      if (&Existing.getMemoryObject() == &Obs.getMemoryObject() &&
+          Existing.isMergeable() && Existing.getRegion() == Region &&
+          Existing.mergeWith(NewObservation))
         return;
-    }
-  }
   Target.addObservation(NewObservation);
 }
 
@@ -450,8 +438,7 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
       Recurrence = Candidate;
     }
   }
-  if (!Recurrence || !Recurrence->getLoop() ||
-      Recurrence->getLoop() != G.getLoop())
+  if (!Recurrence || Recurrence->getLoop() != G.getLoop())
     return std::nullopt;
 
   const Loop &RelevantLoop = *Recurrence->getLoop();
@@ -530,8 +517,7 @@ bool aggregateObservations(MAIRGraph &G, MAIRLoopInfo &Loops,
 
   bool Changed = false;
   for (ProgramPoint &PP : G) {
-    for (auto It = PP.begin(); It != PP.end();) {
-      Observation &Obs = *It++;
+    for (Observation &Obs : make_early_inc_range(PP)) {
       std::optional<AggregatePlan> Plan = buildAggregatePlan(G, Loops, PP, Obs);
       if (!Plan)
         continue;

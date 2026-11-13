@@ -39,12 +39,8 @@ struct ConcreteObservation {
   uint64_t End = 0;
 };
 
-struct CoveringWitness {
-  Observation *Obs = nullptr;
-  uint64_t End = 0;
-};
-
-using WitnessesByLevel = std::array<CoveringWitness, 256>;
+/// Per coverage level, the witness with the furthest end, if any.
+using WitnessesByLevel = std::array<ConcreteObservation, 256>;
 using WitnessesByAtomicity = std::array<WitnessesByLevel, 2>;
 
 std::optional<ConcreteRange> getConcreteRange(const Observation &Obs) {
@@ -86,7 +82,7 @@ bool hasCoveringWitness(const WitnessesByLevel &Witnesses,
   // furthest end at each covering level is therefore the only candidate needed.
   for (unsigned Level = Target.Obs->getLevel(); Level < Witnesses.size();
        ++Level) {
-    const CoveringWitness &Witness = Witnesses[Level];
+    const ConcreteObservation &Witness = Witnesses[Level];
     if (Witness.Obs && Witness.End >= Target.End &&
         Witness.Obs->covers(*Target.Obs))
       return true;
@@ -96,9 +92,9 @@ bool hasCoveringWitness(const WitnessesByLevel &Witnesses,
 
 void updateWitness(WitnessesByLevel &Witnesses,
                    const ConcreteObservation &Candidate) {
-  CoveringWitness &Witness = Witnesses[Candidate.Obs->getLevel()];
+  ConcreteObservation &Witness = Witnesses[Candidate.Obs->getLevel()];
   if (!Witness.Obs || Candidate.End > Witness.End)
-    Witness = {Candidate.Obs, Candidate.End};
+    Witness = Candidate;
 }
 
 unsigned eraseObservations(SmallVectorImpl<Observation *> &Observations) {
@@ -137,8 +133,8 @@ unsigned doIntraROE(MAIRGraph &G) {
         std::optional<ConcreteRange> Range = getConcreteRange(*It);
         assert(Range &&
                "concrete coverage run contains a non-concrete observation");
-        ConcreteObservation Candidate{&*It, Range->End};
         Observation &Obs = *It;
+        ConcreteObservation Candidate{&Obs, Range->End};
         const unsigned Atomicity = Obs.isAtomic();
         bool Covered = hasCoveringWitness(AllWitnesses[Atomicity], Candidate);
         if (!Covered && Obs.isMergeable())

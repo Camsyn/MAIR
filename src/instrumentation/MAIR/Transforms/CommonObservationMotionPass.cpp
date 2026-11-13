@@ -51,14 +51,6 @@ bool isSink(MotionDirection Direction) {
 using NeighborBlocks = SmallSetVector<const BasicBlock *, 4>;
 using NeighborProgramPoints = SmallVector<ProgramPoint *, 4>;
 
-Observation *findMatchingObservation(ProgramPoint &PP,
-                                     const Observation &Needle) {
-  for (Observation &Obs : PP)
-    if (isEquivalentMovableObservation(Obs, Needle))
-      return &Obs;
-  return nullptr;
-}
-
 bool collectNeighborBlocks(const BasicBlock &BB, MotionDirection Direction,
                            NeighborBlocks &Neighbors) {
   if (isSink(Direction))
@@ -87,7 +79,8 @@ bool findCommonObservations(ArrayRef<ProgramPoint *> NeighborPPs,
     Matches.push_back(&Candidate);
     bool Common = true;
     for (ProgramPoint *Neighbor : drop_begin(NeighborPPs)) {
-      Observation *Match = findMatchingObservation(*Neighbor, Candidate);
+      Observation *Match =
+          findEquivalentMovableObservation(*Neighbor, Candidate);
       if (!Match) {
         Common = false;
         break;
@@ -110,15 +103,15 @@ void moveObservationsToTarget(ProgramPoint &Target,
                               ArrayRef<Observation *> Matches,
                               MotionDirection Direction) {
   assert(!Matches.empty() && "common motion requires matching observations");
-  Observation *Accumulator = findMatchingObservation(Target, *Matches.front());
-
-  size_t MergeBegin = 0;
+  ArrayRef<Observation *> ToMerge = Matches;
+  Observation *Accumulator =
+      findEquivalentMovableObservation(Target, *Matches.front());
   if (!Accumulator) {
     Accumulator = &Target.addObservation(*Matches.front());
-    MergeBegin = 1;
+    ToMerge = Matches.drop_front();
   }
-  for (size_t I = MergeBegin; I < Matches.size(); ++I) {
-    bool Merged = Accumulator->mergeWith(*Matches[I]);
+  for (Observation *Obs : ToMerge) {
+    bool Merged = Accumulator->mergeWith(*Obs);
     assert(Merged && "exact common observations must be mergeable");
     (void)Merged;
   }
@@ -148,11 +141,10 @@ bool moveOneCommonObservation(MAIRGraph &G, const BasicBlock &BB,
   PPEdgeKind Kind = isSink(Direction) ? PPEdgeKind::PostDom : PPEdgeKind::Dom;
 
   // 2. Resolve exactly one boundary representative per neighbor block.
-  const bool SourceIsEntry = Kind == PPEdgeKind::Dom;
   NeighborProgramPoints NeighborPPs(
       map_range(NeighborBBs, [&](const BasicBlock *NeighborBB) {
-        return SourceIsEntry ? &G.getBBEntryRepresentative(*NeighborBB)
-                             : &G.getBBExitRepresentative(*NeighborBB);
+        return isSink(Direction) ? &G.getBBExitRepresentative(*NeighborBB)
+                                 : &G.getBBEntryRepresentative(*NeighborBB);
       }));
 
   // 3. Require every neighbor boundary to share the typed parent Target.
@@ -187,23 +179,15 @@ bool moveOneCommonObservation(MAIRGraph &G, const BasicBlock &BB,
 
 bool moveCommonObservationsToFixedPoint(MAIRGraph &G,
                                         MotionDirection Direction) {
-  bool Changed = false;
   const Function *F = G.getFunction();
   assert(F && "CommonObservationMotion requires a function-backed graph");
-  while (true) {
-    bool Moved = false;
-    for (const BasicBlock &BB : *F) {
-      if (!G.containsBlock(BB))
-        continue;
-      if (!moveOneCommonObservation(G, BB, Direction))
-        continue;
-      Moved = true;
-      Changed = true;
-      break;
-    }
-    if (!Moved)
-      return Changed;
-  }
+  // Each move restarts the scan from the first block.
+  bool Changed = false;
+  while (any_of(*F, [&](const BasicBlock &BB) {
+    return G.containsBlock(BB) && moveOneCommonObservation(G, BB, Direction);
+  }))
+    Changed = true;
+  return Changed;
 }
 
 } // namespace

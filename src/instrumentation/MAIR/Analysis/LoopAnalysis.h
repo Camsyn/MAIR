@@ -60,6 +60,11 @@ public:
   llvm::ScalarEvolution &getSE() const;
 
 private:
+  /// The block of \p PP if an observation there may leave \p L, the loop of
+  /// this graph, at all: \p PP runs unconditionally at an anchored site inside
+  /// \p L, and no barrier pins the graph's observations. Null otherwise.
+  const llvm::BasicBlock *getMotionSource(const ProgramPoint &PP,
+                                          const llvm::Loop &L) const;
   bool isLoopInvariant(const llvm::Value *V, const llvm::Loop &L) const;
   bool isLoopInvariant(const AbstractValue &Value, const llvm::Loop &L) const;
 };

@@ -1032,8 +1032,9 @@ std::string nestedIrreducibleCycles(unsigned Depth) {
 }
 
 TEST(RedundantObservationEliminationPass, HandlesManyIteratedCycles) {
-  // With 64 cycles the first store is variant in all of them and the second
-  // in all but one; 65 exceeds what the analysis tracks.
+  // The analysis tracks 63 cycles. With 64 and 65 the extra ones are not
+  // tracked and the edges that iterate them stay closed. Masks of all ones,
+  // or all ones but one, are reserved keys of a DenseMap and must not occur.
   for (unsigned Depth : {63u, 64u, 65u}) {
     llvm::LLVMContext Ctx;
     auto M = parseModule(nestedIrreducibleCycles(Depth), Ctx);

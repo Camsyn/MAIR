@@ -7,7 +7,6 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SparseBitVector.h"
 
-#include <map>
 #include <vector>
 
 namespace mair {
@@ -34,9 +33,7 @@ class RedundantObservationInfo {
   /// The cycles iterated along the edges of the graph. Bit I of a mask closes
   /// the edges that iterate IteratedCycles[I].
   llvm::SmallVector<const llvm::Cycle *, 4> IteratedCycles;
-  /// Keyed by mask. Every 64-bit value is a valid mask, which rules out a
-  /// DenseMap: it reserves two key values for itself.
-  std::map<uint64_t, Reachability> ByClosedCycles;
+  llvm::DenseMap<uint64_t, Reachability> ByClosedCycles;
 
   uint64_t closedCycles(const Observation &Obs) const;
 

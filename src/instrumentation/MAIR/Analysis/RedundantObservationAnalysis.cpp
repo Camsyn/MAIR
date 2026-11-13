@@ -11,7 +11,12 @@ namespace mair {
 AnalysisKey RedundantObservationAnalysis::Key;
 
 // Edges that iterate a cycle beyond this many distinct ones stay closed.
-static constexpr unsigned MaxTrackedCycles = 64;
+// Masks then stay below 2^63, clear of the two largest uint64_t values, which
+// DenseMap reserves as its empty and tombstone keys.
+static constexpr unsigned MaxTrackedCycles = 63;
+static_assert((uint64_t(1) << MaxTrackedCycles) - 1 <
+                  DenseMapInfo<uint64_t>::getTombstoneKey(),
+              "every mask must be usable as a DenseMap key");
 
 uint64_t RedundantObservationInfo::closedCycles(const Observation &Obs) const {
   uint64_t Closed = 0;
@@ -227,7 +232,7 @@ RedundantObservationAnalysis::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
     for (const Observation &Obs : PP) {
       const uint64_t Closed = Result.closedCycles(Obs);
       if (!Result.ByClosedCycles.count(Closed))
-        Result.ByClosedCycles.emplace(Closed, Compute(Closed));
+        Result.ByClosedCycles.try_emplace(Closed, Compute(Closed));
     }
   return Result;
 }

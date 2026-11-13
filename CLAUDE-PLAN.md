@@ -308,7 +308,7 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 | 意见 | 结论 | 处理 |
 | --- | --- | --- |
 | P1：ASan 打开 PostDom 覆盖后，不终止的循环里唯一的检查可能永远不执行 | 现象成立，但不是 ASan 特有，也不是这次改动才有 | 不退回 Dom-only；按维护者决定采用“环一定终止”的假设并写明（`e8c62ff9`） |
-| P2：64 个环时 `DenseMap<uint64_t>` 的保留键导致崩溃 | 成立 | `bdfbc8cc`，改用 `std::map`；测试 `HandlesManyIteratedCycles` 覆盖 63/64/65 层 |
+| P2：64 个环时 `DenseMap<uint64_t>` 的保留键导致崩溃 | 成立 | 先在 `bdfbc8cc` 改用 `std::map`，后改为只跟踪 63 个环、保留 `DenseMap`（见第 14 节）；测试 `HandlesManyIteratedCycles` 覆盖 63/64/65 层 |
 | P3：稀疏图上 ROE 每次查询扫整条 use-list | 成立 | `72d07b78`，在“可达来源的 observation”和“use-list”中枚举较小的一边 |
 
 ### P1 的判断
@@ -343,4 +343,14 @@ jsoncpp 三个翻译单元的 `-O1` 全程只要 0.1–0.2 s，说明常规代�
 - ASan 全量 lit 522 项：318 通过、198 unsupported、1 XFAIL、5 XPASS（与最初基线相同的 5 个），没有失败。TSan 全量 lit 376 项：286 通过、89 unsupported、1 XFAIL。MSan、XSan 的测试没有运行，只确认插件能构建。
 - `mair-opt` 输出：合并结果与本分支 rebase 前逐字节比较 378 组输入×pipeline 全部相同；`claude/mair-refactor-cleanup` 的分支头与分叉点比较同样 378 组全部相同。
 - rebase 过程中在每个发生冲突的提交上都跑过 `check-mair`；没有冲突、自动应用的提交没有逐个单独构建。
+
+## 14. 64 个环的崩溃改为不换容器的修法（2026-11-12）
+
+崩溃原因：可达性表以“对该 observation 关闭的环”的位掩码为键，存在 `DenseMap<uint64_t, …>` 里。`DenseMapInfo<uint64_t>` 把 `UINT64_MAX` 用作空槽、`UINT64_MAX - 1` 用作墓碑，这两个值不能作为键插入。跟踪满 64 个环时，在全部 64 个环里都变化的 observation 的掩码恰好是全 1，即 `UINT64_MAX`；只在一个环里不变（且该环是第 0 位）的掩码是 `UINT64_MAX - 1`。插入时触发断言。
+
+`bdfbc8cc` 的修法是换成 `std::map`：查找从期望 O(1) 变成 O(log K)，K 是“出现过的不同掩码数”。K 实际很小（每个不同掩码都要做一次完整的 SCC 计算），这点差别测不出来，但没有必要为此换容器。
+
+现在的修法：最多跟踪 63 个环（`MaxTrackedCycles = 63`，并用 `static_assert` 固定这个关系），掩码因此小于 2^63，不会碰到两个保留值，容器换回 `DenseMap`。超出部分与原来一样：迭代第 64 个及以后的环的边对所有 observation 关闭，只会更保守。
+
+验证：`check-mair` 219 项单元测试和 41 项 lit 全部如前；与 `std::map` 版本逐字节比较 378 组输入×pipeline 相同，审查给出的 63/64 层用例在 `-O1` 下输出也相同；`simplifygraph,roe` 在菱形、jsoncpp 和 4000 分支输入上的耗时（三次取最好）两版一致。
 

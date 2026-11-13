@@ -113,27 +113,38 @@ LLVM_ENABLE_BITMASK_ENUMS_IN_NAMESPACE();
 /// Sanitizer-specific legality rules shared by every MAIR optimization pass.
 /// Region geometry remains a property of Observation; this configuration
 /// controls which semantic distinctions an observer must preserve.
+///
+/// A volatile access still happens as written; only its observation is subject
+/// to optimization. By default a volatile observation is an ordinary one, as
+/// in ASan and TSan. With DistinguishVolatile, for a sanitizer that reports
+/// volatile accesses separately, a volatile observation is never merged or
+/// deleted, and plain and volatile observations never cover each other.
 class MAIROptimizationConfig {
   uint8_t ReadLevel = 1;
   uint8_t WriteLevel = 2;
   uint8_t ReadWriteLevel = 3;
   bool IgnoreAtomic = false;
+  bool DistinguishVolatile = false;
   bool AllowRelocation = true;
 
   explicit MAIROptimizationConfig(uint8_t ReadLevel, uint8_t WriteLevel,
                                   uint8_t ReadWriteLevel, bool IgnoreAtomic,
+                                  bool DistinguishVolatile,
                                   bool AllowRelocation)
       : ReadLevel(ReadLevel), WriteLevel(WriteLevel),
         ReadWriteLevel(ReadWriteLevel), IgnoreAtomic(IgnoreAtomic),
+        DistinguishVolatile(DistinguishVolatile),
         AllowRelocation(AllowRelocation) {}
 
 public:
   MAIROptimizationConfig() = default;
 
-  static MAIROptimizationConfig generic();
+  static MAIROptimizationConfig generic(bool DistinguishVolatile = false);
   static MAIROptimizationConfig forAddressSanitizer();
-  static MAIROptimizationConfig forThreadSanitizer();
+  static MAIROptimizationConfig
+  forThreadSanitizer(bool DistinguishVolatile = false);
 
+  bool distinguishesVolatile() const { return DistinguishVolatile; }
   uint8_t getLevel(AccessKind Kind) const;
   void initializeObservation(Observation &Obs) const;
 };

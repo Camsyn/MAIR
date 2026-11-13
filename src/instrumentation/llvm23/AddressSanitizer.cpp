@@ -4335,14 +4335,14 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
 
   auto CanInstrumentViaMAIR = [&](const mair::Observation &Obs) {
     if ((ClDebugMin >= 0 && ClDebugMax >= 0) || !Obs.isContiguous() ||
-        Obs.isVolatile() || Obs.isCallLike() ||
-        Obs.getInstructions().size() != 1 || !Obs.hasConcreteRange())
+        Obs.isCallLike() || Obs.getInstructions().size() != 1 ||
+        !Obs.hasConcreteRange())
       return false;
 
     Instruction *Source = Obs.getInstructions().front();
     auto *LI = dyn_cast<LoadInst>(Source);
     auto *SI = dyn_cast<StoreInst>(Source);
-    if ((!LI && !SI) || (LI && LI->isVolatile()) || (SI && SI->isVolatile()))
+    if (!LI && !SI)
       return false;
 
     SmallVector<InterestingMemoryOperand, 1> InterestingOperands;

@@ -1146,7 +1146,8 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
     Opt = std::make_unique<mair::MAOpt<TsanMAIRBarrierTrait>>(
         F, FAM, nullptr,
         /*KeepFullDebug=*/false,
-        mair::MAIROptimizationConfig::forThreadSanitizer());
+        mair::MAIROptimizationConfig::forThreadSanitizer(
+            ClDistinguishVolatile));
     Opt->build();
     Res |= Opt->hasModifiedIR();
 
@@ -1166,8 +1167,10 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
     };
 
     auto CanInstrumentViaMAIR = [&](const mair::Observation &Obs) {
-      if (!Obs.isContiguous() /* || Obs.isVolatile() */ || Obs.isAtomic() ||
-          Obs.getInstructions().size() != 1)
+      // A distinguished volatile access needs __tsan_volatile_*, which the
+      // native lowering emits.
+      if (!Obs.isContiguous() || (ClDistinguishVolatile && Obs.isVolatile()) ||
+          Obs.isAtomic() || Obs.getInstructions().size() != 1)
         return false;
 
       // TODO: Treat memory intrinsics as ordinary observations. They are
@@ -1180,7 +1183,6 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
       auto *LI = dyn_cast<LoadInst>(Source);
       auto *SI = dyn_cast<StoreInst>(Source);
       if ((!LI && !SI) || __xsan::DelegateToXSan::is(*Source) ||
-          // (LI && LI->isVolatile()) || (SI && SI->isVolatile()) ||
           isTsanAtomic(Source) || isVtableAccess(Source))
         return false;
 

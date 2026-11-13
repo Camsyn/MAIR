@@ -137,24 +137,30 @@ void MemoryUse::removeFromList() {
   Prev = nullptr;
 }
 
-MAIROptimizationConfig MAIROptimizationConfig::generic() {
+MAIROptimizationConfig
+MAIROptimizationConfig::generic(bool DistinguishVolatile) {
   return MAIROptimizationConfig(/*ReadLevel=*/1, /*WriteLevel=*/2,
                                 /*ReadWriteLevel=*/3,
-                                /*IgnoreAtomic=*/false,
+                                /*IgnoreAtomic=*/false, DistinguishVolatile,
                                 /*AllowRelocation=*/true);
 }
 
+/// ASan checks a volatile access like any other.
 MAIROptimizationConfig MAIROptimizationConfig::forAddressSanitizer() {
   return MAIROptimizationConfig(/*ReadLevel=*/1, /*WriteLevel=*/1,
                                 /*ReadWriteLevel=*/1,
                                 /*IgnoreAtomic=*/true,
+                                /*DistinguishVolatile=*/false,
                                 /*AllowRelocation=*/true);
 }
 
-MAIROptimizationConfig MAIROptimizationConfig::forThreadSanitizer() {
+/// TSan reports volatile accesses separately only under
+/// -ts-distinguish-volatile.
+MAIROptimizationConfig
+MAIROptimizationConfig::forThreadSanitizer(bool DistinguishVolatile) {
   return MAIROptimizationConfig(/*ReadLevel=*/1, /*WriteLevel=*/2,
                                 /*ReadWriteLevel=*/3,
-                                /*IgnoreAtomic=*/false,
+                                /*IgnoreAtomic=*/false, DistinguishVolatile,
                                 /*AllowRelocation=*/true);
 }
 
@@ -170,21 +176,19 @@ uint8_t MAIROptimizationConfig::getLevel(AccessKind Kind) const {
   llvm_unreachable("unknown access kind");
 }
 
-/// TODO: let this be configurable.
 void MAIROptimizationConfig::initializeObservation(Observation &Obs) const {
   const MaskedRegion *Masked = Obs.getMaskedRegion();
   const bool IsComparableMasked = !Masked || Masked->isComparable();
+  const bool KeepVolatile = DistinguishVolatile && Obs.isVolatile();
   // TODO: CallLike observations, currently modeled memory intrinsics, should
   // become movable and mergeable. They remain pinned until that is proven.
-  const bool CanMerge = !Obs.isVolatile() && !Obs.isCallLike() &&
+  const bool CanMerge = !KeepVolatile && !Obs.isCallLike() &&
                         IsComparableMasked && (IgnoreAtomic || !Obs.isAtomic());
-  const bool CanMove = AllowRelocation &&
-                       // "MA is immovable" does not mean its observation is
-                       // immovable.
-                       // !Obs.isVolatile() &&
-                       !Obs.isCallLike() && !Obs.isAtomic();
-  const bool CanDelete = !Obs.isVolatile() && !Obs.isCallLike() &&
-                         (IgnoreAtomic || !Obs.isAtomic());
+  // A volatile access stays where it is, but its observation may move even
+  // when volatile is distinguished.
+  const bool CanMove = AllowRelocation && !Obs.isCallLike() && !Obs.isAtomic();
+  const bool CanDelete =
+      !KeepVolatile && !Obs.isCallLike() && (IgnoreAtomic || !Obs.isAtomic());
   Obs.setOptimizationProperties(CanMerge, CanMove, CanDelete,
                                 getLevel(Obs.getKind()));
 }
@@ -248,6 +252,15 @@ bool isDefinedOutside(const AbstractAccess &Access, const Cycle &C) {
          isDefinedOutside(Access.getSize(), C) &&
          (!Access.hasSizeExpr() || isDefinedOutside(Access.getSizeExpr(), C));
 }
+
+/// Whether the graph holding \p Obs keeps volatile observations apart.
+bool distinguishesVolatile(const Observation &Obs) {
+  if (const ProgramPoint *PP = Obs.getParent())
+    if (const MAIRGraph *Graph = PP->getParent())
+      return Graph->getOptimizationConfig().distinguishesVolatile();
+  return MAIROptimizationConfig::generic().distinguishesVolatile();
+}
+
 } // namespace
 
 bool Observation::isInvariantIn(const Cycle &C) const {
@@ -276,6 +289,8 @@ bool Observation::covers(const Observation &Other) const {
     return false;
   if (isAtomic() != Other.isAtomic() &&
       (!isMergeable() || !Other.isMergeable()))
+    return false;
+  if (isVolatile() != Other.isVolatile() && distinguishesVolatile(*this))
     return false;
 
   if (const auto *ThisAccess = getContiguousRegion()) {

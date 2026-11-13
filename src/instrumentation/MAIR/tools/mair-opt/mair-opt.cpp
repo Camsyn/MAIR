@@ -51,6 +51,10 @@ static cl::opt<bool>
 static cl::opt<bool>
     O1("O1", cl::desc("Run the standard MAIR O1 optimization pipeline"),
        cl::init(false), cl::cat(MAIROptions));
+static cl::opt<bool> DistinguishVolatile(
+    "distinguish-volatile",
+    cl::desc("Keep volatile observations apart from all others"),
+    cl::init(false), cl::cat(MAIROptions));
 static cl::opt<std::string> PassPipeline("passes",
                                          cl::desc("MAIRGraph pass pipeline"),
                                          cl::value_desc("pipeline"),
@@ -146,7 +150,8 @@ int main(int argc, char **argv) {
       continue;
 
     normalizeMAIRLoops(F, FAM);
-    MAIRGraph Graph = MAIRGraph::build<DefaultBarrierTrait>(F, FAM);
+    MAIRGraph Graph = MAIRGraph::build<DefaultBarrierTrait>(
+        F, FAM, MAIROptimizationConfig::generic(DistinguishVolatile));
     if (!Graph.verify(&errs())) {
       errs() << "invalid MAIRGraph for function " << F.getName() << "\n";
       Graph.print(errs());

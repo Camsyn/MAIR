@@ -307,7 +307,7 @@ entry:
 }
 
 TEST(RedundantObservationEliminationPass,
-     RetainedMemsetDoesNotCoverAVolatileStore) {
+     RetainedMemsetCoversAVolatileStoreByDefault) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
 declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
@@ -322,6 +322,31 @@ entry:
   ASSERT_TRUE(M);
   MAIRGraph Graph = buildGraph(*M->getFunction("f"),
                                MAIROptimizationConfig::forThreadSanitizer());
+  MAIRGraphAnalysisManager AM;
+  EXPECT_FALSE(
+      runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM)
+          .areAllPreserved());
+  EXPECT_EQ(observationCount(Graph, "entry"), 1u);
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(RedundantObservationEliminationPass,
+     RetainedMemsetDoesNotCoverADistinguishedVolatileStore) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+define void @f(ptr %p) {
+entry:
+  call void @llvm.memset.p0.i64(ptr %p, i8 0, i64 8, i1 false)
+  store volatile i32 1, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  MAIRGraph Graph = buildGraph(
+      *M->getFunction("f"),
+      MAIROptimizationConfig::forThreadSanitizer(/*DistinguishVolatile=*/true));
   MAIRGraphAnalysisManager AM;
   EXPECT_TRUE(
       runPassOnGraphTree(RedundantObservationEliminationPass(), Graph, AM)

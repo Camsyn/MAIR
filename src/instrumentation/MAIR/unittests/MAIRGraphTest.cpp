@@ -3043,13 +3043,82 @@ entry:
   EXPECT_FALSE(Atomic.isMergeable());
   EXPECT_FALSE(Atomic.isMovable());
   EXPECT_FALSE(Atomic.isDeletable());
-  EXPECT_FALSE(Volatile.isMergeable());
+  // Volatile accesses still happen; only their observation is optimized.
+  EXPECT_TRUE(Volatile.isMergeable());
   EXPECT_TRUE(Volatile.isMovable());
-  EXPECT_FALSE(Volatile.isDeletable());
+  EXPECT_TRUE(Volatile.isDeletable());
+  EXPECT_EQ(Volatile.getLevel(), Normal.getLevel());
   EXPECT_FALSE(CallLike.isMergeable());
   EXPECT_FALSE(CallLike.isMovable());
   EXPECT_FALSE(CallLike.isDeletable());
   EXPECT_EQ(CallLike.getLevel(), 2u);
+}
+
+TEST(MAIROptimizationConfig, SanitizersTreatVolatileAsPlainByDefault) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %plain = load i32, ptr %p, align 4
+  %volatile = load volatile i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  for (const MAIROptimizationConfig &Config :
+       {MAIROptimizationConfig::forAddressSanitizer(),
+        MAIROptimizationConfig::forThreadSanitizer()}) {
+    MAIRGraph Graph(F, Config);
+    auto It = BB.begin();
+    Observation &Plain = *Graph.createInstProgramPoint(BB, *It++).begin();
+    Observation &Volatile = *Graph.createInstProgramPoint(BB, *It++).begin();
+    EXPECT_TRUE(Volatile.isMergeable());
+    EXPECT_TRUE(Volatile.isDeletable());
+    EXPECT_TRUE(Plain.covers(Volatile));
+    EXPECT_TRUE(Volatile.covers(Plain));
+  }
+}
+
+TEST(MAIROptimizationConfig, DistinguishVolatileKeepsVolatileObservations) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %plain = load i32, ptr %p, align 4
+  %volatile = load volatile i32, ptr %p, align 4
+  %again = load volatile i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  for (const MAIROptimizationConfig &Config :
+       {MAIROptimizationConfig::generic(/*DistinguishVolatile=*/true),
+        MAIROptimizationConfig::forThreadSanitizer(
+            /*DistinguishVolatile=*/true)}) {
+    MAIRGraph Graph(F, Config);
+    auto It = BB.begin();
+    Observation &Plain = *Graph.createInstProgramPoint(BB, *It++).begin();
+    Observation &Volatile = *Graph.createInstProgramPoint(BB, *It++).begin();
+    Observation &Again = *Graph.createInstProgramPoint(BB, *It++).begin();
+    EXPECT_TRUE(Plain.isMergeable());
+    EXPECT_TRUE(Plain.isDeletable());
+    EXPECT_FALSE(Volatile.isMergeable());
+    EXPECT_TRUE(Volatile.isMovable());
+    EXPECT_FALSE(Volatile.isDeletable());
+    // Neither a plain nor a volatile observation stands in for the other.
+    EXPECT_FALSE(Plain.covers(Volatile));
+    EXPECT_FALSE(Volatile.covers(Plain));
+    EXPECT_FALSE(Volatile.covers(Again));
+    EXPECT_FALSE(Plain.mergeWith(Volatile));
+  }
 }
 
 TEST(MAIROptimizationConfig, ThreadSanitizerWriteOnlyCoversRead) {

@@ -16,12 +16,6 @@ using namespace llvm;
 namespace mair {
 
 namespace {
-static AccessKind mergeKind(AccessKind LHS, AccessKind RHS) {
-  if (LHS == RHS)
-    return LHS;
-  return AccessKind::ReadWrite;
-}
-
 static AbstractValue getStoreSize(Type &Ty, const DataLayout &DL) {
   TypeSize Size = DL.getTypeStoreSize(&Ty);
   if (Size.isScalable())
@@ -104,10 +98,11 @@ AbstractValue getAccessSize(const Value &Value) {
 Observation makeObservation(const Instruction &I, const Value &Ptr,
                             AbstractValue Size, AccessKind Kind,
                             const DataLayout &DL) {
-  AbstractAccess Obs =
+  AbstractAccess Access =
       AbstractAccess::fromPointerAndSize(Ptr, std::move(Size), DL);
   Instruction *Inst = const_cast<Instruction *>(&I);
-  return Observation(Inst, std::move(Obs), Kind, getInstructionProperties(I));
+  return Observation(Inst, std::move(Access), Kind,
+                     getInstructionProperties(I));
 }
 
 void MemoryUse::set(MemoryObject *NewObject) {
@@ -204,7 +199,8 @@ void Observation::refreshOptimizationProperties() {
 }
 
 void Observation::mergeKind(AccessKind Other) {
-  Kind = ::mair::mergeKind(Kind, Other);
+  if (Kind != Other)
+    Kind = AccessKind::ReadWrite;
   refreshOptimizationProperties();
   if (ProgramPoint *PP = getParent())
     PP->invalidateSort();
@@ -349,11 +345,8 @@ bool Observation::mergeWith(const Observation &Other, ScalarEvolution *SE) {
   else
     Insts.append(Other.Insts);
 
-  Kind = ::mair::mergeKind(Kind, Other.Kind);
   Properties |= Other.Properties;
-  refreshOptimizationProperties();
-  if (ProgramPoint *PP = getParent())
-    PP->invalidateSort();
+  mergeKind(Other.Kind);
   return true;
 }
 
@@ -441,23 +434,21 @@ void Observation::print(raw_ostream &OS) const {
     OS << " call";
   if (isMasked())
     OS << " masked";
-  if (const auto *Obs = getContiguousRegion()) {
+  if (const auto *Access = getContiguousRegion()) {
     OS << " ptr ";
-    Obs->print(OS);
+    Access->print(OS);
     OS << ", ";
-    if (Obs->hasSizeExpr())
-      Obs->getSizeExpr().print(OS);
+    if (Access->hasSizeExpr())
+      Access->getSizeExpr().print(OS);
     else
-      printAbstractValue(OS, Obs->getSize());
-    return;
-  }
-  if (const MaskedRegion *Masked = getMaskedRegion()) {
-    OS << " ";
-    Masked->print(OS);
+      printAbstractValue(OS, Access->getSize());
     return;
   }
   OS << " ";
-  getPeriodicRegion()->print(OS);
+  if (const MaskedRegion *Masked = getMaskedRegion())
+    Masked->print(OS);
+  else
+    getPeriodicRegion()->print(OS);
 }
 
 } // namespace mair

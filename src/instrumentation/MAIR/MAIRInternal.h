@@ -53,15 +53,12 @@ inline std::optional<uint64_t> getNonNegativeU64(const APInt &Value) {
 }
 
 inline void printAbstractValue(raw_ostream &OS, const AbstractValue &Value) {
-  if (Value.isUnknown()) {
+  if (Value.isUnknown())
     OS << "unknown";
-    return;
-  }
-  if (Value.isConstant()) {
+  else if (Value.isConstant())
     OS << Value.getConstant();
-    return;
-  }
-  printValueName(OS, *Value.getSymbol());
+  else
+    printValueName(OS, *Value.getSymbol());
 }
 
 bool isMaskedMemoryIntrinsic(const Instruction &I);

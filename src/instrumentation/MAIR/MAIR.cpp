@@ -131,7 +131,7 @@ StringRef ProgramPointSite::getKindName(Kind K) {
 void ProgramPointSite::print(raw_ostream &OS) const {
   auto PrintBlock = [&](const BasicBlock *BB) {
     if (BB)
-      BB->printAsOperand(OS, false);
+      printValueName(OS, *BB);
     else
       OS << "null";
   };
@@ -296,7 +296,7 @@ void ProgramPoint::print(raw_ostream &OS) const {
       ExecutionGuard->print(OS);
       if (const BasicBlock *Reset = ExecutionGuard->getResetBlock()) {
         OS << ", reset=";
-        Reset->printAsOperand(OS, false);
+        printValueName(OS, *Reset);
       }
     }
     OS << ", ";
@@ -495,11 +495,10 @@ ProgramPoint &MAIRGraph::createInstProgramPoint(const BasicBlock &BB,
       createProgramPointName(), Anchor, ProgramPoint::SiteKind::MemoryInst));
   const DataLayout &DL = Anchor.getModule()->getDataLayout();
   if (const auto *Transfer = dyn_cast<AnyMemTransferInst>(&Anchor)) {
-    PP.addObservation(makeObservation(Anchor, *Transfer->getRawDest(),
-                                      getAccessSize(*Transfer->getLength()),
+    AbstractValue Length = getAccessSize(*Transfer->getLength());
+    PP.addObservation(makeObservation(Anchor, *Transfer->getRawDest(), Length,
                                       AccessKind::Write, DL));
-    PP.addObservation(makeObservation(Anchor, *Transfer->getRawSource(),
-                                      getAccessSize(*Transfer->getLength()),
+    PP.addObservation(makeObservation(Anchor, *Transfer->getRawSource(), Length,
                                       AccessKind::Read, DL));
   } else {
     PP.addObservation(Observation::fromInstruction(Anchor, DL));

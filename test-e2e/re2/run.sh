@@ -81,6 +81,13 @@ build_one() {
     echo "reuse $sanitizer $variant"
     return 0
   fi
+  # Start from an empty directory. A compiler change makes CMake drop its
+  # cache, and the re-run configure then loses the -D source directories.
+  if [[ "$REBUILD" == 1 && -d "$build_dir" ]]; then
+    local retired=$REPO_DIR/.temp/recyclebin/$(date +%Y%m%d_%H%M)/re2-build/$(date +%s%N)/$sanitizer/$variant
+    mkdir -p "$(dirname "$retired")"
+    mv "$build_dir" "$retired"
+  fi
   mkdir -p "$build_dir"
   if [[ "$variant" == mair ]]; then
     export MAIR=1

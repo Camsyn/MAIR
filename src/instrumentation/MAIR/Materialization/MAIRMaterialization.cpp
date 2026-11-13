@@ -14,12 +14,6 @@ using namespace llvm;
 namespace mair {
 namespace {
 
-struct EdgeCursor {
-  const BasicBlock *From = nullptr;
-  const BasicBlock *To = nullptr;
-  Instruction *Cursor = nullptr;
-};
-
 struct PendingProgramPoint {
   const MaterializationUnit *Unit;
   Instruction *Cursor;
@@ -50,40 +44,29 @@ bool expressionAvailableAt(const MAIRScalarExpr &Expr, const Instruction &At,
   });
 }
 
-bool instructionPrecedes(const Instruction &Before, const Instruction &After) {
-  if (Before.getParent() != After.getParent())
-    return false;
-  return Before.comesBefore(&After);
-}
-
-bool validateGuard(const ProgramPoint &PP, const Instruction &Target,
-                   std::string &Failure) {
+Error validateGuard(const ProgramPoint &PP, const Instruction &Target) {
   const auto *Guard = std::get_if<AnyProvenanceExecutedGuard>(&PP.getGuard());
   if (!Guard)
-    return true;
+    return Error::success();
   if (const BasicBlock *Reset = Guard->getResetBlock())
-    if (Reset->getParent() != Target.getFunction()) {
-      Failure = "execution guard reset is outside the target function";
-      return false;
-    }
+    if (Reset->getParent() != Target.getFunction())
+      return createStringError(
+          "execution guard reset is outside the target function");
 
   for (Instruction *I : Guard->getProvenance()) {
-    if (!I || I->getFunction() != Target.getFunction()) {
-      Failure = "execution guard provenance is outside the target function";
-      return false;
-    }
-    if (I->getParent() == Target.getParent() &&
-        !instructionPrecedes(*I, Target)) {
-      Failure = "execution guard provenance does not precede its sink";
-      return false;
-    }
+    if (!I || I->getFunction() != Target.getFunction())
+      return createStringError(
+          "execution guard provenance is outside the target function");
+    if (I->getParent() == Target.getParent() && !I->comesBefore(&Target))
+      return createStringError(
+          "execution guard provenance does not precede its sink");
   }
-  return true;
+  return Error::success();
 }
 
-bool validateObservation(const Observation &Obs, const Instruction &Target,
-                         DominatorTree &DT, std::string &Failure) {
-  auto ValidateBounds = [&](const AbstractAccess &Region) {
+Error validateObservation(const Observation &Obs, const Instruction &Target,
+                          DominatorTree &DT) {
+  auto ValidateBounds = [&](const AbstractAccess &Region) -> Error {
     const Value *Base = Region.getBase();
     const AbstractValue &Offset = Region.getOffset();
     const AbstractValue &Size = Region.getSize();
@@ -97,29 +80,26 @@ bool validateObservation(const Observation &Obs, const Instruction &Target,
     bool SizeAvailable =
         Region.hasSizeExpr()
             ? expressionAvailableAt(Region.getSizeExpr(), Target, DT)
-            : isValueAvailableAt(Region.getSize(), Target, DT);
+            : isValueAvailableAt(Size, Target, DT);
     if (!Base || !Base->getType()->isPointerTy() ||
         (!OffsetIsCompletePointer && !isValueAvailableAt(*Base, Target, DT)) ||
         !OffsetHasMaterializableType || !SizeHasMaterializableType ||
-        !isValueAvailableAt(Region.getOffset(), Target, DT) || !SizeAvailable) {
-      Failure = "contiguous region has an unavailable or unknown value";
-      return false;
-    }
-    return true;
+        !isValueAvailableAt(Offset, Target, DT) || !SizeAvailable)
+      return createStringError(
+          "contiguous region has an unavailable or unknown value");
+    return Error::success();
   };
 
   if (const AbstractAccess *Region = Obs.getContiguousRegion())
     return ValidateBounds(*Region);
 
   if (const MaskedRegion *Region = Obs.getMaskedRegion()) {
-    if (!ValidateBounds(Region->getBounds()))
-      return false;
+    if (Error Err = ValidateBounds(Region->getBounds()))
+      return Err;
     if (const Value *Mask = Region->getDynamicMask())
-      if (!isValueAvailableAt(*Mask, Target, DT)) {
-        Failure = "masked region has an unavailable mask";
-        return false;
-      }
-    return true;
+      if (!isValueAvailableAt(*Mask, Target, DT))
+        return createStringError("masked region has an unavailable mask");
+    return Error::success();
   }
 
   const PeriodicRegion *Region = Obs.getPeriodicRegion();
@@ -127,21 +107,20 @@ bool validateObservation(const Observation &Obs, const Instruction &Target,
       !expressionAvailableAt(Region->getStart(), Target, DT) ||
       !expressionAvailableAt(Region->getStride(), Target, DT) ||
       !expressionAvailableAt(Region->getAccessSize(), Target, DT) ||
-      !expressionAvailableAt(Region->getTripCount(), Target, DT)) {
-    Failure = "periodic region has an unavailable or invalid expression";
-    return false;
-  }
-  return true;
+      !expressionAvailableAt(Region->getTripCount(), Target, DT))
+    return createStringError(
+        "periodic region has an unavailable or invalid expression");
+  return Error::success();
 }
 
 Expected<MAIRMaterializationPlan> buildPlan(const MAIRGraph &Graph, Function &F,
                                             DominatorTree &DT, LoopInfo &LI) {
-  MAIRMaterializationPlan Plan;
   if (!Graph.isLive())
     return createStringError("cannot instantiate an already consumed graph");
   if (!Graph.verify())
     return createStringError("cannot instantiate an invalid MAIRGraph");
 
+  MAIRMaterializationPlan Plan;
   for (const ProgramPoint *Point : Graph.allProgramPoints()) {
     const ProgramPoint &PP = *Point;
     if (PP.empty())
@@ -174,12 +153,11 @@ Expected<MAIRMaterializationPlan> buildPlan(const MAIRGraph &Graph, Function &F,
       Target = &Anchor;
     }
 
-    std::string Failure;
-    if (!validateGuard(PP, *Target, Failure))
-      return createStringError(Failure);
+    if (Error Err = validateGuard(PP, *Target))
+      return std::move(Err);
     for (const Observation &Obs : PP)
-      if (!validateObservation(Obs, *Target, DT, Failure))
-        return createStringError(Failure);
+      if (Error Err = validateObservation(Obs, *Target, DT))
+        return std::move(Err);
 
     MaterializationUnit Unit{&PP, PP.getSite(), PP.getGuard(), {}};
     for (const Observation &Obs : PP)
@@ -264,13 +242,13 @@ Value *lowerAbstractValue(const AbstractValue &Value, IRBuilder<> &Builder) {
 
 Value *lowerContiguous(const AbstractAccess &Region, IRBuilder<> &Builder) {
   Value *Base = const_cast<Value *>(Region.getBase());
-  if (Region.getOffset() == 0)
+  const AbstractValue &Offset = Region.getOffset();
+  if (Offset == 0)
     return Base;
-  if (Region.getOffset().isSymbol() &&
-      Region.getOffset().getSymbol()->getType()->isPointerTy())
-    return const_cast<Value *>(Region.getOffset().getSymbol());
-  Value *Offset = lowerAbstractValue(Region.getOffset(), Builder);
-  return Builder.CreateGEP(Type::getInt8Ty(Builder.getContext()), Base, Offset,
+  if (Offset.isSymbol() && Offset.getSymbol()->getType()->isPointerTy())
+    return const_cast<Value *>(Offset.getSymbol());
+  return Builder.CreateGEP(Type::getInt8Ty(Builder.getContext()), Base,
+                           lowerAbstractValue(Offset, Builder),
                            "mair.observation.gep");
 }
 
@@ -292,14 +270,15 @@ bool provenanceExecutesWithTarget(const ProgramPointGuard &Guard,
 
 Value *materializeGuard(const ProgramPointGuard &PPGuard, BasicBlock *Target,
                         Function &F) {
+  LLVMContext &Ctx = F.getContext();
   SmallVector<PHINode *, 8> InsertedPhis;
   SSAUpdater Updater(&InsertedPhis);
-  Updater.Initialize(Type::getInt1Ty(F.getContext()), "mair.executed");
+  Updater.Initialize(Type::getInt1Ty(Ctx), "mair.executed");
   SmallPtrSet<BasicBlock *, 8> Seen;
   const auto &Guard = std::get<AnyProvenanceExecutedGuard>(PPGuard);
   BasicBlock *Reset = const_cast<BasicBlock *>(Guard.getResetBlock());
   if (Reset) {
-    Updater.AddAvailableValue(Reset, ConstantInt::getFalse(F.getContext()));
+    Updater.AddAvailableValue(Reset, ConstantInt::getFalse(Ctx));
     Seen.insert(Reset);
   }
   bool EntryHasProvenance = false;
@@ -307,22 +286,50 @@ Value *materializeGuard(const ProgramPointGuard &PPGuard, BasicBlock *Target,
     if (I->getParent() == &F.getEntryBlock())
       EntryHasProvenance = true;
     else if (Seen.insert(I->getParent()).second)
-      Updater.AddAvailableValue(I->getParent(),
-                                ConstantInt::getTrue(F.getContext()));
+      Updater.AddAvailableValue(I->getParent(), ConstantInt::getTrue(Ctx));
   if (Reset != &F.getEntryBlock())
     Updater.AddAvailableValue(&F.getEntryBlock(),
-                              EntryHasProvenance
-                                  ? ConstantInt::getTrue(F.getContext())
-                                  : ConstantInt::getFalse(F.getContext()));
+                              ConstantInt::getBool(Ctx, EntryHasProvenance));
   return Updater.GetValueInMiddleOfBlock(Target);
 }
 
-EdgeCursor *findEdgeCursor(SmallVectorImpl<EdgeCursor> &Cursors,
-                           const BasicBlock *From, const BasicBlock *To) {
-  for (EdgeCursor &Cursor : Cursors)
-    if (Cursor.From == From && Cursor.To == To)
-      return &Cursor;
-  return nullptr;
+MaterializedObservation
+lowerObservation(const PlannedObservation &Obs, IRBuilder<> &Builder,
+                 DenseMap<const void *, Value *> &Cache) {
+  MaterializedObservation Materialized;
+  Materialized.Source = Obs.Source;
+  Materialized.Kind = Obs.Kind;
+  Materialized.Properties = Obs.Properties;
+  if (const auto *Contiguous = std::get_if<AbstractAccess>(&Obs.Region)) {
+    Materialized.Address = lowerContiguous(*Contiguous, Builder);
+    Materialized.AccessSize =
+        Contiguous->hasSizeExpr()
+            ? lowerExpr(Contiguous->getSizeExpr(), Builder, Cache)
+            : lowerAbstractValue(Contiguous->getSize(), Builder);
+  } else if (const auto *Masked = std::get_if<MaskedRegion>(&Obs.Region)) {
+    Materialized.Address = lowerContiguous(Masked->getBounds(), Builder);
+    Materialized.AccessSize =
+        lowerAbstractValue(Masked->getBounds().getSize(), Builder);
+    Materialized.MaskElementSize = Masked->getElementSize();
+    if (Masked->isConstantMask()) {
+      SmallVector<Constant *, 8> Elements;
+      Type *I1 = Type::getInt1Ty(Builder.getContext());
+      for (unsigned Lane = 0; Lane < Masked->getNumLanes(); ++Lane)
+        Elements.push_back(
+            ConstantInt::get(I1, Masked->getConstantMask().test(Lane)));
+      Materialized.Mask = ConstantVector::get(Elements);
+    } else {
+      Materialized.Mask = const_cast<Value *>(Masked->getDynamicMask());
+    }
+  } else {
+    const PeriodicRegion &Periodic = std::get<PeriodicRegion>(Obs.Region);
+    Materialized.Address = lowerExpr(Periodic.getStart(), Builder, Cache);
+    Materialized.Stride = lowerExpr(Periodic.getStride(), Builder, Cache);
+    Materialized.AccessSize =
+        lowerExpr(Periodic.getAccessSize(), Builder, Cache);
+    Materialized.TripCount = lowerExpr(Periodic.getTripCount(), Builder, Cache);
+  }
+  return Materialized;
 }
 
 } // namespace
@@ -351,7 +358,10 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
     return std::move(Err);
 
   DomTreeUpdater DTU(DT, DomTreeUpdater::UpdateStrategy::Eager);
-  SmallVector<EdgeCursor, 8> EdgeCursors;
+  // The cursor of each split edge is the terminator of its new exit block.
+  SmallDenseMap<std::pair<const BasicBlock *, const BasicBlock *>,
+                Instruction *, 8>
+      EdgeCursors;
   SmallVector<PendingProgramPoint, 8> Pending;
   MAIRInstantiationResult Result;
 
@@ -360,7 +370,7 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
       continue;
     const BasicBlock *From = Unit.Site.getEdgeFrom();
     const BasicBlock *To = Unit.Site.getEdgeTo();
-    if (findEdgeCursor(EdgeCursors, From, To))
+    if (EdgeCursors.contains({From, To}))
       continue;
     unsigned SuccNo = GetSuccessorNumber(From, To);
     CriticalEdgeSplittingOptions Options(&DT, &LI);
@@ -371,7 +381,7 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
     if (!VirtualExit)
       report_fatal_error(
           "Patch C edge split failed after successful preflight");
-    EdgeCursors.push_back({From, To, VirtualExit->getTerminator()});
+    EdgeCursors[{From, To}] = VirtualExit->getTerminator();
     ++Result.SplitEdges;
     Result.CFGChanged = true;
   }
@@ -379,79 +389,38 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
   for (const MaterializationUnit &Unit : Plan.units()) {
     Instruction *Cursor = nullptr;
     if (Unit.Site.isEdge()) {
-      EdgeCursor *Edge = findEdgeCursor(EdgeCursors, Unit.Site.getEdgeFrom(),
-                                        Unit.Site.getEdgeTo());
-      assert(Edge && "preflight edge must have an apply cursor");
-      Cursor = Edge->Cursor;
+      Cursor =
+          EdgeCursors.lookup({Unit.Site.getEdgeFrom(), Unit.Site.getEdgeTo()});
+      assert(Cursor && "preflight edge must have an apply cursor");
     } else {
       Cursor = const_cast<Instruction *>(&Unit.Site.getAnchor());
     }
 
-    IRBuilder<> UnguardedBuilder(Cursor);
-    IRBuilder<> *BuilderPtr = &UnguardedBuilder;
-    std::optional<IRBuilder<>> GuardBuilder;
+    Instruction *InsertPt = Cursor;
+    BasicBlock *Head = Cursor->getParent();
     bool IsGuarded =
         std::holds_alternative<AnyProvenanceExecutedGuard>(Unit.Guard) &&
-        !provenanceExecutesWithTarget(Unit.Guard, Cursor->getParent());
+        !provenanceExecutesWithTarget(Unit.Guard, Head);
     if (IsGuarded) {
-      Value *Guard = materializeGuard(Unit.Guard, Cursor->getParent(), F);
-      BasicBlock *Head = Cursor->getParent();
-      Instruction *ThenTerminator = SplitBlockAndInsertIfThen(
-          Guard, Cursor, /*Unreachable=*/false, nullptr, &DTU, &LI, nullptr);
+      Value *Guard = materializeGuard(Unit.Guard, Head, F);
+      InsertPt = SplitBlockAndInsertIfThen(Guard, Cursor, /*Unreachable=*/false,
+                                           nullptr, &DTU, &LI, nullptr);
+      // The split moves Cursor into the tail block. Earlier points pending at
+      // Cursor emit at the head's new branch, ahead of this guard.
       for (PendingProgramPoint &Point : Pending)
         if (Point.Cursor == Cursor)
           Point.Cursor = Head->getTerminator();
-      GuardBuilder.emplace(ThenTerminator);
-      BuilderPtr = &*GuardBuilder;
       ++Result.GuardBranches;
       Result.CFGChanged = true;
     }
 
+    IRBuilder<> Builder(InsertPt);
     SmallVector<MaterializedObservation, 4> Lowered;
     DenseMap<const void *, Value *> ExprCache;
-    for (const PlannedObservation &Obs : Unit.Observations) {
-      MaterializedObservation Materialized;
-      Materialized.Source = Obs.Source;
-      Materialized.Kind = Obs.Kind;
-      Materialized.Properties = Obs.Properties;
-      if (const auto *Contiguous = std::get_if<AbstractAccess>(&Obs.Region)) {
-        Materialized.Address = lowerContiguous(*Contiguous, *BuilderPtr);
-        Materialized.AccessSize =
-            Contiguous->hasSizeExpr()
-                ? lowerExpr(Contiguous->getSizeExpr(), *BuilderPtr, ExprCache)
-                : lowerAbstractValue(Contiguous->getSize(), *BuilderPtr);
-      } else if (const auto *Masked = std::get_if<MaskedRegion>(&Obs.Region)) {
-        Materialized.Address =
-            lowerContiguous(Masked->getBounds(), *BuilderPtr);
-        Materialized.AccessSize =
-            lowerAbstractValue(Masked->getBounds().getSize(), *BuilderPtr);
-        Materialized.MaskElementSize = Masked->getElementSize();
-        if (Masked->isConstantMask()) {
-          SmallVector<Constant *, 8> Elements;
-          Type *I1 = Type::getInt1Ty(BuilderPtr->getContext());
-          for (unsigned Lane = 0; Lane < Masked->getNumLanes(); ++Lane)
-            Elements.push_back(
-                ConstantInt::get(I1, Masked->getConstantMask().test(Lane)));
-          Materialized.Mask = ConstantVector::get(Elements);
-        } else {
-          Materialized.Mask = const_cast<Value *>(Masked->getDynamicMask());
-        }
-      } else {
-        const PeriodicRegion &Periodic = std::get<PeriodicRegion>(Obs.Region);
-        Materialized.Address =
-            lowerExpr(Periodic.getStart(), *BuilderPtr, ExprCache);
-        Materialized.Stride =
-            lowerExpr(Periodic.getStride(), *BuilderPtr, ExprCache);
-        Materialized.AccessSize =
-            lowerExpr(Periodic.getAccessSize(), *BuilderPtr, ExprCache);
-        Materialized.TripCount =
-            lowerExpr(Periodic.getTripCount(), *BuilderPtr, ExprCache);
-      }
-      Lowered.push_back(Materialized);
-    }
+    for (const PlannedObservation &Obs : Unit.Observations)
+      Lowered.push_back(lowerObservation(Obs, Builder, ExprCache));
 
-    Pending.push_back(
-        {&Unit, &*BuilderPtr->GetInsertPoint(), IsGuarded, std::move(Lowered)});
+    Pending.push_back({&Unit, InsertPt, IsGuarded, std::move(Lowered)});
   }
 
   for (const PendingProgramPoint &Point : Pending) {

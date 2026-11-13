@@ -14,6 +14,7 @@ set(LLVM_LINK_COMPONENTS
 set(MAIR_GTEST_DIR ${LLVM_MAIN_SRC_DIR}/../third-party/unittest/googletest)
 if(EXISTS ${MAIR_GTEST_DIR}/src/gtest-all.cc)
   add_llvm_executable(MAIRGraphTest
+    MAIRBarrierAnalysisTest.cpp
     MAIRGraphTest.cpp
     MAIRLoopHierarchyTest.cpp
     MAIRMaterializationTest.cpp
@@ -32,6 +33,7 @@ if(EXISTS ${MAIR_GTEST_DIR}/src/gtest-all.cc)
   add_dependencies(MAIRUnitTests MAIRGraphTest)
 else()
   add_unittest(MAIRUnitTests MAIRGraphTest
+    MAIRBarrierAnalysisTest.cpp
     MAIRGraphTest.cpp
     MAIRLoopHierarchyTest.cpp
     MAIRMaterializationTest.cpp

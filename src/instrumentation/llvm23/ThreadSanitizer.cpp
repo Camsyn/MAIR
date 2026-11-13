@@ -1026,6 +1026,78 @@ bool XsanThreadSanitizer::collectTargetsToIntrument(
 }
 
 #ifndef XSAN_PASS
+namespace {
+/// A periodic region whose trips cover contiguous bytes: its constant stride
+/// is no wider than its constant access size. TSan records it as one range. A
+/// wider stride leaves gaps, and one range over them would report races on
+/// bytes no trip touches.
+struct ContiguousPeriodicShape {
+  uint64_t Step;
+  uint64_t AccessSize;
+  bool Downward;
+};
+
+std::optional<ContiguousPeriodicShape>
+getContiguousPeriodicShape(const mair::PeriodicRegion &Region) {
+  using Kind = mair::MAIRScalarExpr::Kind;
+  const mair::MAIRScalarExpr &Stride = Region.getStride();
+  const mair::MAIRScalarExpr &AccessSize = Region.getAccessSize();
+  // The trip count may be wider than a pointer, such as the i65 of a
+  // backedge count plus one. Lowering truncates it: the trips of a nonzero
+  // stride span at least as many bytes as there are trips, so a real count
+  // fits in the address space.
+  if (Stride.getKind() != Kind::Constant ||
+      AccessSize.getKind() != Kind::Constant ||
+      !Region.getTripCount().getType()->isIntegerTy())
+    return std::nullopt;
+  const APInt &StrideValue = Stride.getConstant();
+  const APInt &SizeValue = AccessSize.getConstant();
+  if (StrideValue.isZero() || StrideValue.getSignificantBits() > 64 ||
+      SizeValue.getActiveBits() > 64)
+    return std::nullopt;
+  APInt Step = StrideValue.abs();
+  if (Step.getActiveBits() > 64 ||
+      Step.getZExtValue() > SizeValue.getZExtValue())
+    return std::nullopt;
+  return ContiguousPeriodicShape{Step.getZExtValue(), SizeValue.getZExtValue(),
+                                 StrideValue.isNegative()};
+}
+
+/// The alignment of the first byte of \p Region. A source whose address is a
+/// known distance past that byte proves the alignment common to its own and
+/// that distance.
+Align getContiguousStartAlign(const mair::Observation &Obs,
+                              const mair::AbstractAccess &Region,
+                              const DataLayout &DL) {
+  const mair::AbstractValue &Start = Region.getOffset();
+  Align Result(1);
+  for (Instruction *I : Obs.getInstructions()) {
+    const Value *Ptr = getLoadStorePointerOperand(I);
+    if (!Ptr)
+      continue;
+    std::optional<uint64_t> Distance;
+    if (Start.isSymbol() && Start.getSymbol() == Ptr) {
+      Distance = 0;
+    } else {
+      mair::AbstractAccess Access = mair::AbstractAccess::fromPointerAndSize(
+          *Ptr, mair::AbstractValue::constant(0), DL);
+      const mair::AbstractValue &Offset = Access.getOffset();
+      if (Access.getBase() != Region.getBase())
+        continue;
+      if (Offset == Start)
+        Distance = 0;
+      else if (Offset.isConstant() && Start.isConstant() &&
+               Offset.getConstant() >= Start.getConstant())
+        Distance = Offset.getConstant() - Start.getConstant();
+    }
+    if (Distance)
+      Result = std::max(Result,
+                        commonAlignment(getLoadStoreAlignment(I), *Distance));
+  }
+  return Result;
+}
+} // namespace
+
 bool XsanThreadSanitizer::instrumentMAIRObservation(
     const mair::MaterializedObservation &Obs, IRBuilderBase &Builder,
     const DataLayout &DL) {
@@ -1036,9 +1108,6 @@ bool XsanThreadSanitizer::instrumentMAIRObservation(
   if (SelectedSources.empty())
     report_fatal_error("TSan MAIR observation has no source instruction");
 
-  auto InstrumentAtSource = [&](Instruction &Source) {
-    return instrumentLoadOrStore(InstructionInfo(&Source), DL);
-  };
   auto useOriginalAccessDebugLoc = [&](IRBuilderBase &IRB) {
     if (DebugLoc Loc = Obs.Source->getStableDebugLoc())
       IRB.SetCurrentDebugLocation(Loc);
@@ -1067,64 +1136,72 @@ bool XsanThreadSanitizer::instrumentMAIRObservation(
     return true;
   }
 
-  Type *SourceType =
-      isa<LoadInst>(Source)
-          ? cast<LoadInst>(Source)->getType()
-          : cast<StoreInst>(Source)->getValueOperand()->getType();
-  const auto *Size = dyn_cast_or_null<ConstantInt>(Obs.AccessSize);
-  // volatile observation should be considered as a normal obs.
-  // bool IsVolatile = isa<LoadInst>(Source)
-  //                       ? cast<LoadInst>(Source)->isVolatile()
-  //                       : cast<StoreInst>(Source)->isVolatile();
-  TypeSize SourceSize = DL.getTypeStoreSize(SourceType);
-  bool CanUseOptimizedSite =
-      SelectedSources.size() == 1 &&
-      Obs.Source->getInstructions().size() == 1 && Obs.Source->isContiguous() &&
-      !SourceType->isVectorTy() && !SourceSize.isScalable() && Size &&
-      Size->getValue().getActiveBits() < 32 &&
-      Size->getZExtValue() == SourceSize.getFixedValue() && /* !IsVolatile && */
-      !isVtableAccess(Source);
-  if (!CanUseOptimizedSite) {
-    bool Changed = false;
-    for (Instruction *Selected : SelectedSources)
-      Changed |= InstrumentAtSource(*Selected);
-    return Changed;
-  }
-
-  if (Obs.Address->isSwiftError())
-    return false;
-  int Idx = getMemoryAccessFuncIndex(SourceType, Obs.Address, DL);
-  // TODO: TSan MAIR lowering does not yet support a nonstandard width, such
-  // as an i24 store. Returning here drops that access. If an earlier pass used
-  // it to cover a smaller standard access, that smaller access is not
-  // instrumented either.
-  if (Idx < 0)
-    return false;
-
-  Align Alignment = isa<LoadInst>(Source) ? cast<LoadInst>(Source)->getAlign()
-                                          : cast<StoreInst>(Source)->getAlign();
-  uint32_t TypeSizeInBits = DL.getTypeStoreSizeInBits(SourceType);
-  bool IsCompoundRW = Obs.Kind == mair::AccessKind::ReadWrite;
-  bool IsWrite = Obs.Kind != mair::AccessKind::Read;
-  FunctionCallee OnAccessFunc;
-  if (Alignment >= Align(8) ||
-      (Alignment.value() % (TypeSizeInBits / 8)) == 0) {
-    if (IsCompoundRW)
-      OnAccessFunc = TsanCompoundRW[Idx];
-    else
-      OnAccessFunc = IsWrite ? TsanWrite[Idx] : TsanRead[Idx];
-  } else if (IsCompoundRW) {
-    OnAccessFunc = TsanUnalignedCompoundRW[Idx];
-  } else {
-    OnAccessFunc = IsWrite ? TsanUnalignedWrite[Idx] : TsanUnalignedRead[Idx];
-  }
-
+  // A volatile source reaches here only when volatile is not distinguished;
+  // it is then recorded like a plain access (CanInstrumentViaMAIR).
   __xsan::InstrumentationIRBuilder IRB(Builder);
   useOriginalAccessDebugLoc(IRB);
-  IRB.CreateCall(OnAccessFunc, Obs.Address);
-  if (IsCompoundRW || IsWrite)
+  Value *Addr = Obs.Address;
+  Value *Size = Obs.AccessSize;
+  Align StartAlign(1);
+  if (const mair::PeriodicRegion *Periodic = Obs.Source->getPeriodicRegion()) {
+    // CanInstrumentViaMAIR accepts only periodic regions whose trips cover
+    // contiguous bytes: [Start, Start + (Trips - 1) * Stride + AccessSize)
+    // for an upward stride, ending at Start + AccessSize for a downward one.
+    std::optional<ContiguousPeriodicShape> Shape =
+        getContiguousPeriodicShape(*Periodic);
+    if (!Shape)
+      report_fatal_error("TSan MAIR periodic observation has gaps");
+    auto *Zero = ConstantInt::get(IntptrTy, 0);
+    Value *Trips = IRB.CreateZExtOrTrunc(Obs.TripCount, IntptrTy);
+    Value *Span = IRB.CreateMul(
+        IRB.CreateSub(Trips, ConstantInt::get(IntptrTy, 1)),
+        ConstantInt::get(IntptrTy, Shape->Step), "mair.tsan.span");
+    // Zero trips touch no byte, and Trips - 1 would wrap.
+    Size = IRB.CreateSelect(
+        IRB.CreateICmpEQ(Trips, Zero), Zero,
+        IRB.CreateAdd(Span, ConstantInt::get(IntptrTy, Shape->AccessSize)),
+        "mair.tsan.size");
+    if (Shape->Downward)
+      Addr = IRB.CreateGEP(IRB.getInt8Ty(), Addr, IRB.CreateNeg(Span),
+                           "mair.tsan.start");
+  } else {
+    StartAlign = getContiguousStartAlign(
+        *Obs.Source, *Obs.Source->getContiguousRegion(), DL);
+  }
+
+  const bool IsCompoundRW = Obs.Kind == mair::AccessKind::ReadWrite;
+  const bool IsWrite = Obs.Kind != mair::AccessKind::Read;
+  auto *ConstantSize = dyn_cast<ConstantInt>(Size);
+  if (ConstantSize && ConstantSize->isZero())
+    return false;
+  if (ConstantSize && ConstantSize->getValue().ule(16) &&
+      ConstantSize->getValue().isPowerOf2()) {
+    // The same choice native TSan makes for a single access of this width.
+    uint64_t Bytes = ConstantSize->getZExtValue();
+    size_t Idx = llvm::countr_zero(Bytes);
+    FunctionCallee OnAccessFunc;
+    if (StartAlign >= Align(8) || StartAlign.value() % Bytes == 0) {
+      if (IsCompoundRW)
+        OnAccessFunc = TsanCompoundRW[Idx];
+      else
+        OnAccessFunc = IsWrite ? TsanWrite[Idx] : TsanRead[Idx];
+    } else if (IsCompoundRW) {
+      OnAccessFunc = TsanUnalignedCompoundRW[Idx];
+    } else {
+      OnAccessFunc = IsWrite ? TsanUnalignedWrite[Idx] : TsanUnalignedRead[Idx];
+    }
+    IRB.CreateCall(OnAccessFunc, Addr);
+  } else {
+    // Any other width, including a nonstandard one such as an i24 store, and
+    // every size known only at run time. A write range also covers the read
+    // of a compound read-write: a write conflicts with every access a read
+    // conflicts with.
+    IRB.CreateCall(IsWrite ? TsanWriteRange : TsanReadRange,
+                   {Addr, IRB.CreateZExtOrTrunc(Size, IntptrTy)});
+  }
+  if (IsWrite)
     NumInstrumentedWrites++;
-  if (IsCompoundRW || !IsWrite)
+  if (Obs.Kind != mair::AccessKind::Write)
     NumInstrumentedReads++;
   return true;
 }
@@ -1166,20 +1243,10 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
       return false;
     };
 
-    auto CanInstrumentViaMAIR = [&](const mair::Observation &Obs) {
-      // A distinguished volatile access needs __tsan_volatile_*, which the
-      // native lowering emits.
-      if (!Obs.isContiguous() || (ClDistinguishVolatile && Obs.isVolatile()) ||
-          Obs.isAtomic() || Obs.getInstructions().size() != 1)
-        return false;
-
-      // TODO: Treat memory intrinsics as ordinary observations. They are
-      // call-like and skipped below; ThreadSanitizer's original lowering
-      // instruments them until then.
-      if (Obs.isCallLike() || !Obs.hasConcreteRange())
-        return false;
-
-      Instruction *Source = Obs.getInstructions().front();
+    // Native TSan's per-access filters. Every source of an observation must
+    // pass them, so that a merged or combined observation never records an
+    // access native TSan would omit.
+    auto CanInstrumentSource = [&](Instruction *Source) {
       auto *LI = dyn_cast<LoadInst>(Source);
       auto *SI = dyn_cast<StoreInst>(Source);
       if ((!LI && !SI) || __xsan::DelegateToXSan::is(*Source) ||
@@ -1191,13 +1258,46 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
         return false;
 
       Value *Addr = LI ? LI->getPointerOperand() : SI->getPointerOperand();
-      if (!shouldInstrumentReadWriteFromAddress(Source->getModule(), Addr) ||
+      if (Addr->isSwiftError() ||
+          !shouldInstrumentReadWriteFromAddress(Source->getModule(), Addr) ||
           (LI && PointsToConstantData(Addr)))
         return false;
 
       const AllocaInst *AI = findAllocaForValue(Addr);
       return !AI || !ClOmitNonCaptured ||
              PointerMayBeCaptured(AI, /*ReturnCaptures=*/true);
+    };
+
+    // An observation may merge several sources (LocationMerge, LIOM, COM) or
+    // stand for all trips of a loop access (LPOC). TSan records it as one
+    // access of its bytes, which must be contiguous: a contiguous region with
+    // a known size, at a constant or symbolic offset, or a periodic region
+    // without gaps. Merging requires equal levels, which TSan gives reads,
+    // writes and read-writes each their own, so the kind is one of the
+    // sources' kind and a read is never recorded as a write.
+    auto CanInstrumentViaMAIR = [&](const mair::Observation &Obs) {
+      // TODO: Treat memory intrinsics as ordinary observations. They are
+      // call-like and skipped below; ThreadSanitizer's original lowering
+      // instruments them until then.
+      // A distinguished volatile access needs __tsan_volatile_*, which the
+      // native lowering emits. A merged observation is volatile if any of
+      // its sources is.
+      if ((ClDistinguishVolatile && Obs.isVolatile()) || Obs.isAtomic() ||
+          Obs.isCallLike() || Obs.getInstructions().empty())
+        return false;
+
+      if (const mair::AbstractAccess *Region = Obs.getContiguousRegion()) {
+        if (Region->getOffset().isUnknown() ||
+            (!Region->hasSizeExpr() && !Region->getSize().isConstant()))
+          return false;
+      } else if (const mair::PeriodicRegion *Periodic =
+                     Obs.getPeriodicRegion()) {
+        if (!getContiguousPeriodicShape(*Periodic))
+          return false;
+      } else {
+        return false;
+      }
+      return all_of(Obs.getInstructions(), CanInstrumentSource);
     };
 
     MAIRSelection = mair::selectMaterializableObservations(

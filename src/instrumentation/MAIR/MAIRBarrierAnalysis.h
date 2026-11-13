@@ -1,5 +1,7 @@
 #pragma once
 
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
@@ -11,7 +13,9 @@
 namespace mair {
 
 using llvm::any_of;
+using llvm::ArrayRef;
 using llvm::BasicBlock;
+using llvm::BitVector;
 using llvm::DenseMap;
 using llvm::Instruction;
 using llvm::make_range;
@@ -37,10 +41,21 @@ public:
     return hasBarrierBetween(BB, From, To, /*Forward=*/false);
   }
   bool hasFwdBarrierPath(const BasicBlock &From, const BasicBlock &To) {
-    return hasBarrierPath(From, To, /*Forward=*/true);
+    return hasBarrierPaths(From, {&To}, /*Forward=*/true)[0];
   }
   bool hasBwdBarrierPath(const BasicBlock &From, const BasicBlock &To) {
-    return hasBarrierPath(From, To, /*Forward=*/false);
+    return hasBarrierPaths(To, {&From}, /*Forward=*/false)[0];
+  }
+  /// Batch forms that share one search per witness block: bit I of the result
+  /// is hasFwdBarrierPath(From, *To[I]), respectively
+  /// hasBwdBarrierPath(*From[I], To).
+  BitVector hasFwdBarrierPaths(const BasicBlock &From,
+                               ArrayRef<const BasicBlock *> To) {
+    return hasBarrierPaths(From, To, /*Forward=*/true);
+  }
+  BitVector hasBwdBarrierPaths(ArrayRef<const BasicBlock *> From,
+                               const BasicBlock &To) {
+    return hasBarrierPaths(To, From, /*Forward=*/false);
   }
   bool hasFwdBarrier(const BasicBlock &BB) {
     return isBarrierBlock(BB, /*Forward=*/true);
@@ -68,8 +83,8 @@ private:
   bool isBarrierBlock(const BasicBlock &BB, bool Forward);
   bool hasBarrierBetween(const BasicBlock &BB, const Instruction *From,
                          const Instruction *To, bool Forward);
-  bool hasBarrierPath(const BasicBlock &From, const BasicBlock &To,
-                      bool Forward);
+  BitVector hasBarrierPaths(const BasicBlock &Witness,
+                            ArrayRef<const BasicBlock *> Covered, bool Forward);
 };
 
 template <class BarrierTrait = DefaultBarrierTrait>

@@ -260,16 +260,25 @@ TEST(MAIRBarrierAnalysis, MatchesPerPairSearchOnRandomGraphs) {
     llvm::Function &F = generateFunction(M, Rng);
     ASSERT_FALSE(llvm::verifyFunction(F, &llvm::errs()));
     MAIRBarrierAnalysis<BarrierCallIsBarrier> BA;
-    for (const llvm::BasicBlock &From : F)
-      for (const llvm::BasicBlock &To : F) {
-        SCOPED_TRACE(("round " + llvm::Twine(Round) + ": " + From.getName() +
-                      " -> " + To.getName())
+    llvm::SmallVector<const llvm::BasicBlock *, 16> Blocks;
+    for (const llvm::BasicBlock &BB : F)
+      Blocks.push_back(&BB);
+    for (const llvm::BasicBlock &Witness : F) {
+      // Every block as covered block at once, as the graph builder asks.
+      llvm::BitVector Fwd = BA.hasFwdBarrierPaths(Witness, Blocks);
+      llvm::BitVector Bwd = BA.hasBwdBarrierPaths(Blocks, Witness);
+      for (auto [I, Covered] : llvm::enumerate(Blocks)) {
+        SCOPED_TRACE(("round " + llvm::Twine(Round) + ": witness " +
+                      Witness.getName() + ", covered " + Covered->getName())
                          .str());
-        EXPECT_EQ(BA.hasFwdBarrierPath(From, To),
-                  referenceBarrierPath(From, To, /*Forward=*/true));
-        EXPECT_EQ(BA.hasBwdBarrierPath(From, To),
-                  referenceBarrierPath(From, To, /*Forward=*/false));
+        EXPECT_EQ(BA.hasFwdBarrierPath(Witness, *Covered),
+                  referenceBarrierPath(Witness, *Covered, /*Forward=*/true));
+        EXPECT_EQ(Fwd[I], BA.hasFwdBarrierPath(Witness, *Covered));
+        EXPECT_EQ(BA.hasBwdBarrierPath(*Covered, Witness),
+                  referenceBarrierPath(*Covered, Witness, /*Forward=*/false));
+        EXPECT_EQ(Bwd[I], BA.hasBwdBarrierPath(*Covered, Witness));
       }
+    }
   }
 }
 

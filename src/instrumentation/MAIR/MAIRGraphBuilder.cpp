@@ -2,6 +2,7 @@
 
 #include "MAIR/MAIRInternal.h"
 
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
@@ -249,20 +250,42 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
       IDom = GetIDom(Tree, *IDom);
     return IDom;
   };
+  // Blocks with the same witness share one barrier search, so collect the
+  // queries per witness first.
+  using CoveredBlocks = SmallVector<const BasicBlock *, 4>;
+  DenseMap<const BasicBlock *, CoveredBlocks> FwdQueries, BwdQueries;
+  for (BasicBlock &BB : F) {
+    if (const BasicBlock *IDom = GetIDomInScope(DT, BB))
+      if (!BA.isFwdBarrier(*IDom->getTerminator()))
+        FwdQueries[IDom].push_back(&BB);
+    if (const BasicBlock *IPDom = GetIDomInScope(PDT, BB))
+      if (!BA.isBwdBarrier(*BB.getTerminator()))
+        BwdQueries[IPDom].push_back(&BB);
+  }
+  // The witness of each covered block that no barrier separates from it.
+  DenseMap<const BasicBlock *, const BasicBlock *> DomWitness, PostDomWitness;
+  for (auto &[IDom, Blocks] : FwdQueries) {
+    BitVector Barred = BA.hasFwdBarrierPaths(*IDom, Blocks);
+    for (auto [I, BB] : enumerate(Blocks))
+      if (!Barred[I])
+        DomWitness[BB] = IDom;
+  }
+  for (auto &[IPDom, Blocks] : BwdQueries) {
+    BitVector Barred = BA.hasBwdBarrierPaths(Blocks, *IPDom);
+    for (auto [I, BB] : enumerate(Blocks))
+      if (!Barred[I])
+        PostDomWitness[BB] = IPDom;
+  }
   for (BasicBlock &BB : F) {
     MAIRGraph &Scope = ScopeFor(BB);
     BlockPoints &ScopePPs = OrderedPPs[&Scope];
-    if (const BasicBlock *IDom = GetIDomInScope(DT, BB))
-      if (!BA.isFwdBarrier(*IDom->getTerminator()) &&
-          !BA.hasFwdBarrierPath(*IDom, BB))
-        Scope.addEdge(*ScopePPs[IDom].back(), *ScopePPs[&BB].front(),
-                      PPEdgeKind::Dom);
-    if (const BasicBlock *IPDom = GetIDomInScope(PDT, BB))
-      if (!BA.isBwdBarrier(*BB.getTerminator()) &&
-          !BA.hasBwdBarrierPath(BB, *IPDom))
-        Scope.addEdge(*ScopePPs[IPDom].front(), *ScopePPs[&BB].back(),
-                      PPEdgeKind::PostDom,
-                      iteratedCycleBetween(BB, *IPDom, Cycles));
+    if (const BasicBlock *IDom = DomWitness.lookup(&BB))
+      Scope.addEdge(*ScopePPs[IDom].back(), *ScopePPs[&BB].front(),
+                    PPEdgeKind::Dom);
+    if (const BasicBlock *IPDom = PostDomWitness.lookup(&BB))
+      Scope.addEdge(*ScopePPs[IPDom].front(), *ScopePPs[&BB].back(),
+                    PPEdgeKind::PostDom,
+                    iteratedCycleBetween(BB, *IPDom, Cycles));
   }
 
   return Graph;

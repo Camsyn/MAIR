@@ -77,8 +77,14 @@ public:
     else
       buildMAIRGraphO1Pipeline(PM);
     PM.run(*Graph, GAM);
+#ifndef NDEBUG
+    // Verification walks every program point, edge and observation again, and
+    // instantiate() verifies the graph before it plans the lowering anyway.
+    // So only assertion-enabled builds also check right after the pipeline,
+    // as mair-opt does.
     if (!Graph->verify())
       return llvm::createStringError("MAOpt produced an invalid MAIRGraph");
+#endif
     for (MAIRGraph *Scope : Graph->graphs())
       GAM.clear(*Scope, F.getName());
     Optimized = true;

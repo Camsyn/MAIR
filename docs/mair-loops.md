@@ -75,7 +75,7 @@ barrier 也要考虑重复执行：被覆盖的一端所在块如果能在不经
 
 宿主 LLVM 的 `-stats` 在 Release 构建里不会打印。要看每个 pass 实际改了什么，用 `-mair-stats`。`xclang -mair-stats` 会把它转成 `-mllvm -mair-stats`；`mair-opt -mair-stats` 直接认这个选项。每个编译单元在 stderr 打一块汇总，不按函数展开，避免 C++ mangled 名字淹没构建日志。`default<O1>` / `default<Og>` 里重复出现的 pass 带 `#1`、`#2`，所以第二次不变外提不会和第一次混在一起。`in` 仍按每次本层调用累计；比较效果看 `preheader`、`exit`、`range`、`periodic`、`merged`、`intra`、`inter`、`hoisted`、`sunk`。
 
-sanitizer 编译还会多一行 `select`，在优化之后统计 lowering 去向：`in` 是非 call-like 的终态 Observation，`lowered` 交给 MAIR 物化，`native` 退回 sanitizer 自己逐访问插桩；`multi`（多源，合并产物）、`symbolic`（非常量偏移/大小或非连续区间，含 periodic）、`vector`、`shared`（来源同时被一个退回的 Observation 持有）说明退回原因，其余退回原因是 sanitizer 自身判定（如 ASan 安全栈访问、TSan 未逃逸 alloca）。`fallback` 是退回 native 的来源指令数。实现在 `selectMaterializableObservations`（`src/instrumentation/MAIR/Materialization/MAIRMaterialization.cpp`），测试 `test/MAIR/TestCases/asan/mair-select-stats.c`。
+sanitizer 编译还会多一行 `select`，在优化之后统计 lowering 去向：`in` 是非 call-like 的终态 Observation，`lowered` 交给 MAIR 物化，`native` 退回 sanitizer 自己逐访问插桩；`multi`（多源，合并产物）、`symbolic`（非常量偏移/大小或非连续区间，含 periodic）、`vector`、`shared`（来源同时被一个退回的 Observation 持有）说明退回原因，其余退回原因是 sanitizer 自身判定（如 ASan 安全栈访问、TSan 未逃逸 alloca）。`fallback` 是退回 native 的来源指令数。实现在 `selectMaterializableObservations`（`src/instrumentation/MAIR/Materialization/MAIRMaterialization.cpp`），测试 `test/MAIR/TestCases/asan/mair-select-stats.c`。这几个原因字段只描述 Observation 的形状；ASan 已能 lowering 多源、符号区间、periodic 和固定宽度向量（见“ASan 的 lowering”），在 ASan 下它们只剩 masked 区域和来源本身被 ASan 拒绝的情况。
 
 统计汇总按函数首次出现的顺序遍历各函数的 pass visits，以 pass 标签首次出现的位置决定行顺序；不是全局事件时间顺序。汇总阶段一次累计，保持 ordinal、字段顺序及只含 `in` 的行，全零行不打印。
 
@@ -96,6 +96,18 @@ MAOpt 的调用者通过 `allProgramPoints()` 读取当前图，不维护额外�
 符号地址只有在能够证明字节差时才合并。有 ScalarEvolution 时使用地址 SCEV 的常量差；证明失败即保留原观察。没有该分析时，只用 LLVM 的常量偏移剥离匹配相同剩余地址，以 APInt 计算差值，不把整数 `add` 当成不回绕的地址距离。
 
 Observation 合并保留完整来源指令序列及重复项。若右项严格包含左项，右项来源放在前面；相等、左项包含或非包含的区间并集仍按左后右追加。首项及首个有效 debug location 依赖这个顺序，不能把来源改成集合。
+
+## ASan 的 lowering
+
+ASan 按 Observation 的区域检查，而不是按来源指令逐个检查（`XsanAddressSanitizer::instrumentMAIRObservation` 和 `instrumentFunctionViaMAIR` 里的 `CanInstrumentViaMAIR`，`src/instrumentation/llvm23/AddressSanitizer.cpp`）。接受条件：每个来源都是 native ASan 也会检查的 load/store（`getInterestingMemoryOperands` 恰好给出一个操作数、不被安全栈/全局访问优化省掉、不是 scalable 向量）；区域是大小已知的连续区间（偏移可以是符号，大小可以是 trip count 表达式），或 periodic 区域。任一来源不满足时整个 Observation 退回 native，由 native 自己决定每个来源查不查。
+
+- 合并区间没有空洞：`AbstractAccess::merge` 只合并重叠或相邻的区间，`mergeExpressionSizedRanges` 要求区间长度不小于起点差，LIOM/COM/LPOC 只合并相等的区域。所以查整个区间不会查到来源没碰过的字节。
+- 单个未合并的访问（含固定宽度向量）照旧按 native 方式检查。不超过 16 字节的区间走内联检查：对齐时一次 shadow load，否则查首末两个字节，与 native 对不对齐访问的做法相同；中间至多跨一个 granule，ASan 自己的 redzone 不会这么窄。更长的区间或长度是表达式的区间调用 `__asan_loadN/storeN`，逐字节检查（`__asan_region_is_poisoned`）。
+- periodic 区域调用 `__asan_{load,store}_periodic(start, stride, size, count)`（recover 模式带 `_noabort`，`src/runtime/lib/asan/asan_rtl.cpp`）。runtime 按 stride 符号算出最低地址，count 为 0 不查；先用一次 shadow 扫描查整个外包区间，干净则全部合法；否则（或 stride 超过 1 KiB 时）按迭代顺序逐个访问检查，报告第一个越界访问的地址和单次访问大小，空隙中的 poison 不报。内核 ASan 和 `-asan-force-experiment` 没有这个入口，periodic 区域退回 native。
+- 报告：调试位置取第一个来源（`Observation::getStableDebugLoc`），大小可能是合并后的区间大小。读写合并后按写报告；但若所有来源访问同一地址同一大小、且第一个来源是 load（`x[i]++`），按读报告，与 native 先查到的 load 一致。
+- 检查放在 Observation 所在的 ProgramPoint：LPOC 的区间/periodic 观察在循环出口（嵌套循环可再被外层不变外提提到外层 preheader），即访问发生之后，这是 ASan 已有的规则（见上文“输入与优化规则”）。
+
+测试：`test/MAIR/TestCases/asan/mair-merged-range.c`、`mair-loop-range.c`（IR），`mair-range-runtime.c`（越界仍报告、界内不误报，含只有空隙被 poison 的 strided 访问），`mair-periodic-runtime.c`（直接调用 runtime 入口的边界情况）。
 
 ## 可复现验证
 

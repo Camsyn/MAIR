@@ -4188,6 +4188,23 @@ void XsanAddressSanitizer::instrumentMAIRObservation(
   InstrumentationIRBuilder IRB(InsertBefore);
   useOriginalAccessDebugLoc(IRB, Loc);
 
+  if (Obs.isPeriodic()) {
+    // One access over all iterations of a loop. The runtime works out the
+    // footprint from the stride's sign and skips a zero trip count, and checks
+    // strided accesses one by one rather than the gaps between them.
+    std::string Name = ClMemoryAccessCallbackPrefix +
+                       (IsWrite ? "store" : "load") + "_periodic" +
+                       (Recover ? "_noabort" : "");
+    FunctionCallee Callback = First->getModule()->getOrInsertFunction(
+        Name, IRB.getVoidTy(), IntptrTy, IntptrTy, IntptrTy, IntptrTy);
+    RTCI.createRuntimeCall(IRB, Callback,
+                           {IRB.CreatePointerCast(Obs.Address, IntptrTy),
+                            IRB.CreateSExtOrTrunc(Obs.Stride, IntptrTy),
+                            IRB.CreateZExtOrTrunc(Obs.AccessSize, IntptrTy),
+                            IRB.CreateZExtOrTrunc(Obs.TripCount, IntptrTy)});
+    return;
+  }
+
   // A contiguous range. Its start is where some source starts, so the
   // smallest source alignment holds for it.
   Align Alignment = getLoadStoreAlignment(First);
@@ -4320,7 +4337,8 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
   // Whether one check of Obs's region can stand in for the native checks of
   // all its sources. The region of a merged observation is the gap-free union
   // of its sources' bytes (AbstractAccess::merge joins only overlapping or
-  // adjacent ranges), so the check covers exactly the bytes the sources touch.
+  // adjacent ranges), and a periodic one is checked access by access by the
+  // runtime, so the check covers exactly the bytes the sources touch.
   auto CanInstrumentViaMAIR = [&](const mair::Observation &Obs) {
     if ((ClDebugMin >= 0 && ClDebugMax >= 0) || Obs.isCallLike())
       return false;
@@ -4330,6 +4348,11 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
       // The size must be known, as a constant or a trip count expression.
       if (Region->getOffset().isUnknown() ||
           (!Region->hasSizeExpr() && !Region->getSize().isConstant()))
+        return false;
+    } else if (Obs.isPeriodic()) {
+      // Only the user-space runtime has periodic checks, without the
+      // experiment variants.
+      if (CompileKernel || ClForceExperiment != 0)
         return false;
     } else {
       return false;

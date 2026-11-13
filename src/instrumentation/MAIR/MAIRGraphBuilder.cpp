@@ -251,22 +251,18 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
   };
   for (BasicBlock &BB : F) {
     MAIRGraph &Scope = ScopeFor(BB);
-    ProgramPoint *EntryPP = OrderedPPs[&Scope][&BB].front();
-    ProgramPoint *ExitPP = OrderedPPs[&Scope][&BB].back();
-    assert(EntryPP && ExitPP);
-    if (const BasicBlock *IDom = GetIDomInScope(DT, BB)) {
-      ProgramPoint *Pred = OrderedPPs[&Scope][IDom].back();
+    BlockPoints &ScopePPs = OrderedPPs[&Scope];
+    if (const BasicBlock *IDom = GetIDomInScope(DT, BB))
       if (!BA.isFwdBarrier(*IDom->getTerminator()) &&
           !BA.hasFwdBarrierPath(*IDom, BB))
-        Scope.addEdge(*Pred, *EntryPP, PPEdgeKind::Dom);
-    }
-    if (const BasicBlock *IPDom = GetIDomInScope(PDT, BB)) {
-      ProgramPoint *Succ = OrderedPPs[&Scope][IPDom].front();
+        Scope.addEdge(*ScopePPs[IDom].back(), *ScopePPs[&BB].front(),
+                      PPEdgeKind::Dom);
+    if (const BasicBlock *IPDom = GetIDomInScope(PDT, BB))
       if (!BA.isBwdBarrier(*BB.getTerminator()) &&
           !BA.hasBwdBarrierPath(BB, *IPDom))
-        Scope.addEdge(*Succ, *ExitPP, PPEdgeKind::PostDom,
+        Scope.addEdge(*ScopePPs[IPDom].front(), *ScopePPs[&BB].back(),
+                      PPEdgeKind::PostDom,
                       iteratedCycleBetween(BB, *IPDom, Cycles));
-    }
   }
 
   return Graph;

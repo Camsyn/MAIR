@@ -28,8 +28,6 @@ namespace {
 class MAIRLLVMWriter final : public AssemblyAnnotationWriter {
   DenseMap<const Instruction *, SmallVector<const ProgramPoint *, 2>>
       AnchoredProgramPoints;
-  void emitProgramPointLine(const ProgramPoint &PP,
-                            formatted_raw_ostream &OS) const;
 
 public:
   explicit MAIRLLVMWriter(ArrayRef<const MAIRGraph *> Graphs) {
@@ -129,10 +127,7 @@ struct DOTGraphTraits<const mair::MAIRGraphDOTView *>
     raw_string_ostream OS(Attrs);
     mair::PPEdgeKind Kind = I.getKind();
     OS << "label=\"" << mair::getEdgeKindName(Kind) << "\"";
-    if (Kind == mair::PPEdgeKind::Dom)
-      OS << ", color=blue";
-    else
-      OS << ", color=red";
+    OS << (Kind == mair::PPEdgeKind::Dom ? ", color=blue" : ", color=red");
     return OS.str();
   }
 };
@@ -148,36 +143,21 @@ static const Function &getFunctionForDump(const MAIRGraph &Graph) {
   return *F;
 }
 
-static const Module &getModuleForDump(ArrayRef<const MAIRGraph *> Graphs) {
-  if (Graphs.empty())
-    report_fatal_error("cannot dump LLVM module without MAIR graphs");
-
-  if (!Graphs.front())
-    report_fatal_error("cannot dump LLVM module with a null MAIR graph");
-  const Function &F = getFunctionForDump(*Graphs.front());
-  const Module *M = F.getParent();
-  if (!M)
-    report_fatal_error("cannot dump LLVM for a function without a module");
-  return *M;
-}
-
-void MAIRLLVMWriter::emitProgramPointLine(const ProgramPoint &PP,
-                                          formatted_raw_ostream &OS) const {
-  std::string Text = PP.toString();
-  SmallVector<StringRef, 4> Lines;
-  StringRef(Text).split(Lines, '\n');
-  for (StringRef Line : Lines)
-    if (!Line.trim().empty())
-      OS << "  ; " << Line << "\n";
-}
-
+// Prints each non-blank line of each program point anchored at \p I as an
+// IR comment.
 void MAIRLLVMWriter::emitInstructionAnnot(const Instruction *I,
                                           formatted_raw_ostream &OS) {
   auto Points = AnchoredProgramPoints.find(I);
   if (Points == AnchoredProgramPoints.end())
     return;
-  for (const ProgramPoint *PP : Points->second)
-    emitProgramPointLine(*PP, OS);
+  for (const ProgramPoint *PP : Points->second) {
+    std::string Text = PP->toString();
+    SmallVector<StringRef, 4> Lines;
+    StringRef(Text).split(Lines, '\n');
+    for (StringRef Line : Lines)
+      if (!Line.trim().empty())
+        OS << "  ; " << Line << "\n";
+  }
 }
 
 void dumpMAIR(const MAIRGraph &Graph, raw_ostream &OS) { Graph.print(OS); }
@@ -194,9 +174,15 @@ void dumpLLVM(const MAIRGraph &Graph, raw_ostream &OS) {
 }
 
 void dumpLLVM(ArrayRef<const MAIRGraph *> Graphs, raw_ostream &OS) {
-  const Module &M = getModuleForDump(Graphs);
+  if (Graphs.empty())
+    report_fatal_error("cannot dump LLVM module without MAIR graphs");
+  if (!Graphs.front())
+    report_fatal_error("cannot dump LLVM module with a null MAIR graph");
+  const Module *M = getFunctionForDump(*Graphs.front()).getParent();
+  if (!M)
+    report_fatal_error("cannot dump LLVM for a function without a module");
   MAIRLLVMWriter Writer(Graphs);
-  M.print(OS, &Writer);
+  M->print(OS, &Writer);
 }
 
 } // namespace mair

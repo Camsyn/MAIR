@@ -147,9 +147,13 @@ private:
   void buildEdgeIndex();
 
   unsigned countChildEdge(const ProgramPoint &From, const ProgramPoint &To,
-                          PPEdgeKind Kind) const;
+                          PPEdgeKind Kind) const {
+    return ChildEdgeCounts.lookup({&From, &To}).get(Kind);
+  }
   unsigned countParentEdge(const ProgramPoint &To, const ProgramPoint &From,
-                           PPEdgeKind Kind) const;
+                           PPEdgeKind Kind) const {
+    return ParentEdgeCounts.lookup({&From, &To}).get(Kind);
+  }
 };
 
 bool MAIRVerifier::verify(const MAIRGraph &G) {
@@ -279,10 +283,10 @@ void MAIRVerifier::buildEdgeIndex() {
 }
 
 void MAIRVerifier::verifyBoundaryRepresentatives() {
-  for (const auto &Entry : Graph->BBEntryRepresentatives)
-    verifyBoundaryRepresentative(Entry.first, Entry.second, true);
-  for (const auto &Entry : Graph->BBExitRepresentatives)
-    verifyBoundaryRepresentative(Entry.first, Entry.second, false);
+  for (const auto &[BB, Representative] : Graph->BBEntryRepresentatives)
+    verifyBoundaryRepresentative(BB, Representative, /*IsEntry=*/true);
+  for (const auto &[BB, Representative] : Graph->BBExitRepresentatives)
+    verifyBoundaryRepresentative(BB, Representative, /*IsEntry=*/false);
 }
 
 void MAIRVerifier::verifyBoundaryRepresentative(
@@ -354,17 +358,14 @@ void MAIRVerifier::verifyProgramPoint(const ProgramPoint &PP) {
                        BB))
       return;
 
-    if (PP.isBasicBlockEntrySite()) {
+    if (PP.isBasicBlockEntrySite())
       Check(&Anchor == &*BB->getFirstNonPHIIt(),
             "basic-block entry program point is not anchored at first non-PHI",
             PP, &Anchor, BB);
-    }
-
-    if (PP.isBasicBlockExitSite()) {
+    if (PP.isBasicBlockExitSite())
       Check(&Anchor == BB->getTerminator(),
             "basic-block exit program point is not anchored at terminator", PP,
             &Anchor, BB);
-    }
   }
 
   verifyGuard(PP);
@@ -669,18 +670,6 @@ void MAIRVerifier::verifyCounters() {
         "graph edge count does not match child edge lists");
   Check(ObservedParentEdges == Graph->NumEdges,
         "graph edge count does not match parent edge lists");
-}
-
-unsigned MAIRVerifier::countChildEdge(const ProgramPoint &From,
-                                      const ProgramPoint &To,
-                                      PPEdgeKind Kind) const {
-  return ChildEdgeCounts.lookup({&From, &To}).get(Kind);
-}
-
-unsigned MAIRVerifier::countParentEdge(const ProgramPoint &To,
-                                       const ProgramPoint &From,
-                                       PPEdgeKind Kind) const {
-  return ParentEdgeCounts.lookup({&From, &To}).get(Kind);
 }
 
 bool MAIRGraph::verify(raw_ostream *OS) const {

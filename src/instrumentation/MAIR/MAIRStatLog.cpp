@@ -35,14 +35,10 @@ struct Visit {
   std::array<uint64_t, FieldCount> Counts{};
 };
 
-struct FunctionStats {
-  std::vector<Visit> Visits;
-};
-
 std::string Pipeline;
-std::vector<FunctionStats> Functions;
+// The visits of each function, in first-visit order.
+std::vector<std::vector<Visit>> Functions;
 StringMap<unsigned> FunctionIndex;
-bool Printed = false;
 
 struct ActiveVisit {
   unsigned Function = 0;
@@ -51,12 +47,12 @@ struct ActiveVisit {
 
 std::optional<ActiveVisit> Current;
 
-unsigned findVisit(FunctionStats &Fn, StringRef Pass) {
-  for (unsigned Index = 0; Index < Fn.Visits.size(); ++Index)
-    if (Fn.Visits[Index].Pass == Pass)
+unsigned findVisit(std::vector<Visit> &Visits, StringRef Pass) {
+  for (unsigned Index = 0; Index < Visits.size(); ++Index)
+    if (Visits[Index].Pass == Pass)
       return Index;
-  Fn.Visits.push_back(Visit{Pass.str(), {}});
-  return Fn.Visits.size() - 1;
+  Visits.push_back(Visit{Pass.str(), {}});
+  return Visits.size() - 1;
 }
 
 void printVisit(raw_ostream &OS, StringRef Pass,
@@ -71,9 +67,6 @@ void printVisit(raw_ostream &OS, StringRef Pass,
 }
 
 void printLog() {
-  if (Printed)
-    return;
-  Printed = true;
   if (!ClMAIRStats)
     return;
 
@@ -89,15 +82,15 @@ void printLog() {
 
   MapVector<std::string, std::array<uint64_t, FieldCount>, StringMap<unsigned>>
       Totals;
-  for (const FunctionStats &Fn : Functions) {
-    for (const Visit &Item : Fn.Visits) {
+  for (const std::vector<Visit> &Visits : Functions) {
+    for (const Visit &Item : Visits) {
       auto &Sum = Totals[Item.Pass];
       for (unsigned Index = 0; Index < FieldCount; ++Index)
         Sum[Index] += Item.Counts[Index];
     }
   }
-  for (const auto &Item : Totals)
-    printVisit(errs(), Item.first, Item.second);
+  for (const auto &[Pass, Counts] : Totals)
+    printVisit(errs(), Pass, Counts);
 }
 
 struct LogPrinter {
@@ -145,8 +138,7 @@ void MAIRStatScope::add(MAIRStatField Field, uint64_t N) {
   if (!ClMAIRStats || N == 0)
     return;
   assert(Current && "MAIR stat update outside a pass");
-  Functions[Current->Function]
-      .Visits[Current->Visit]
+  Functions[Current->Function][Current->Visit]
       .Counts[static_cast<unsigned>(Field)] += N;
 }
 

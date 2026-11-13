@@ -36,16 +36,6 @@ public:
                             const Instruction *To) {
     return hasBarrierBetween(BB, From, To, /*Forward=*/false);
   }
-  bool hasFwdBarrierBetween(const Instruction *From, const Instruction *To) {
-    assert(From && To && From->getParent() &&
-           To->getParent() == From->getParent());
-    return hasBarrierBetween(*From->getParent(), From, To, /*Forward=*/true);
-  }
-  bool hasBwdBarrierBetween(const Instruction *From, const Instruction *To) {
-    assert(From && To && From->getParent() &&
-           To->getParent() == From->getParent());
-    return hasBarrierBetween(*From->getParent(), From, To, /*Forward=*/false);
-  }
   bool hasFwdBarrierPath(const BasicBlock &From, const BasicBlock &To) {
     return hasBarrierPath(From, To, /*Forward=*/true);
   }

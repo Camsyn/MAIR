@@ -54,17 +54,17 @@ void store_record(struct record *r) {
 }
 
 // ASan checks reads and writes alike, so a read and a write merge. The range
-// is reported as a store because one of its accesses writes.
+// is reported as a load, like the access that runs first.
 // CHECK-LABEL: define {{.*}} @copy_next(
-// CHECK-NOT:   __asan_report_load
-// CHECK:       call void @__asan_report_store_n(i64 %{{.*}}, i64 8)
-// CHECK:       call void @__asan_report_store_n(i64 %{{.*}}, i64 8)
-// CHECK-NOT:   __asan_report_load
+// CHECK-NOT:   __asan_report_store
+// CHECK:       call void @__asan_report_load_n(i64 %{{.*}}, i64 8)
+// CHECK:       call void @__asan_report_load_n(i64 %{{.*}}, i64 8)
+// CHECK-NOT:   __asan_report_store
 // CHECK:       ret void
 void copy_next(int *p) { p[1] = p[0]; }
 
 // A read-modify-write of the same bytes is one 4-byte check. It is reported
-// as a READ, like the load native ASan checks first.
+// as a READ, like the load, which runs first.
 // CHECK-LABEL: define {{.*}} @increment(
 // CHECK:       call void @__asan_report_load4(
 // CHECK-NOT:   __asan_report_

@@ -1336,6 +1336,7 @@ public:
                                  const TargetLibraryInfo *TLI,
                                  const TargetTransformInfo *TTI);
   void instrumentMAIRObservation(const mair::MaterializedObservation &Obs,
+                                 Instruction *FirstSource,
                                  IRBuilderBase &Builder, bool UseCalls,
                                  RuntimeCallInserter &RTCI);
 #endif
@@ -4158,30 +4159,44 @@ bool XsanAddressSanitizer::prepareAsanTargetsToInstrument(
 }
 
 #ifndef XSAN_PASS
+// The source of \p Obs that runs first, the one every other source follows.
+// Sources are loads and stores, so instruction dominance is the order they
+// run in. Sources merged from different paths, such as the two arms of a
+// branch, may have no such source; then this is a source that no other
+// source strictly dominates, picked by the observation's source order alone.
+static Instruction *getFirstSource(const mair::Observation &Obs,
+                                   const DominatorTree &DT) {
+  ArrayRef<Instruction *> Sources = Obs.getInstructions();
+  Instruction *First = Sources.front();
+  // Each replacement strictly dominates the one it replaces, so no source
+  // strictly dominates the result, and a source that dominates all others
+  // is found.
+  for (Instruction *Source : Sources.drop_front())
+    if (Source != First && DT.dominates(Source, First))
+      First = Source;
+  return First;
+}
+
 // Check the bytes of one MAIR observation. Its sources were accepted by
 // CanInstrumentViaMAIR in instrumentFunctionViaMAIR: loads and stores whose
 // footprint the observation covers without gaps, so every checked byte is one
-// a source touches.
+// a source touches. FirstSource is the source that runs first
+// (getFirstSource).
 void XsanAddressSanitizer::instrumentMAIRObservation(
-    const mair::MaterializedObservation &Obs, IRBuilderBase &Builder,
-    bool UseCalls, RuntimeCallInserter &RTCI) {
+    const mair::MaterializedObservation &Obs, Instruction *FirstSource,
+    IRBuilderBase &Builder, bool UseCalls, RuntimeCallInserter &RTCI) {
+  assert(FirstSource &&
+         is_contained(Obs.Source->getInstructions(), FirstSource) &&
+         "the first source must be one of the observation's sources");
   ArrayRef<Instruction *> Sources = Obs.Source->getInstructions();
-  Instruction *First = Sources.front();
-  // ASan checks reads and writes alike, so MAIR merges them. Report the range
-  // as a store if any source writes, unless every source accesses the same
-  // bytes and the first is a load: native ASan reports the load of x[i]++,
-  // which runs first, as a READ.
+  Instruction *First = FirstSource;
+  // ASan checks reads and writes alike, so MAIR merges them, and of two that
+  // cover each other keeps the earlier. Native ASan reports the access it
+  // checks first; so is the range, with the kind and the location of the
+  // source that runs first: READ for the load of x[i]++.
   const DataLayout &DL = First->getDataLayout();
-  auto SameBytesAsFirst = [&](Instruction *I) {
-    return getLoadStorePointerOperand(I) == getLoadStorePointerOperand(First) &&
-           DL.getTypeStoreSize(getLoadStoreType(I)) ==
-               DL.getTypeStoreSize(getLoadStoreType(First));
-  };
-  bool IsWrite = Obs.Kind != mair::AccessKind::Read &&
-                 !(isa<LoadInst>(First) && all_of(Sources, SameBytesAsFirst));
-  // Reports point at the first source, the one the range starts with when
-  // MAIR merged several.
-  DebugLoc Loc = Obs.Source->getStableDebugLoc();
+  bool IsWrite = isa<StoreInst>(First);
+  DebugLoc Loc = First->getStableDebugLoc();
   assert(Builder.GetInsertBlock() &&
          Builder.GetInsertPoint() != Builder.GetInsertBlock()->end());
   Instruction *InsertBefore = &*Builder.GetInsertPoint();
@@ -4425,17 +4440,27 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
 
   int NumInstrumented = 0;
   if (!MAIRSelection.Targets.empty()) {
+    // Materialization and the checks emitted before change the CFG without
+    // updating the dominator tree, so find the first sources now.
+    DenseMap<const mair::Observation *, Instruction *> FirstSources;
+    const DominatorTree &DT = Opt.getGraph().getDominatorTree();
+    for (const mair::Observation *Obs : MAIRSelection.Targets)
+      FirstSources[Obs] = getFirstSource(*Obs, DT);
 
     class AddressSanitizerBackend final : public mair::MAIRObservationBackend {
       XsanAddressSanitizer &ASan;
+      const DenseMap<const mair::Observation *, Instruction *> &FirstSources;
       bool UseCalls;
       RuntimeCallInserter &RTCI;
       bool Changed = false;
 
     public:
-      AddressSanitizerBackend(XsanAddressSanitizer &ASan, bool UseCalls,
-                              RuntimeCallInserter &RTCI)
-          : ASan(ASan), UseCalls(UseCalls), RTCI(RTCI) {}
+      AddressSanitizerBackend(XsanAddressSanitizer &ASan,
+                              const DenseMap<const mair::Observation *,
+                                             Instruction *> &FirstSources,
+                              bool UseCalls, RuntimeCallInserter &RTCI)
+          : ASan(ASan), FirstSources(FirstSources), UseCalls(UseCalls),
+            RTCI(RTCI) {}
 
       Error prepare(const mair::MAIRMaterializationPlan &) override {
         return Error::success();
@@ -4444,12 +4469,13 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
       void emit(const mair::MaterializedProgramPoint &PP,
                 IRBuilderBase &Builder) override {
         for (const mair::MaterializedObservation &Obs : PP.Observations)
-          ASan.instrumentMAIRObservation(Obs, Builder, UseCalls, RTCI);
+          ASan.instrumentMAIRObservation(Obs, FirstSources.lookup(Obs.Source),
+                                         Builder, UseCalls, RTCI);
         Changed |= !PP.Observations.empty();
       }
 
       bool changed() const { return Changed; }
-    } Backend(*this, UseCalls, RTCI);
+    } Backend(*this, FirstSources, UseCalls, RTCI);
 
     Expected<mair::MAIRInstantiationResult> Result = Opt.instantiate(Backend);
     if (!Result)

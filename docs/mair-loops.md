@@ -107,7 +107,7 @@ ASan 按 Observation 的区域检查，而不是按来源指令逐个检查（`X
 - 区间起点的对齐取来源对齐的最小值；若某个来源的指针就是起点，或与区间基址只差常量偏移，就用它推出基址和起点的对齐（`struct { long a; int b, c; }` 三个字段合并后仍按 8 字节对齐）。
 - 单个未合并的访问（含固定宽度向量）照旧按 native 方式检查。不超过 16 字节的区间走内联检查：对齐时一次 shadow load，否则查首末两个字节，与 native 对不对齐访问的做法相同；中间至多跨一个 granule，ASan 自己的 redzone 不会这么窄。更长的区间或长度是表达式的区间调用 `__asan_loadN/storeN`，逐字节检查（`__asan_region_is_poisoned`）。
 - periodic 区域调用 `__asan_{load,store}_periodic(start, stride, size, count)`（recover 模式带 `_noabort`，`src/runtime/lib/asan/asan_rtl.cpp`）。runtime 按 stride 符号算出最低地址，count 为 0 不查；先用一次 shadow 扫描查整个外包区间，干净则全部合法；否则（或 stride 超过 1 KiB 时）按迭代顺序逐个访问检查，报告第一个越界访问的地址和单次访问大小，空隙中的 poison 不报。内核 ASan 和 `-asan-force-experiment` 没有这个入口，periodic 区域退回 native。
-- 报告：调试位置取第一个来源（`Observation::getStableDebugLoc`），大小可能是合并后的区间大小。读写合并后按写报告；但若所有来源访问同一地址同一大小、且第一个来源是 load（`x[i]++`），按读报告，与 native 先查到的 load 一致。
+- 报告：读写种类（READ/WRITE，periodic 也一样选 `__asan_load_periodic` 或 `__asan_store_periodic`）和调试位置都取最先执行的来源，与 native 先查到的那次访问一致；大小可能是合并后的区间大小。来源的先后按指令支配关系判断（同一块内即指令顺序），在物化前用 MAIR 图的 DT 算好（`getFirstSource`，`src/instrumentation/llvm23/AddressSanitizer.cpp`），因为物化和先发出的检查会改 CFG 而不更新 DT。来源列表的顺序是合并顺序（LocationMerge 按偏移排序），不是执行顺序，不能直接取第一个。来自不同路径（如分支两侧经 COM 合并）的来源可能没有一个支配其余全部；这时取一个不被其他来源严格支配的来源，只由来源列表顺序决定，结果确定，但不代表运行时实际先执行的那个。`x[i]++` 因此按读报告，`p[0] = p[1]` 合并后的区间也按读报告，位置在 load。测试：`test/MAIR/TestCases/asan/mair-report-first-source.c`。
 - 检查放在 Observation 所在的 ProgramPoint：LPOC 的区间/periodic 观察在循环出口（嵌套循环可再被外层不变外提提到外层 preheader），即访问发生之后，这是 ASan 已有的规则（见上文“输入与优化规则”）。
 
 测试：`test/MAIR/TestCases/asan/mair-merged-range.c`、`mair-loop-range.c`（IR），`mair-range-runtime.c`（越界仍报告、界内不误报，含只有空隙被 poison 的 strided 访问），`mair-periodic-runtime.c`（直接调用 runtime 入口的边界情况）。

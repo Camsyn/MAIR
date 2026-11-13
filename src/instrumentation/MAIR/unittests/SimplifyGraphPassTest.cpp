@@ -1,5 +1,13 @@
 #include "MAIR/Transforms/SimplifyGraphPass.h"
+#include "MAIR/Analysis/MAIRStatAnalysis.h"
+#include "MAIR/MAIRDump.h"
 #include "MAIRPassTestUtil.h"
+
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <random>
 
 using namespace mair;
 
@@ -718,6 +726,180 @@ entry:
   EXPECT_TRUE(Graph.getBBExitRepresentative(BB).isBasicBlockExitSite());
   EXPECT_EQ(Graph.size(), 3u);
   EXPECT_TRUE(Graph.verify());
+}
+
+TEST(SimplifyGraphPass, TakesUpAnEarlierDomParentOfTheContractedPoint) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %x = load i32, ptr %p, align 4
+  %f = load i32, ptr %p, align 4
+  %i = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  auto It = BB.begin();
+  MAIRGraph Graph(F);
+  ProgramPoint &X = Graph.createInstProgramPoint(BB, *It++);
+  ProgramPoint &From = Graph.createInstProgramPoint(BB, *It++);
+  ProgramPoint &Into = Graph.createInstProgramPoint(BB, *It++);
+  // X offers nothing until From, after X in list order, is contracted into
+  // Into and Into takes over the PostDom edge to X.
+  Graph.addEdge(X, Into, PPEdgeKind::Dom);
+  Graph.addEdge(From, X, PPEdgeKind::PostDom);
+  Graph.addEdge(From, Into, PPEdgeKind::Dom);
+  Graph.addEdge(Into, From, PPEdgeKind::PostDom);
+
+  MAIRGraphAnalysisManager AM;
+  EXPECT_FALSE(SimplifyGraphPass().run(Graph, AM).areAllPreserved());
+  ASSERT_EQ(Graph.size(), 1u);
+  EXPECT_EQ(&*Graph.begin(), &Into);
+  EXPECT_EQ(Into.size(), 3u);
+}
+
+TEST(SimplifyGraphPass, TakesUpAnEarlierProgramPointContractedInto) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  %i = load i32, ptr %p, align 4
+  %f = load i32, ptr %p, align 4
+  %y = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &BB = F.getEntryBlock();
+  auto It = BB.begin();
+  MAIRGraph Graph(F);
+  ProgramPoint &Into = Graph.createInstProgramPoint(BB, *It++);
+  ProgramPoint &From = Graph.createInstProgramPoint(BB, *It++);
+  ProgramPoint &Y = Graph.createInstProgramPoint(BB, *It++);
+  // From offers Into before Y. Into, before From in list order, offers Y
+  // only once it takes over the edges of From.
+  Graph.addEdge(From, Into, PPEdgeKind::Dom);
+  Graph.addEdge(Into, From, PPEdgeKind::PostDom);
+  Graph.addEdge(From, Y, PPEdgeKind::Dom);
+  Graph.addEdge(Y, From, PPEdgeKind::PostDom);
+
+  MAIRGraphAnalysisManager AM;
+  EXPECT_FALSE(SimplifyGraphPass().run(Graph, AM).areAllPreserved());
+  ASSERT_EQ(Graph.size(), 1u);
+  EXPECT_EQ(&*Graph.begin(), &Y);
+  EXPECT_EQ(Y.size(), 3u);
+}
+
+// Whether some program point of \p G still offers a mutual Dom/PostDom pair
+// that SimplifyGraphPass would contract.
+bool offersContraction(const MAIRGraph &G) {
+  for (const ProgramPoint &PP1 : G) {
+    if (llvm::isa<LoopProgramPoint>(PP1) ||
+        llvm::any_of(PP1,
+                     [](const Observation &Obs) { return !Obs.isMovable(); }))
+      continue;
+    for (const ProgramPointEdge &Edge : PP1.children()) {
+      const ProgramPoint &PP2 = Edge.getNode();
+      if (!Edge.isDom() || &PP1 == &PP2 || llvm::isa<LoopProgramPoint>(PP2) ||
+          !PP1.hasCompatibleMergeSemantics(PP2) ||
+          !PP2.hasChild(PP1, PPEdgeKind::PostDom))
+        continue;
+      if (PP1.getBasicBlock() == PP2.getBasicBlock() ||
+          G.getLoopInfo().getLoopFor(PP1.getBasicBlock()) ==
+              G.getLoopInfo().getLoopFor(PP2.getBasicBlock()))
+        return true;
+    }
+  }
+  return false;
+}
+
+// Random functions whose blocks branch to their layout successor and to one
+// random block, with loads, stores, atomic stores that pin their program
+// point and calls that act as barriers.
+llvm::Function &generateFunction(llvm::Module &M, std::mt19937 &Rng) {
+  llvm::LLVMContext &Ctx = M.getContext();
+  llvm::Type *PtrTy = llvm::PointerType::getUnqual(Ctx);
+  llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
+  llvm::Type *VoidTy = llvm::Type::getVoidTy(Ctx);
+  const unsigned NumBlocks = 2 + Rng() % 12;
+  std::vector<llvm::Type *> Params{PtrTy, PtrTy};
+  Params.insert(Params.end(), NumBlocks, llvm::Type::getInt1Ty(Ctx));
+  llvm::Function *F =
+      llvm::Function::Create(llvm::FunctionType::get(VoidTy, Params, false),
+                             llvm::GlobalValue::ExternalLinkage, "f", M);
+  llvm::FunctionCallee Barrier =
+      M.getOrInsertFunction("barrier", llvm::FunctionType::get(VoidTy, false));
+  std::vector<llvm::BasicBlock *> Blocks;
+  for (unsigned I = 0; I < NumBlocks; ++I)
+    Blocks.push_back(llvm::BasicBlock::Create(Ctx, "b" + llvm::Twine(I), F));
+  for (unsigned I = 0; I < NumBlocks; ++I) {
+    llvm::IRBuilder<> Builder(Blocks[I]);
+    for (unsigned Items = Rng() % 5; Items; --Items) {
+      llvm::Value *Ptr = F->getArg(Rng() % 2);
+      switch (Rng() % 6) {
+      case 0:
+      case 1:
+        Builder.CreateLoad(I32Ty, Ptr);
+        break;
+      case 2:
+      case 3:
+        Builder.CreateStore(Builder.getInt32(0), Ptr);
+        break;
+      case 4:
+        Builder.CreateAlignedStore(Builder.getInt32(0), Ptr, llvm::Align(4))
+            ->setAtomic(llvm::AtomicOrdering::Monotonic);
+        break;
+      default:
+        Builder.CreateCall(Barrier);
+      }
+    }
+    if (I + 1 == NumBlocks) {
+      Builder.CreateRetVoid();
+      continue;
+    }
+    const unsigned Other = 1 + Rng() % (NumBlocks - 1);
+    if (Other == I + 1)
+      Builder.CreateBr(Blocks[I + 1]);
+    else
+      Builder.CreateCondBr(F->getArg(2 + I), Blocks[I + 1], Blocks[Other]);
+  }
+  return *F;
+}
+
+// Contractions expose new pairs away from the contracted program points; the
+// pass must take them up as well and stop only at a fixed point.
+TEST(SimplifyGraphPass, ContractsUntilNoPairRemainsOnRandomGraphs) {
+  unsigned Merged = 0;
+  for (unsigned Seed = 0; Seed < 400; ++Seed) {
+    llvm::LLVMContext Ctx;
+    llvm::Module M("random", Ctx);
+    std::mt19937 Rng(Seed);
+    llvm::Function &F = generateFunction(M, Rng);
+    ASSERT_FALSE(llvm::verifyFunction(F, &llvm::errs()));
+    MAIRGraph Graph = buildGraph<CallBarrierTrait>(
+        F, Seed % 2 ? MAIROptimizationConfig::forThreadSanitizer()
+                    : MAIROptimizationConfig::forAddressSanitizer());
+    const unsigned Before = MAIRStat::compute(Graph).getNumProgramPoints();
+    MAIRGraphAnalysisManager AM;
+    runPassOnGraphTree(SimplifyGraphPass(), Graph, AM);
+    ASSERT_TRUE(Graph.verify(&llvm::errs())) << "seed " << Seed;
+    for (const MAIRGraph *Scope : Graph.graphs()) {
+      std::string Text;
+      llvm::raw_string_ostream OS(Text);
+      dumpMAIR(Graph, OS);
+      ASSERT_FALSE(offersContraction(*Scope)) << "seed " << Seed << "\n"
+                                              << Text;
+    }
+    Merged += Before - MAIRStat::compute(Graph).getNumProgramPoints();
+  }
+  // The graphs exercise many contractions, not just the empty case.
+  EXPECT_GT(Merged, 1000u);
 }
 
 } // namespace

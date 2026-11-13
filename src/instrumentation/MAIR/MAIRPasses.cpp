@@ -76,11 +76,6 @@ bool normalizeMAIRLoops(Function &F, FunctionAnalysisManager &FAM) {
 }
 
 void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
-                               PassInstrumentationCallbacks *PIC) {
-  registerMAIRGraphAnalyses(AM, PIC, nullptr);
-}
-
-void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
                                PassInstrumentationCallbacks *PIC,
                                FunctionAnalysisManager *FAM) {
   AM.registerPass([PIC] { return PassInstrumentationAnalysis(PIC); });

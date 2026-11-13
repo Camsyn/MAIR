@@ -28,8 +28,6 @@ namespace {
 class MAIRLLVMWriter final : public AssemblyAnnotationWriter {
   DenseMap<const Instruction *, SmallVector<const ProgramPoint *, 2>>
       AnchoredProgramPoints;
-  void emitAnchoredProgramPoints(const Instruction *I,
-                                 formatted_raw_ostream &OS) const;
   void emitProgramPointLine(const ProgramPoint &PP,
                             formatted_raw_ostream &OS) const;
 
@@ -163,15 +161,6 @@ static const Module &getModuleForDump(ArrayRef<const MAIRGraph *> Graphs) {
   return *M;
 }
 
-void MAIRLLVMWriter::emitAnchoredProgramPoints(
-    const Instruction *I, formatted_raw_ostream &OS) const {
-  auto Points = AnchoredProgramPoints.find(I);
-  if (Points == AnchoredProgramPoints.end())
-    return;
-  for (const ProgramPoint *PP : Points->second)
-    emitProgramPointLine(*PP, OS);
-}
-
 void MAIRLLVMWriter::emitProgramPointLine(const ProgramPoint &PP,
                                           formatted_raw_ostream &OS) const {
   std::string Text = PP.toString();
@@ -184,7 +173,11 @@ void MAIRLLVMWriter::emitProgramPointLine(const ProgramPoint &PP,
 
 void MAIRLLVMWriter::emitInstructionAnnot(const Instruction *I,
                                           formatted_raw_ostream &OS) {
-  emitAnchoredProgramPoints(I, OS);
+  auto Points = AnchoredProgramPoints.find(I);
+  if (Points == AnchoredProgramPoints.end())
+    return;
+  for (const ProgramPoint *PP : Points->second)
+    emitProgramPointLine(*PP, OS);
 }
 
 void dumpMAIR(const MAIRGraph &Graph, raw_ostream &OS) { Graph.print(OS); }

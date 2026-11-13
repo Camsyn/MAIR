@@ -10,6 +10,7 @@
 #include "llvm/IR/Instruction.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <iterator>
 #include <utility>
 
 using namespace llvm;
@@ -24,30 +25,27 @@ struct MAIRVerifierSupport {
 
   explicit MAIRVerifierSupport(raw_ostream *Out) : OS(Out) {}
 
+  // The Write overloads print one context line each; they are only called
+  // with a non-null OS.
   void Write(const ProgramPoint *PP) {
-    if (!PP)
-      return;
-    Write(*PP);
+    if (PP)
+      Write(*PP);
   }
 
   void Write(const ProgramPoint &PP) {
-    if (!OS)
-      return;
     *OS << "  program point: ";
     PP.print(*OS);
     *OS << "\n";
   }
 
   void Write(const Observation &Obs) {
-    if (!OS)
-      return;
     *OS << "  observation: ";
     Obs.print(*OS);
     *OS << "\n";
   }
 
   void Write(const Instruction *I) {
-    if (!OS || !I)
+    if (!I)
       return;
     *OS << "  instruction: ";
     I->print(*OS);
@@ -57,7 +55,7 @@ struct MAIRVerifierSupport {
   void Write(const Instruction &I) { Write(&I); }
 
   void Write(const BasicBlock *BB) {
-    if (!OS || !BB)
+    if (!BB)
       return;
     *OS << "  basic block: ";
     BB->printAsOperand(*OS, false);
@@ -65,40 +63,20 @@ struct MAIRVerifierSupport {
   }
 
   void Write(const Value *V) {
-    if (!OS || !V)
+    if (!V)
       return;
     *OS << "  value: ";
     V->printAsOperand(*OS, false);
     *OS << "\n";
   }
 
-  void Write(const ProgramPoint &From, const ProgramPointEdge &Edge) {
+  template <typename... Ts>
+  void CheckFailed(const Twine &Message, const Ts &...Vs) {
+    Broken = true;
     if (!OS)
       return;
-    *OS << "  edge: ";
-    *OS << From.getName() << " -> " << Edge.getNode().getName() << " ("
-        << getEdgeKindName(Edge.getKind()) << ")\n";
-  }
-
-  template <typename T> void WriteTs(const T &V) { Write(V); }
-
-  template <typename T1, typename T2, typename... Ts>
-  void WriteTs(const T1 &V1, const T2 &V2, const Ts &...Vs) {
-    Write(V1);
-    WriteTs(V2, Vs...);
-  }
-
-  void CheckFailed(const Twine &Message) {
-    if (OS)
-      *OS << "MAIR verification failed: " << Message << "\n";
-    Broken = true;
-  }
-
-  template <typename T1, typename... Ts>
-  void CheckFailed(const Twine &Message, const T1 &V1, const Ts &...Vs) {
-    CheckFailed(Message);
-    if (OS)
-      WriteTs(V1, Vs...);
+    *OS << "MAIR verification failed: " << Message << "\n";
+    (Write(Vs), ...);
   }
 
   template <typename... Ts>
@@ -479,14 +457,10 @@ void MAIRVerifier::verifyObservation(const ProgramPoint &PP,
   Check(Graph->getMemoryObject(*Base) == &Object,
         "observation is not linked to the graph's canonical object", Obs, PP,
         Base);
-  bool FoundUse = false;
-  for (const Observation &User : Object.users())
-    if (&User == &Obs) {
-      FoundUse = true;
-      break;
-    }
-  Check(FoundUse, "memory object use-list does not contain this observation",
-        Obs, PP, Base);
+  Check(llvm::any_of(Object.users(),
+                     [&](const Observation &User) { return &User == &Obs; }),
+        "memory object use-list does not contain this observation", Obs, PP,
+        Base);
 
   if (const AbstractAccess *Region = Obs.getContiguousRegion())
     if (Region->hasSizeExpr()) {
@@ -536,8 +510,7 @@ void MAIRVerifier::verifyScalarExpr(const MAIRScalarExpr &Expr,
     Check(Operands.empty(), "constant scalar expression has operands", Obs, PP);
     Check(Ty->isIntegerTy(), "scalar constant is not integer typed", Obs, PP);
     if (Ty->isIntegerTy())
-      Check(cast<IntegerType>(Ty)->getBitWidth() ==
-                Expr.getConstant().getBitWidth(),
+      Check(Ty->getIntegerBitWidth() == Expr.getConstant().getBitWidth(),
             "scalar constant bit width does not match its type", Obs, PP);
     break;
   case Kind::LLVMValue: {
@@ -580,30 +553,28 @@ void MAIRVerifier::verifyScalarExpr(const MAIRScalarExpr &Expr,
   for (const MAIRScalarExpr &Operand : Operands)
     verifyScalarExpr(Operand, Obs, PP);
 
-  if (llvm::any_of(Operands, [](const MAIRScalarExpr &Operand) {
+  if (Operands.empty() ||
+      llvm::any_of(Operands, [](const MAIRScalarExpr &Operand) {
         return !Operand.isValid() || !Operand.getType();
       }))
     return;
-  if (Operands.empty())
-    return;
-  if (Expr.getKind() == Kind::Truncate || Expr.getKind() == Kind::ZeroExtend ||
-      Expr.getKind() == Kind::SignExtend) {
-    Check(Ty->isIntegerTy() && Operands.front().getType()->isIntegerTy(),
-          "scalar cast operands are not integer typed", Obs, PP);
-    if (Ty->isIntegerTy() && Operands.front().getType()->isIntegerTy()) {
-      unsigned ResultWidth = cast<IntegerType>(Ty)->getBitWidth();
-      unsigned OperandWidth =
-          cast<IntegerType>(Operands.front().getType())->getBitWidth();
-      if (Expr.getKind() == Kind::Truncate)
-        Check(ResultWidth < OperandWidth, "scalar truncate does not narrow",
-              Obs, PP);
-      else
-        Check(ResultWidth > OperandWidth, "scalar extension does not widen",
-              Obs, PP);
-    }
+  const Kind K = Expr.getKind();
+  if (K == Kind::Truncate || K == Kind::ZeroExtend || K == Kind::SignExtend) {
+    Type *OperandTy = Operands.front().getType();
+    if (!CheckRequired(Ty->isIntegerTy() && OperandTy->isIntegerTy(),
+                       "scalar cast operands are not integer typed", Obs, PP))
+      return;
+    unsigned ResultWidth = Ty->getIntegerBitWidth();
+    unsigned OperandWidth = OperandTy->getIntegerBitWidth();
+    if (K == Kind::Truncate)
+      Check(ResultWidth < OperandWidth, "scalar truncate does not narrow", Obs,
+            PP);
+    else
+      Check(ResultWidth > OperandWidth, "scalar extension does not widen", Obs,
+            PP);
     return;
   }
-  if (Expr.getKind() == Kind::Add && Ty->isPointerTy()) {
+  if (K == Kind::Add && Ty->isPointerTy()) {
     Check(Operands.size() == 2 && Operands[0].getType() == Ty &&
               Operands[1].getType()->isIntegerTy(),
           "pointer add must use pointer plus integer byte offset", Obs, PP);
@@ -686,11 +657,7 @@ void MAIRVerifier::verifyCounters() {
     ObservedChildEdges += PP.Children.size();
     ObservedParentEdges += PP.Parents.size();
 
-    unsigned ObservedObservations = 0;
-    for (const Observation &Obs : PP) {
-      (void)Obs;
-      ++ObservedObservations;
-    }
+    unsigned ObservedObservations = std::distance(PP.begin(), PP.end());
     Check(ObservedObservations == PP.size(),
           "program point observation count does not match observation list",
           PP);
@@ -707,15 +674,13 @@ void MAIRVerifier::verifyCounters() {
 unsigned MAIRVerifier::countChildEdge(const ProgramPoint &From,
                                       const ProgramPoint &To,
                                       PPEdgeKind Kind) const {
-  auto It = ChildEdgeCounts.find({&From, &To});
-  return It == ChildEdgeCounts.end() ? 0 : It->second.get(Kind);
+  return ChildEdgeCounts.lookup({&From, &To}).get(Kind);
 }
 
 unsigned MAIRVerifier::countParentEdge(const ProgramPoint &To,
                                        const ProgramPoint &From,
                                        PPEdgeKind Kind) const {
-  auto It = ParentEdgeCounts.find({&From, &To});
-  return It == ParentEdgeCounts.end() ? 0 : It->second.get(Kind);
+  return ParentEdgeCounts.lookup({&From, &To}).get(Kind);
 }
 
 bool MAIRGraph::verify(raw_ostream *OS) const {

@@ -29,13 +29,29 @@ public:
   /// means the interval ends at the block end. When both are present, \p From
   /// must strictly precede \p To and the interval excludes both endpoints.
   bool hasFwdBarrierBetween(const BasicBlock &BB, const Instruction *From,
-                            const Instruction *To);
+                            const Instruction *To) {
+    return hasBarrierBetween(BB, From, To, /*Forward=*/true);
+  }
   bool hasBwdBarrierBetween(const BasicBlock &BB, const Instruction *From,
-                            const Instruction *To);
-  bool hasFwdBarrierBetween(const Instruction *From, const Instruction *To);
-  bool hasBwdBarrierBetween(const Instruction *From, const Instruction *To);
-  bool hasFwdBarrierPath(const BasicBlock &From, const BasicBlock &To);
-  bool hasBwdBarrierPath(const BasicBlock &From, const BasicBlock &To);
+                            const Instruction *To) {
+    return hasBarrierBetween(BB, From, To, /*Forward=*/false);
+  }
+  bool hasFwdBarrierBetween(const Instruction *From, const Instruction *To) {
+    assert(From && To && From->getParent() &&
+           To->getParent() == From->getParent());
+    return hasBarrierBetween(*From->getParent(), From, To, /*Forward=*/true);
+  }
+  bool hasBwdBarrierBetween(const Instruction *From, const Instruction *To) {
+    assert(From && To && From->getParent() &&
+           To->getParent() == From->getParent());
+    return hasBarrierBetween(*From->getParent(), From, To, /*Forward=*/false);
+  }
+  bool hasFwdBarrierPath(const BasicBlock &From, const BasicBlock &To) {
+    return hasBarrierPath(From, To, /*Forward=*/true);
+  }
+  bool hasBwdBarrierPath(const BasicBlock &From, const BasicBlock &To) {
+    return hasBarrierPath(From, To, /*Forward=*/false);
+  }
   bool hasFwdBarrier(const BasicBlock &BB) {
     return isBarrierBlock(BB, /*Forward=*/true);
   }
@@ -49,10 +65,6 @@ public:
     return isBarrier(I, /*Forward=*/false);
   }
 
-private:
-  DenseMap<const BasicBlock *, bool> FwdBarrierBBMemo;
-  DenseMap<const BasicBlock *, bool> BwdBarrierBBMemo;
-
 protected:
   virtual bool hasAnyBarrier(const BasicBlock &BB, bool Forward) const = 0;
   virtual bool hasAnyBarrier(const BasicBlock &BB, const Instruction *From,
@@ -60,6 +72,9 @@ protected:
   virtual bool isBarrier(const Instruction &I, bool Forward) const = 0;
 
 private:
+  DenseMap<const BasicBlock *, bool> FwdBarrierBBMemo;
+  DenseMap<const BasicBlock *, bool> BwdBarrierBBMemo;
+
   bool isBarrierBlock(const BasicBlock &BB, bool Forward);
   bool hasBarrierBetween(const BasicBlock &BB, const Instruction *From,
                          const Instruction *To, bool Forward);

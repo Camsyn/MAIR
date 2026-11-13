@@ -177,16 +177,11 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
     Scope.ForwardBarrier |= BA.hasFwdBarrier(BB);
     Scope.BackwardBarrier |= BA.hasBwdBarrier(BB);
     auto &PPsInOneBB = OrderedPPs[&Scope][&BB];
-    auto &Start = Scope.createBBProgramPoint(BB, true);
-    PPsInOneBB.push_back(&Start);
-    for (Instruction &I : BB) {
-      if (isInterestingMop(I)) {
-        auto &PP = Scope.createInstProgramPoint(BB, I);
-        PPsInOneBB.push_back(&PP);
-      }
-    }
-    auto &End = Scope.createBBProgramPoint(BB, false);
-    PPsInOneBB.push_back(&End);
+    PPsInOneBB.push_back(&Scope.createBBProgramPoint(BB, true));
+    for (Instruction &I : BB)
+      if (isInterestingMop(I))
+        PPsInOneBB.push_back(&Scope.createInstProgramPoint(BB, I));
+    PPsInOneBB.push_back(&Scope.createBBProgramPoint(BB, false));
   }
   for (const Loop *Loop : LI.getLoopsInPreorder()) {
     MAIRGraph &Body = *LoopGraphs.lookup(Loop);
@@ -216,26 +211,23 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
   // ===========================================================
   // 2. Connect program point edges inside each block
   // ===========================================================
-  for (auto &ScopeEntry : OrderedPPs) {
-    MAIRGraph &Scope = *ScopeEntry.first;
-    for (auto &Entry : ScopeEntry.second) {
-      const BasicBlock &BB = *Entry.first;
-      ArrayRef<ProgramPoint *> Points = Entry.second;
+  for (auto &[Scope, BlockPPs] : OrderedPPs) {
+    for (auto &[BB, Points] : BlockPPs) {
       for (unsigned I = 1; I < Points.size(); ++I) {
         ProgramPoint &Prev = *Points[I - 1], &Next = *Points[I];
         const Instruction *PrevI = getBarrierRangeStart(Prev);
         const Instruction *NextI = getBarrierRangeEnd(Next);
         bool FwdEndpointBarrier =
-            Prev.isMemoryInstSite() && PrevI && BA.isFwdBarrier(*PrevI);
+            Prev.isMemoryInstSite() && BA.isFwdBarrier(Prev.getAnchor());
         bool BwdEndpointBarrier =
-            Prev.isMemoryInstSite() && PrevI && BA.isBwdBarrier(*PrevI);
+            Prev.isMemoryInstSite() && BA.isBwdBarrier(Prev.getAnchor());
         const bool SameSite = Prev.getSite() == Next.getSite();
-        if (SameSite ||
-            (!FwdEndpointBarrier && !BA.hasFwdBarrierBetween(BB, PrevI, NextI)))
-          Scope.addEdge(Prev, Next, PPEdgeKind::Dom);
-        if (SameSite ||
-            (!BwdEndpointBarrier && !BA.hasBwdBarrierBetween(BB, PrevI, NextI)))
-          Scope.addEdge(Next, Prev, PPEdgeKind::PostDom);
+        if (SameSite || (!FwdEndpointBarrier &&
+                         !BA.hasFwdBarrierBetween(*BB, PrevI, NextI)))
+          Scope->addEdge(Prev, Next, PPEdgeKind::Dom);
+        if (SameSite || (!BwdEndpointBarrier &&
+                         !BA.hasBwdBarrierBetween(*BB, PrevI, NextI)))
+          Scope->addEdge(Next, Prev, PPEdgeKind::PostDom);
       }
     }
   }
@@ -249,24 +241,26 @@ MAIRGraph MAIRGraph::build(Function &F, const DominatorTree &DT,
         return IDom->getBlock();
     return nullptr;
   };
+  // The nearest strict (post-)dominator of BB in the scope of BB.
+  auto GetIDomInScope = [&](auto &Tree,
+                            const BasicBlock &BB) -> const BasicBlock * {
+    const BasicBlock *IDom = GetIDom(Tree, BB);
+    while (IDom && &ScopeFor(*IDom) != &ScopeFor(BB))
+      IDom = GetIDom(Tree, *IDom);
+    return IDom;
+  };
   for (BasicBlock &BB : F) {
     MAIRGraph &Scope = ScopeFor(BB);
     ProgramPoint *EntryPP = OrderedPPs[&Scope][&BB].front();
     ProgramPoint *ExitPP = OrderedPPs[&Scope][&BB].back();
     assert(EntryPP && ExitPP);
-    const BasicBlock *IDom = GetIDom(DT, BB);
-    while (IDom && &ScopeFor(*IDom) != &Scope)
-      IDom = GetIDom(DT, *IDom);
-    if (IDom) {
+    if (const BasicBlock *IDom = GetIDomInScope(DT, BB)) {
       ProgramPoint *Pred = OrderedPPs[&Scope][IDom].back();
       if (!BA.isFwdBarrier(*IDom->getTerminator()) &&
           !BA.hasFwdBarrierPath(*IDom, BB))
         Scope.addEdge(*Pred, *EntryPP, PPEdgeKind::Dom);
     }
-    const BasicBlock *IPDom = GetIDom(PDT, BB);
-    while (IPDom && &ScopeFor(*IPDom) != &Scope)
-      IPDom = GetIDom(PDT, *IPDom);
-    if (IPDom) {
+    if (const BasicBlock *IPDom = GetIDomInScope(PDT, BB)) {
       ProgramPoint *Succ = OrderedPPs[&Scope][IPDom].front();
       if (!BA.isBwdBarrier(*BB.getTerminator()) &&
           !BA.hasBwdBarrierPath(BB, *IPDom))

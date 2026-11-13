@@ -10,6 +10,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <array>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -48,7 +49,7 @@ struct ActiveVisit {
   unsigned Visit = 0;
 };
 
-ActiveVisit *Current = nullptr;
+std::optional<ActiveVisit> Current;
 
 unsigned findVisit(FunctionStats &Fn, StringRef Pass) {
   for (unsigned Index = 0; Index < Fn.Visits.size(); ++Index)
@@ -58,21 +59,14 @@ unsigned findVisit(FunctionStats &Fn, StringRef Pass) {
   return Fn.Visits.size() - 1;
 }
 
-void printCounts(raw_ostream &OS,
-                 const std::array<uint64_t, FieldCount> &Counts) {
-  for (unsigned Index = 0; Index < FieldCount; ++Index) {
-    if (Counts[Index] == 0)
-      continue;
-    OS << "  " << FieldNames[Index] << " " << Counts[Index];
-  }
-}
-
 void printVisit(raw_ostream &OS, StringRef Pass,
                 const std::array<uint64_t, FieldCount> &Counts) {
   if (all_of(Counts, [](uint64_t Count) { return Count == 0; }))
     return;
   OS << format("    %-16s", Pass.str().c_str());
-  printCounts(OS, Counts);
+  for (unsigned Index = 0; Index < FieldCount; ++Index)
+    if (Counts[Index] != 0)
+      OS << "  " << FieldNames[Index] << " " << Counts[Index];
   OS << "\n";
 }
 
@@ -137,25 +131,15 @@ void MAIRStatScope::begin(StringRef Pass, unsigned Ordinal, const MAIRGraph &G,
   StringRef Func = getFunctionName(G);
   std::string Label =
       Ordinal == 0 ? Pass.str() : (Pass + "#" + Twine(Ordinal)).str();
-  auto It = FunctionIndex.find(Func);
-  if (It == FunctionIndex.end()) {
-    FunctionIndex[Func] = Functions.size();
-    Functions.push_back(FunctionStats{});
-    It = FunctionIndex.find(Func);
-  }
-  FunctionStats &Fn = Functions[It->second];
-  unsigned VisitIndex = findVisit(Fn, Label);
-  static ActiveVisit Storage;
-  Storage = ActiveVisit{It->second, VisitIndex};
-  Current = &Storage;
+  auto [It, Inserted] = FunctionIndex.try_emplace(Func, Functions.size());
+  if (Inserted)
+    Functions.emplace_back();
+  unsigned FnIndex = It->second;
+  Current = ActiveVisit{FnIndex, findVisit(Functions[FnIndex], Label)};
   add(MAIRStatField::In, NumInputs);
 }
 
-MAIRStatScope::~MAIRStatScope() {
-  if (!ClMAIRStats)
-    return;
-  Current = nullptr;
-}
+MAIRStatScope::~MAIRStatScope() { Current.reset(); }
 
 void MAIRStatScope::add(MAIRStatField Field, uint64_t N) {
   if (!ClMAIRStats || N == 0)

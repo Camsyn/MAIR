@@ -117,10 +117,8 @@ int main(int argc, char **argv) {
   }
 
   if (EmitDOT) {
-    unsigned NumDefinitions = 0;
-    for (const Function &F : *M)
-      if (!F.isDeclaration())
-        ++NumDefinitions;
+    unsigned NumDefinitions =
+        count_if(*M, [](const Function &F) { return !F.isDeclaration(); });
     if (NumDefinitions != 1) {
       errs() << "-emit-dot expects exactly one function definition; found "
              << NumDefinitions << "\n";
@@ -167,16 +165,18 @@ int main(int argc, char **argv) {
         GAM.clear(*Scope, F.getName());
     }
 
-    if (!DisableOutput && EmitDOT) {
+    if (DisableOutput)
+      continue;
+    if (EmitDOT)
       dumpDOT(Graph, *OutputOS);
-    } else if (!DisableOutput && !EmitLLVM) {
-      dumpMAIR(Graph, *OutputOS);
-    }
-    if (!DisableOutput && EmitLLVM)
+    else if (EmitLLVM)
       Graphs.push_back(std::move(Graph));
+    else
+      dumpMAIR(Graph, *OutputOS);
   }
 
-  if (!DisableOutput && EmitLLVM && !Graphs.empty()) {
+  // Graphs holds the functions only under -emit-llvm.
+  if (!Graphs.empty()) {
     SmallVector<const MAIRGraph *, 8> GraphPtrs(make_pointer_range(Graphs));
     dumpLLVM(GraphPtrs, *OutputOS);
   }

@@ -19,10 +19,8 @@ using MAIRGraphPassManager =
     llvm::PassManager<MAIRGraph, MAIRGraphAnalysisManager>;
 
 void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
-                               llvm::PassInstrumentationCallbacks *PIC);
-void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
                                llvm::PassInstrumentationCallbacks *PIC,
-                               llvm::FunctionAnalysisManager *FAM);
+                               llvm::FunctionAnalysisManager *FAM = nullptr);
 
 bool normalizeMAIRLoops(llvm::Function &F, llvm::FunctionAnalysisManager &FAM);
 

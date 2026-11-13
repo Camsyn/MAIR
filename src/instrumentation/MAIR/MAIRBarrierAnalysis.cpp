@@ -12,51 +12,22 @@ namespace mair {
 bool MAIRBarrierAnalysisCore::isBarrierBlock(const BasicBlock &BB,
                                              bool Forward) {
   auto &Memo = Forward ? FwdBarrierBBMemo : BwdBarrierBBMemo;
-  if (auto It = Memo.find(&BB); It != Memo.end())
-    return It->second;
-  const bool Result = hasAnyBarrier(BB, Forward);
-  Memo[&BB] = Result;
-  return Result;
-}
-
-bool MAIRBarrierAnalysisCore::hasFwdBarrierBetween(
-    const BasicBlock &BB, const Instruction *ComesBefore,
-    const Instruction *ComesAfter) {
-  return hasBarrierBetween(BB, ComesBefore, ComesAfter, true);
-}
-
-bool MAIRBarrierAnalysisCore::hasBwdBarrierBetween(
-    const BasicBlock &BB, const Instruction *ComesBefore,
-    const Instruction *ComesAfter) {
-  return hasBarrierBetween(BB, ComesBefore, ComesAfter, false);
-}
-
-bool MAIRBarrierAnalysisCore::hasFwdBarrierBetween(
-    const Instruction *ComesBefore, const Instruction *ComesAfter) {
-  assert(ComesBefore && ComesAfter && ComesBefore->getParent() &&
-         ComesAfter->getParent() == ComesBefore->getParent());
-  return hasBarrierBetween(*ComesBefore->getParent(), ComesBefore, ComesAfter,
-                           true);
-}
-
-bool MAIRBarrierAnalysisCore::hasBwdBarrierBetween(
-    const Instruction *ComesBefore, const Instruction *ComesAfter) {
-  assert(ComesBefore && ComesAfter && ComesBefore->getParent() &&
-         ComesAfter->getParent() == ComesBefore->getParent());
-  return hasBarrierBetween(*ComesBefore->getParent(), ComesBefore, ComesAfter,
-                           false);
+  auto [It, Inserted] = Memo.try_emplace(&BB, false);
+  if (Inserted)
+    It->second = hasAnyBarrier(BB, Forward);
+  return It->second;
 }
 
 bool MAIRBarrierAnalysisCore::hasBarrierBetween(const BasicBlock &BB,
-                                                const Instruction *ComesBefore,
-                                                const Instruction *ComesAfter,
+                                                const Instruction *From,
+                                                const Instruction *To,
                                                 bool Forward) {
-  if (ComesBefore && ComesAfter && ComesBefore == ComesAfter)
+  if (From && From == To)
     return false;
-  bool Result = hasAnyBarrier(BB, ComesBefore, ComesAfter, Forward);
-  if (Result)
-    (Forward ? FwdBarrierBBMemo : BwdBarrierBBMemo)[&BB] = true;
-  return Result;
+  if (!hasAnyBarrier(BB, From, To, Forward))
+    return false;
+  (Forward ? FwdBarrierBBMemo : BwdBarrierBBMemo)[&BB] = true;
+  return true;
 }
 
 // Whether a barrier can run between the witness and the observation it
@@ -85,7 +56,7 @@ bool MAIRBarrierAnalysisCore::hasBarrierPath(const BasicBlock &From,
   df_iterator_default_set<const BasicBlock *> Visited;
   Visited.insert(&Witness);
   auto IsBarrier = [&](const BasicBlock *BB) {
-    return BB != &From && BB != &To && this->isBarrierBlock(*BB, Forward);
+    return BB != &From && BB != &To && isBarrierBlock(*BB, Forward);
   };
   if (Forward ? any_of(inverse_depth_first_ext(&To, Visited), IsBarrier)
               : any_of(depth_first_ext(&From, Visited), IsBarrier))
@@ -99,16 +70,6 @@ bool MAIRBarrierAnalysisCore::hasBarrierPath(const BasicBlock &From,
                              ? any_of(successors(&Covered), ClosesCircuit)
                              : any_of(predecessors(&Covered), ClosesCircuit);
   return RunsAgain && isBarrierBlock(Covered, Forward);
-}
-
-bool MAIRBarrierAnalysisCore::hasFwdBarrierPath(const BasicBlock &From,
-                                                const BasicBlock &To) {
-  return hasBarrierPath(From, To, true);
-}
-
-bool MAIRBarrierAnalysisCore::hasBwdBarrierPath(const BasicBlock &From,
-                                                const BasicBlock &To) {
-  return hasBarrierPath(From, To, false);
 }
 
 } // namespace mair

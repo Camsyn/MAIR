@@ -1335,9 +1335,8 @@ public:
   bool instrumentFunctionViaMAIR(Function &F, FunctionAnalysisManager &FAM,
                                  const TargetLibraryInfo *TLI,
                                  const TargetTransformInfo *TTI);
-  bool instrumentMAIRObservation(const mair::MaterializedObservation &Obs,
+  void instrumentMAIRObservation(const mair::MaterializedObservation &Obs,
                                  IRBuilderBase &Builder, bool UseCalls,
-                                 ObjectSizeOffsetVisitor &ObjSizeVis,
                                  RuntimeCallInserter &RTCI);
 #endif
 
@@ -4159,86 +4158,71 @@ bool XsanAddressSanitizer::prepareAsanTargetsToInstrument(
 }
 
 #ifndef XSAN_PASS
-bool XsanAddressSanitizer::instrumentMAIRObservation(
+// Check the bytes of one MAIR observation. Its sources were accepted by
+// CanInstrumentViaMAIR in instrumentFunctionViaMAIR: loads and stores whose
+// footprint the observation covers without gaps, so every checked byte is one
+// a source touches.
+void XsanAddressSanitizer::instrumentMAIRObservation(
     const mair::MaterializedObservation &Obs, IRBuilderBase &Builder,
-    bool UseCalls, ObjectSizeOffsetVisitor &ObjSizeVis,
-    RuntimeCallInserter &RTCI) {
-  if (!Obs.Source)
-    report_fatal_error("ASan MAIR observation has no source");
-
-  ArrayRef<Instruction *> SelectedSources = Obs.Source->getInstructions();
-  if (SelectedSources.empty())
-    report_fatal_error("ASan MAIR observation has no source instruction");
-
-  auto InstrumentAtSource = [&](Instruction &Source) {
-    if (auto *LI = dyn_cast<LoadInst>(&Source)) {
-      InterestingMemoryOperand Operand(&Source, LI->getPointerOperandIndex(),
-                                       false, LI->getType(), LI->getAlign());
-      instrumentMop(ObjSizeVis, Operand, UseCalls, Source.getDataLayout(),
-                    RTCI);
-      return;
-    }
-    auto *SI = dyn_cast<StoreInst>(&Source);
-    if (!SI)
-      report_fatal_error("ASan MAIR provenance is not a load or store");
-    InterestingMemoryOperand Operand(&Source, SI->getPointerOperandIndex(),
-                                     true, SI->getValueOperand()->getType(),
-                                     SI->getAlign());
-    instrumentMop(ObjSizeVis, Operand, UseCalls, Source.getDataLayout(), RTCI);
+    bool UseCalls, RuntimeCallInserter &RTCI) {
+  ArrayRef<Instruction *> Sources = Obs.Source->getInstructions();
+  Instruction *First = Sources.front();
+  // ASan checks reads and writes alike, so MAIR merges them. Report the range
+  // as a store if any source writes, unless every source accesses the same
+  // bytes and the first is a load: native ASan reports the load of x[i]++,
+  // which runs first, as a READ.
+  const DataLayout &DL = First->getDataLayout();
+  auto SameBytesAsFirst = [&](Instruction *I) {
+    return getLoadStorePointerOperand(I) == getLoadStorePointerOperand(First) &&
+           DL.getTypeStoreSize(getLoadStoreType(I)) ==
+               DL.getTypeStoreSize(getLoadStoreType(First));
   };
-
-  Instruction *Source = SelectedSources.front();
-  Type *SourceType =
-      isa<LoadInst>(Source)
-          ? cast<LoadInst>(Source)->getType()
-          : cast<StoreInst>(Source)->getValueOperand()->getType();
-  const auto *Size = dyn_cast_or_null<ConstantInt>(Obs.AccessSize);
-  bool CanUseOptimizedSite = SelectedSources.size() == 1 &&
-                             Obs.Source->getInstructions().size() == 1 &&
-                             Obs.Source->isContiguous() &&
-                             !SourceType->isVectorTy() && Size &&
-                             Size->getValue().getActiveBits() < 32;
-  if (!CanUseOptimizedSite) {
-    for (Instruction *Selected : SelectedSources)
-      InstrumentAtSource(*Selected);
-    return true;
-  }
-
-  Value *SourceAddr = isa<LoadInst>(Source)
-                          ? cast<LoadInst>(Source)->getPointerOperand()
-                          : cast<StoreInst>(Source)->getPointerOperand();
-  TypeSize SourceStoreSize =
-      Source->getDataLayout().getTypeStoreSize(SourceType);
-  if (ClOpt && ClOptGlobals) {
-    GlobalVariable *G =
-        dyn_cast<GlobalVariable>(getUnderlyingObject(SourceAddr));
-    if (G && (!ClInitializers || GlobalIsLinkerInitialized(G)) &&
-        isSafeAccess(ObjSizeVis, SourceAddr, SourceStoreSize)) {
-      NumOptimizedAccessesToGlobalVar++;
-      return false;
-    }
-  }
-  if (ClOpt && ClOptStack) {
-    if (isa<AllocaInst>(getUnderlyingObject(SourceAddr)) &&
-        isSafeAccess(ObjSizeVis, SourceAddr, SourceStoreSize)) {
-      NumOptimizedAccessesToStackVar++;
-      return false;
-    }
-  }
-
+  bool IsWrite = Obs.Kind != mair::AccessKind::Read &&
+                 !(isa<LoadInst>(First) && all_of(Sources, SameBytesAsFirst));
+  // Reports point at the first source, the one the range starts with when
+  // MAIR merged several.
+  DebugLoc Loc = Obs.Source->getStableDebugLoc();
   assert(Builder.GetInsertBlock() &&
          Builder.GetInsertPoint() != Builder.GetInsertBlock()->end());
   Instruction *InsertBefore = &*Builder.GetInsertPoint();
-  MaybeAlign Alignment = isa<LoadInst>(Source)
-                             ? MaybeAlign(cast<LoadInst>(Source)->getAlign())
-                             : MaybeAlign(cast<StoreInst>(Source)->getAlign());
-  TypeSize SizeInBits = TypeSize::getFixed(Size->getZExtValue() * 8);
-  bool IsWrite = Obs.Kind != mair::AccessKind::Read;
-  doInstrumentAddress(this, Source, InsertBefore, Obs.Address, Alignment,
-                      1U << Mapping.Scale, SizeInBits, IsWrite, nullptr,
-                      UseCalls, ClForceExperiment, RTCI,
-                      Obs.Source->getStableDebugLoc());
-  return true;
+  InstrumentationIRBuilder IRB(InsertBefore);
+  useOriginalAccessDebugLoc(IRB, Loc);
+
+  // A contiguous range. Its start is where some source starts, so the
+  // smallest source alignment holds for it.
+  Align Alignment = getLoadStoreAlignment(First);
+  for (Instruction *Source : Sources)
+    Alignment = std::min(Alignment, getLoadStoreAlignment(Source));
+  const auto *Size = dyn_cast<ConstantInt>(Obs.AccessSize);
+  if (Size && Size->getValue().getActiveBits() <= 32) {
+    uint64_t Bytes = Size->getZExtValue();
+    // A single unmerged access is checked exactly as native ASan would.
+    bool IsOneAccess = Sources.size() == 1 &&
+                       Bytes == DL.getTypeStoreSize(getLoadStoreType(First));
+    // Up to 16 bytes, the inline check is as precise as for one access of that
+    // size: one shadow load if the range is aligned, else its first and last
+    // byte. The bytes between them span at most one granule, and ASan's own
+    // redzones are never that narrow.
+    if (IsOneAccess || Bytes <= 16) {
+      doInstrumentAddress(this, First, InsertBefore, Obs.Address, Alignment,
+                          1U << Mapping.Scale, TypeSize::getFixed(Bytes * 8),
+                          IsWrite, nullptr, UseCalls, ClForceExperiment, RTCI,
+                          Loc);
+      return;
+    }
+  }
+
+  // A longer range is checked byte by byte: its first and last byte could
+  // both be addressable around a redzone in between.
+  Value *AddrLong = IRB.CreatePointerCast(Obs.Address, IntptrTy);
+  Value *SizeLong = IRB.CreateZExtOrTrunc(Obs.AccessSize, IntptrTy);
+  if (ClForceExperiment == 0)
+    RTCI.createRuntimeCall(IRB, AsanMemoryAccessCallbackSized[IsWrite][0],
+                           {AddrLong, SizeLong});
+  else
+    RTCI.createRuntimeCall(
+        IRB, AsanMemoryAccessCallbackSized[IsWrite][1],
+        {AddrLong, SizeLong, IRB.getInt32(ClForceExperiment)});
 }
 
 bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
@@ -4333,26 +4317,43 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
     return false;
   };
 
+  // Whether one check of Obs's region can stand in for the native checks of
+  // all its sources. The region of a merged observation is the gap-free union
+  // of its sources' bytes (AbstractAccess::merge joins only overlapping or
+  // adjacent ranges), so the check covers exactly the bytes the sources touch.
   auto CanInstrumentViaMAIR = [&](const mair::Observation &Obs) {
-    if ((ClDebugMin >= 0 && ClDebugMax >= 0) || !Obs.isContiguous() ||
-        Obs.isCallLike() || Obs.getInstructions().size() != 1 ||
-        !Obs.hasConcreteRange())
+    if ((ClDebugMin >= 0 && ClDebugMax >= 0) || Obs.isCallLike())
       return false;
 
-    Instruction *Source = Obs.getInstructions().front();
-    auto *LI = dyn_cast<LoadInst>(Source);
-    auto *SI = dyn_cast<StoreInst>(Source);
-    if (!LI && !SI)
+    if (const mair::AbstractAccess *Region = Obs.getContiguousRegion()) {
+      // The offset may be symbolic: materialization computes the address.
+      // The size must be known, as a constant or a trip count expression.
+      if (Region->getOffset().isUnknown() ||
+          (!Region->hasSizeExpr() && !Region->getSize().isConstant()))
+        return false;
+    } else {
       return false;
+    }
 
-    SmallVector<InterestingMemoryOperand, 1> InterestingOperands;
-    getInterestingMemoryOperands(Source, InterestingOperands, TTI);
-    if (InterestingOperands.size() != 1)
-      return false;
+    for (Instruction *Source : Obs.getInstructions()) {
+      auto *LI = dyn_cast<LoadInst>(Source);
+      auto *SI = dyn_cast<StoreInst>(Source);
+      if (!LI && !SI)
+        return false;
 
-    Type *AccessTy = LI ? LI->getType() : SI->getValueOperand()->getType();
-    return !AccessTy->isVectorTy() && !AccessTy->isScalableTy() &&
-           !IsElidedByNativeAsanOpt(*Source);
+      // Native ASan may leave the source unchecked, as a safe stack or global
+      // access or an access it ignores. Let it decide for all the sources.
+      SmallVector<InterestingMemoryOperand, 1> InterestingOperands;
+      getInterestingMemoryOperands(Source, InterestingOperands, TTI);
+      if (InterestingOperands.size() != 1 || IsElidedByNativeAsanOpt(*Source))
+        return false;
+
+      // A fixed vector is one access of its store size, as for native ASan.
+      Type *AccessTy = LI ? LI->getType() : SI->getValueOperand()->getType();
+      if (AccessTy->isScalableTy())
+        return false;
+    }
+    return !Obs.getInstructions().empty();
   };
 
   auto MAIRSelection = mair::selectMaterializableObservations(
@@ -4384,16 +4385,13 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
     class AddressSanitizerBackend final : public mair::MAIRObservationBackend {
       XsanAddressSanitizer &ASan;
       bool UseCalls;
-      ObjectSizeOffsetVisitor &ObjSizeVis;
       RuntimeCallInserter &RTCI;
       bool Changed = false;
 
     public:
       AddressSanitizerBackend(XsanAddressSanitizer &ASan, bool UseCalls,
-                              ObjectSizeOffsetVisitor &ObjSizeVis,
                               RuntimeCallInserter &RTCI)
-          : ASan(ASan), UseCalls(UseCalls), ObjSizeVis(ObjSizeVis), RTCI(RTCI) {
-      }
+          : ASan(ASan), UseCalls(UseCalls), RTCI(RTCI) {}
 
       Error prepare(const mair::MAIRMaterializationPlan &) override {
         return Error::success();
@@ -4402,12 +4400,12 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
       void emit(const mair::MaterializedProgramPoint &PP,
                 IRBuilderBase &Builder) override {
         for (const mair::MaterializedObservation &Obs : PP.Observations)
-          Changed |= ASan.instrumentMAIRObservation(Obs, Builder, UseCalls,
-                                                    ObjSizeVis, RTCI);
+          ASan.instrumentMAIRObservation(Obs, Builder, UseCalls, RTCI);
+        Changed |= !PP.Observations.empty();
       }
 
       bool changed() const { return Changed; }
-    } Backend(*this, UseCalls, ObjSizeVis, RTCI);
+    } Backend(*this, UseCalls, RTCI);
 
     Expected<mair::MAIRInstantiationResult> Result = Opt.instantiate(Backend);
     if (!Result)

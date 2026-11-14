@@ -4159,29 +4159,11 @@ bool XsanAddressSanitizer::prepareAsanTargetsToInstrument(
 }
 
 #ifndef XSAN_PASS
-// The source of \p Obs that runs first, the one every other source follows.
-// Sources are loads and stores, so instruction dominance is the order they
-// run in. Sources merged from different paths, such as the two arms of a
-// branch, may have no such source; then this is a source that no other
-// source strictly dominates, picked by the observation's source order alone.
-static Instruction *getFirstSource(const mair::Observation &Obs,
-                                   const DominatorTree &DT) {
-  ArrayRef<Instruction *> Sources = Obs.getInstructions();
-  Instruction *First = Sources.front();
-  // Each replacement strictly dominates the one it replaces, so no source
-  // strictly dominates the result, and a source that dominates all others
-  // is found.
-  for (Instruction *Source : Sources.drop_front())
-    if (Source != First && DT.dominates(Source, First))
-      First = Source;
-  return First;
-}
-
 // Check the bytes of one MAIR observation. Its sources were accepted by
 // CanInstrumentViaMAIR in instrumentFunctionViaMAIR: loads and stores whose
 // footprint the observation covers without gaps, so every checked byte is one
 // a source touches. FirstSource is the source that runs first
-// (getFirstSource).
+// (mair::getFirstSource).
 void XsanAddressSanitizer::instrumentMAIRObservation(
     const mair::MaterializedObservation &Obs, Instruction *FirstSource,
     IRBuilderBase &Builder, bool UseCalls, RuntimeCallInserter &RTCI) {
@@ -4445,7 +4427,7 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
     DenseMap<const mair::Observation *, Instruction *> FirstSources;
     const DominatorTree &DT = Opt.getGraph().getDominatorTree();
     for (const mair::Observation *Obs : MAIRSelection.Targets)
-      FirstSources[Obs] = getFirstSource(*Obs, DT);
+      FirstSources[Obs] = mair::getFirstSource(*Obs, DT);
 
     class AddressSanitizerBackend final : public mair::MAIRObservationBackend {
       XsanAddressSanitizer &ASan;

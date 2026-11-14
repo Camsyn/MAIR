@@ -201,6 +201,7 @@ struct XsanThreadSanitizer : public ThreadSanitizer {
   bool sanitizeFunctionViaMAIR(Function &F, FunctionAnalysisManager &FAM,
                                const TargetLibraryInfo &TLI);
   bool instrumentMAIRObservation(const mair::MaterializedObservation &Obs,
+                                 Instruction *FirstSource,
                                  IRBuilderBase &Builder, const DataLayout &DL);
 #endif
   bool collectTargetsToIntrument(Function &F, const TargetLibraryInfo &TLI,
@@ -1098,9 +1099,11 @@ Align getContiguousStartAlign(const mair::Observation &Obs,
 }
 } // namespace
 
+// FirstSource is the source of Obs that runs first (mair::getFirstSource);
+// a race on the observation is reported at it.
 bool XsanThreadSanitizer::instrumentMAIRObservation(
-    const mair::MaterializedObservation &Obs, IRBuilderBase &Builder,
-    const DataLayout &DL) {
+    const mair::MaterializedObservation &Obs, Instruction *FirstSource,
+    IRBuilderBase &Builder, const DataLayout &DL) {
   if (!Obs.Source)
     report_fatal_error("TSan MAIR observation has no source");
 
@@ -1108,8 +1111,10 @@ bool XsanThreadSanitizer::instrumentMAIRObservation(
   if (SelectedSources.empty())
     report_fatal_error("TSan MAIR observation has no source instruction");
 
+  assert(FirstSource && is_contained(SelectedSources, FirstSource) &&
+         "the first source must be one of the observation's sources");
   auto useOriginalAccessDebugLoc = [&](IRBuilderBase &IRB) {
-    if (DebugLoc Loc = Obs.Source->getStableDebugLoc())
+    if (DebugLoc Loc = FirstSource->getStableDebugLoc())
       IRB.SetCurrentDebugLocation(Loc);
   };
 
@@ -1315,15 +1320,25 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
   // objects from MAOpt own the primary instrumentation target set.
   if (ClInstrumentMemoryAccesses && SanitizeFunction) {
     if (!MAIRSelection.Targets.empty()) {
+      // Materialization changes the CFG without updating the dominator tree,
+      // so find the first sources now.
+      DenseMap<const mair::Observation *, Instruction *> FirstSources;
+      const DominatorTree &DT = Opt->getGraph().getDominatorTree();
+      for (const mair::Observation *Obs : MAIRSelection.Targets)
+        FirstSources[Obs] = mair::getFirstSource(*Obs, DT);
 
       class ThreadSanitizerBackend final : public mair::MAIRObservationBackend {
         XsanThreadSanitizer &TSan;
+        const DenseMap<const mair::Observation *, Instruction *> &FirstSources;
         const DataLayout &DL;
         bool Changed = false;
 
       public:
-        ThreadSanitizerBackend(XsanThreadSanitizer &TSan, const DataLayout &DL)
-            : TSan(TSan), DL(DL) {}
+        ThreadSanitizerBackend(XsanThreadSanitizer &TSan,
+                               const DenseMap<const mair::Observation *,
+                                              Instruction *> &FirstSources,
+                               const DataLayout &DL)
+            : TSan(TSan), FirstSources(FirstSources), DL(DL) {}
 
         Error prepare(const mair::MAIRMaterializationPlan &) override {
           return Error::success();
@@ -1332,11 +1347,12 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
         void emit(const mair::MaterializedProgramPoint &PP,
                   IRBuilderBase &Builder) override {
           for (const mair::MaterializedObservation &Obs : PP.Observations)
-            Changed |= TSan.instrumentMAIRObservation(Obs, Builder, DL);
+            Changed |= TSan.instrumentMAIRObservation(
+                Obs, FirstSources.lookup(Obs.Source), Builder, DL);
         }
 
         bool changed() const { return Changed; }
-      } Backend(*this, DL);
+      } Backend(*this, FirstSources, DL);
 
       Expected<mair::MAIRInstantiationResult> Result =
           Opt->instantiate(Backend);

@@ -30,6 +30,16 @@ MAIRObservationSelection selectMaterializableObservations(
     const llvm::SmallPtrSetImpl<const llvm::Instruction *> &ModeledSources,
     llvm::function_ref<bool(const Observation &)> CanInstrument);
 
+/// The source of \p Obs that runs first, the one every other source follows.
+/// Sources are loads and stores, so instruction dominance is the order they
+/// run in. Sources merged from different paths, such as the two arms of a
+/// branch, may have no such source; then this is a source that no other
+/// source strictly dominates, picked by the observation's source order alone.
+/// Sanitizers report a merged check at this source. Call it before
+/// instantiation, which splits blocks without updating \p DT.
+llvm::Instruction *getFirstSource(const Observation &Obs,
+                                  const llvm::DominatorTree &DT);
+
 struct PlannedObservation {
   const Observation *Source = nullptr;
   AccessKind Kind = AccessKind::Read;

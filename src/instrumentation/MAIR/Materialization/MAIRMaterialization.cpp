@@ -473,6 +473,19 @@ std::optional<MAIRStatField> classifyNativeObservation(const Observation &Obs) {
 
 } // namespace
 
+Instruction *getFirstSource(const Observation &Obs, const DominatorTree &DT) {
+  ArrayRef<Instruction *> Sources = Obs.getInstructions();
+  assert(!Sources.empty() && "an observation has at least one source");
+  Instruction *First = Sources.front();
+  // Each replacement strictly dominates the one it replaces, so no source
+  // strictly dominates the result, and a source that dominates all others
+  // is found.
+  for (Instruction *Source : Sources.drop_front())
+    if (Source != First && DT.dominates(Source, First))
+      First = Source;
+  return First;
+}
+
 MAIRObservationSelection selectMaterializableObservations(
     const MAIRGraph &Graph,
     const SmallPtrSetImpl<const Instruction *> &ModeledSources,

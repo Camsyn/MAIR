@@ -1253,11 +1253,6 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
     Opt->build();
     Res |= Opt->hasModifiedIR();
 
-    auto MAIRModeledSources = mair::collectModeledSources(Opt->getGraph());
-
-    if (Error Err = Opt->optimize())
-      report_fatal_error(Twine(toString(std::move(Err))));
-
     auto PointsToConstantData = [](Value *Addr) {
       if (auto *GEP = dyn_cast<GetElementPtrInst>(Addr))
         Addr = GEP->getPointerOperand();
@@ -1268,29 +1263,56 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
       return false;
     };
 
-    // Native TSan's per-access filters. Every source of an observation must
-    // pass them, so that a merged or combined observation never records an
-    // access native TSan would omit.
-    auto CanInstrumentSource = [&](Instruction *Source) {
+    // Native TSan's filters that drop a load or store whatever surrounds it
+    // (collectTargetsToIntrument, chooseInstructionsToInstrument and
+    // instrumentLoadOrStore): it never records such an access. They depend
+    // only on the access and its address, not on where it runs.
+    auto NativeTsanOmits = [&](Instruction *Source) {
       auto *LI = dyn_cast<LoadInst>(Source);
       auto *SI = dyn_cast<StoreInst>(Source);
-      if ((!LI && !SI) || __xsan::DelegateToXSan::is(*Source) ||
-          isTsanAtomic(Source) || isVtableAccess(Source))
+      if (!LI && !SI)
         return false;
-
-      Type *AccessTy = LI ? LI->getType() : SI->getValueOperand()->getType();
-      if (AccessTy->isVectorTy() || AccessTy->isScalableTy())
+      if (__xsan::DelegateToXSan::is(*Source))
+        return true;
+      if (isTsanAtomic(Source))
         return false;
-
       Value *Addr = LI ? LI->getPointerOperand() : SI->getPointerOperand();
       if (Addr->isSwiftError() ||
           !shouldInstrumentReadWriteFromAddress(Source->getModule(), Addr) ||
           (LI && PointsToConstantData(Addr)))
+        return true;
+      const AllocaInst *AI = findAllocaForValue(Addr);
+      return AI && ClOmitNonCaptured &&
+             !PointerMayBeCaptured(AI, /*ReturnCaptures=*/true);
+    };
+
+    // Drop the accesses native TSan never records before optimization
+    // (MAOpt::eraseObservationsIf). Kept, such an access would merge with
+    // recorded ones and send them all back to native lowering.
+    Opt->eraseObservationsIf([&](const mair::Observation &Obs) {
+      ArrayRef<Instruction *> Sources = Obs.getInstructions();
+      return !Obs.isCallLike() && !Sources.empty() &&
+             all_of(Sources, NativeTsanOmits);
+    });
+
+    auto MAIRModeledSources = mair::collectModeledSources(Opt->getGraph());
+
+    if (Error Err = Opt->optimize())
+      report_fatal_error(Twine(toString(std::move(Err))));
+
+    // The other per-access filters for MAIR lowering: native TSan instruments
+    // these accesses its own way (atomics, vtable pointer accesses, vectors).
+    // Every source of an observation must pass them, so that a merged or
+    // combined observation never records an access the way native TSan would
+    // not. Those native TSan omits were dropped before optimization.
+    auto CanInstrumentSource = [&](Instruction *Source) {
+      auto *LI = dyn_cast<LoadInst>(Source);
+      auto *SI = dyn_cast<StoreInst>(Source);
+      if ((!LI && !SI) || isTsanAtomic(Source) || isVtableAccess(Source))
         return false;
 
-      const AllocaInst *AI = findAllocaForValue(Addr);
-      return !AI || !ClOmitNonCaptured ||
-             PointerMayBeCaptured(AI, /*ReturnCaptures=*/true);
+      Type *AccessTy = LI ? LI->getType() : SI->getValueOperand()->getType();
+      return !AccessTy->isVectorTy() && !AccessTy->isScalableTy();
     };
 
     // An observation may merge several sources (LocationMerge, LIOM, COM) or

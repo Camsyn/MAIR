@@ -4342,11 +4342,14 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
     ArrayRef<Instruction *> Sources = Obs.getInstructions();
     return !Obs.isCallLike() && !Sources.empty() &&
            all_of(Sources, [&](Instruction *Source) {
-             if (!isa<LoadInst, StoreInst>(Source))
-               return false;
+             // Masked loads and stores are asked too: with reads or writes
+             // disabled, an unchecked masked load could otherwise cover the
+             // masked store after it.
              SmallVector<InterestingMemoryOperand, 1> InterestingOperands;
              getInterestingMemoryOperands(Source, InterestingOperands, TTI);
-             return InterestingOperands.empty() ||
+             if (InterestingOperands.empty())
+               return true;
+             return isa<LoadInst, StoreInst>(Source) &&
                     IsElidedByNativeAsanOpt(*Source);
            });
   });

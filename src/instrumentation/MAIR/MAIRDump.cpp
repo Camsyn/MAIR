@@ -1,4 +1,5 @@
 #include "MAIR/MAIRDump.h"
+#include "MAIR/MAIRInternal.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
@@ -6,6 +7,7 @@
 #include "llvm/IR/AssemblyAnnotationWriter.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ModuleSlotTracker.h"
 #include "llvm/Support/DOTGraphTraits.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormattedStream.h"
@@ -28,9 +30,11 @@ namespace {
 class MAIRLLVMWriter final : public AssemblyAnnotationWriter {
   DenseMap<const Instruction *, SmallVector<const ProgramPoint *, 2>>
       AnchoredProgramPoints;
+  ModuleSlotTracker MST;
 
 public:
-  explicit MAIRLLVMWriter(ArrayRef<const MAIRGraph *> Graphs) {
+  MAIRLLVMWriter(const Module &M, ArrayRef<const MAIRGraph *> Graphs)
+      : MST(&M, /*ShouldInitializeAllMetadata=*/false) {
     for (const MAIRGraph *Graph : Graphs)
       if (Graph)
         for (const ProgramPoint *PP : Graph->allProgramPoints())
@@ -150,6 +154,8 @@ void MAIRLLVMWriter::emitInstructionAnnot(const Instruction *I,
   auto Points = AnchoredProgramPoints.find(I);
   if (Points == AnchoredProgramPoints.end())
     return;
+  MST.incorporateFunction(*I->getFunction());
+  DumpSlotTrackerScope Scope(MST);
   for (const ProgramPoint *PP : Points->second) {
     std::string Text = PP->toString();
     SmallVector<StringRef, 4> Lines;
@@ -160,7 +166,22 @@ void MAIRLLVMWriter::emitInstructionAnnot(const Instruction *I,
   }
 }
 
-void dumpMAIR(const MAIRGraph &Graph, raw_ostream &OS) { Graph.print(OS); }
+void dumpMAIR(const MAIRGraph &Graph, raw_ostream &OS) {
+  const Function *F = Graph.getFunction();
+  if (!F || !F->getParent()) {
+    Graph.print(OS);
+    return;
+  }
+  ModuleSlotTracker MST(F->getParent(), /*ShouldInitializeAllMetadata=*/false);
+  dumpMAIR(Graph, OS, MST);
+}
+
+void dumpMAIR(const MAIRGraph &Graph, raw_ostream &OS, ModuleSlotTracker &MST) {
+  if (const Function *F = Graph.getFunction())
+    MST.incorporateFunction(*F);
+  DumpSlotTrackerScope Scope(MST);
+  Graph.print(OS);
+}
 
 void dumpDOT(const MAIRGraph &Graph, raw_ostream &OS) {
   const MAIRGraphDOTView View(Graph);
@@ -169,8 +190,11 @@ void dumpDOT(const MAIRGraph &Graph, raw_ostream &OS) {
 
 void dumpLLVM(const MAIRGraph &Graph, raw_ostream &OS) {
   const MAIRGraph *Graphs[] = {&Graph};
-  MAIRLLVMWriter Writer(Graphs);
-  getFunctionForDump(Graph).print(OS, &Writer);
+  const Function &F = getFunctionForDump(Graph);
+  if (!F.getParent())
+    report_fatal_error("cannot dump LLVM for a function without a module");
+  MAIRLLVMWriter Writer(*F.getParent(), Graphs);
+  F.print(OS, &Writer);
 }
 
 void dumpLLVM(ArrayRef<const MAIRGraph *> Graphs, raw_ostream &OS) {
@@ -181,7 +205,7 @@ void dumpLLVM(ArrayRef<const MAIRGraph *> Graphs, raw_ostream &OS) {
   const Module *M = getFunctionForDump(*Graphs.front()).getParent();
   if (!M)
     report_fatal_error("cannot dump LLVM for a function without a module");
-  MAIRLLVMWriter Writer(Graphs);
+  MAIRLLVMWriter Writer(*M, Graphs);
   M->print(OS, &Writer);
 }
 

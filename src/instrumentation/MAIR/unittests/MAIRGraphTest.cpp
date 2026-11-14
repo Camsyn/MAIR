@@ -28,6 +28,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ModuleSlotTracker.h"
 #include "llvm/IR/PassInstrumentation.h"
 #include "llvm/Support/SourceMgr.h"
 #include "gtest/gtest.h"
@@ -334,6 +335,73 @@ clean:
   EXPECT_EQ(CountingCallBarrierTrait::ForwardQueries, QueriesAfterCleanBlock);
 }
 } // namespace
+
+// The dump functions number unnamed values with one shared slot tracker; the
+// output must not differ from printing each graph on its own.
+TEST(MAIRDump, NumbersUnnamedValuesLikePrint) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+@0 = global [4 x i32] zeroinitializer
+define void @f(ptr %0, i64 %1, i1 %2) {
+  %4 = getelementptr i8, ptr %0, i64 %1
+  store i32 0, ptr %4, align 4
+  br label %5
+5:
+  %6 = phi i64 [ 0, %3 ], [ %8, %5 ]
+  %7 = getelementptr i32, ptr @0, i64 %6
+  store i32 1, ptr %7, align 4
+  store i32 2, ptr %0, align 4
+  %8 = add i64 %6, 1
+  br i1 %2, label %5, label %9
+9:
+  %10 = load i32, ptr %4, align 4
+  ret void
+}
+define void @g(ptr %0) {
+  %2 = getelementptr i8, ptr %0, i64 8
+  %3 = load i32, ptr %2, align 4
+  store i32 %3, ptr @0, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  MAIRGraph F = buildGraph(*M->getFunction("f"));
+  MAIRGraph G = buildGraph(*M->getFunction("g"));
+  auto Print = [](const MAIRGraph &Graph) {
+    std::string Text;
+    llvm::raw_string_ostream OS(Text);
+    Graph.print(OS);
+    return Text;
+  };
+  const std::string Expected = Print(F) + Print(G);
+  ASSERT_NE(Expected.find("ptr %0"), std::string::npos);
+  ASSERT_NE(Expected.find("loop-preheader=%5"), std::string::npos);
+
+  std::string Shared;
+  llvm::raw_string_ostream SharedOS(Shared);
+  llvm::ModuleSlotTracker MST(M.get(), /*ShouldInitializeAllMetadata=*/false);
+  dumpMAIR(F, SharedOS, MST);
+  dumpMAIR(G, SharedOS, MST);
+  EXPECT_EQ(Shared, Expected);
+
+  std::string Single;
+  llvm::raw_string_ostream SingleOS(Single);
+  dumpMAIR(F, SingleOS);
+  dumpMAIR(G, SingleOS);
+  EXPECT_EQ(Single, Expected);
+
+  std::string LLVMText;
+  llvm::raw_string_ostream LLVMOS(LLVMText);
+  const MAIRGraph *Graphs[] = {&F, &G};
+  dumpLLVM(Graphs, LLVMOS);
+  for (const MAIRGraph *Graph : Graphs)
+    for (const ProgramPoint *PP : Graph->allProgramPoints()) {
+      std::string Line = PP->toString();
+      Line = Line.substr(0, Line.find('\n'));
+      EXPECT_NE(LLVMText.find("; " + Line), std::string::npos) << Line;
+    }
+}
 
 TEST(MAIRGraph, BasicConstructionAndDump) {
   llvm::LLVMContext Ctx;

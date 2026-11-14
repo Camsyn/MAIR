@@ -12,6 +12,7 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ModuleSlotTracker.h"
 #include "llvm/IR/PassInstrumentation.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IRReader/IRReader.h"
@@ -145,6 +146,8 @@ int main(int argc, char **argv) {
   }
 
   SmallVector<MAIRGraph, 8> Graphs;
+  // One tracker numbers the unnamed values of all dumped functions.
+  ModuleSlotTracker MST(M.get(), /*ShouldInitializeAllMetadata=*/false);
   for (Function &F : *M) {
     if (F.isDeclaration())
       continue;
@@ -177,7 +180,7 @@ int main(int argc, char **argv) {
     else if (EmitLLVM)
       Graphs.push_back(std::move(Graph));
     else
-      dumpMAIR(Graph, *OutputOS);
+      dumpMAIR(Graph, *OutputOS, MST);
   }
 
   // Graphs holds the functions only under -emit-llvm.

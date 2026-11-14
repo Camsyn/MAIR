@@ -1,14 +1,21 @@
 #pragma once
 
-// Declarations shared by the MAIR core sources (MAIR.cpp, MAIRGraphBuilder.cpp,
-// MAIRObservation.cpp, MAIRRegion.cpp). Nothing else includes this file.
+// Declarations shared by the MAIR core sources (MAIR.cpp, MAIRDump.cpp,
+// MAIRGraphBuilder.cpp, MAIRObservation.cpp, MAIRRegion.cpp). Nothing else
+// includes this file.
 
 #include "MAIR/MAIR.h"
+
+#include "llvm/IR/Metadata.h"
+#include "llvm/IR/ModuleSlotTracker.h"
 
 #include <optional>
 #include <string>
 
 namespace mair {
+
+using llvm::MetadataAsValue;
+using llvm::ModuleSlotTracker;
 
 struct MAIRScalarExprOwner {};
 
@@ -35,8 +42,32 @@ struct MAIRGraphResources {
   unsigned NextProgramPointID = 0;
 };
 
+/// The slot tracker the dump functions (MAIRDump.cpp) install while they
+/// print. Without one, printing an unnamed value such as %5 numbers the whole
+/// module again, which makes dumping a large module quadratic.
+class DumpSlotTrackerScope {
+  inline static thread_local ModuleSlotTracker *Current = nullptr;
+  ModuleSlotTracker *Previous;
+
+public:
+  explicit DumpSlotTrackerScope(ModuleSlotTracker &MST) : Previous(Current) {
+    Current = &MST;
+  }
+  ~DumpSlotTrackerScope() { Current = Previous; }
+  DumpSlotTrackerScope(const DumpSlotTrackerScope &) = delete;
+  DumpSlotTrackerScope &operator=(const DumpSlotTrackerScope &) = delete;
+
+  static ModuleSlotTracker *get() { return Current; }
+};
+
 inline void printValueName(raw_ostream &OS, const Value &V) {
-  V.printAsOperand(OS, /*PrintType=*/false);
+  // Metadata is numbered differently when the tracker has not numbered all of
+  // it, so it keeps the default path.
+  ModuleSlotTracker *MST = DumpSlotTrackerScope::get();
+  if (MST && !isa<MetadataAsValue>(V))
+    V.printAsOperand(OS, /*PrintType=*/false, *MST);
+  else
+    V.printAsOperand(OS, /*PrintType=*/false);
 }
 
 template <class T> std::string printToString(const T &Object) {

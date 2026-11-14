@@ -66,6 +66,23 @@ public:
     }
   }
 
+  /// Drop the observations \p Unwanted selects. Before optimization, a
+  /// sanitizer drops those of the accesses its native lowering never
+  /// instruments. Such an observation would otherwise merge with others and
+  /// make the merged one fall back to native lowering as a whole. Dropping it
+  /// removes no check from another access: an observation only ever covers or
+  /// merges with others, so without it they keep their own checks. Its source
+  /// is then not modeled, and native lowering skips it as before.
+  void
+  eraseObservationsIf(llvm::function_ref<bool(const Observation &)> Unwanted) {
+    assert(Graph && "MAOpt graph has not been built");
+    for (ProgramPoint *Point : Graph->allProgramPoints()) {
+      ProgramPoint &PP = *Point;
+      for (auto It = PP.begin(); It != PP.end();)
+        It = Unwanted(*It) ? PP.erase(It) : std::next(It);
+    }
+  }
+
   llvm::Error optimize() {
     if (!Graph)
       return llvm::createStringError("MAOpt graph has not been built");

@@ -4309,29 +4309,6 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
   Opt.build();
   FunctionModified |= Opt.hasModifiedIR();
 
-  // Reads or writes disabled by the instrumentation flags are not sanitizer
-  // observations. Drop them before optimization so a disabled access cannot
-  // cover a later one and then disappear, taking that check with it.
-  if (!ClInstrumentReads || !ClInstrumentWrites) {
-    SmallPtrSet<const mair::Observation *, 32> Kept;
-    for (const mair::ProgramPoint *PP : Opt.getGraph().allProgramPoints()) {
-      for (const mair::Observation &Obs : *PP) {
-        mair::AccessKind Kind = Obs.getKind();
-        if (!ClInstrumentReads && Kind == mair::AccessKind::Read)
-          continue;
-        if (!ClInstrumentWrites && Kind == mair::AccessKind::Write)
-          continue;
-        Kept.insert(&Obs);
-      }
-    }
-    Opt.retainObservations(Kept);
-  }
-
-  auto MAIRModeledSources = mair::collectModeledSources(Opt.getGraph());
-
-  if (Error Err = Opt.optimize())
-    report_fatal_error(Twine(toString(std::move(Err))));
-
   auto IsElidedByNativeAsanOpt = [&](Instruction &Source) {
     auto *LI = dyn_cast<LoadInst>(&Source);
     auto *SI = dyn_cast<StoreInst>(&Source);
@@ -4351,6 +4328,33 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
     }
     return false;
   };
+
+  // Drop the loads and stores native ASan never checks before optimization
+  // (MAOpt::eraseObservationsIf). Kept, such an access would merge with
+  // checked ones and send them all back to native checks, or cover a checked
+  // one and, falling back unchecked itself, take that check with it. These
+  // are the accesses native ASan ignores (reads or writes disabled by the
+  // instrumentation flags, accesses to promotable or stack-safe allocas, ...)
+  // and the safe stack and global accesses instrumentMop elides. isSafeAccess
+  // depends only on the address and the access size, not on where the access
+  // runs, so the latter are safe wherever their check would end up.
+  Opt.eraseObservationsIf([&](const mair::Observation &Obs) {
+    ArrayRef<Instruction *> Sources = Obs.getInstructions();
+    return !Obs.isCallLike() && !Sources.empty() &&
+           all_of(Sources, [&](Instruction *Source) {
+             if (!isa<LoadInst, StoreInst>(Source))
+               return false;
+             SmallVector<InterestingMemoryOperand, 1> InterestingOperands;
+             getInterestingMemoryOperands(Source, InterestingOperands, TTI);
+             return InterestingOperands.empty() ||
+                    IsElidedByNativeAsanOpt(*Source);
+           });
+  });
+
+  auto MAIRModeledSources = mair::collectModeledSources(Opt.getGraph());
+
+  if (Error Err = Opt.optimize())
+    report_fatal_error(Twine(toString(std::move(Err))));
 
   // Whether one check of Obs's region can stand in for the native checks of
   // all its sources. The region of a merged observation is the gap-free union
@@ -4382,12 +4386,8 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
       if (!LI && !SI)
         return false;
 
-      // Native ASan may leave the source unchecked, as a safe stack or global
-      // access or an access it ignores. Let it decide for all the sources.
-      SmallVector<InterestingMemoryOperand, 1> InterestingOperands;
-      getInterestingMemoryOperands(Source, InterestingOperands, TTI);
-      if (InterestingOperands.size() != 1 || IsElidedByNativeAsanOpt(*Source))
-        return false;
+      // Native ASan checks every load and store left in the graph: those it
+      // leaves unchecked were dropped before optimization.
 
       // A fixed vector is one access of its store size, as for native ASan.
       Type *AccessTy = LI ? LI->getType() : SI->getValueOperand()->getType();

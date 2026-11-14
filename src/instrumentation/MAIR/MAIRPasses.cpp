@@ -16,6 +16,7 @@
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/PassManagerImpl.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/Utils/LoopSimplify.h"
 
 using namespace llvm;
@@ -38,6 +39,11 @@ template class PassManager<mair::MAIRGraph>;
 namespace mair {
 
 namespace {
+
+cl::opt<std::string> ClMAIRPipeline(
+    "mair-pipeline", cl::Hidden,
+    cl::desc("Replace the MAIR pipeline that MAOpt runs (for tuning); same "
+             "syntax as mair-opt -passes"));
 
 class MAIRGraphHierarchyPass : public PassInfoMixin<MAIRGraphHierarchyPass> {
   MAIRGraphPassManager PM;
@@ -128,6 +134,20 @@ void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
   addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/2));
 }
 
+void buildMAIRGraphDefaultPipeline(MAIRGraphPassManager &PM,
+                                   bool KeepFullDebug) {
+  if (!ClMAIRPipeline.empty()) {
+    noteMAIRPipeline("custom");
+    if (Error Err = parseMAIRGraphPassPipeline(PM, ClMAIRPipeline))
+      report_fatal_error(Twine("-mair-pipeline: ") + toString(std::move(Err)));
+    return;
+  }
+  if (KeepFullDebug)
+    buildMAIRGraphOgPipeline(PM);
+  else
+    buildMAIRGraphO1Pipeline(PM);
+}
+
 Error parseMAIRGraphPassPipeline(MAIRGraphPassManager &PM,
                                  StringRef PipelineText) {
   SmallVector<StringRef, 8> Pipeline;
@@ -148,6 +168,17 @@ Error parseMAIRGraphPassPipeline(MAIRGraphPassManager &PM,
     if (PassName == "print<stat>") {
       PM.addPass(MAIRStatPrinterPass(errs()));
       continue;
+    }
+
+    // `NAME#N` numbers a repeated pass in `-mair-stats`, as the default
+    // pipelines do.
+    unsigned Ordinal = 0;
+    auto [Name, OrdinalText] = PassName.split('#');
+    if (!OrdinalText.empty()) {
+      if (OrdinalText.getAsInteger(10, Ordinal) || Ordinal == 0)
+        return createStringError("bad ordinal in MAIRGraph pass '" + PassName +
+                                 "'");
+      PassName = Name;
     }
 
 #define MAIR_GRAPH_PASS(NAME, CREATE_PASS)                                     \

@@ -14,12 +14,16 @@
 
 MAIR_GRAPH_ANALYSIS("stat", MAIRStatAnalysis())
 MAIR_GRAPH_ANALYSIS("redundant-observation", RedundantObservationAnalysis())
-MAIR_GRAPH_PASS("com", CommonObservationMotionPass())
-MAIR_GRAPH_PASS("locationmerge", LocationMergePass())
-MAIR_GRAPH_PASS("liom", LoopInvariantObservationMotionPass())
-MAIR_GRAPH_PASS("lpoc", LoopPeriodicObservationCombinePass())
-MAIR_GRAPH_PASS("roe", RedundantObservationEliminationPass())
-MAIR_GRAPH_PASS("simplifygraph", SimplifyGraphPass())
+// CREATE_PASS may use `Ordinal`, the N of a `NAME#N` pipeline entry (0 if
+// absent), which only names the visit in `-mair-stats`.
+MAIR_GRAPH_PASS("com", CommonObservationMotionPass(Ordinal))
+MAIR_GRAPH_PASS("locationmerge", LocationMergePass(Ordinal))
+MAIR_GRAPH_PASS("liom", LoopInvariantObservationMotionPass(
+                            /*MergeEquivalentObservations=*/true, Ordinal))
+MAIR_GRAPH_PASS("lpoc", LoopPeriodicObservationCombinePass(
+                            /*MergeEquivalentObservations=*/true, Ordinal))
+MAIR_GRAPH_PASS("roe", RedundantObservationEliminationPass(Ordinal))
+MAIR_GRAPH_PASS("simplifygraph", SimplifyGraphPass(Ordinal))
 MAIR_GRAPH_PASS("print<stat>", MAIRStatPrinterPass(errs()))
 
 #undef MAIR_GRAPH_ANALYSIS

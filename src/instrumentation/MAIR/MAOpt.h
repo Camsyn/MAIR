@@ -72,10 +72,7 @@ public:
     if (Optimized)
       return llvm::createStringError("MAOpt graph has already been optimized");
 
-    if (KeepFullDebug)
-      buildMAIRGraphOgPipeline(PM);
-    else
-      buildMAIRGraphO1Pipeline(PM);
+    buildMAIRGraphDefaultPipeline(PM, KeepFullDebug);
     PM.run(*Graph, GAM);
 #ifndef NDEBUG
     // Verification walks every program point, edge and observation again, and

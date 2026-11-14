@@ -127,13 +127,17 @@ e2e 的 `instrumented_mops`（MAIR 变体，oracle 全部通过；无 MAIR → �
 
 两个 periodic 区域在基址、stride、trip count 都相同、access size 为常量、起点只差常量 `d`（不大于较低一方的 size）时合并成一个：每一轮里两段足迹相接或重叠，并集是一段 `[较低起点, max(a, d + b))`，所以结果保留较低起点、stride 和 trip count，只把 size 放大，正好是并集（`PeriodicRegion::merge`，`src/instrumentation/MAIR/MAIRRegion.cpp`）。起点按“根指针 + 常量 + 符号项”比较，偏移类型必须和指针索引同宽，常量差才精确。有空隙、stride 或 trip count 不同都不合并。合并后若 stride 不大于 size，区域变成连续的，TSan 用一次 range 访问记录，而不是逐轮调用 `__tsan_{read,write}_periodic`。测试：`test/MAIR/TestCases/locationmerge-periodic.ll`。
 
+有空隙时还有一种精确合并：交错。m 个 periodic 区域基址、常量 access size `a`、trip count `T` 和常量 stride `S` 都相同，起点排序后等距 `g = |S| / m`（`m * g == |S|`），这是向量化/交错展开后常见的形状（例如 stride 32 的 +0 与 +16 两路 gather）。取 `s0` 为最低起点（`S < 0` 时为最高起点）、`d = S / m`，各起点为 `s0 + k * d`（`0 <= k < m`），第 k 个区域的第 i 轮访问 `s0 + k * d + i * S = s0 + (i * m + k) * d`，恰是起点 `s0`、stride `d`、access size `a`、trip count `m * T` 的区域的第 `i * m + k` 轮；反过来该区域的每一轮都唯一对应某个 (i, k)。所以并集正好是一个 periodic 区域，`g > a`（轮间有空隙）和 `g < a`（重叠）都精确，每一轮仍单独检查，空隙不查（`PeriodicRegion::mergeInterleaved`）。trip count 先零扩展 `ceil(log2 m)` 位再乘 m（`(2 * zext(T to i66))`），乘积不会回绕；常量 trip count 直接折叠。materialization 已支持 `Mul`/`ZeroExtend`，ASan/TSan 本来就把 trip count `ZExtOrTrunc` 到指针宽度，后端无需改动。
+
+成员不能两两拼出：m = 3 时没有两条区域相距 `S / 2`，所以 LocationMerge 显式分组（`mergeInterleavedRange`，`src/instrumentation/MAIR/Transforms/LocationMergePass.cpp`）：periodic 类先按上段做两两相接合并，再对每个区域找候选（`PeriodicRegion::getInterleaveDistance`：基址、stride、size、trip count 相同，起点差为常量且 `0 < |d| < |S|`），从小到大尝试候选间距 g（m 尽量大），要求 `s0 + k * g` 全部在场；组由列表中最靠前的成员吸收其余成员，来源按列表顺序追加。合并后的区域 stride 变小，会再试一次。间距不整除 stride、`m * g != |S|`、size 或 trip count 不同都不合并。测试：`test/MAIR/TestCases/locationmerge-interleaved.ll`，运行时 `test/MAIR/TestCases/asan/mair-interleaved-runtime.c`（越界仍报告、界内与只 poison 空隙时不报告）。
+
 Observation 合并保留完整来源指令序列及重复项。若右项严格包含左项，右项来源放在前面；相等、左项包含或非包含的区间并集仍按左后右追加。首项及首个有效 debug location 依赖这个顺序，不能把来源改成集合。
 
 ## ASan 的 lowering
 
 ASan 按 Observation 的区域检查，而不是按来源指令逐个检查（`XsanAddressSanitizer::instrumentMAIRObservation` 和 `instrumentFunctionViaMAIR` 里的 `CanInstrumentViaMAIR`，`src/instrumentation/llvm23/AddressSanitizer.cpp`）。接受条件：每个来源都是 native ASan 也会检查的 load/store（`getInterestingMemoryOperands` 恰好给出一个操作数、不被安全栈/全局访问优化省掉、不是 scalable 向量）；区域是大小已知的连续区间（偏移可以是符号，大小可以是 trip count 表达式），或 periodic 区域。任一来源不满足时整个 Observation 退回 native，由 native 自己决定每个来源查不查。
 
-- 合并区间没有空洞：`AbstractAccess::merge` 只合并重叠或相邻的区间，`mergeExpressionSizedRanges` 要求区间长度不小于起点差，LIOM/COM/LPOC 只合并相等的区域，periodic 区域只在每轮足迹相接或重叠时合并（见“地址合并”）。所以查整个区间不会查到来源没碰过的字节。
+- 合并区间没有空洞：`AbstractAccess::merge` 只合并重叠或相邻的区间，`mergeExpressionSizedRanges` 要求区间长度不小于起点差，LIOM/COM/LPOC 只合并相等的区域，periodic 区域只在每轮足迹相接或重叠时把 size 放大，交错合并不放大 size 只缩小 stride（见“地址合并”）。所以查整个区间不会查到来源没碰过的字节。
 - 区间起点的对齐取来源对齐的最小值；若某个来源的指针就是起点，或与区间基址只差常量偏移，就用它推出基址和起点的对齐（`struct { long a; int b, c; }` 三个字段合并后仍按 8 字节对齐）。
 - 单个未合并的访问（含固定宽度向量）照旧按 native 方式检查。不超过 16 字节的区间走内联检查：对齐时一次 shadow load，否则查首末两个字节，与 native 对不对齐访问的做法相同；中间至多跨一个 granule，ASan 自己的 redzone 不会这么窄。更长的区间或长度是表达式的区间调用 `__asan_loadN/storeN`，逐字节检查（`__asan_region_is_poisoned`）。
 - periodic 区域调用 `__asan_{load,store}_periodic(start, stride, size, count)`（recover 模式带 `_noabort`，`src/runtime/lib/asan/asan_rtl.cpp`）。runtime 按 stride 符号算出最低地址，count 为 0 不查；先用一次 shadow 扫描查整个外包区间，干净则全部合法；否则（或 stride 超过 1 KiB 时）按迭代顺序逐个访问检查，报告第一个越界访问的地址和单次访问大小，空隙中的 poison 不报。内核 ASan 和 `-asan-force-experiment` 没有这个入口，periodic 区域退回 native。

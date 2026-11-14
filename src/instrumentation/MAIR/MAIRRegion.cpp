@@ -444,6 +444,10 @@ std::optional<int64_t> constantStartDelta(const PeriodicRegion &A,
   return (CB.sext(IndexBits + 1) - CA.sext(IndexBits + 1)).trySExtValue();
 }
 
+uint64_t absValue(int64_t V) {
+  return V < 0 ? -static_cast<uint64_t>(V) : static_cast<uint64_t>(V);
+}
+
 } // namespace
 
 std::optional<PeriodicRegion> PeriodicRegion::merge(const PeriodicRegion &A,
@@ -482,6 +486,84 @@ std::optional<PeriodicRegion> PeriodicRegion::merge(const PeriodicRegion &A,
   MAIRScalarExpr Size = ExprGraph->createConstantExpr(
       *SizeType, HighEnd.trunc(SizeType->getIntegerBitWidth()));
   return PeriodicRegion(Low.Base, Low.Start, Low.Stride, Size, Low.TripCount);
+}
+
+std::optional<int64_t> PeriodicRegion::getInterleaveDistance(
+    const PeriodicRegion &A, const PeriodicRegion &B, const DataLayout &DL) {
+  using Kind = MAIRScalarExpr::Kind;
+  if (A.Base != B.Base || A.Stride != B.Stride || A.TripCount != B.TripCount ||
+      A.AccessSize != B.AccessSize || A.Stride.getKind() != Kind::Constant ||
+      A.AccessSize.getKind() != Kind::Constant)
+    return std::nullopt;
+  std::optional<int64_t> Delta = constantStartDelta(A, B, DL);
+  // |S| must fit in 63 bits for mergeInterleaved's arithmetic.
+  const APInt &Stride = A.Stride.getConstant();
+  if (!Delta || *Delta == 0 || Stride.getSignificantBits() > 63 ||
+      absValue(*Delta) >= absValue(Stride.getSExtValue()))
+    return std::nullopt;
+  return Delta;
+}
+
+std::optional<PeriodicRegion>
+PeriodicRegion::mergeInterleaved(ArrayRef<const PeriodicRegion *> Slices,
+                                 const DataLayout *DL, MAIRGraph *ExprGraph) {
+  using Kind = MAIRScalarExpr::Kind;
+  const uint64_t M = Slices.size();
+  if (M < 2 || !DL || !ExprGraph)
+    return std::nullopt;
+  for (const PeriodicRegion *R : Slices)
+    for (MAIRScalarExpr E : {R->Start, R->Stride, R->AccessSize, R->TripCount})
+      if (!ExprGraph->ownsScalarExpr(E))
+        return std::nullopt;
+
+  // The starts by distance from the first slice. Each distance is less than
+  // |S| < 2^63, so the arithmetic below cannot overflow.
+  const PeriodicRegion &First = *Slices.front();
+  SmallVector<std::pair<int64_t, const PeriodicRegion *>, 4> Starts;
+  Starts.push_back({0, &First});
+  for (const PeriodicRegion *R : Slices.drop_front()) {
+    std::optional<int64_t> Delta = getInterleaveDistance(First, *R, *DL);
+    if (!Delta)
+      return std::nullopt;
+    Starts.push_back({*Delta, R});
+  }
+  auto *TripType = dyn_cast<IntegerType>(First.TripCount.getType());
+  const int64_t S = First.Stride.getConstant().getSExtValue();
+  if (!TripType || absValue(S) % M != 0)
+    return std::nullopt;
+  const int64_t Gap = absValue(S) / M;
+  llvm::sort(Starts, llvm::less_first());
+  for (uint64_t K = 0; K < M; ++K)
+    if (Starts[K].first != Starts.front().first + static_cast<int64_t>(K) * Gap)
+      return std::nullopt;
+
+  MAIRScalarExpr Start =
+      S > 0 ? Starts.front().second->Start : Starts.back().second->Start;
+  Type &StrideType = *First.Stride.getType();
+  MAIRScalarExpr Stride = ExprGraph->createConstantExpr(
+      StrideType, APInt(StrideType.getIntegerBitWidth(),
+                        S / static_cast<int64_t>(M), /*isSigned=*/true));
+
+  // m * T fits in ceil(log2 m) more bits than T.
+  const unsigned Width = TripType->getBitWidth();
+  auto *WideType =
+      IntegerType::get(TripType->getContext(), Width + Log2_64_Ceil(M));
+  MAIRScalarExpr Trips;
+  if (First.TripCount.getKind() == Kind::Constant) {
+    APInt Product =
+        First.TripCount.getConstant().zext(WideType->getBitWidth()) * M;
+    Trips = Product.getActiveBits() <= Width
+                ? ExprGraph->createConstantExpr(*TripType, Product.trunc(Width))
+                : ExprGraph->createConstantExpr(*WideType, Product);
+  } else {
+    Trips = ExprGraph->createBinaryExpr(
+        Kind::Mul, *WideType,
+        ExprGraph->createConstantExpr(*WideType,
+                                      APInt(WideType->getBitWidth(), M)),
+        ExprGraph->createUnaryExpr(Kind::ZeroExtend, *WideType,
+                                   First.TripCount));
+  }
+  return PeriodicRegion(First.Base, Start, Stride, First.AccessSize, Trips);
 }
 
 std::optional<AbstractAccess> AbstractAccess::merge(const AbstractAccess &A,

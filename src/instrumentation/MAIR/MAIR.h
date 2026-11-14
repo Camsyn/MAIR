@@ -454,6 +454,27 @@ struct PeriodicRegion {
                                              const DataLayout *DL,
                                              MAIRGraph *ExprGraph);
 
+  /// B.Start - A.Start in bytes if \p B may be another slice of a region
+  /// that \p A interleaves into (mergeInterleaved): the same base, access
+  /// size, trip count and constant stride S, a constant access size, and
+  /// starts a constant distance d with 0 < |d| < |S| apart.
+  static std::optional<int64_t> getInterleaveDistance(const PeriodicRegion &A,
+                                                      const PeriodicRegion &B,
+                                                      const DataLayout &DL);
+
+  /// The union of \p Slices if they are the m >= 2 interleaved slices of one
+  /// periodic region: every slice is getInterleaveDistance() from the first,
+  /// and the starts are equally spaced by |S| / m. With s0 the lowest start
+  /// for a positive stride and the highest one for a negative stride, and
+  /// d = S / m, the starts are s0 + k * d for 0 <= k < m. Trip i of slice k
+  /// touches s0 + k * d + i * S = s0 + (i * m + k) * d, so the union is the
+  /// region starting at s0 with stride d, the same access size and m times
+  /// the trips. The trip count is widened so that the product cannot wrap.
+  /// New expressions are created in \p ExprGraph, which must own every slice.
+  static std::optional<PeriodicRegion>
+  mergeInterleaved(ArrayRef<const PeriodicRegion *> Slices,
+                   const DataLayout *DL, MAIRGraph *ExprGraph);
+
   bool operator==(const PeriodicRegion &Other) const {
     return Base == Other.Base && Start == Other.Start &&
            Stride == Other.Stride && AccessSize == Other.AccessSize &&
@@ -785,6 +806,10 @@ public:
   /// merging requires equal levels.
   bool covers(const Observation &Other) const;
   bool mergeWith(const Observation &Other, llvm::ScalarEvolution *SE = nullptr);
+  /// Merge \p Others into this periodic observation if together they are the
+  /// interleaved slices of one periodic region
+  /// (PeriodicRegion::mergeInterleaved). Their sources are appended in order.
+  bool mergeInterleaved(ArrayRef<const Observation *> Others);
   void mergeKind(AccessKind Other);
   void eraseFromParent();
 

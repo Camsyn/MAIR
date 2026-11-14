@@ -371,6 +371,34 @@ bool Observation::mergeWith(const Observation &Other, ScalarEvolution *SE) {
   return true;
 }
 
+bool Observation::mergeInterleaved(ArrayRef<const Observation *> Others) {
+  const PeriodicRegion *ThisPeriodic = getPeriodicRegion();
+  const Instruction *Provenance = getInstruction();
+  ProgramPoint *PP = getParent();
+  if (!ThisPeriodic || !Provenance || !PP || !isMergeable())
+    return false;
+  SmallVector<const PeriodicRegion *, 4> Slices{ThisPeriodic};
+  for (const Observation *Other : Others) {
+    if (Other->getBase() != getBase() || !Other->isMergeable() ||
+        Other->getLevel() != getLevel() || !Other->getPeriodicRegion())
+      return false;
+    Slices.push_back(Other->getPeriodicRegion());
+  }
+  std::optional<PeriodicRegion> Merged = PeriodicRegion::mergeInterleaved(
+      Slices, &Provenance->getModule()->getDataLayout(), PP->getParent());
+  if (!Merged)
+    return false;
+
+  // No slice contains another, so the sources are appended in order.
+  Region = std::move(*Merged);
+  for (const Observation *Other : Others) {
+    Insts.append(Other->Insts);
+    Properties |= Other->Properties;
+    mergeKind(Other->Kind);
+  }
+  return true;
+}
+
 DebugLoc Observation::getStableDebugLoc() const {
   for (const Instruction *I : Insts)
     if (const DebugLoc &Loc = I->getStableDebugLoc())

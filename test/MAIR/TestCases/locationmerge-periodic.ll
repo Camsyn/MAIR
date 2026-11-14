@@ -131,12 +131,13 @@ exit:
   ret void
 }
 
-; A gap between the footprints: the union is not one periodic region.
+; A gap between the footprints that is not an interleaving (6 does not divide
+; 16): the union is not one periodic region.
 define void @gap(ptr %p, i64 %n) {
 ; CHECK-LABEL: mair graph of fn @gap {
 ; CHECK:       loop-exit=%loop,
 ; CHECK-NEXT:    o: read period start=%p, stride=16, access-size=4, trips={{.*}}
-; CHECK-NEXT:    o: read period start=(%p + 8), stride=16, access-size=4, trips={{.*}}
+; CHECK-NEXT:    o: read period start=(%p + 6), stride=16, access-size=4, trips={{.*}}
 ; CHECK-NOT:     o:
 ; CHECK:       }
 entry:
@@ -146,9 +147,9 @@ loop:
   %i = phi i64 [ 0, %entry ], [ %next, %loop ]
   %i.16 = mul nuw nsw i64 %i, 16
   %lo = getelementptr inbounds i8, ptr %p, i64 %i.16
-  %hi = getelementptr inbounds i8, ptr %lo, i64 8
+  %hi = getelementptr inbounds i8, ptr %lo, i64 6
   %vlo = load i32, ptr %lo, align 4
-  %vhi = load i32, ptr %hi, align 4
+  %vhi = load i32, ptr %hi, align 2
   %next = add nuw nsw i64 %i, 1
   %done = icmp eq i64 %next, %n
   br i1 %done, label %exit, label %loop

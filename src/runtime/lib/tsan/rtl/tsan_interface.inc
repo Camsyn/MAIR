@@ -188,3 +188,24 @@ void __tsan_read_range_pc(void *addr, uptr size, void *pc) {
 void __tsan_write_range_pc(void *addr, uptr size, void *pc) {
   MemoryAccessRange(cur_thread(), STRIP_PAC_PC(pc), (uptr)addr, size, true);
 }
+
+// Periodic accesses stand for one loop access over all its iterations: the
+// bytes [start + i * stride, start + i * stride + size) for 0 <= i < count.
+// MAIR emits one call outside the loop in place of an access in every
+// iteration. Each iteration is recorded on its own, so the gaps between
+// iterations of a strided access are not. The stride may be negative or
+// smaller than the size; a count of 0 records nothing.
+static void MemoryAccessPeriodic(uptr pc, uptr start, sptr stride, uptr size,
+                                 uptr count, bool is_write) {
+  ThreadState *thr = cur_thread();
+  for (uptr i = 0; i < count; ++i)
+    MemoryAccessRange(thr, pc, start + i * (uptr)stride, size, is_write);
+}
+
+void __tsan_read_periodic(void *start, sptr stride, uptr size, uptr count) {
+  MemoryAccessPeriodic(CALLERPC, (uptr)start, stride, size, count, false);
+}
+
+void __tsan_write_periodic(void *start, sptr stride, uptr size, uptr count) {
+  MemoryAccessPeriodic(CALLERPC, (uptr)start, stride, size, count, true);
+}

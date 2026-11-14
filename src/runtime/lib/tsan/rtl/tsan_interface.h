@@ -111,6 +111,14 @@ void __tsan_read_range_pc(void *addr, unsigned long size, void *pc);
 SANITIZER_INTERFACE_ATTRIBUTE
 void __tsan_write_range_pc(void *addr, unsigned long size, void *pc);
 
+// One loop access over count iterations: size bytes at start + i * stride.
+SANITIZER_INTERFACE_ATTRIBUTE
+void __tsan_read_periodic(void *start, long stride, unsigned long size,
+                          unsigned long count);
+SANITIZER_INTERFACE_ATTRIBUTE
+void __tsan_write_periodic(void *start, long stride, unsigned long size,
+                           unsigned long count);
+
 // User may provide function that would be called right when TSan detects
 // an error. The argument 'report' is an opaque pointer that can be used to
 // gather additional information using other TSan report API functions.

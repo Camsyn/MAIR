@@ -137,6 +137,8 @@ Observation 合并保留完整来源指令序列及重复项。若右项严格�
 
 ASan 按 Observation 的区域检查，而不是按来源指令逐个检查（`XsanAddressSanitizer::instrumentMAIRObservation` 和 `instrumentFunctionViaMAIR` 里的 `CanInstrumentViaMAIR`，`src/instrumentation/llvm23/AddressSanitizer.cpp`）。接受条件：每个来源都是 native ASan 也会检查的 load/store（`getInterestingMemoryOperands` 恰好给出一个操作数、不被安全栈/全局访问优化省掉、不是 scalable 向量）；区域是大小已知的连续区间（偏移可以是符号，大小可以是 trip count 表达式），或 periodic 区域。任一来源不满足时整个 Observation 退回 native，由 native 自己决定每个来源查不查。
 
+native ASan 永远不查的 load/store（`getInterestingMemoryOperands` 为空：读写开关关闭、promotable 或 stack-safety 证明安全的 alloca 等；或被安全栈/全局访问优化省掉）在优化**之前**就从图中删掉（`MAOpt::eraseObservationsIf`，`src/instrumentation/MAIR/MAOpt.h`）。否则它们会与要查的访问合并，使整个合并 Observation 退回 native；在 7zip/re2/sqlite3 上，退回的多来源 Observation 全部含这样的来源（多数只由它们组成，另有 4/72/20 个拖回了要查的访问）。删除是可靠的：Observation 只会覆盖或合并别的 Observation，删掉它不会去掉其他访问的检查（反而避免了它覆盖一个要查的访问、自己退回 native 不查、把那次检查一起带走）；它的来源不再被建模，交给 native，native 照旧跳过。`isSafeAccess` 只取决于地址和访问大小，与检查放在哪无关。之后 `CanInstrumentViaMAIR` 不必再逐来源问 native。测试：`test/MAIR/TestCases/asan/mair-unchecked-sources.ll`（IR 与 select 统计）、`mair-unchecked-sources-oob.c`（越界仍报告）。
+
 - 合并区间没有空洞：`AbstractAccess::merge` 只合并重叠或相邻的区间，`mergeExpressionSizedRanges` 要求区间长度不小于起点差，LIOM/COM/LPOC 只合并相等的区域，periodic 区域只在每轮足迹相接或重叠时把 size 放大，交错合并不放大 size 只缩小 stride（见“地址合并”）。所以查整个区间不会查到来源没碰过的字节。
 - 区间起点的对齐取来源对齐的最小值；若某个来源的指针就是起点，或与区间基址只差常量偏移，就用它推出基址和起点的对齐（`struct { long a; int b, c; }` 三个字段合并后仍按 8 字节对齐）。
 - 单个未合并的访问（含固定宽度向量）照旧按 native 方式检查。不超过 16 字节的区间走内联检查：对齐时一次 shadow load，否则查首末两个字节，与 native 对不对齐访问的做法相同；中间至多跨一个 granule，ASan 自己的 redzone 不会这么窄。更长的区间或长度是表达式的区间调用 `__asan_loadN/storeN`，逐字节检查（`__asan_region_is_poisoned`）。
@@ -148,7 +150,7 @@ ASan 按 Observation 的区域检查，而不是按来源指令逐个检查（`X
 
 ## TSan 的 lowering
 
-TSan 同样按 Observation 的区域记录访问（`XsanThreadSanitizer::instrumentMAIRObservation` 和 `sanitizeFunctionViaMAIR` 里的 `CanInstrumentViaMAIR`，`src/instrumentation/llvm23/ThreadSanitizer.cpp`）。每个来源都要通过 native TSan 的逐访问过滤（load/store、非 TSan atomic/vtable、非向量、`shouldInstrumentReadWriteFromAddress`、读常量数据和未逃逸 alloca 除外）；开 `-ts-distinguish-volatile` 时含 volatile 来源的 Observation 退回 native。TSan 的读、写、读写层次互不相同，合并只发生在同层次之间，所以不会把读记成写。
+TSan 同样按 Observation 的区域记录访问（`XsanThreadSanitizer::instrumentMAIRObservation` 和 `sanitizeFunctionViaMAIR` 里的 `CanInstrumentViaMAIR`，`src/instrumentation/llvm23/ThreadSanitizer.cpp`）。native TSan 永远不记录的 load/store（委托给 XSan、swifterror、`shouldInstrumentReadWriteFromAddress` 为假、读常量数据、未被捕获的 alloca）与 ASan 一样在优化前删掉（`NativeTsanOmits`，测试 `test/MAIR/TestCases/tsan/mair-unrecorded-sources.ll`）。剩下的每个来源还要是 native 按普通方式记录的访问（load/store、非 TSan atomic/vtable、非向量）；vtable 指针访问和向量仍会与普通访问合并并使其退回 native，这是剩余 `multi` 的主要来源；开 `-ts-distinguish-volatile` 时含 volatile 来源的 Observation 退回 native。TSan 的读、写、读写层次互不相同，合并只发生在同层次之间，所以不会把读记成写。
 
 - 连续区间：2 的幂且不超过 16 字节时，与 native 单次访问相同地选择 `__tsan_{read,write}N`、`unaligned` 或 compound 变体（起点对齐由来源推出）；其他大小或运行时大小用 `__tsan_{read,write}_range`。
 - periodic 区域：常量 stride 不大于 access size 时足迹连续，按 `[Start, Start + (Trips - 1) * |Stride| + AccessSize)` 记一次 range（下降 stride 起点下移，trip 为 0 时 size 为 0，runtime 直接返回）。其他情况（有空隙或 stride 只在运行时已知）调用 `__tsan_{read,write}_periodic(start, stride, size, count)`（`src/runtime/lib/tsan/rtl/tsan_interface.inc`），runtime 逐轮记录 `size` 字节，空隙不记。

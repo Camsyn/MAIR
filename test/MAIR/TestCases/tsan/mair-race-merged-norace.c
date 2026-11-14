@@ -1,9 +1,10 @@
 // A merged observation must not create races the source accesses do not have:
 // merged reads stay reads, and a merged access records only the bytes its
 // sources touch, not the bytes next to them.
-// RUN: env MAIR=1 %clang -tsan -O1 -S -emit-llvm %s -o - | FileCheck %s
-// --check-prefix=IR RUN: env MAIR=1 %clang -tsan -O1 -g %s -o %t RUN: %t 2>&1 |
-// FileCheck %s
+// RUN: env MAIR=1 %clang -tsan -O1 -S -emit-llvm %s -o - \
+// RUN:   | FileCheck %s --check-prefix=IR
+// RUN: env MAIR=1 %clang -tsan -O1 -g %s -o %t
+// RUN: %t 2>&1 | FileCheck %s
 
 #include <pthread.h>
 #include <stdio.h>

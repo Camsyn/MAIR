@@ -1,9 +1,10 @@
 // A loop range must cover exactly the bytes the iterations touch: not the
 // element after an upward loop, not the element before a downward loop, and
 // nothing at all when the loop runs zero times. Reads stay reads.
-// RUN: env MAIR=1 %clang -tsan -O1 -S -emit-llvm %s -o - | FileCheck %s
-// --check-prefix=IR RUN: env MAIR=1 %clang -tsan -O1 -g %s -o %t RUN: %t 2>&1 |
-// FileCheck %s
+// RUN: env MAIR=1 %clang -tsan -O1 -S -emit-llvm %s -o - \
+// RUN:   | FileCheck %s --check-prefix=IR
+// RUN: env MAIR=1 %clang -tsan -O1 -g %s -o %t
+// RUN: %t 2>&1 | FileCheck %s
 
 #include <pthread.h>
 #include <stdio.h>

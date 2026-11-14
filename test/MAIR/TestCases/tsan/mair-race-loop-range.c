@@ -1,9 +1,10 @@
 // A loop whose iterations cover contiguous bytes is recorded as one TSan range
 // access at the loop exit. A race with any one iteration must still be
 // reported, for both upward and downward loops.
-// RUN: env MAIR=1 %clang -tsan -O1 -S -emit-llvm %s -o - | FileCheck %s
-// --check-prefix=IR RUN: env MAIR=1 %clang -tsan -O1 -g %s -o %t RUN: not %t
-// 2>&1 | FileCheck %s
+// RUN: env MAIR=1 %clang -tsan -O1 -S -emit-llvm %s -o - \
+// RUN:   | FileCheck %s --check-prefix=IR
+// RUN: env MAIR=1 %clang -tsan -O1 -g %s -o %t
+// RUN: not %t 2>&1 | FileCheck %s
 
 #include <pthread.h>
 #include <stdio.h>

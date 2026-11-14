@@ -1,9 +1,10 @@
 // A merged observation is recorded as one TSan access of all of its bytes. A
 // race on any one of the merged fields must still be reported, at the source
 // line of the merged accesses.
-// RUN: env MAIR=1 %clang -tsan -O1 -S -emit-llvm %s -o - | FileCheck %s
-// --check-prefix=IR RUN: env MAIR=1 %clang -tsan -O1 -g %s -o %t RUN: not %t
-// 2>&1 | FileCheck %s
+// RUN: env MAIR=1 %clang -tsan -O1 -S -emit-llvm %s -o - \
+// RUN:   | FileCheck %s --check-prefix=IR
+// RUN: env MAIR=1 %clang -tsan -O1 -g %s -o %t
+// RUN: not %t 2>&1 | FileCheck %s
 
 #include <pthread.h>
 #include <stdio.h>

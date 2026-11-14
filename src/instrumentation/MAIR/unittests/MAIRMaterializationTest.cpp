@@ -351,6 +351,8 @@ entry:
   EXPECT_NE(Diagnostics.find("contiguous region size is not integer typed"),
             std::string::npos);
 
+#ifndef NDEBUG
+  // Only assertion-enabled builds verify the whole graph before lowering.
   PassInstrumentationCallbacks PIC;
   FunctionAnalysisManager FAM;
   registerMaterializationAnalyses(FAM, PIC);
@@ -372,6 +374,7 @@ entry:
   raw_string_ostream AfterGraphStream(AfterGraph);
   Graph.print(AfterGraphStream);
   EXPECT_EQ(AfterGraph, BeforeGraph);
+#endif
 }
 
 TEST(MAIRMaterialization, RejectsUnavailableContiguousBaseBeforeMutation) {

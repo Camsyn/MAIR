@@ -124,8 +124,13 @@ Error validateObservation(const Observation &Obs, const Instruction &Target,
 
 Expected<MAIRMaterializationPlan> buildPlan(const MAIRGraph &Graph, Function &F,
                                             DominatorTree &DT, LoopInfo &LI) {
+#ifndef NDEBUG
+  // A full walk of the graph per function. The checks below cover what the
+  // lowering itself relies on, so release compiles skip it, as they skip the
+  // verification after the MAIR pipeline (MAOpt::optimize).
   if (!Graph.verify())
     return createStringError("cannot instantiate an invalid MAIRGraph");
+#endif
 
   MAIRMaterializationPlan Plan;
   for (const ProgramPoint *Point : Graph.allProgramPoints()) {
@@ -438,8 +443,13 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
     ++Result.LoweredProgramPoints;
   }
 
+#ifndef NDEBUG
+  // The IR verifier visits every instruction of the function. Release
+  // compiles leave it to the pipeline, as clang does with
+  // -disable-llvm-verifier.
   if (verifyFunction(F, &errs()))
     report_fatal_error("Patch C produced invalid LLVM IR");
+#endif
   FAM.invalidate(F, PreservedAnalyses::none());
   markConsumed();
   return Result;

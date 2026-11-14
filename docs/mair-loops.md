@@ -93,9 +93,39 @@ MAOpt 的调用者通过 `allProgramPoints()` 读取当前图，不维护额外�
 
 内层范围起点复用已有 LLVM Value 时，除 SCEV 相等和目标位置可用外，还必须保证类型匹配与 poison 安全。指令候选只有在 `ScalarEvolution::canReuseInstruction` 允许复用且无需丢弃 poison flags 时才接受；优化阶段不修改原 LLVM IR。`loop-start-reuse.ll` 覆盖不安全候选、非 SCEV 类型以及继续寻找安全候选。
 
+## `default<O1>` 的顺序
+
+`buildMAIRGraphO1Pipeline`（`src/instrumentation/MAIR/MAIRPasses.cpp`）依次运行：
+
+```
+simplifygraph#1 → roe#1 → locationmerge#1 → liom#1 → lpoc → liom#2 → locationmerge#2 → roe#2 → simplifygraph#2
+```
+
+每个 pass 各自做一次整树遍历（子图先于父图）。顺序依据 e2e 的 `-mair-stats` 和 `instrumented_mops`：
+
+- `roe#1` 在最前，原因见上文（下沉时只保留一个来源 guard）。把位置合并提到它前面试过：re2 ASan 少 81 个检查，但 7zip ASan 多 112、sqlite3 ASan 多 8；合并还会拼接来源，ASan 因多源退回 native 的 Observation 变多（sqlite3 `multi` 342 → 463），所以不采用。
+- `locationmerge#1` 在不变外提和周期合并之前。循环体里的 `p[2i]`、`p[2i+1]` 先合并成一个 8 字节、步长也是 8 的访问，周期合并得到一个连续区间；先做周期合并只能得到两个 stride 8、size 4 的 periodic 区域。7zip ASan 中周期合并的 `range` 从 125 增至 438，`periodic` 从 3282 降至 1060。测试：`test/MAIR/TestCases/o1-pipeline.ll` 的 `o1_location_merge_before_periodic_combine`。
+- `liom#2` 原因见上文；新顺序下 7zip ASan 仍有 12 个提升。
+- `locationmerge#2` 合并外提和周期合并放到循环边界的 Observation，包括足迹相接的 periodic 区域（见“地址合并”）；`roe#2` 删除被合并后区域覆盖的访问（7zip ASan 110 个）。
+- 公共 Observation 移动（COM）、第三次位置合并和第三次冗余删除已移出：调整前后在 4 个项目 × 2 个 sanitizer 中都是 0。COM 不触发是因为 `-O2` 的 SimplifyCFG 已经把两条分支里相同的访问提到或沉到公共块（例如两边都读 `p[0]` 时，读已在入口块）。COM 仍可用 `-passes=com` 单独运行。
+- 位置合并之后再跑一轮 `lpoc`/`liom` 没有收益（jsoncpp、re2、sqlite3 的检查数不变），所以只跑一轮。
+
+e2e 的 `instrumented_mops`（MAIR 变体，oracle 全部通过；无 MAIR → 旧 O1 → 新 O1，新 O1 含 periodic 足迹合并）：
+
+| 项目 | ASan | TSan |
+| --- | --- | --- |
+| jsoncpp | 5461 → 4573 → 4570 | 6732 → 5644 → 5644 |
+| re2 | 35194 → 30071 → 29789 | 38208 → 32552 → 32496 |
+| sqlite3 | 36971 → 35485 → 35424 | 39274 → 36825 → 36783 |
+| 7zip | 112703 → 98218 → 96579 | 117691 → 106541 → 105462 |
+
+调顺序不需要重编：隐藏选项 `-mair-pipeline=<text>`（`xclang ... -mllvm -mair-pipeline=...`）用 `mair-opt -passes` 的语法替换 sanitizer 跑的流水线（`buildMAIRGraphDefaultPipeline`）。`NAME#N` 给重复的 pass 编号，`-mair-stats` 分开打印（测试 `mair-stats-counts.ll`）。
+
 ## 地址合并
 
 符号地址只有在能够证明字节差时才合并。有 ScalarEvolution 时使用地址 SCEV 的常量差；证明失败即保留原观察。没有该分析时，只用 LLVM 的常量偏移剥离匹配相同剩余地址，以 APInt 计算差值，不把整数 `add` 当成不回绕的地址距离。
+
+两个 periodic 区域在基址、stride、trip count 都相同、access size 为常量、起点只差常量 `d`（不大于较低一方的 size）时合并成一个：每一轮里两段足迹相接或重叠，并集是一段 `[较低起点, max(a, d + b))`，所以结果保留较低起点、stride 和 trip count，只把 size 放大，正好是并集（`PeriodicRegion::merge`，`src/instrumentation/MAIR/MAIRRegion.cpp`）。起点按“根指针 + 常量 + 符号项”比较，偏移类型必须和指针索引同宽，常量差才精确。有空隙、stride 或 trip count 不同都不合并。合并后若 stride 不大于 size，区域变成连续的，TSan 也能按区间 lowering，而不是退回循环内逐次检查。测试：`test/MAIR/TestCases/locationmerge-periodic.ll`。
 
 Observation 合并保留完整来源指令序列及重复项。若右项严格包含左项，右项来源放在前面；相等、左项包含或非包含的区间并集仍按左后右追加。首项及首个有效 debug location 依赖这个顺序，不能把来源改成集合。
 
@@ -103,7 +133,7 @@ Observation 合并保留完整来源指令序列及重复项。若右项严格�
 
 ASan 按 Observation 的区域检查，而不是按来源指令逐个检查（`XsanAddressSanitizer::instrumentMAIRObservation` 和 `instrumentFunctionViaMAIR` 里的 `CanInstrumentViaMAIR`，`src/instrumentation/llvm23/AddressSanitizer.cpp`）。接受条件：每个来源都是 native ASan 也会检查的 load/store（`getInterestingMemoryOperands` 恰好给出一个操作数、不被安全栈/全局访问优化省掉、不是 scalable 向量）；区域是大小已知的连续区间（偏移可以是符号，大小可以是 trip count 表达式），或 periodic 区域。任一来源不满足时整个 Observation 退回 native，由 native 自己决定每个来源查不查。
 
-- 合并区间没有空洞：`AbstractAccess::merge` 只合并重叠或相邻的区间，`mergeExpressionSizedRanges` 要求区间长度不小于起点差，LIOM/COM/LPOC 只合并相等的区域。所以查整个区间不会查到来源没碰过的字节。
+- 合并区间没有空洞：`AbstractAccess::merge` 只合并重叠或相邻的区间，`mergeExpressionSizedRanges` 要求区间长度不小于起点差，LIOM/COM/LPOC 只合并相等的区域，periodic 区域只在每轮足迹相接或重叠时合并（见“地址合并”）。所以查整个区间不会查到来源没碰过的字节。
 - 区间起点的对齐取来源对齐的最小值；若某个来源的指针就是起点，或与区间基址只差常量偏移，就用它推出基址和起点的对齐（`struct { long a; int b, c; }` 三个字段合并后仍按 8 字节对齐）。
 - 单个未合并的访问（含固定宽度向量）照旧按 native 方式检查。不超过 16 字节的区间走内联检查：对齐时一次 shadow load，否则查首末两个字节，与 native 对不对齐访问的做法相同；中间至多跨一个 granule，ASan 自己的 redzone 不会这么窄。更长的区间或长度是表达式的区间调用 `__asan_loadN/storeN`，逐字节检查（`__asan_region_is_poisoned`）。
 - periodic 区域调用 `__asan_{load,store}_periodic(start, stride, size, count)`（recover 模式带 `_noabort`，`src/runtime/lib/asan/asan_rtl.cpp`）。runtime 按 stride 符号算出最低地址，count 为 0 不查；先用一次 shadow 扫描查整个外包区间，干净则全部合法；否则（或 stride 超过 1 KiB 时）按迭代顺序逐个访问检查，报告第一个越界访问的地址和单次访问大小，空隙中的 poison 不报。内核 ASan 和 `-asan-force-experiment` 没有这个入口，periodic 区域退回 native。

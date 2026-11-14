@@ -382,7 +382,107 @@ mergeExpressionSizedRanges(const AbstractAccess &A, const AbstractAccess &B,
   return Result;
 }
 
+/// A pointer start expression split as Root + (Constant + Terms...), where
+/// the integer offset is a tree of adds.
+struct PeriodicStart {
+  MAIRScalarExpr Root;
+  SmallVector<MAIRScalarExpr, 4> Terms;
+  std::optional<APInt> Constant;
+  Type *OffsetType = nullptr;
+};
+
+void collectAddTerms(MAIRScalarExpr Expr, PeriodicStart &Start) {
+  using Kind = MAIRScalarExpr::Kind;
+  if (Expr.getKind() == Kind::Add) {
+    for (MAIRScalarExpr Operand : Expr.operands())
+      collectAddTerms(Operand, Start);
+    return;
+  }
+  if (Expr.getKind() == Kind::Constant) {
+    Start.Constant = Start.Constant ? *Start.Constant + Expr.getConstant()
+                                    : Expr.getConstant();
+    return;
+  }
+  Start.Terms.push_back(Expr);
+}
+
+PeriodicStart splitPeriodicStart(MAIRScalarExpr Start) {
+  PeriodicStart Result;
+  if (Start.getKind() != MAIRScalarExpr::Kind::Add ||
+      !Start.getType()->isPointerTy()) {
+    Result.Root = Start;
+    return Result;
+  }
+  // A pointer add is a pointer plus an integer offset (MAIRVerifier).
+  Result.Root = Start.operands()[0];
+  MAIRScalarExpr Offset = Start.operands()[1];
+  Result.OffsetType = Offset.getType();
+  collectAddTerms(Offset, Result);
+  return Result;
+}
+
+/// B.Start - A.Start in bytes, if the starts differ only by constants. The
+/// offsets are lowered as i8 GEP indices, so they must be as wide as the
+/// pointer index for the difference to be exact.
+std::optional<int64_t> constantStartDelta(const PeriodicRegion &A,
+                                          const PeriodicRegion &B,
+                                          const DataLayout &DL) {
+  Type *PointerType = A.getStart().getType();
+  if (!PointerType || !PointerType->isPointerTy() ||
+      B.getStart().getType() != PointerType)
+    return std::nullopt;
+  const unsigned IndexBits = DL.getIndexTypeSizeInBits(PointerType);
+  PeriodicStart SA = splitPeriodicStart(A.getStart());
+  PeriodicStart SB = splitPeriodicStart(B.getStart());
+  if (SA.Root != SB.Root || !llvm::equal(SA.Terms, SB.Terms))
+    return std::nullopt;
+  for (const PeriodicStart *S : {&SA, &SB})
+    if (S->OffsetType && S->OffsetType->getIntegerBitWidth() != IndexBits)
+      return std::nullopt;
+  APInt CA = SA.Constant.value_or(APInt(IndexBits, 0));
+  APInt CB = SB.Constant.value_or(APInt(IndexBits, 0));
+  return (CB.sext(IndexBits + 1) - CA.sext(IndexBits + 1)).trySExtValue();
+}
+
 } // namespace
+
+std::optional<PeriodicRegion> PeriodicRegion::merge(const PeriodicRegion &A,
+                                                    const PeriodicRegion &B,
+                                                    const DataLayout *DL,
+                                                    MAIRGraph *ExprGraph) {
+  using Kind = MAIRScalarExpr::Kind;
+  if (A == B)
+    return A;
+  if (!DL || !ExprGraph || A.Base != B.Base || A.Stride != B.Stride ||
+      A.TripCount != B.TripCount || A.AccessSize.getKind() != Kind::Constant ||
+      B.AccessSize.getKind() != Kind::Constant ||
+      A.AccessSize.getType() != B.AccessSize.getType())
+    return std::nullopt;
+  for (const PeriodicRegion *R : {&A, &B})
+    for (MAIRScalarExpr E : {R->Start, R->Stride, R->AccessSize, R->TripCount})
+      if (!ExprGraph->ownsScalarExpr(E))
+        return std::nullopt;
+  std::optional<int64_t> Delta = constantStartDelta(A, B, *DL);
+  if (!Delta)
+    return std::nullopt;
+
+  const PeriodicRegion &Low = *Delta < 0 ? B : A;
+  const PeriodicRegion &High = *Delta < 0 ? A : B;
+  APInt Distance = APInt(128, static_cast<uint64_t>(*Delta), true).abs();
+  APInt LowSize = Low.AccessSize.getConstant().zext(128);
+  APInt HighEnd = Distance + High.AccessSize.getConstant().zext(128);
+  // A gap between the two footprints of one trip is not covered.
+  if (Distance.ugt(LowSize))
+    return std::nullopt;
+  if (HighEnd.ule(LowSize))
+    return Low;
+  Type *SizeType = Low.AccessSize.getType();
+  if (HighEnd.getActiveBits() > SizeType->getIntegerBitWidth())
+    return std::nullopt;
+  MAIRScalarExpr Size = ExprGraph->createConstantExpr(
+      *SizeType, HighEnd.trunc(SizeType->getIntegerBitWidth()));
+  return PeriodicRegion(Low.Base, Low.Start, Low.Stride, Size, Low.TripCount);
+}
 
 std::optional<AbstractAccess> AbstractAccess::merge(const AbstractAccess &A,
                                                     const AbstractAccess &B,

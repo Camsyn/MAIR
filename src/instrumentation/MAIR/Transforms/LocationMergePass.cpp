@@ -144,7 +144,7 @@ bool mergeLocations(ProgramPoint &PP, ScalarEvolution *SE) {
 
   bool Changed = false;
   for (ObservationIterator Begin = PP.begin(); Begin != PP.end();) {
-    if (!Begin->isMergeable() || Begin->isPeriodic()) {
+    if (!Begin->isMergeable()) {
       ++Begin;
       continue;
     }
@@ -153,6 +153,8 @@ bool mergeLocations(ProgramPoint &PP, ScalarEvolution *SE) {
     while (End != PP.end() && hasSameMergeClass(*Begin, *End))
       ++End;
 
+    // Symbolic ranges and periodic regions have no order to sort by, so they
+    // try every pair.
     if (Begin->hasConcreteRange())
       Changed |= mergeConcreteRange(PP, Begin, End, SE);
     else

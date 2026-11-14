@@ -17,12 +17,16 @@
 // CHECK:       call void @__asan_loadN(i64 %{{.*}}, i64 %{{.*}})
 // CHECK-NOT:   __asan_report_load
 // CHECK:       ret i32
-// At -O2 the loop is vectorized. Its vector loads are fixed-width accesses
-// too, and each gets one periodic check after the loop.
+// At -O2 the loop is vectorized and interleaved: two 16-byte vector loads at
+// +0 and +16 per 32-byte step. Their periodic regions touch, so LocationMerge
+// merges them into one periodic check covering the whole 32-byte step; the
+// scalar remainder loop gets its own.
 // VEC-LABEL: define {{.*}} @sum(
 // VEC-NOT:   __asan_report_load
-// VEC:       call void @__asan_load_periodic(i64 %{{.*}}, i64 {{[0-9]+}}, i64 16, i64 %{{.*}})
+// VEC:       call void @__asan_load_periodic(i64 %{{.*}}, i64 32, i64 32, i64 %{{.*}})
+// VEC:       call void @__asan_load_periodic(i64 %{{.*}}, i64 4, i64 4, i64 %{{.*}})
 // VEC-NOT:   __asan_report_load
+// VEC-NOT:   __asan_load_periodic
 // VEC:       ret i32
 int sum(int *p, int n) {
   int t = 0;

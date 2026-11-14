@@ -443,6 +443,17 @@ struct PeriodicRegion {
   const MAIRScalarExpr &getAccessSize() const { return AccessSize; }
   const MAIRScalarExpr &getTripCount() const { return TripCount; }
 
+  /// The union of \p A and \p B if it is itself one periodic region: the
+  /// same base, stride and trip count, constant access sizes, and starts a
+  /// constant distance apart that leaves no gap between the two footprints of
+  /// a trip. The union of each trip is then one interval, so the result keeps
+  /// the lower start, stride and trip count and widens the access size. A new
+  /// size expression is created in \p ExprGraph, which must own both regions.
+  static std::optional<PeriodicRegion> merge(const PeriodicRegion &A,
+                                             const PeriodicRegion &B,
+                                             const DataLayout *DL,
+                                             MAIRGraph *ExprGraph);
+
   bool operator==(const PeriodicRegion &Other) const {
     return Base == Other.Base && Start == Other.Start &&
            Stride == Other.Stride && AccessSize == Other.AccessSize &&

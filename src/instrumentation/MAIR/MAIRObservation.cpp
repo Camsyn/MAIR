@@ -318,16 +318,16 @@ bool Observation::mergeWith(const Observation &Other, ScalarEvolution *SE) {
     return false;
 
   bool PrependOther = false;
+  const Instruction *Provenance = getInstruction();
+  const DataLayout *DL =
+      Provenance ? &Provenance->getModule()->getDataLayout() : nullptr;
+  MAIRGraph *ExprGraph = nullptr;
+  if (ProgramPoint *PP = getParent())
+    ExprGraph = PP->getParent();
   if (const auto *ThisAccess = getContiguousRegion()) {
     const auto *OtherAccess = Other.getContiguousRegion();
     if (!OtherAccess)
       return false;
-    const Instruction *Provenance = getInstruction();
-    const DataLayout *DL =
-        Provenance ? &Provenance->getModule()->getDataLayout() : nullptr;
-    MAIRGraph *ExprGraph = nullptr;
-    if (ProgramPoint *PP = getParent())
-      ExprGraph = PP->getParent();
     std::optional<AbstractAccess> Merged =
         AbstractAccess::merge(*ThisAccess, *OtherAccess, DL, SE, ExprGraph);
     if (!Merged)
@@ -351,8 +351,14 @@ bool Observation::mergeWith(const Observation &Other, ScalarEvolution *SE) {
   } else {
     const auto *ThisPeriodic = getPeriodicRegion();
     const auto *OtherPeriodic = Other.getPeriodicRegion();
-    if (!ThisPeriodic || !OtherPeriodic || *ThisPeriodic != *OtherPeriodic)
+    if (!ThisPeriodic || !OtherPeriodic)
       return false;
+    std::optional<PeriodicRegion> Merged =
+        PeriodicRegion::merge(*ThisPeriodic, *OtherPeriodic, DL, ExprGraph);
+    if (!Merged)
+      return false;
+    PrependOther = *Merged == *OtherPeriodic && *Merged != *ThisPeriodic;
+    Region = std::move(*Merged);
   }
 
   if (PrependOther)

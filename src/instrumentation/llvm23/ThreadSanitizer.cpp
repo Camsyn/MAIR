@@ -191,6 +191,7 @@ private:
   FunctionCallee TsanVptrLoad;
   FunctionCallee MemmoveFn, MemcpyFn, MemsetFn;
   FunctionCallee TsanReadRange, TsanWriteRange;
+  FunctionCallee TsanReadPeriodic, TsanWritePeriodic;
 };
 
 struct XsanThreadSanitizer : public ThreadSanitizer {
@@ -425,6 +426,13 @@ void ThreadSanitizer::initialize(Module &M, const TargetLibraryInfo &TLI) {
       "__tsan_read_range", Attr, IRB.getVoidTy(), IRB.getPtrTy(), IntptrTy);
   TsanWriteRange = M.getOrInsertFunction(
       "__tsan_write_range", Attr, IRB.getVoidTy(), IRB.getPtrTy(), IntptrTy);
+  // (start, stride, size, count): one loop access over all its iterations.
+  TsanReadPeriodic =
+      M.getOrInsertFunction("__tsan_read_periodic", Attr, IRB.getVoidTy(),
+                            IRB.getPtrTy(), IntptrTy, IntptrTy, IntptrTy);
+  TsanWritePeriodic =
+      M.getOrInsertFunction("__tsan_write_periodic", Attr, IRB.getVoidTy(),
+                            IRB.getPtrTy(), IntptrTy, IntptrTy, IntptrTy);
 }
 
 static bool isVtableAccess(Instruction *I) {
@@ -1149,13 +1157,25 @@ bool XsanThreadSanitizer::instrumentMAIRObservation(
   Value *Size = Obs.AccessSize;
   Align StartAlign(1);
   if (const mair::PeriodicRegion *Periodic = Obs.Source->getPeriodicRegion()) {
-    // CanInstrumentViaMAIR accepts only periodic regions whose trips cover
-    // contiguous bytes: [Start, Start + (Trips - 1) * Stride + AccessSize)
-    // for an upward stride, ending at Start + AccessSize for a downward one.
     std::optional<ContiguousPeriodicShape> Shape =
         getContiguousPeriodicShape(*Periodic);
-    if (!Shape)
-      report_fatal_error("TSan MAIR periodic observation has gaps");
+    if (!Shape) {
+      // Gaps between the trips, or a stride known only at run time: the
+      // runtime records each trip on its own, so no gap byte is recorded.
+      const bool IsWrite = Obs.Kind != mair::AccessKind::Read;
+      IRB.CreateCall(IsWrite ? TsanWritePeriodic : TsanReadPeriodic,
+                     {Addr, IRB.CreateSExtOrTrunc(Obs.Stride, IntptrTy),
+                      IRB.CreateZExtOrTrunc(Obs.AccessSize, IntptrTy),
+                      IRB.CreateZExtOrTrunc(Obs.TripCount, IntptrTy)});
+      if (IsWrite)
+        NumInstrumentedWrites++;
+      if (Obs.Kind != mair::AccessKind::Write)
+        NumInstrumentedReads++;
+      return true;
+    }
+    // The trips cover contiguous bytes, recorded as one range:
+    // [Start, Start + (Trips - 1) * Stride + AccessSize) for an upward
+    // stride, ending at Start + AccessSize for a downward one.
     auto *Zero = ConstantInt::get(IntptrTy, 0);
     Value *Trips = IRB.CreateZExtOrTrunc(Obs.TripCount, IntptrTy);
     Value *Span = IRB.CreateMul(
@@ -1297,8 +1317,14 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
           return false;
       } else if (const mair::PeriodicRegion *Periodic =
                      Obs.getPeriodicRegion()) {
-        if (!getContiguousPeriodicShape(*Periodic))
-          return false;
+        // A contiguous periodic region becomes one range access, any other
+        // one a __tsan_{read,write}_periodic call. Both need integer
+        // operands to pass to the runtime.
+        for (const mair::MAIRScalarExpr *E :
+             {&Periodic->getStride(), &Periodic->getAccessSize(),
+              &Periodic->getTripCount()})
+          if (!E->getType() || !E->getType()->isIntegerTy())
+            return false;
       } else {
         return false;
       }

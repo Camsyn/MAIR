@@ -41,7 +41,8 @@ void fill_down(int *p, int n) {
 // CHECK: ret void
 
 // A stride wider than the access leaves gaps. One range would record bytes no
-// iteration touches, so each iteration keeps its own access.
+// iteration touches, so the loop becomes one periodic call, which records
+// each iteration on its own.
 struct S {
   int x, y;
   long z;
@@ -54,7 +55,7 @@ int sum_x(struct S *p, int n) {
 }
 // CHECK-LABEL: define {{.*}} @sum_x(
 // CHECK-NOT: call void @__tsan_{{read|write}}_range
-// CHECK: for.body:
-// CHECK: call void @__tsan_read4(
-// CHECK-NOT: call void @__tsan_{{read|write}}_range
+// CHECK-NOT: call void @__tsan_read4(
+// CHECK: call void @__tsan_read_periodic(ptr %p, i64 16, i64 4, i64 %{{.*}})
+// CHECK-NOT: call void @__tsan_read4(
 // CHECK: {{^}$}}

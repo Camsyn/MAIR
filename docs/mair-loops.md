@@ -125,7 +125,7 @@ e2e 的 `instrumented_mops`（MAIR 变体，oracle 全部通过；无 MAIR → �
 
 符号地址只有在能够证明字节差时才合并。有 ScalarEvolution 时使用地址 SCEV 的常量差；证明失败即保留原观察。没有该分析时，只用 LLVM 的常量偏移剥离匹配相同剩余地址，以 APInt 计算差值，不把整数 `add` 当成不回绕的地址距离。
 
-两个 periodic 区域在基址、stride、trip count 都相同、access size 为常量、起点只差常量 `d`（不大于较低一方的 size）时合并成一个：每一轮里两段足迹相接或重叠，并集是一段 `[较低起点, max(a, d + b))`，所以结果保留较低起点、stride 和 trip count，只把 size 放大，正好是并集（`PeriodicRegion::merge`，`src/instrumentation/MAIR/MAIRRegion.cpp`）。起点按“根指针 + 常量 + 符号项”比较，偏移类型必须和指针索引同宽，常量差才精确。有空隙、stride 或 trip count 不同都不合并。合并后若 stride 不大于 size，区域变成连续的，TSan 也能按区间 lowering，而不是退回循环内逐次检查。测试：`test/MAIR/TestCases/locationmerge-periodic.ll`。
+两个 periodic 区域在基址、stride、trip count 都相同、access size 为常量、起点只差常量 `d`（不大于较低一方的 size）时合并成一个：每一轮里两段足迹相接或重叠，并集是一段 `[较低起点, max(a, d + b))`，所以结果保留较低起点、stride 和 trip count，只把 size 放大，正好是并集（`PeriodicRegion::merge`，`src/instrumentation/MAIR/MAIRRegion.cpp`）。起点按“根指针 + 常量 + 符号项”比较，偏移类型必须和指针索引同宽，常量差才精确。有空隙、stride 或 trip count 不同都不合并。合并后若 stride 不大于 size，区域变成连续的，TSan 用一次 range 访问记录，而不是逐轮调用 `__tsan_{read,write}_periodic`。测试：`test/MAIR/TestCases/locationmerge-periodic.ll`。
 
 Observation 合并保留完整来源指令序列及重复项。若右项严格包含左项，右项来源放在前面；相等、左项包含或非包含的区间并集仍按左后右追加。首项及首个有效 debug location 依赖这个顺序，不能把来源改成集合。
 
@@ -141,6 +141,16 @@ ASan 按 Observation 的区域检查，而不是按来源指令逐个检查（`X
 - 检查放在 Observation 所在的 ProgramPoint：LPOC 的区间/periodic 观察在循环出口（嵌套循环可再被外层不变外提提到外层 preheader），即访问发生之后，这是 ASan 已有的规则（见上文“输入与优化规则”）。
 
 测试：`test/MAIR/TestCases/asan/mair-merged-range.c`、`mair-loop-range.c`（IR），`mair-range-runtime.c`（越界仍报告、界内不误报，含只有空隙被 poison 的 strided 访问），`mair-periodic-runtime.c`（直接调用 runtime 入口的边界情况）。
+
+## TSan 的 lowering
+
+TSan 同样按 Observation 的区域记录访问（`XsanThreadSanitizer::instrumentMAIRObservation` 和 `sanitizeFunctionViaMAIR` 里的 `CanInstrumentViaMAIR`，`src/instrumentation/llvm23/ThreadSanitizer.cpp`）。每个来源都要通过 native TSan 的逐访问过滤（load/store、非 TSan atomic/vtable、非向量、`shouldInstrumentReadWriteFromAddress`、读常量数据和未逃逸 alloca 除外）；开 `-ts-distinguish-volatile` 时含 volatile 来源的 Observation 退回 native。TSan 的读、写、读写层次互不相同，合并只发生在同层次之间，所以不会把读记成写。
+
+- 连续区间：2 的幂且不超过 16 字节时，与 native 单次访问相同地选择 `__tsan_{read,write}N`、`unaligned` 或 compound 变体（起点对齐由来源推出）；其他大小或运行时大小用 `__tsan_{read,write}_range`。
+- periodic 区域：常量 stride 不大于 access size 时足迹连续，按 `[Start, Start + (Trips - 1) * |Stride| + AccessSize)` 记一次 range（下降 stride 起点下移，trip 为 0 时 size 为 0，runtime 直接返回）。其他情况（有空隙或 stride 只在运行时已知）调用 `__tsan_{read,write}_periodic(start, stride, size, count)`（`src/runtime/lib/tsan/rtl/tsan_interface.inc`），runtime 逐轮记录 `size` 字节，空隙不记。
+- 报告位置取最先执行的来源（`mair::getFirstSource`，`src/instrumentation/MAIR/Materialization/MAIRMaterialization.cpp`，与 ASan 共用）；访问类型就是 Observation 的类型。循环区间在出口处记录，所以与之竞争的另一线程访问常表现为 “Write … Previous read”。
+
+测试：`test/MAIR/TestCases/tsan/mair-merged-access.c`、`mair-loop-range.c`、`mair-strided-loop.c`、`mair-report-first-source.c`（IR），`mair-race-*.c`、`mair-strided-loop.c`（竞争仍报告、空隙与界外不误报）。
 
 ## 可复现验证
 

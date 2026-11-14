@@ -7,6 +7,9 @@
 
 ; CONFLICT: -Og/-O1 cannot be combined with -passes
 
+; default<O1> has no common observation motion: at -O2 SimplifyCFG has
+; already hoisted or sunk the identical accesses of both branches, and the
+; pass never fired in the e2e projects. LocationMerge merges the right side.
 define void @o1_common_before_location_merge(ptr %p, ptr %q, i1 %cond) {
 ; CHECK-LABEL: mair graph of fn @o1_common_before_location_merge {
 ; CHECK:       pp4: preds=
@@ -59,6 +62,37 @@ header:
   %pi = getelementptr i8, ptr %p, i64 %i
   %v = load i8, ptr %pi, align 1
   %next = add i64 %i, 1
+  %done = icmp eq i64 %next, 4
+  br i1 %done, label %exit, label %header
+
+exit:
+  ret void
+}
+
+; LocationMerge runs in the loop body before periodic combination: p[2i] and
+; p[2i+1] become one 8-byte access with an 8-byte step, which LPOC turns into
+; one contiguous range. Combining first would leave two 4-byte accesses with an
+; 8-byte step, which only form a periodic region.
+define void @o1_location_merge_before_periodic_combine(ptr %p) {
+; CHECK-LABEL: mair graph of fn @o1_location_merge_before_periodic_combine {
+; CHECK:       loop-exit=%header, preds=
+; CHECK-NEXT:    o: write ptr %p, 32
+; CHECK-NOT:     o:
+; CHECK:       }
+; CHECK-LABEL: mair graph of fn @o1_location_merge_before_periodic_combine of loop %header {
+; CHECK-NOT:     o:
+; CHECK:       }
+entry:
+  br label %header
+
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %header ]
+  %i.8 = shl nuw nsw i64 %i, 3
+  %lo = getelementptr inbounds i8, ptr %p, i64 %i.8
+  %hi = getelementptr inbounds i8, ptr %lo, i64 4
+  store i32 0, ptr %lo, align 4
+  store i32 1, ptr %hi, align 4
+  %next = add nuw nsw i64 %i, 1
   %done = icmp eq i64 %next, 4
   br i1 %done, label %exit, label %header
 

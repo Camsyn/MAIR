@@ -110,15 +110,23 @@ void buildMAIRGraphOgPipeline(MAIRGraphPassManager &PM) {
 }
 
 void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
-  // Normalize topology before motion, combine loop and location opportunities,
-  // then alternate global motion with local merging/elimination. Invariant
-  // motion runs again after periodic combination: an inner loop can synthesize
-  // an observation in its parent only after the parent's first motion pass.
-  // The final simplification removes program points emptied by those
-  // observation transforms.
+  // Normalize topology, then eliminate redundant observations before motion
+  // (so that sinking keeps one source guard). Location merging runs before
+  // loop motion and periodic combination: accesses merged in a loop body,
+  // such as p[2i] and p[2i+1], become one access whose step equals its size,
+  // which periodic combination summarizes as one contiguous range instead of
+  // two strided periodic regions. Invariant motion runs again after periodic
+  // combination: an inner loop can synthesize an observation in its parent
+  // only after the parent's first motion pass. The second location merge
+  // combines what motion and combination placed at the loop boundaries,
+  // including periodic regions whose footprints touch, and the second
+  // elimination removes accesses the merged regions cover. The final
+  // simplification removes program points emptied by those transforms.
+  // docs/mair-loops.md has the e2e data behind this order.
   noteMAIRPipeline("O1");
   addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/1));
   addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/1));
+  addHierarchyPass(PM, LocationMergePass(/*Ordinal=*/1));
   addHierarchyPass(PM,
                    LoopInvariantObservationMotionPass(
                        /*MergeEquivalentObservations=*/true, /*Ordinal=*/1));
@@ -126,11 +134,8 @@ void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
   addHierarchyPass(PM,
                    LoopInvariantObservationMotionPass(
                        /*MergeEquivalentObservations=*/true, /*Ordinal=*/2));
-  addHierarchyPass(PM, LocationMergePass(/*Ordinal=*/1));
-  addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/2));
-  addHierarchyPass(PM, CommonObservationMotionPass());
   addHierarchyPass(PM, LocationMergePass(/*Ordinal=*/2));
-  addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/3));
+  addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/2));
   addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/2));
 }
 

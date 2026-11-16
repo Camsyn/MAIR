@@ -1217,10 +1217,15 @@ bool XsanThreadSanitizer::instrumentMAIRObservation(
     }
     IRB.CreateCall(OnAccessFunc, Addr);
   } else {
-    // Any other width, including a nonstandard one such as an i24 store, and
-    // every size known only at run time. A write range also covers the read
-    // of a compound read-write: a write conflicts with every access a read
+    // Any other width, including a nonstandard one such as an i24 store or a
+    // 32-byte vector, which native TSan leaves unrecorded, and every size
+    // known only at run time. A write range also covers the read of a
+    // compound read-write: a write conflicts with every access a read
     // conflicts with.
+    // TODO: The range entries handle any start alignment themselves. An
+    // aligned variant, used when StartAlign >= 8 or the size is at most
+    // StartAlign as for the fixed-width entries, could skip the partial
+    // first cell.
     IRB.CreateCall(IsWrite ? TsanWriteRange : TsanReadRange,
                    {Addr, IRB.CreateZExtOrTrunc(Size, IntptrTy)});
   }
@@ -1289,10 +1294,20 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
     // Drop the accesses native TSan never records before optimization
     // (MAOpt::eraseObservationsIf). Kept, such an access would merge with
     // recorded ones and send them all back to native lowering.
+    //
+    // Vtable pointer accesses are dropped too, and native TSan lowers them
+    // as before: __tsan_vptr_{read,update} tag the access so that a race on
+    // it is reported as a race on the vptr, which no range or plain entry
+    // can express. They take no part in MAIR optimization, so a vptr access
+    // never covers a plain access nor merges with one.
     Opt->eraseObservationsIf([&](const mair::Observation &Obs) {
       ArrayRef<Instruction *> Sources = Obs.getInstructions();
       return !Obs.isCallLike() && !Sources.empty() &&
-             all_of(Sources, NativeTsanOmits);
+             all_of(Sources, [&](Instruction *Source) {
+               return NativeTsanOmits(Source) ||
+                      (isa<LoadInst, StoreInst>(Source) &&
+                       isVtableAccess(Source));
+             });
     });
 
     auto MAIRModeledSources = mair::collectModeledSources(Opt->getGraph());
@@ -1300,19 +1315,20 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
     if (Error Err = Opt->optimize())
       report_fatal_error(Twine(toString(std::move(Err))));
 
-    // The other per-access filters for MAIR lowering: native TSan instruments
-    // these accesses its own way (atomics, vtable pointer accesses, vectors).
-    // Every source of an observation must pass them, so that a merged or
-    // combined observation never records an access the way native TSan would
-    // not. Those native TSan omits were dropped before optimization.
+    // The other per-access filter for MAIR lowering: native TSan instruments
+    // atomics its own way. Every source of an observation must pass it, so
+    // that a merged or combined observation never records an access the way
+    // native TSan would not. The accesses native TSan omits and the vtable
+    // pointer accesses were dropped before optimization.
+    //
+    // A fixed vector is one access of its store size, as for native TSan,
+    // which records it with the entry of that width. A scalable vector has
+    // no constant size, which its observation does not model, so the region
+    // check below rejects it.
+    // TODO: Record a scalable vector as a range of vscale * its minimum size
+    // bytes; native TSan does not record it.
     auto CanInstrumentSource = [&](Instruction *Source) {
-      auto *LI = dyn_cast<LoadInst>(Source);
-      auto *SI = dyn_cast<StoreInst>(Source);
-      if ((!LI && !SI) || isTsanAtomic(Source) || isVtableAccess(Source))
-        return false;
-
-      Type *AccessTy = LI ? LI->getType() : SI->getValueOperand()->getType();
-      return !AccessTy->isVectorTy() && !AccessTy->isScalableTy();
+      return isa<LoadInst, StoreInst>(Source) && !isTsanAtomic(Source);
     };
 
     // An observation may merge several sources (LocationMerge, LIOM, COM) or

@@ -64,7 +64,7 @@ inline void printValueName(raw_ostream &OS, const Value &V) {
   // Metadata is numbered differently when the tracker has not numbered all of
   // it, so it keeps the default path.
   ModuleSlotTracker *MST = DumpSlotTrackerScope::get();
-  if (MST && !isa<MetadataAsValue>(V))
+  if (MST && !llvm::isa<MetadataAsValue>(V))
     V.printAsOperand(OS, /*PrintType=*/false, *MST);
   else
     V.printAsOperand(OS, /*PrintType=*/false);
@@ -97,8 +97,10 @@ bool isMaskedMemoryIntrinsic(const Instruction &I);
 /// A constant length in bytes, or the length value itself as a symbol.
 AbstractValue getAccessSize(const Value &Value);
 
+/// The observation of \p I accessing \p Size bytes at \p Ptr, which \p I
+/// declares aligned to \p Alignment.
 Observation makeObservation(const Instruction &I, const Value &Ptr,
                             AbstractValue Size, AccessKind Kind,
-                            const DataLayout &DL);
+                            const DataLayout &DL, Align Alignment);
 
 } // namespace mair

@@ -137,6 +137,8 @@ void PeriodicRegion::print(raw_ostream &OS) const {
   AccessSize.print(OS);
   OS << ", trips=";
   TripCount.print(OS);
+  if (Alignment > 1)
+    OS << ", align " << Alignment.value();
 }
 
 AbstractValue::Kind AbstractValue::getKind() const {
@@ -179,9 +181,9 @@ const Value *getByteOffsetIndex(const Value &Ptr, const Value &Base,
   return GEP->getOperand(1);
 }
 
-AbstractAccess AbstractAccess::fromPointerAndSize(const Value &Ptr,
-                                                  AbstractValue Size,
-                                                  const DataLayout &DL) {
+namespace {
+AbstractAccess accessAtPointer(const Value &Ptr, AbstractValue Size,
+                               const DataLayout &DL) {
   APInt Offset(DL.getIndexTypeSizeInBits(Ptr.getType()), 0);
   const Value *Stripped = Ptr.stripAndAccumulateConstantOffsets(
       DL, Offset, /*AllowNonInbounds=*/true);
@@ -211,6 +213,17 @@ AbstractAccess AbstractAccess::fromPointerAndSize(const Value &Ptr,
     return AbstractAccess(Underlying, AbstractValue::symbol(Ptr), Size);
 
   return AbstractAccess(&Ptr, AbstractValue::constant(0), Size);
+}
+} // namespace
+
+AbstractAccess AbstractAccess::fromPointerAndSize(const Value &Ptr,
+                                                  AbstractValue Size,
+                                                  const DataLayout &DL,
+                                                  Align Alignment) {
+  // Each form accessAtPointer builds starts at Ptr itself.
+  AbstractAccess Result = accessAtPointer(Ptr, std::move(Size), DL);
+  Result.setAlign(Alignment);
+  return Result;
 }
 
 bool AbstractAccess::contains(const AbstractAccess &Other) const {
@@ -455,8 +468,11 @@ std::optional<PeriodicRegion> PeriodicRegion::merge(const PeriodicRegion &A,
                                                     const DataLayout *DL,
                                                     MAIRGraph *ExprGraph) {
   using Kind = MAIRScalarExpr::Kind;
-  if (A == B)
-    return A;
+  if (A == B) {
+    PeriodicRegion Result = A;
+    Result.Alignment = std::max(A.Alignment, B.Alignment);
+    return Result;
+  }
   if (!DL || !ExprGraph || A.Base != B.Base || A.Stride != B.Stride ||
       A.TripCount != B.TripCount || A.AccessSize.getKind() != Kind::Constant ||
       B.AccessSize.getKind() != Kind::Constant ||
@@ -478,14 +494,22 @@ std::optional<PeriodicRegion> PeriodicRegion::merge(const PeriodicRegion &A,
   // A gap between the two footprints of one trip is not covered.
   if (Distance.ugt(LowSize))
     return std::nullopt;
-  if (HighEnd.ule(LowSize))
-    return Low;
+  // Each trip of the union starts where the lower region's trip does, and
+  // the higher region's trip starts Distance bytes past it.
+  Align Alignment = std::max(
+      Low.Alignment, commonAlignment(High.Alignment, Distance.getZExtValue()));
+  if (HighEnd.ule(LowSize)) {
+    PeriodicRegion Result = Low;
+    Result.Alignment = Alignment;
+    return Result;
+  }
   Type *SizeType = Low.AccessSize.getType();
   if (HighEnd.getActiveBits() > SizeType->getIntegerBitWidth())
     return std::nullopt;
   MAIRScalarExpr Size = ExprGraph->createConstantExpr(
       *SizeType, HighEnd.trunc(SizeType->getIntegerBitWidth()));
-  return PeriodicRegion(Low.Base, Low.Start, Low.Stride, Size, Low.TripCount);
+  return PeriodicRegion(Low.Base, Low.Start, Low.Stride, Size, Low.TripCount,
+                        Alignment);
 }
 
 std::optional<int64_t> PeriodicRegion::getInterleaveDistance(
@@ -563,24 +587,68 @@ PeriodicRegion::mergeInterleaved(ArrayRef<const PeriodicRegion *> Slices,
         ExprGraph->createUnaryExpr(Kind::ZeroExtend, *WideType,
                                    First.TripCount));
   }
-  return PeriodicRegion(First.Base, Start, Stride, First.AccessSize, Trips);
+  // Every trip of the union is a trip of some slice.
+  Align Alignment = First.Alignment;
+  for (const PeriodicRegion *R : Slices)
+    Alignment = std::min(Alignment, R->Alignment);
+  return PeriodicRegion(First.Base, Start, Stride, First.AccessSize, Trips,
+                        Alignment);
 }
+
+namespace {
+/// How many bytes \p Part starts past \p Start, if their offsets tell.
+std::optional<uint64_t> startDistance(const AbstractAccess &Start,
+                                      const AbstractAccess &Part) {
+  const AbstractValue &From = Start.getOffset();
+  const AbstractValue &To = Part.getOffset();
+  if (From.isUnknown() || To.isUnknown())
+    return std::nullopt;
+  if (From == To)
+    return 0;
+  if (From.isConstant() && To.isConstant() &&
+      To.getConstant() >= From.getConstant())
+    return To.getConstant() - From.getConstant();
+  return std::nullopt;
+}
+
+/// Strengthen the alignment known for the start of \p Result with what
+/// \p Part proves: an address aligned to A lies \p Distance bytes past the
+/// start, so the start is aligned to what A and Distance have in common.
+void proveStartAlign(AbstractAccess &Result, const AbstractAccess &Part,
+                     uint64_t Distance) {
+  Result.setAlign(
+      std::max(Result.getAlign(), commonAlignment(Part.getAlign(), Distance)));
+}
+} // namespace
 
 std::optional<AbstractAccess> AbstractAccess::merge(const AbstractAccess &A,
                                                     const AbstractAccess &B,
                                                     const DataLayout *DL,
                                                     ScalarEvolution *SE,
                                                     MAIRGraph *ExprGraph) {
+  // Each union below starts where A or B starts, so it knows that one's
+  // alignment, and the other proves more if its distance is known.
+  auto WithStartAlign = [&](AbstractAccess Result) {
+    for (const AbstractAccess *Part : {&A, &B})
+      if (std::optional<uint64_t> Distance = startDistance(Result, *Part))
+        proveStartAlign(Result, *Part, *Distance);
+    return Result;
+  };
   if (A == B)
-    return A;
+    return WithStartAlign(A);
   if (A.Base != B.Base)
     return std::nullopt;
   if (A.contains(B))
-    return A;
+    return WithStartAlign(A);
   if (B.contains(A))
-    return B;
-  if (A.hasSizeExpr() || B.hasSizeExpr())
-    return mergeExpressionSizedRanges(A, B, ExprGraph);
+    return WithStartAlign(B);
+  if (A.hasSizeExpr() || B.hasSizeExpr()) {
+    std::optional<AbstractAccess> Merged =
+        mergeExpressionSizedRanges(A, B, ExprGraph);
+    if (!Merged)
+      return std::nullopt;
+    return WithStartAlign(*Merged);
+  }
   if (!A.Size.isConstant() || !B.Size.isConstant())
     return std::nullopt;
 
@@ -602,9 +670,16 @@ std::optional<AbstractAccess> AbstractAccess::merge(const AbstractAccess &A,
     if (MergedSize.getActiveBits() > 64)
       return std::nullopt;
 
-    const AbstractAccess &First = BBegin.slt(Zero) ? B : A;
-    return AbstractAccess(First.Base, First.Offset,
-                          AbstractValue::constant(MergedSize.getZExtValue()));
+    // The offsets are not comparable, so the distance of the later part is
+    // the pointer delta.
+    const bool BFirst = BBegin.slt(Zero);
+    const AbstractAccess &First = BFirst ? B : A;
+    AbstractAccess Result(First.Base, First.Offset,
+                          AbstractValue::constant(MergedSize.getZExtValue()),
+                          First.Alignment);
+    proveStartAlign(Result, BFirst ? A : B,
+                    static_cast<uint64_t>(BBegin.abs().getZExtValue()));
+    return Result;
   }
 
   uint64_t ABegin = A.Offset.getConstant();
@@ -621,8 +696,8 @@ std::optional<AbstractAccess> AbstractAccess::merge(const AbstractAccess &A,
   uint64_t Begin = std::min(ABegin, BBegin);
   uint64_t End = std::max(*AEnd, *BEnd);
 
-  return AbstractAccess(A.Base, AbstractValue::constant(Begin),
-                        AbstractValue::constant(End - Begin));
+  return WithStartAlign(AbstractAccess(A.Base, AbstractValue::constant(Begin),
+                                       AbstractValue::constant(End - Begin)));
 }
 
 void AbstractAccess::print(raw_ostream &OS) const {
@@ -689,7 +764,10 @@ std::optional<MaskedRegion> MaskedRegion::merge(const MaskedRegion &A,
   }
   SmallBitVector Combined = A.ConstantMask;
   Combined |= B.ConstantMask;
-  return MaskedRegion(A.Bounds, std::move(Combined), A.ElementSize);
+  // Comparable lanes have equal bounds, so both alignments hold.
+  AbstractAccess Bounds = A.Bounds;
+  Bounds.setAlign(std::max(A.Bounds.getAlign(), B.Bounds.getAlign()));
+  return MaskedRegion(std::move(Bounds), std::move(Combined), A.ElementSize);
 }
 
 bool MaskedRegion::operator==(const MaskedRegion &Other) const {
@@ -708,13 +786,15 @@ void MaskedRegion::print(raw_ostream &OS) const {
   OS << ", mask ";
   if (!IsConstant) {
     printValueName(OS, *DynamicMask);
-    return;
+  } else {
+    OS << "<";
+    ListSeparator Separator(",");
+    for (unsigned Lane = 0; Lane < ConstantMask.size(); ++Lane)
+      OS << Separator << (ConstantMask.test(Lane) ? '1' : '0');
+    OS << ">";
   }
-  OS << "<";
-  ListSeparator Separator(",");
-  for (unsigned Lane = 0; Lane < ConstantMask.size(); ++Lane)
-    OS << Separator << (ConstantMask.test(Lane) ? '1' : '0');
-  OS << ">";
+  if (Bounds.getAlign() > 1)
+    OS << ", align " << Bounds.getAlign().value();
 }
 
 } // namespace mair

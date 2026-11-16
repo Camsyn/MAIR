@@ -97,9 +97,9 @@ AbstractValue getAccessSize(const Value &Value) {
 
 Observation makeObservation(const Instruction &I, const Value &Ptr,
                             AbstractValue Size, AccessKind Kind,
-                            const DataLayout &DL) {
+                            const DataLayout &DL, Align Alignment) {
   AbstractAccess Access =
-      AbstractAccess::fromPointerAndSize(Ptr, std::move(Size), DL);
+      AbstractAccess::fromPointerAndSize(Ptr, std::move(Size), DL, Alignment);
   Instruction *Inst = const_cast<Instruction *>(&I);
   return Observation(Inst, std::move(Access), Kind,
                      getInstructionProperties(I));
@@ -413,10 +413,19 @@ Observation Observation::fromInstruction(const Instruction &I,
   const Value *Ptr = nullptr;
   AbstractValue Size = AbstractValue::unknown();
   AccessKind Kind = AccessKind::Read;
+  // The alignment the instruction declares for its pointer.
+  Align Alignment;
   if (isa<LoadInst, StoreInst, AtomicRMWInst, AtomicCmpXchgInst>(I)) {
-    // LLVM knows the pointer and the store size of these accesses.
+    // LLVM knows the pointer, the store size and the alignment of these
+    // accesses.
     MemoryLocation Location = MemoryLocation::get(&I);
     Ptr = Location.Ptr;
+    if (const auto *RMW = dyn_cast<AtomicRMWInst>(&I))
+      Alignment = RMW->getAlign();
+    else if (const auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(&I))
+      Alignment = CmpXchg->getAlign();
+    else
+      Alignment = getLoadStoreAlignment(&I);
     if (Location.Size.hasValue() && !Location.Size.isScalable())
       Size = AbstractValue::constant(Location.Size.getValue().getFixedValue());
     if (isa<LoadInst>(I))
@@ -431,6 +440,7 @@ Observation Observation::fromInstruction(const Instruction &I,
   } else if (const auto *MI = dyn_cast<AnyMemSetInst>(&I)) {
     Ptr = MI->getRawDest();
     Size = getAccessSize(*MI->getLength());
+    Alignment = MI->getDestAlign().valueOrOne();
     Kind = AccessKind::Write;
   } else if (const auto *II = dyn_cast<IntrinsicInst>(&I);
              II && isMaskedMemoryIntrinsic(I)) {
@@ -447,7 +457,8 @@ Observation Observation::fromInstruction(const Instruction &I,
         DL.getTypeStoreSize(VectorAccessType->getElementType());
     if (ElementStoreSize.isScalable())
       report_fatal_error("masked access has scalable element size");
-    AbstractAccess Bounds = AbstractAccess::fromPointerAndSize(*Ptr, Size, DL);
+    AbstractAccess Bounds = AbstractAccess::fromPointerAndSize(
+        *Ptr, Size, DL, II->getParamAlign(PtrOperand).valueOrOne());
     const Value &Mask = *II->getArgOperand(MaskOperand);
     std::optional<SmallBitVector> ConstantMask = getConstantMask(Mask);
     MaskedRegion Region =
@@ -470,7 +481,7 @@ Observation Observation::fromInstruction(const Instruction &I,
 
   if (!Ptr)
     report_fatal_error("memory access instruction has no modeled pointer");
-  return makeObservation(I, *Ptr, std::move(Size), Kind, DL);
+  return makeObservation(I, *Ptr, std::move(Size), Kind, DL, Alignment);
 }
 
 void Observation::print(raw_ostream &OS) const {
@@ -491,6 +502,8 @@ void Observation::print(raw_ostream &OS) const {
       Access->getSizeExpr().print(OS);
     else
       printAbstractValue(OS, Access->getSize());
+    if (Access->getAlign() > 1)
+      OS << ", align " << Access->getAlign().value();
     return;
   }
   OS << " ";

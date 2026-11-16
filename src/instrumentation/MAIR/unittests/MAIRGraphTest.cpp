@@ -581,6 +581,60 @@ entry:
   EXPECT_FALSE(A.contains(*Merged));
 }
 
+TEST(MAIRGraph, AbstractAccessMergeKeepsStrongestStartAlignment) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  const llvm::Argument &P = *M->getFunction("f")->arg_begin();
+  auto Access = [&](uint64_t Offset, uint64_t Size, uint64_t Alignment) {
+    return AbstractAccess(&P, AbstractValue::constant(Offset),
+                          AbstractValue::constant(Size),
+                          llvm::Align(Alignment));
+  };
+
+  // The leftmost part proves its own alignment for the start.
+  std::optional<AbstractAccess> Merged =
+      AbstractAccess::merge(Access(0, 4, 8), Access(4, 4, 4));
+  ASSERT_TRUE(Merged.has_value());
+  EXPECT_EQ(Merged->getAlign(), llvm::Align(8));
+
+  // A part 8 bytes past the start proves gcd(16, 8) = 8, more than the
+  // leftmost part's 4, in either order.
+  for (bool Swap : {false, true}) {
+    AbstractAccess Low = Access(0, 8, 4), High = Access(8, 8, 16);
+    Merged = Swap ? AbstractAccess::merge(High, Low)
+                  : AbstractAccess::merge(Low, High);
+    ASSERT_TRUE(Merged.has_value());
+    EXPECT_EQ(Merged->getAlign(), llvm::Align(8));
+  }
+
+  // A contained part proves alignment for the container's start too.
+  Merged = AbstractAccess::merge(Access(0, 16, 1), Access(8, 4, 16));
+  ASSERT_TRUE(Merged.has_value());
+  EXPECT_EQ(Merged->getSize(), AbstractValue::constant(16));
+  EXPECT_EQ(Merged->getAlign(), llvm::Align(8));
+
+  // Equal bytes keep the stronger alignment; alignment is not part of the
+  // identity of the bytes.
+  EXPECT_EQ(Access(0, 4, 2), Access(0, 4, 4));
+  Merged = AbstractAccess::merge(Access(0, 4, 2), Access(0, 4, 4));
+  ASSERT_TRUE(Merged.has_value());
+  EXPECT_EQ(Merged->getAlign(), llvm::Align(4));
+
+  // An access built from an instruction knows nothing more than one byte
+  // unless told.
+  EXPECT_EQ(
+      AbstractAccess(&P, AbstractValue::constant(0), AbstractValue::constant(4))
+          .getAlign(),
+      llvm::Align(1));
+}
+
 TEST(MAIRGraph, GraphTraitsExposeProgramPointGraph) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(

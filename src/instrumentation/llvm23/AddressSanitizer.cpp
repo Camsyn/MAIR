@@ -4202,32 +4202,9 @@ void XsanAddressSanitizer::instrumentMAIRObservation(
     return;
   }
 
-  // A contiguous range. Its start is where some source starts, so the
-  // smallest source alignment holds for it. A source at a constant offset
-  // from the region's base bounds the base's alignment too, and with it the
-  // start's: merging a and b of struct { long a; int b; } keeps a's 8 bytes.
-  Align Alignment = getLoadStoreAlignment(First);
-  for (Instruction *Source : Sources)
-    Alignment = std::min(Alignment, getLoadStoreAlignment(Source));
-  const mair::AbstractAccess *Region = Obs.Source->getContiguousRegion();
-  for (Instruction *Source : Sources) {
-    const Value *Pointer = getLoadStorePointerOperand(Source);
-    if (Pointer == Obs.Address) {
-      Alignment = std::max(Alignment, getLoadStoreAlignment(Source));
-      continue;
-    }
-    if (!Region || !Region->getOffset().isConstant())
-      continue;
-    APInt Offset(DL.getIndexTypeSizeInBits(Pointer->getType()), 0);
-    if (Pointer->stripAndAccumulateConstantOffsets(
-            DL, Offset, /*AllowNonInbounds=*/true) != Region->getBase())
-      continue;
-    Align BaseAlignment =
-        commonAlignment(getLoadStoreAlignment(Source), Offset.getZExtValue());
-    Alignment =
-        std::max(Alignment, commonAlignment(BaseAlignment,
-                                            Region->getOffset().getConstant()));
-  }
+  // A contiguous range. MAIR keeps the alignment of its first byte through
+  // merges.
+  Align Alignment = Obs.Source->getContiguousRegion()->getAlign();
   const auto *Size = dyn_cast<ConstantInt>(Obs.AccessSize);
   if (Size && Size->getValue().getActiveBits() <= 32) {
     uint64_t Bytes = Size->getZExtValue();

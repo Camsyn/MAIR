@@ -26,6 +26,7 @@
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Type.h"
+#include "llvm/Support/Alignment.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
@@ -49,6 +50,7 @@ class SCEV;
 
 namespace mair {
 
+using llvm::Align;
 using llvm::APInt;
 using llvm::ArrayRef;
 using llvm::BasicBlock;
@@ -271,15 +273,22 @@ class AbstractAccess {
   // Valid when the access length is an expression owned by the graph. Size is
   // then unknown.
   MAIRScalarExpr SizeExpr;
+  // The alignment known for the first accessed byte, Base + Offset. A fact
+  // about the address, not part of which bytes are accessed: operator==
+  // ignores it.
+  Align Alignment;
 
 public:
   AbstractAccess() = default;
-  AbstractAccess(const Value *B, AbstractValue O, AbstractValue S)
-      : Base(B), Offset(O), Size(S) {}
+  AbstractAccess(const Value *B, AbstractValue O, AbstractValue S,
+                 Align A = Align())
+      : Base(B), Offset(O), Size(S), Alignment(A) {}
 
   const Value *getBase() const { return Base; }
   const AbstractValue &getOffset() const { return Offset; }
   const AbstractValue &getSize() const { return Size; }
+  Align getAlign() const { return Alignment; }
+  void setAlign(Align A) { Alignment = A; }
   bool hasSizeExpr() const { return SizeExpr.isValid(); }
   MAIRScalarExpr getSizeExpr() const {
     assert(hasSizeExpr() && "the access length is not an expression");
@@ -307,8 +316,15 @@ public:
   const llvm::SCEV *getAddressSCEV(llvm::ScalarEvolution &SE,
                                    ZeroOffsetBase ZeroOffset) const;
 
+  /// The access of \p Size bytes at \p Ptr, which is known to be aligned to
+  /// \p Alignment.
   static AbstractAccess fromPointerAndSize(const Value &Ptr, AbstractValue Size,
-                                           const DataLayout &DL);
+                                           const DataLayout &DL,
+                                           Align Alignment = Align());
+  /// The gap-free union of \p A and \p B if it is one access. Its start is
+  /// where the leftmost of them starts, and its alignment the strongest that
+  /// either proves for that start: an access D bytes past the start proves
+  /// the alignment common to its own and D.
   static std::optional<AbstractAccess>
   merge(const AbstractAccess &A, const AbstractAccess &B,
         const DataLayout *DL = nullptr, llvm::ScalarEvolution *SE = nullptr,
@@ -431,13 +447,18 @@ struct PeriodicRegion {
   MAIRScalarExpr Stride;
   MAIRScalarExpr AccessSize;
   MAIRScalarExpr TripCount;
+  // The alignment known for the start of every trip, Start + i * Stride. A
+  // fact about the addresses, ignored by operator==.
+  Align Alignment;
 
   PeriodicRegion() = default;
   PeriodicRegion(const Value *B, MAIRScalarExpr S, MAIRScalarExpr Step,
-                 MAIRScalarExpr Size, MAIRScalarExpr Trips)
-      : Base(B), Start(S), Stride(Step), AccessSize(Size), TripCount(Trips) {}
+                 MAIRScalarExpr Size, MAIRScalarExpr Trips, Align A = Align())
+      : Base(B), Start(S), Stride(Step), AccessSize(Size), TripCount(Trips),
+        Alignment(A) {}
 
   const Value *getBase() const { return Base; }
+  Align getAlign() const { return Alignment; }
   const MAIRScalarExpr &getStart() const { return Start; }
   const MAIRScalarExpr &getStride() const { return Stride; }
   const MAIRScalarExpr &getAccessSize() const { return AccessSize; }
@@ -449,6 +470,9 @@ struct PeriodicRegion {
   /// a trip. The union of each trip is then one interval, so the result keeps
   /// the lower start, stride and trip count and widens the access size. A new
   /// size expression is created in \p ExprGraph, which must own both regions.
+  /// Each trip starts where the lower region's trip starts, so it keeps the
+  /// lower region's alignment, strengthened by what the higher one proves a
+  /// constant distance past it.
   static std::optional<PeriodicRegion> merge(const PeriodicRegion &A,
                                              const PeriodicRegion &B,
                                              const DataLayout *DL,
@@ -471,6 +495,8 @@ struct PeriodicRegion {
   /// region starting at s0 with stride d, the same access size and m times
   /// the trips. The trip count is widened so that the product cannot wrap.
   /// New expressions are created in \p ExprGraph, which must own every slice.
+  /// A trip of the union is a trip of some slice, so the union knows the
+  /// weakest alignment of the slices.
   static std::optional<PeriodicRegion>
   mergeInterleaved(ArrayRef<const PeriodicRegion *> Slices,
                    const DataLayout *DL, MAIRGraph *ExprGraph);

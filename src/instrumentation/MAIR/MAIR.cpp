@@ -497,9 +497,11 @@ ProgramPoint &MAIRGraph::createInstProgramPoint(const BasicBlock &BB,
   if (const auto *Transfer = dyn_cast<AnyMemTransferInst>(&Anchor)) {
     AbstractValue Length = getAccessSize(*Transfer->getLength());
     PP.addObservation(makeObservation(Anchor, *Transfer->getRawDest(), Length,
-                                      AccessKind::Write, DL));
+                                      AccessKind::Write, DL,
+                                      Transfer->getDestAlign().valueOrOne()));
     PP.addObservation(makeObservation(Anchor, *Transfer->getRawSource(), Length,
-                                      AccessKind::Read, DL));
+                                      AccessKind::Read, DL,
+                                      Transfer->getSourceAlign().valueOrOne()));
   } else {
     PP.addObservation(Observation::fromInstruction(Anchor, DL));
   }

@@ -1072,39 +1072,6 @@ getContiguousPeriodicShape(const mair::PeriodicRegion &Region) {
                                  StrideValue.isNegative()};
 }
 
-/// The alignment of the first byte of \p Region. A source whose address is a
-/// known distance past that byte proves the alignment common to its own and
-/// that distance.
-Align getContiguousStartAlign(const mair::Observation &Obs,
-                              const mair::AbstractAccess &Region,
-                              const DataLayout &DL) {
-  const mair::AbstractValue &Start = Region.getOffset();
-  Align Result(1);
-  for (Instruction *I : Obs.getInstructions()) {
-    const Value *Ptr = getLoadStorePointerOperand(I);
-    if (!Ptr)
-      continue;
-    std::optional<uint64_t> Distance;
-    if (Start.isSymbol() && Start.getSymbol() == Ptr) {
-      Distance = 0;
-    } else {
-      mair::AbstractAccess Access = mair::AbstractAccess::fromPointerAndSize(
-          *Ptr, mair::AbstractValue::constant(0), DL);
-      const mair::AbstractValue &Offset = Access.getOffset();
-      if (Access.getBase() != Region.getBase())
-        continue;
-      if (Offset == Start)
-        Distance = 0;
-      else if (Offset.isConstant() && Start.isConstant() &&
-               Offset.getConstant() >= Start.getConstant())
-        Distance = Offset.getConstant() - Start.getConstant();
-    }
-    if (Distance)
-      Result = std::max(Result,
-                        commonAlignment(getLoadStoreAlignment(I), *Distance));
-  }
-  return Result;
-}
 } // namespace
 
 // FirstSource is the source of Obs that runs first (mair::getFirstSource);
@@ -1190,8 +1157,8 @@ bool XsanThreadSanitizer::instrumentMAIRObservation(
       Addr = IRB.CreateGEP(IRB.getInt8Ty(), Addr, IRB.CreateNeg(Span),
                            "mair.tsan.start");
   } else {
-    StartAlign = getContiguousStartAlign(
-        *Obs.Source, *Obs.Source->getContiguousRegion(), DL);
+    // MAIR keeps the alignment of the region's first byte through merges.
+    StartAlign = Obs.Source->getContiguousRegion()->getAlign();
   }
 
   const bool IsCompoundRW = Obs.Kind == mair::AccessKind::ReadWrite;

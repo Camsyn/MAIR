@@ -334,6 +334,9 @@ buildContiguousAggregate(MAIRGraph &ExprGraph, const Observation &Obs,
   if (!StartOffset)
     return std::nullopt;
 
+  // Every trip starts at an address Location's alignment holds for, and the
+  // range starts at the first trip upward and at the last one downward.
+  const Align TripAlign = Location->getAlign();
   if (Count) {
     if (StartOffset->isConstant()) {
       uint64_t RangeOffset = StartOffset->getConstant();
@@ -347,12 +350,12 @@ buildContiguousAggregate(MAIRGraph &ExprGraph, const Observation &Obs,
       }
       return AbstractAccess(Location->getBase(),
                             AbstractValue::constant(RangeOffset),
-                            AbstractValue::constant(RangeSize));
+                            AbstractValue::constant(RangeSize), TripAlign);
     }
     if (StepValue.isNegative())
       return std::nullopt;
     return AbstractAccess(Location->getBase(), *StartOffset,
-                          AbstractValue::constant(RangeSize));
+                          AbstractValue::constant(RangeSize), TripAlign);
   }
   if (!StartOffset->isConstant())
     return std::nullopt;
@@ -381,7 +384,7 @@ buildContiguousAggregate(MAIRGraph &ExprGraph, const Observation &Obs,
 
   AbstractAccess Range(Location->getBase(),
                        AbstractValue::constant(StartOffset->getConstant()),
-                       AbstractValue());
+                       AbstractValue(), TripAlign);
   Range.setSizeExpr(SizeExpr);
   return Range;
 }
@@ -473,8 +476,9 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
     MAIRScalarExpr SizeExpr =
         G.getParent()->createConstantExpr(*SizeType, APInt(64, AccessSize));
     MAIRScalarExpr CountExpr = Converter.convert(ExecutionCount);
+    // Each trip starts where Location does in that iteration.
     Aggregate = PeriodicRegion(Location->getBase(), StartExpr, StrideExpr,
-                               SizeExpr, CountExpr);
+                               SizeExpr, CountExpr, Location->getAlign());
   }
 
   return AggregatePlan{

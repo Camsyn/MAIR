@@ -409,6 +409,15 @@ static cl::opt<bool>
                cl::desc("Don't instrument scalar stack variables"), cl::Hidden,
                cl::init(false));
 
+#ifndef XSAN_PASS
+// Off by default: MAIR then checks every access native ASan checks.
+static cl::opt<bool> ClMAIRBoundsElimination(
+    "mair-asan-boe",
+    cl::desc("With MAIR, do not check accesses that provably stay within a "
+             "constant global (MAIR pass boe)"),
+    cl::init(false));
+#endif
+
 static cl::opt<bool> ClDynamicAllocaStack(
     "as-stack-dynamic-alloca",
     cl::desc("Use dynamic alloca to represent stack variables"), cl::Hidden,
@@ -4423,10 +4432,31 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
   const DataLayout &DL = F.getDataLayout();
   ObjectSizeOffsetVisitor ObjSizeVis(DL, TLI, F.getContext());
 
-  mair::MAOpt<AsanMAIRBarrierTrait> Opt(
-      F, FAM, nullptr,
-      /*KeepFullDebug=*/false,
-      mair::MAIROptimizationConfig::forAddressSanitizer());
+  mair::MAIROptimizationConfig Config =
+      mair::MAIROptimizationConfig::forAddressSanitizer();
+  // The globals whose accesses instrumentMop elides when it can prove them in
+  // bounds (ClOptGlobals), restricted to constant ones. Nothing poisons
+  // constant data: not the init-order check, which poisons only globals with
+  // a dynamic initializer, not the user, who poisons writable memory, and not
+  // container annotations. So an access within one is never reported, also
+  // where isSafeAccess cannot prove it. The size is the one isSafeAccess
+  // uses: the exact size, unknown if another definition may replace the
+  // global. Mutable globals and heap objects can be poisoned, see
+  // docs/mair-object-bounds.md.
+  if (ClMAIRBoundsElimination)
+    Config.setTrustedObjectSize(
+        [&](const Value &Base) -> std::optional<uint64_t> {
+          auto *G = dyn_cast<GlobalVariable>(const_cast<Value *>(&Base));
+          if (!G || !G->isConstant() || !ClOpt || !ClOptGlobals ||
+              (ClInitializers && !GlobalIsLinkerInitialized(G)))
+            return std::nullopt;
+          SizeOffsetAPInt SizeOffset = ObjSizeVis.compute(G);
+          if (!SizeOffset.bothKnown() || !SizeOffset.Offset.isZero())
+            return std::nullopt;
+          return SizeOffset.Size.getZExtValue();
+        });
+  mair::MAOpt<AsanMAIRBarrierTrait> Opt(F, FAM, nullptr,
+                                        /*KeepFullDebug=*/false, Config);
   Opt.build();
   FunctionModified |= Opt.hasModifiedIR();
 

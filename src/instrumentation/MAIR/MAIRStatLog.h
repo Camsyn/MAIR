@@ -44,6 +44,10 @@ enum class MAIRStatField : uint8_t {
   Symbolic,
   Shared,
   Fallback,
+  // Object bounds elimination: whether proving an eliminated observation
+  // needed LazyValueInfo after ScalarEvolution.
+  Scev,
+  Lvi,
 };
 
 /// Whether `-mair-stats` was requested. Independent of LLVM `-stats`.

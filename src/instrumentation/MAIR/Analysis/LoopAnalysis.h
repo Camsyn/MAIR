@@ -2,6 +2,7 @@
 
 #include "MAIR/MAIRPasses.h"
 
+#include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/IR/Dominators.h"
@@ -69,6 +70,8 @@ public:
   /// ScalarEvolution must come from the same FAM generation as the graph's
   /// borrowed LoopInfo; mixing snapshots would invalidate SCEV loop identity.
   llvm::ScalarEvolution &getSE() const;
+  /// The assumption cache of the function, from the same FAM as getSE.
+  llvm::AssumptionCache &getAssumptionCache() const;
 
 private:
   /// The block of \p PP if an observation there may leave \p L, the loop of

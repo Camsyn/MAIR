@@ -36,6 +36,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -149,6 +150,26 @@ public:
   bool distinguishesVolatile() const { return DistinguishVolatile; }
   uint8_t getLevel(AccessKind Kind) const;
   void initializeObservation(Observation &Obs) const;
+
+  /// The number of bytes N from \p Base, the start of an object, that the
+  /// sanitizer guarantees never to report an access to, or nothing.
+  /// ObjectBoundsEliminationPass deletes an observation whose region provably
+  /// lies within [Base, Base + N). Unset, as for every sanitizer by default,
+  /// no object is trusted and that pass changes nothing.
+  using TrustedObjectSizeFn =
+      std::function<std::optional<uint64_t>(const Value &Base)>;
+  void setTrustedObjectSize(TrustedObjectSizeFn Fn) {
+    TrustedObjectSize = std::move(Fn);
+  }
+  bool trustsObjects() const { return static_cast<bool>(TrustedObjectSize); }
+  std::optional<uint64_t> getTrustedObjectSize(const Value &Base) const {
+    if (!TrustedObjectSize)
+      return std::nullopt;
+    return TrustedObjectSize(Base);
+  }
+
+private:
+  TrustedObjectSizeFn TrustedObjectSize;
 };
 
 /// Dom: the parent runs before the child whenever the child runs.

@@ -15,10 +15,12 @@
 ; HELP: --emit-llvm{{[[:space:]]+}}- Print LLVM IR annotated with MAIR
 ; HELP: -o <filename>{{[[:space:]]+}}- Write output to <file>
 ; HELP: --passes=<pipeline>{{[[:space:]]+}}- MAIRGraph pass pipeline
+; HELP: --trust-constant-globals{{[[:space:]]+}}- Let boe delete accesses within constant globals
 ; HELP: MAIRGraph pass names for -passes:
 ; HELP: com{{[[:space:]]+}}- Common Observation Motion
 ; HELP: liom{{[[:space:]]+}}- Loop Invariant Observation Motion
 ; HELP: lpoc{{[[:space:]]+}}- Loop Periodic Observation Combine
+; HELP: boe{{[[:space:]]+}}- Object Bounds Elimination
 ; HELP: locationmerge{{[[:space:]]+}}- Location Merge
 ; HELP: roe{{[[:space:]]+}}- Redundant Observation Elimination
 ; HELP: simplifygraph{{[[:space:]]+}}- Simplify Graph

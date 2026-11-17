@@ -30,9 +30,9 @@ const char *const FieldNames[] = {
     "rej-barrier", "rej-nonaffine", "rej-cond", "rej-multiexit",
     "rej-nocount", "rej-other",     "lowered",  "native",
     "multi",       "vector",        "symbolic", "shared",
-    "fallback"};
+    "fallback",    "scev",          "lvi"};
 constexpr unsigned FieldCount = std::size(FieldNames);
-static_assert(static_cast<unsigned>(MAIRStatField::Fallback) + 1 == FieldCount,
+static_assert(static_cast<unsigned>(MAIRStatField::Lvi) + 1 == FieldCount,
               "every MAIR stat field needs a name");
 
 struct Visit {

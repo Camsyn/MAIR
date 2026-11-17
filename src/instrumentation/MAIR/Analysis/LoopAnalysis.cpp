@@ -390,6 +390,12 @@ ScalarEvolution &MAIRLoopInfo::getSE() const {
   return FAM->getResult<ScalarEvolutionAnalysis>(*Func);
 }
 
+AssumptionCache &MAIRLoopInfo::getAssumptionCache() const {
+  if (!FAM || !Func)
+    report_fatal_error("MAIR LoopAnalysis requires a FunctionAnalysisManager");
+  return FAM->getResult<AssumptionAnalysis>(*Func);
+}
+
 LoopAnalysis::Result LoopAnalysis::run(MAIRGraph &G,
                                        MAIRGraphAnalysisManager &) {
   if (!G.isLive())

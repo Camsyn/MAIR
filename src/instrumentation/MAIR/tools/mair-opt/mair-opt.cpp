@@ -5,6 +5,7 @@
 #include "llvm/ADT/iterator.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/MemoryBuiltins.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
@@ -56,6 +57,11 @@ static cl::opt<bool> DistinguishVolatile(
     "distinguish-volatile",
     cl::desc("Keep volatile observations apart from all others"),
     cl::init(false), cl::cat(MAIROptions));
+static cl::opt<bool> TrustConstantGlobals(
+    "trust-constant-globals",
+    cl::desc("Let boe delete accesses within constant globals that no other "
+             "definition can replace (as ASan with -mair-asan-boe)"),
+    cl::init(false), cl::cat(MAIROptions));
 static cl::opt<std::string> PassPipeline("passes",
                                          cl::desc("MAIRGraph pass pipeline"),
                                          cl::value_desc("pipeline"),
@@ -65,11 +71,27 @@ MAIRGraph pass names for -passes:
   com                           - Common Observation Motion
   liom                          - Loop Invariant Observation Motion
   lpoc                          - Loop Periodic Observation Combine
+  boe                           - Object Bounds Elimination
   locationmerge                 - Location Merge
   roe                           - Redundant Observation Elimination
   simplifygraph                 - Simplify Graph
   print<stat>                   - Print MAIR Statistics
 )");
+
+/// The size of \p Base if it is a constant global whose size is exact: its
+/// initializer is the one the program runs with, as ObjectSizeOffsetVisitor
+/// requires in its exact mode.
+static std::optional<uint64_t> getConstantGlobalSize(const Value &Base) {
+  const auto *G = dyn_cast<GlobalVariable>(&Base);
+  if (!G || !G->isConstant())
+    return std::nullopt;
+  const DataLayout &DL = G->getDataLayout();
+  ObjectSizeOffsetVisitor Visitor(DL, /*TLI=*/nullptr, G->getContext());
+  SizeOffsetAPInt SizeOffset = Visitor.compute(const_cast<GlobalVariable *>(G));
+  if (!SizeOffset.bothKnown() || !SizeOffset.Offset.isZero())
+    return std::nullopt;
+  return SizeOffset.Size.getZExtValue();
+}
 
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
@@ -153,8 +175,11 @@ int main(int argc, char **argv) {
       continue;
 
     normalizeMAIRLoops(F, FAM);
-    MAIRGraph Graph = MAIRGraph::build<DefaultBarrierTrait>(
-        F, FAM, MAIROptimizationConfig::generic(DistinguishVolatile));
+    MAIROptimizationConfig Config =
+        MAIROptimizationConfig::generic(DistinguishVolatile);
+    if (TrustConstantGlobals)
+      Config.setTrustedObjectSize(getConstantGlobalSize);
+    MAIRGraph Graph = MAIRGraph::build<DefaultBarrierTrait>(F, FAM, Config);
     if (!Graph.verify(&errs())) {
       errs() << "invalid MAIRGraph for function " << F.getName() << "\n";
       Graph.print(errs());

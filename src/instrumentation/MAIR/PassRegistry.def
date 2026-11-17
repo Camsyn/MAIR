@@ -22,6 +22,7 @@ MAIR_GRAPH_PASS("liom", LoopInvariantObservationMotionPass(
                             /*MergeEquivalentObservations=*/true, Ordinal))
 MAIR_GRAPH_PASS("lpoc", LoopPeriodicObservationCombinePass(
                             /*MergeEquivalentObservations=*/true, Ordinal))
+MAIR_GRAPH_PASS("boe", ObjectBoundsEliminationPass(Ordinal))
 MAIR_GRAPH_PASS("roe", RedundantObservationEliminationPass(Ordinal))
 MAIR_GRAPH_PASS("simplifygraph", SimplifyGraphPass(Ordinal))
 MAIR_GRAPH_PASS("print<stat>", MAIRStatPrinterPass(errs()))

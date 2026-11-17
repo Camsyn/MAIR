@@ -8,6 +8,7 @@
 #include "MAIR/Transforms/LocationMergePass.h"
 #include "MAIR/Transforms/LoopInvariantObservationMotionPass.h"
 #include "MAIR/Transforms/LoopPeriodicObservationCombinePass.h"
+#include "MAIR/Transforms/ObjectBoundsEliminationPass.h"
 #include "MAIR/Transforms/RedundantObservationEliminationPass.h"
 #include "MAIR/Transforms/SimplifyGraphPass.h"
 
@@ -92,7 +93,8 @@ void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
 #include "MAIR/PassRegistry.def"
 }
 
-void buildMAIRGraphOgPipeline(MAIRGraphPassManager &PM) {
+void buildMAIRGraphOgPipeline(MAIRGraphPassManager &PM,
+                              bool EliminateWithinTrustedObjects) {
   noteMAIRPipeline("Og");
   addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/1));
   addHierarchyPass(PM, LoopInvariantObservationMotionPass(
@@ -107,10 +109,13 @@ void buildMAIRGraphOgPipeline(MAIRGraphPassManager &PM) {
                            /*MergeEquivalentObservations=*/false,
                            /*Ordinal=*/2));
   addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/1));
+  if (EliminateWithinTrustedObjects)
+    addHierarchyPass(PM, ObjectBoundsEliminationPass());
   addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/2));
 }
 
-void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
+void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM,
+                              bool EliminateWithinTrustedObjects) {
   // Normalize topology, then eliminate redundant observations before motion
   // (so that sinking keeps one source guard). Location merging runs before
   // loop motion and periodic combination: accesses merged in a loop body,
@@ -121,8 +126,11 @@ void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
   // loops have just summarized, such as the rows of a matrix. The second
   // invariant motion and location merge, which handled those summaries
   // before the grouping, no longer change anything on 7zip and sqlite3. The
-  // second elimination removes accesses the merged regions cover. The final
-  // simplification removes program points emptied by those transforms.
+  // second elimination removes accesses the merged regions cover. Object
+  // bounds elimination, when the sanitizer trusts some objects, runs last: an
+  // observation it deletes can no longer cover another one for the redundancy
+  // elimination before it. The final simplification removes program points
+  // emptied by those transforms.
   // docs/mair-loops.md has the e2e data behind this order.
   noteMAIRPipeline("O1");
   addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/1));
@@ -136,11 +144,13 @@ void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
                        /*MergeEquivalentObservations=*/true, /*Ordinal=*/2));
   addHierarchyPass(PM, LocationMergePass(/*Ordinal=*/2));
   addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/2));
+  if (EliminateWithinTrustedObjects)
+    addHierarchyPass(PM, ObjectBoundsEliminationPass());
   addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/2));
 }
 
-void buildMAIRGraphDefaultPipeline(MAIRGraphPassManager &PM,
-                                   bool KeepFullDebug) {
+void buildMAIRGraphDefaultPipeline(MAIRGraphPassManager &PM, bool KeepFullDebug,
+                                   bool EliminateWithinTrustedObjects) {
   if (!ClMAIRPipeline.empty()) {
     noteMAIRPipeline("custom");
     if (Error Err = parseMAIRGraphPassPipeline(PM, ClMAIRPipeline))
@@ -148,9 +158,9 @@ void buildMAIRGraphDefaultPipeline(MAIRGraphPassManager &PM,
     return;
   }
   if (KeepFullDebug)
-    buildMAIRGraphOgPipeline(PM);
+    buildMAIRGraphOgPipeline(PM, EliminateWithinTrustedObjects);
   else
-    buildMAIRGraphO1Pipeline(PM);
+    buildMAIRGraphO1Pipeline(PM, EliminateWithinTrustedObjects);
 }
 
 Error parseMAIRGraphPassPipeline(MAIRGraphPassManager &PM,

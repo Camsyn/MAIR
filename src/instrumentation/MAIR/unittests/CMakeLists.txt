@@ -23,6 +23,7 @@ if(EXISTS ${MAIR_GTEST_DIR}/src/gtest-all.cc)
     LocationMergePassTest.cpp
     LoopInvariantObservationMotionPassTest.cpp
     LoopPeriodicObservationCombinePassTest.cpp
+    ObjectBoundsEliminationPassTest.cpp
     RedundantObservationEliminationPassTest.cpp
     SimplifyGraphPassTest.cpp
     ${MAIR_GTEST_DIR}/src/gtest-all.cc
@@ -42,6 +43,7 @@ else()
     LocationMergePassTest.cpp
     LoopInvariantObservationMotionPassTest.cpp
     LoopPeriodicObservationCombinePassTest.cpp
+    ObjectBoundsEliminationPassTest.cpp
     RedundantObservationEliminationPassTest.cpp
     SimplifyGraphPassTest.cpp
     $<TARGET_OBJECTS:MAIRCore>

@@ -24,12 +24,17 @@ void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
 
 bool normalizeMAIRLoops(llvm::Function &F, llvm::FunctionAnalysisManager &FAM);
 
-void buildMAIRGraphOgPipeline(MAIRGraphPassManager &PM);
-void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM);
+/// \p EliminateWithinTrustedObjects adds object bounds elimination (`boe`),
+/// for a sanitizer that trusts some objects
+/// (MAIROptimizationConfig::trustsObjects).
+void buildMAIRGraphOgPipeline(MAIRGraphPassManager &PM,
+                              bool EliminateWithinTrustedObjects = false);
+void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM,
+                              bool EliminateWithinTrustedObjects = false);
 /// The pipeline MAOpt runs: Og when \p KeepFullDebug, else O1, unless the
 /// hidden `-mair-pipeline=<text>` option replaces it.
-void buildMAIRGraphDefaultPipeline(MAIRGraphPassManager &PM,
-                                   bool KeepFullDebug);
+void buildMAIRGraphDefaultPipeline(MAIRGraphPassManager &PM, bool KeepFullDebug,
+                                   bool EliminateWithinTrustedObjects = false);
 
 llvm::Error parseMAIRGraphPassPipeline(MAIRGraphPassManager &PM,
                                        llvm::StringRef PipelineText);

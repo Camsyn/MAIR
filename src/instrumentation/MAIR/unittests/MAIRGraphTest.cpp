@@ -2865,6 +2865,75 @@ entry:
             std::string::npos);
 }
 
+// backedges(%header) is how often the backedges of the loop headed by %header
+// were taken in its last run: LPOC's count when no induction variable gives
+// one. It names a loop header of the graph's function.
+TEST(MAIRSchema, BackedgeCountExpressionVerifiesAndPrints) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p) {
+entry:
+  br label %loop
+loop:
+  %v = load i32, ptr %p, align 4
+  %more = icmp sgt i32 %v, 0
+  br i1 %more, label %loop, label %exit
+exit:
+  ret void
+}
+
+define void @g() {
+entry:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &F = *M->getFunction("f");
+  llvm::BasicBlock &Entry = F.getEntryBlock();
+  llvm::BasicBlock &Loop = *std::next(F.begin());
+  llvm::BasicBlock &Other = M->getFunction("g")->getEntryBlock();
+  llvm::Instruction &Load = Loop.front();
+  llvm::IntegerType &I64 = *llvm::Type::getInt64Ty(Ctx);
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+
+  auto Verify = [&](const llvm::BasicBlock &Header, std::string &Error) {
+    MAIRGraph Graph = createGraphWithFunctionAnalyses(F, FAM);
+    auto *PP =
+        const_cast<ProgramPoint *>(findMemoryProgramPoint(Graph, "loop"));
+    if (!PP) {
+      ADD_FAILURE() << "no program point for the load";
+      return false;
+    }
+    AbstractAccess Access(F.getArg(0), AbstractValue::constant(0),
+                          AbstractValue::constant(4));
+    Access.setSizeExpr(PP->getParent()->createBackedgeCountExpr(Header, I64));
+    PP->addObservation(Observation({&Load}, Access, AccessKind::Read));
+    llvm::raw_string_ostream OS(Error);
+    bool Valid = Graph.verify(&OS);
+    Error += Graph.toString();
+    return Valid;
+  };
+
+  std::string Valid;
+  EXPECT_TRUE(Verify(Loop, Valid)) << Valid;
+  EXPECT_NE(Valid.find("backedges(%loop)"), std::string::npos) << Valid;
+
+  std::string NoLoop;
+  EXPECT_FALSE(Verify(Entry, NoLoop));
+  EXPECT_NE(NoLoop.find("scalar backedge count does not name a loop header"),
+            std::string::npos)
+      << NoLoop;
+
+  std::string Foreign;
+  EXPECT_FALSE(Verify(Other, Foreign));
+  EXPECT_NE(Foreign.find("scalar backedge count is outside graph function"),
+            std::string::npos)
+      << Foreign;
+}
+
 TEST(MAIRSchema, VerifierRejectsForeignExpressionAndZeroStride) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(

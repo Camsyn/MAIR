@@ -533,6 +533,20 @@ void MAIRVerifier::verifyScalarExpr(const MAIRScalarExpr &Expr,
             "scalar global is outside graph module", Obs, PP, V);
     break;
   }
+  case Kind::BackedgeCount: {
+    Check(Operands.empty(), "scalar backedge count has operands", Obs, PP);
+    Check(Ty->isIntegerTy(), "scalar backedge count is not integer typed", Obs,
+          PP);
+    const BasicBlock *Header = Expr.getLoopHeader();
+    if (!CheckRequired(Header && Header->getParent() == Graph->getFunction(),
+                       "scalar backedge count is outside graph function", Obs,
+                       PP))
+      return;
+    if (Graph->hasLoopInfo())
+      Check(Graph->getLoopInfo().isLoopHeader(Header),
+            "scalar backedge count does not name a loop header", Obs, PP);
+    break;
+  }
   case Kind::Truncate:
   case Kind::ZeroExtend:
   case Kind::SignExtend:

@@ -41,6 +41,12 @@ const Value *MAIRScalarExpr::getLLVMValue() const {
   return Node->LLVMValue;
 }
 
+const BasicBlock *MAIRScalarExpr::getLoopHeader() const {
+  assert(Node && Node->Kind == Kind::BackedgeCount &&
+         "MAIR scalar expression is not a backedge count");
+  return cast<BasicBlock>(Node->LLVMValue);
+}
+
 ArrayRef<MAIRScalarExpr> MAIRScalarExpr::operands() const {
   assert(Node && "invalid MAIR scalar expression");
   return Node->Operands;
@@ -73,11 +79,15 @@ void MAIRScalarExpr::print(raw_ostream &OS, bool Signed) const {
     OS << Text;
     return;
   }
-  if (Node->Kind == Kind::LLVMValue) {
+  if (Node->Kind == Kind::LLVMValue || Node->Kind == Kind::BackedgeCount) {
+    if (Node->Kind == Kind::BackedgeCount)
+      OS << "backedges(";
     if (Node->LLVMValue)
       printValueName(OS, *Node->LLVMValue);
     else
       OS << "<null>";
+    if (Node->Kind == Kind::BackedgeCount)
+      OS << ")";
     return;
   }
 
@@ -119,6 +129,7 @@ void MAIRScalarExpr::print(raw_ostream &OS, bool Signed) const {
     break;
   case Kind::Constant:
   case Kind::LLVMValue:
+  case Kind::BackedgeCount:
     llvm_unreachable("handled scalar expression leaf");
   }
   if (!Node->Operands.empty())

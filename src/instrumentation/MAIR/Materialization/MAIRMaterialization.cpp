@@ -41,15 +41,28 @@ bool isPatchBLoopExit(const BasicBlock &From, const BasicBlock &To,
   return false;
 }
 
+// A backedge count reads the counter phi apply inserts into the header, so
+// the header must be a loop header with room for it that dominates the use.
+bool backedgeCountAvailableAt(const BasicBlock &Header, const Instruction &At,
+                              DominatorTree &DT, LoopInfo &LI) {
+  return Header.getParent() == At.getFunction() && LI.isLoopHeader(&Header) &&
+         Header.getFirstInsertionPt() != Header.end() &&
+         DT.dominates(&Header, At.getParent());
+}
+
 bool expressionAvailableAt(const MAIRScalarExpr &Expr, const Instruction &At,
-                           DominatorTree &DT) {
+                           DominatorTree &DT, LoopInfo &LI) {
   if (!Expr.isValid())
     return false;
   if (Expr.getKind() == MAIRScalarExpr::Kind::LLVMValue &&
       !isValueAvailableAt(*Expr.getLLVMValue(), At, DT))
     return false;
+  if (Expr.getKind() == MAIRScalarExpr::Kind::BackedgeCount &&
+      (!Expr.getType()->isIntegerTy() ||
+       !backedgeCountAvailableAt(*Expr.getLoopHeader(), At, DT, LI)))
+    return false;
   return llvm::all_of(Expr.operands(), [&](const MAIRScalarExpr &Operand) {
-    return expressionAvailableAt(Operand, At, DT);
+    return expressionAvailableAt(Operand, At, DT, LI);
   });
 }
 
@@ -74,7 +87,7 @@ Error validateGuard(const ProgramPoint &PP, const Instruction &Target) {
 }
 
 Error validateObservation(const Observation &Obs, const Instruction &Target,
-                          DominatorTree &DT) {
+                          DominatorTree &DT, LoopInfo &LI) {
   auto ValidateBounds = [&](const AbstractAccess &Region) -> Error {
     const Value *Base = Region.getBase();
     const AbstractValue &Offset = Region.getOffset();
@@ -88,7 +101,7 @@ Error validateObservation(const Observation &Obs, const Instruction &Target,
                                      Size.getSymbol()->getType()->isIntegerTy();
     bool SizeAvailable =
         Region.hasSizeExpr()
-            ? expressionAvailableAt(Region.getSizeExpr(), Target, DT)
+            ? expressionAvailableAt(Region.getSizeExpr(), Target, DT, LI)
             : isValueAvailableAt(Size, Target, DT);
     if (!Base || !Base->getType()->isPointerTy() ||
         (!OffsetIsCompletePointer && !isValueAvailableAt(*Base, Target, DT)) ||
@@ -113,10 +126,10 @@ Error validateObservation(const Observation &Obs, const Instruction &Target,
 
   const PeriodicRegion *Region = Obs.getPeriodicRegion();
   if (!Region || !Region->getBase() ||
-      !expressionAvailableAt(Region->getStart(), Target, DT) ||
-      !expressionAvailableAt(Region->getStride(), Target, DT) ||
-      !expressionAvailableAt(Region->getAccessSize(), Target, DT) ||
-      !expressionAvailableAt(Region->getTripCount(), Target, DT))
+      !expressionAvailableAt(Region->getStart(), Target, DT, LI) ||
+      !expressionAvailableAt(Region->getStride(), Target, DT, LI) ||
+      !expressionAvailableAt(Region->getAccessSize(), Target, DT, LI) ||
+      !expressionAvailableAt(Region->getTripCount(), Target, DT, LI))
     return createStringError(
         "periodic region has an unavailable or invalid expression");
   return Error::success();
@@ -168,7 +181,7 @@ Expected<MAIRMaterializationPlan> buildPlan(const MAIRGraph &Graph, Function &F,
     if (Error Err = validateGuard(PP, *Target))
       return std::move(Err);
     for (const Observation &Obs : PP)
-      if (Error Err = validateObservation(Obs, *Target, DT))
+      if (Error Err = validateObservation(Obs, *Target, DT, LI))
         return std::move(Err);
 
     MaterializationUnit Unit{&PP, PP.getSite(), PP.getGuard(), {}};
@@ -180,8 +193,46 @@ Expected<MAIRMaterializationPlan> buildPlan(const MAIRGraph &Graph, Function &F,
   return Plan;
 }
 
+/// The backedge counters apply inserted, one per loop header and type. The
+/// counter of header H is
+///   %mair.count = phi [0, entering block], ..., [%mair.count.next, latch]
+///   %mair.count.next = add %mair.count, 1
+/// so at any point H dominates it holds the backedges taken in the most
+/// recent run of the loop. It starts at 0 on every entry: a run of an inner
+/// loop does not inherit the count of the previous one. It is as wide as the
+/// expression asks, 64 bits from LPOC, and a plain add: it wraps only after
+/// 2^64 iterations (docs/mair-loops.md, 数据相关的出口).
+class BackedgeCounters {
+  DominatorTree &DT;
+  DenseMap<std::pair<const BasicBlock *, Type *>, PHINode *> Counters;
+
+public:
+  explicit BackedgeCounters(DominatorTree &DT) : DT(DT) {}
+
+  Value *get(const BasicBlock &ConstHeader, Type &Ty) {
+    PHINode *&Counter = Counters[{&ConstHeader, &Ty}];
+    if (Counter)
+      return Counter;
+    BasicBlock &Header = const_cast<BasicBlock &>(ConstHeader);
+    Counter = PHINode::Create(&Ty, pred_size(&Header), "mair.count");
+    Counter->insertBefore(Header.getFirstNonPHIIt());
+    auto *Next = BinaryOperator::CreateAdd(Counter, ConstantInt::get(&Ty, 1),
+                                           "mair.count.next");
+    Next->insertBefore(Header.getFirstInsertionPt());
+    // A predecessor the header dominates comes around a backedge, any other
+    // one enters the loop. DT is current: splits so far updated it.
+    for (BasicBlock *Pred : predecessors(&Header))
+      Counter->addIncoming(DT.dominates(&Header, Pred)
+                               ? static_cast<Value *>(Next)
+                               : ConstantInt::get(&Ty, 0),
+                           Pred);
+    return Counter;
+  }
+};
+
 Value *lowerExpr(const MAIRScalarExpr &Expr, IRBuilder<> &Builder,
-                 DenseMap<const void *, Value *> &Cache) {
+                 DenseMap<const void *, Value *> &Cache,
+                 BackedgeCounters &Counters) {
   const void *Key = Expr.getOpaqueNode();
   if (Value *Cached = Cache.lookup(Key))
     return Cached;
@@ -190,7 +241,7 @@ Value *lowerExpr(const MAIRScalarExpr &Expr, IRBuilder<> &Builder,
   // and with it the order of the emitted instructions, would be unspecified.
   SmallVector<Value *, 2> Ops;
   for (const MAIRScalarExpr &Operand : Expr.operands())
-    Ops.push_back(lowerExpr(Operand, Builder, Cache));
+    Ops.push_back(lowerExpr(Operand, Builder, Cache, Counters));
 
   using Kind = MAIRScalarExpr::Kind;
   Type *Ty = Expr.getType();
@@ -201,6 +252,9 @@ Value *lowerExpr(const MAIRScalarExpr &Expr, IRBuilder<> &Builder,
     break;
   case Kind::LLVMValue:
     Result = const_cast<Value *>(Expr.getLLVMValue());
+    break;
+  case Kind::BackedgeCount:
+    Result = Counters.get(*Expr.getLoopHeader(), *Ty);
     break;
   case Kind::Add:
     // A pointer-typed add is a pointer plus a byte offset.
@@ -309,9 +363,10 @@ Value *materializeGuard(const ProgramPointGuard &PPGuard, BasicBlock *Target,
   return Updater.GetValueInMiddleOfBlock(Target);
 }
 
-MaterializedObservation
-lowerObservation(const PlannedObservation &Obs, IRBuilder<> &Builder,
-                 DenseMap<const void *, Value *> &Cache) {
+MaterializedObservation lowerObservation(const PlannedObservation &Obs,
+                                         IRBuilder<> &Builder,
+                                         DenseMap<const void *, Value *> &Cache,
+                                         BackedgeCounters &Counters) {
   MaterializedObservation Materialized;
   Materialized.Source = Obs.Source;
   Materialized.Kind = Obs.Kind;
@@ -320,7 +375,7 @@ lowerObservation(const PlannedObservation &Obs, IRBuilder<> &Builder,
     Materialized.Address = lowerContiguous(*Contiguous, Builder);
     Materialized.AccessSize =
         Contiguous->hasSizeExpr()
-            ? lowerExpr(Contiguous->getSizeExpr(), Builder, Cache)
+            ? lowerExpr(Contiguous->getSizeExpr(), Builder, Cache, Counters)
             : lowerAbstractValue(Contiguous->getSize(), Builder);
   } else if (const auto *Masked = std::get_if<MaskedRegion>(&Obs.Region)) {
     Materialized.Address = lowerContiguous(Masked->getBounds(), Builder);
@@ -338,11 +393,14 @@ lowerObservation(const PlannedObservation &Obs, IRBuilder<> &Builder,
     }
   } else {
     const PeriodicRegion &Periodic = std::get<PeriodicRegion>(Obs.Region);
-    Materialized.Address = lowerExpr(Periodic.getStart(), Builder, Cache);
-    Materialized.Stride = lowerExpr(Periodic.getStride(), Builder, Cache);
+    Materialized.Address =
+        lowerExpr(Periodic.getStart(), Builder, Cache, Counters);
+    Materialized.Stride =
+        lowerExpr(Periodic.getStride(), Builder, Cache, Counters);
     Materialized.AccessSize =
-        lowerExpr(Periodic.getAccessSize(), Builder, Cache);
-    Materialized.TripCount = lowerExpr(Periodic.getTripCount(), Builder, Cache);
+        lowerExpr(Periodic.getAccessSize(), Builder, Cache, Counters);
+    Materialized.TripCount =
+        lowerExpr(Periodic.getTripCount(), Builder, Cache, Counters);
   }
   return Materialized;
 }
@@ -379,6 +437,7 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
       EdgeCursors;
   SmallVector<PendingProgramPoint, 8> Pending;
   MAIRInstantiationResult Result;
+  BackedgeCounters Counters(DT);
 
   for (const MaterializationUnit &Unit : Plan.units()) {
     if (!Unit.Site.isEdge())
@@ -433,7 +492,7 @@ MAIRGraph::instantiate(FunctionAnalysisManager &FAM,
     SmallVector<MaterializedObservation, 4> Lowered;
     DenseMap<const void *, Value *> ExprCache;
     for (const PlannedObservation &Obs : Unit.Observations)
-      Lowered.push_back(lowerObservation(Obs, Builder, ExprCache));
+      Lowered.push_back(lowerObservation(Obs, Builder, ExprCache, Counters));
 
     Pending.push_back({&Unit, InsertPt, IsGuarded, std::move(Lowered)});
   }

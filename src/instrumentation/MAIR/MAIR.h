@@ -252,6 +252,12 @@ public:
     /// The bits of a pointer as an integer of the pointer's width, so that
     /// two pointers can be subtracted.
     PtrToInt,
+    /// How often the backedges of the loop headed by a block were taken in
+    /// its most recent run, as an unsigned integer. Only meaningful where the
+    /// header dominates the use, such as the loop's exit. Materialization
+    /// inserts a counter into the header for it (LPOC's count of a loop no
+    /// induction variable counts).
+    BackedgeCount,
     SMin,
     UMin,
     SMax,
@@ -271,6 +277,8 @@ public:
   Type *getType() const;
   const APInt &getConstant() const;
   const Value *getLLVMValue() const;
+  /// The loop header a BackedgeCount counts the backedges of.
+  const BasicBlock *getLoopHeader() const;
   ArrayRef<MAIRScalarExpr> operands() const;
   /// The identity of the expression node, for use as a map key.
   const void *getOpaqueNode() const { return Node; }
@@ -1236,6 +1244,8 @@ public:
 
   MAIRScalarExpr createConstantExpr(Type &Ty, const APInt &Value);
   MAIRScalarExpr createValueExpr(const Value &Value);
+  MAIRScalarExpr createBackedgeCountExpr(const BasicBlock &Header,
+                                         llvm::IntegerType &Ty);
   MAIRScalarExpr createUnaryExpr(MAIRScalarExpr::Kind Kind, Type &ResultType,
                                  MAIRScalarExpr Operand);
   MAIRScalarExpr createBinaryExpr(MAIRScalarExpr::Kind Kind, Type &ResultType,

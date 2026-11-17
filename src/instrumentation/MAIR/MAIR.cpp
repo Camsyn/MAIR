@@ -553,6 +553,12 @@ MAIRScalarExpr MAIRGraph::createValueExpr(const Value &Value) {
                     APInt(1, 0), &Value, {});
 }
 
+MAIRScalarExpr MAIRGraph::createBackedgeCountExpr(const BasicBlock &Header,
+                                                  llvm::IntegerType &Ty) {
+  return createExpr(MAIRScalarExpr::Kind::BackedgeCount, Ty, APInt(1, 0),
+                    &Header, {});
+}
+
 MAIRScalarExpr MAIRGraph::createUnaryExpr(MAIRScalarExpr::Kind Kind,
                                           Type &ResultType,
                                           MAIRScalarExpr Operand) {

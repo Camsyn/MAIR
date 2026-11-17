@@ -745,6 +745,52 @@ void commitAggregate(MAIRGraph &G, Observation &Obs, AggregatePlan Plan,
   }
 }
 
+const SCEVAddRecExpr *findAffineRecurrenceOf(const Observation &Obs,
+                                             const Loop &L,
+                                             ScalarEvolution &SE) {
+  auto AsRecurrence = [&](const SCEV *Expr) -> const SCEVAddRecExpr * {
+    const auto *AddRec = dyn_cast_or_null<SCEVAddRecExpr>(Expr);
+    return AddRec && AddRec->isAffine() && AddRec->getLoop() == &L ? AddRec
+                                                                   : nullptr;
+  };
+  if (const AbstractAccess *Location = Obs.getContiguousRegion())
+    if (const SCEVAddRecExpr *AddRec = AsRecurrence(Location->getAddressSCEV(
+            SE, AbstractAccess::ZeroOffsetBase::Analyzed)))
+      return AddRec;
+  for (Instruction *I : Obs.getInstructions())
+    if (const Value *Pointer =
+            I ? llvm::getLoadStorePointerOperand(I) : nullptr)
+      if (const SCEVAddRecExpr *AddRec =
+              AsRecurrence(SE.getSCEV(const_cast<Value *>(Pointer))))
+        return AddRec;
+  return nullptr;
+}
+
+// Why buildAggregatePlan left \p Obs in the loop of \p G, for -mair-stats.
+// The checks are diagnostic: in the order below, the first that fails names
+// the reason. Loop-invariant observations are left to LIOM and not counted.
+std::optional<MAIRStatField> classifyRejection(MAIRGraph &G,
+                                               MAIRLoopInfo &Loops,
+                                               const ProgramPoint &PP,
+                                               const Observation &Obs) {
+  const Loop &L = *G.getLoop();
+  if (Loops.isLoopInvariant(Obs, L))
+    return std::nullopt;
+  if (!Obs.isMovable() || !Obs.getContiguousRegion())
+    return MAIRStatField::RejectOther;
+  if (G.hasForwardBarrier() || G.hasBackwardBarrier())
+    return MAIRStatField::RejectBarrier;
+  if (!findAffineRecurrenceOf(Obs, L, Loops.getSE()))
+    return MAIRStatField::RejectNonAffine;
+  if (!Loops.executesOncePerRelevantIteration(PP, L))
+    return MAIRStatField::RejectConditional;
+  if (!L.getExitingBlock() || !L.getUniqueExitBlock())
+    return MAIRStatField::RejectMultiExit;
+  if (!Loops.getExactExecutionCountSCEV(PP, L))
+    return MAIRStatField::RejectNoCount;
+  return MAIRStatField::RejectOther;
+}
+
 bool aggregateObservations(MAIRGraph &G, MAIRLoopInfo &Loops,
                            bool MergeEquivalentObservations) {
   if (!Loops.isAvailable() || !G.getLoop())
@@ -754,8 +800,13 @@ bool aggregateObservations(MAIRGraph &G, MAIRLoopInfo &Loops,
   for (ProgramPoint &PP : G) {
     for (Observation &Obs : make_early_inc_range(PP)) {
       std::optional<AggregatePlan> Plan = buildAggregatePlan(G, Loops, PP, Obs);
-      if (!Plan)
+      if (!Plan) {
+        if (mairStatsEnabled())
+          if (std::optional<MAIRStatField> Reason =
+                  classifyRejection(G, Loops, PP, Obs))
+            MAIRStatScope::add(*Reason);
         continue;
+      }
       commitAggregate(G, Obs, std::move(*Plan), MergeEquivalentObservations);
       Changed = true;
     }

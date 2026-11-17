@@ -93,6 +93,8 @@ barrier 也要考虑重复执行：被覆盖的一端所在块如果能在不经
 
 宿主 LLVM 的 `-stats` 在 Release 构建里不会打印。要看每个 pass 实际改了什么，用 `-mair-stats`。`xclang -mair-stats` 会把它转成 `-mllvm -mair-stats`；`mair-opt -mair-stats` 直接认这个选项。每个编译单元在 stderr 打一块汇总，不按函数展开，避免 C++ mangled 名字淹没构建日志。`default<O1>` / `default<Og>` 里重复出现的 pass 带 `#1`、`#2`，所以第二次不变外提不会和第一次混在一起。`in` 仍按每次本层调用累计；比较效果看 `preheader`、`exit`、`range`、`periodic`、`merged`、`intra`、`inter`、`hoisted`、`sunk`。
 
+`lpoc` 和 `liom` 行还说明为什么有 Observation 留在循环里（每次本层调用各计一次）。`lpoc` 只计地址随循环变化的 Observation，`liom` 只计循环不变的，各按下列顺序取第一个不满足的条件：`rej-barrier`（循环里有 barrier），`rej-nonaffine`（地址不是本循环的仿射递推，仅 `lpoc`），`rej-cond`（来源不是每轮恰执行一次，含 `liom` 跳过的带 guard 的 ProgramPoint），`rej-multiexit`（不止一个 exiting block 或出口块），`rej-nocount`（没有 SCEV 算出的次数，仅 `lpoc`），`rej-other`（其余，如原子访问、非连续区域、起点或次数无法在出口表达、出口不后支配来源）。分类只在 `-mair-stats` 下计算，不影响优化。实现在 `classifyRejection`（`LoopPeriodicObservationCombinePass.cpp`、`LoopInvariantObservationMotionPass.cpp`），测试 `test/MAIR/TestCases/mair-stats-loop-rejections.ll`（mair-opt 没有 barrier，`rej-barrier` 由 sanitizer 编译体现）。
+
 sanitizer 编译还会多一行 `select`，在优化之后统计 lowering 去向：`in` 是非 call-like 的终态 Observation，`lowered` 交给 MAIR 物化，`native` 退回 sanitizer 自己逐访问插桩；`multi`（多源，合并产物）、`symbolic`（非常量偏移/大小或非连续区间，含 periodic）、`vector`、`shared`（来源同时被一个退回的 Observation 持有）说明退回原因，其余退回原因是 sanitizer 自身判定（如 ASan 安全栈访问、TSan 未逃逸 alloca）。`fallback` 是退回 native 的来源指令数。实现在 `selectMaterializableObservations`（`src/instrumentation/MAIR/Materialization/MAIRMaterialization.cpp`），测试 `test/MAIR/TestCases/asan/mair-select-stats.c`。这几个原因字段只描述 Observation 的形状；ASan 已能 lowering 多源、符号区间、periodic 和固定宽度向量（见“ASan 的 lowering”），在 ASan 下它们只剩 masked 区域和来源本身被 ASan 拒绝的情况。
 
 统计汇总按函数首次出现的顺序遍历各函数的 pass visits，以 pass 标签首次出现的位置决定行顺序；不是全局事件时间顺序。汇总阶段一次累计，保持 ordinal、字段顺序及只含 `in` 的行，全零行不打印。

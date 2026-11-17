@@ -115,6 +115,27 @@ std::optional<InvariantMotionPlan> findInvariantMotion(MAIRLoopInfo &Loops,
                              InvariantMotionKind::Exit};
 }
 
+// Why findInvariantMotion left \p Obs in \p L, for -mair-stats. The first
+// failing check in the order below names the reason. Observations whose
+// region varies in the loop are LPOC's and not counted.
+std::optional<MAIRStatField> classifyRejection(const MAIRGraph &G,
+                                               MAIRLoopInfo &Loops,
+                                               const ProgramPoint &Source,
+                                               const Observation &Obs,
+                                               const Loop &L) {
+  if (!Obs.getContiguousRegion() || !Loops.isLoopInvariant(Obs, L))
+    return std::nullopt;
+  if (!Obs.isMovable())
+    return MAIRStatField::RejectOther;
+  if (G.hasForwardBarrier() || G.hasBackwardBarrier())
+    return MAIRStatField::RejectBarrier;
+  if (!Loops.executesOncePerRelevantIteration(Source, L))
+    return MAIRStatField::RejectConditional;
+  if (!L.getExitingBlock() || !L.getUniqueExitBlock())
+    return MAIRStatField::RejectMultiExit;
+  return MAIRStatField::RejectOther;
+}
+
 void commitInvariantMotion(MAIRGraph &G, Observation &Obs,
                            InvariantMotionPlan Plan,
                            bool MergeEquivalentObservations) {
@@ -151,13 +172,24 @@ LoopInvariantObservationMotionPass::run(MAIRGraph &G,
     // Edge program points are already placed at a virtual CFG edge. Their
     // source terminator anchor identifies that edge; it does not make the
     // program point an ordinary loop-body candidate for another motion round.
-    if (PP.isEdgeSite() || !PP.hasAlwaysGuard())
+    if (PP.isEdgeSite() || !PP.hasAlwaysGuard()) {
+      if (mairStatsEnabled() && !PP.isEdgeSite())
+        for (Observation &Obs : PP)
+          if (Obs.getContiguousRegion() &&
+              Loops.isLoopInvariant(Obs, *ScopedLoop))
+            MAIRStatScope::add(MAIRStatField::RejectConditional);
       continue;
+    }
     for (Observation &Obs : llvm::make_early_inc_range(PP)) {
       std::optional<InvariantMotionPlan> Plan =
           findInvariantMotion(Loops, PP, Obs, *ScopedLoop);
-      if (!Plan)
+      if (!Plan) {
+        if (mairStatsEnabled())
+          if (std::optional<MAIRStatField> Reason =
+                  classifyRejection(G, Loops, PP, Obs, *ScopedLoop))
+            MAIRStatScope::add(*Reason);
         continue;
+      }
       commitInvariantMotion(G, Obs, std::move(*Plan),
                             MergeEquivalentObservations);
       Changed = true;

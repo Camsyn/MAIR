@@ -22,6 +22,18 @@ enum class MAIRStatField : uint8_t {
   Eliminated,
   Hoisted,
   Sunk,
+  // Loop aggregates whose trip count is read off induction variables at the
+  // loop exit (a subset of range and periodic).
+  ExitTrip,
+  // Why a loop pass left an observation inside its loop: a barrier in the
+  // loop, an address that is no affine recurrence of the loop, a source that
+  // may skip an iteration, more than one exit, no trip count, anything else.
+  RejectBarrier,
+  RejectNonAffine,
+  RejectConditional,
+  RejectMultiExit,
+  RejectNoCount,
+  RejectOther,
   // Sanitizer selection: observations lowered through MAIR or left to native
   // lowering, why each native one fell back, and the source accesses that
   // fall back.

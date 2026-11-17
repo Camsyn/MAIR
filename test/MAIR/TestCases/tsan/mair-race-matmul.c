@@ -2,12 +2,10 @@
 // A with one read range after the loops (mair-matmul.c); the race with that
 // one element must still be reported, for the constant and the symbolic size.
 //
-// -ffp-contract=off: see mair-matmul.c.
-//
 // RUN: env MAIR=1 %clang -tsan -O2 -fno-vectorize -fno-unroll-loops \
-// RUN:   -ffp-contract=off -S -emit-llvm %s -o - | FileCheck %s --check-prefix=IR
+// RUN:   -S -emit-llvm %s -o - | FileCheck %s --check-prefix=IR
 // RUN: env MAIR=1 %clang -tsan -O2 -fno-vectorize -fno-unroll-loops \
-// RUN:   -ffp-contract=off -g %s -o %t
+// RUN:   -g %s -o %t
 // RUN: not %t 2>&1 | FileCheck %s
 
 #include <pthread.h>

@@ -8,16 +8,14 @@
 // The O2 prefix shows @mm_const, whose unrolled k loop has no remainder, still
 // folds at plain -O2.
 //
-// -ffp-contract=off: s += a * b otherwise becomes a call to llvm.fmuladd,
-// which TSan still treats as a barrier that keeps accesses in the loop.
-// TODO: drop the flag once nosync calls stop being barriers (WP1 of
-// .tasks/new_passes_impl_20261117_1720).
+// s += a * b becomes a call to llvm.fmuladd, which is nosync and nofree and so
+// no TSan barrier.
 //
-// RUN: env MAIR=1 %clang -tsan -O1 -ffp-contract=off -S -emit-llvm %s -o - \
+// RUN: env MAIR=1 %clang -tsan -O1 -S -emit-llvm %s -o - \
 // RUN:   | FileCheck %s
 // RUN: env MAIR=1 %clang -tsan -O2 -fno-vectorize -fno-unroll-loops \
-// RUN:   -ffp-contract=off -S -emit-llvm %s -o - | FileCheck %s
-// RUN: env MAIR=1 %clang -tsan -O2 -ffp-contract=off -S -emit-llvm %s -o - \
+// RUN:   -S -emit-llvm %s -o - | FileCheck %s
+// RUN: env MAIR=1 %clang -tsan -O2 -S -emit-llvm %s -o - \
 // RUN:   | FileCheck %s --check-prefix=O2
 
 #define N 64

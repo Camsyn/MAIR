@@ -173,16 +173,15 @@ TODO（研究）：lifetime 是 ASan 循环里最大的单项阻挡。只对 ASa
 `buildMAIRGraphO1Pipeline`（`src/instrumentation/MAIR/MAIRPasses.cpp`）依次运行：
 
 ```
-simplifygraph#1 → roe#1 → [locationmerge#1, liom#1, lpoc] → liom#2 → locationmerge#2 → roe#2 → simplifygraph#2
+simplifygraph#1 → roe#1 → [locationmerge#1, liom#1, lpoc] → roe#2 → simplifygraph#2
 ```
 
 方括号内的三个 pass 编成一组（`addHierarchyPass` 的多 pass 形式）：对每层图依次跑完这三步，再处理父图，子图先于父图。其余 pass 各自做一次整树遍历（子图先于父图）。顺序依据 e2e 的 `-mair-stats` 和 `instrumented_mops`：
 
 - `roe#1` 在最前，原因见上文（下沉时只保留一个来源 guard）。把位置合并提到它前面试过：re2 ASan 少 81 个检查，但 7zip ASan 多 112、sqlite3 ASan 多 8；合并还会拼接来源，ASan 因多源退回 native 的 Observation 变多（sqlite3 `multi` 342 → 463），所以不采用。
 - `locationmerge#1` 在不变外提和周期合并之前。循环体里的 `p[2i]`、`p[2i+1]` 先合并成一个 8 字节、步长也是 8 的访问，周期合并得到一个连续区间；先做周期合并只能得到两个 stride 8、size 4 的 periodic 区域。7zip ASan 中周期合并的 `range` 从 125 增至 438，`periodic` 从 3282 降至 1060。测试：`test/MAIR/TestCases/o1-pipeline.ll` 的 `o1_location_merge_before_periodic_combine`。
-- 位置合并、不变外提和周期合并逐层成组：父层的位置合并能合并子循环刚放到边界上的观察（例如展开后的四列交错 periodic 区域合成一列），不变外提能把内层汇总出的不变区间提出去，父层周期合并再汇总它们（见“外层循环再汇总”）。分组前，内层汇总的结果要等整树的 `liom#2`/`locationmerge#2` 才处理，父层周期合并已经跑过。在 7zip（320 个 TU）和 sqlite3 的 `-O2` IR 上，分组后终态 Observation 数不变，`liom#2` 和 `locationmerge#2` 不再有改动（它们的工作在组内完成）。两者暂时保留，是否删去待定。测试：`test/MAIR/TestCases/mair-stats.ll`（外层的 `liom#1` 提升内层合成的区间）、`loop-matmul.ll` 的 `mm_const_unrolled`。
-- `liom#2` 原因见上文；分组前新顺序下 7zip ASan 仍有 12 个提升，分组后为 0。
-- `locationmerge#2` 合并外提和周期合并放到循环边界的 Observation，包括足迹相接的 periodic 区域（见“地址合并”）；`roe#2` 删除被合并后区域覆盖的访问（7zip ASan 110 个）。
+- 位置合并、不变外提和周期合并逐层成组：父层的位置合并能合并子循环刚放到边界上的观察（例如展开后的四列交错 periodic 区域合成一列），不变外提能把内层汇总出的不变区间提出去，父层周期合并再汇总它们（见“外层循环再汇总”）。分组前，内层汇总的结果要等整树的 `liom#2`/`locationmerge#2` 才处理，父层周期合并已经跑过。在 7zip（320 个 TU）和 sqlite3 的 `-O2` IR 上，分组后终态 Observation 数不变。组后原有的第二次不变外提 `liom#2` 和第二次位置合并 `locationmerge#2`（它们的工作已在组内完成）在 4 个 e2e 项目 × 2 个 sanitizer 上都没有任何改动（2026-11-17，`-mair-stats` 逐 TU 汇总，`.tasks/new_passes_impl_20261117_1720/worklog.md`），所以从默认流水线中删去；需要时仍可用 `-mair-pipeline` 加回。测试：`test/MAIR/TestCases/mair-stats.ll`（外层的 `liom#1` 提升内层合成的区间）、`loop-matmul.ll` 的 `mm_const_unrolled`。
+- `roe#2` 删除被组内合并、汇总后的区域覆盖的访问（2026-11-17 e2e：ASan jsoncpp/sqlite3/re2/7zip 13/18/39/78 个，TSan 14/16/57/78 个）。分组前，`liom#2` 在 7zip ASan 上还有 12 个提升，`locationmerge#2` 合并外提和周期合并放到循环边界的 Observation。
 - 公共 Observation 移动（COM）、第三次位置合并和第三次冗余删除已移出：调整前后在 4 个项目 × 2 个 sanitizer 中都是 0。COM 不触发是因为 `-O2` 的 SimplifyCFG 已经把两条分支里相同的访问提到或沉到公共块（例如两边都读 `p[0]` 时，读已在入口块）。COM 仍可用 `-passes=com` 单独运行。
 - 位置合并之后再跑一轮 `lpoc`/`liom` 没有收益（jsoncpp、re2、sqlite3 的检查数不变），所以只跑一轮。
 - ASan 加 `-mllvm -mair-asan-boe` 时，`roe#2` 之后、`simplifygraph#2` 之前多一个对象边界消除 `boe`，删除可证明落在常量全局内的访问；默认不跑。规则、位置理由与数据见 `docs/mair-object-bounds.md`。

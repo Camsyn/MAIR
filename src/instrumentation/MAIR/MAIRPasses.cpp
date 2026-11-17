@@ -123,10 +123,11 @@ void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM,
   // which periodic combination summarizes as one contiguous range instead of
   // two strided periodic regions. The three run on each loop before its
   // parent, so the parent merges, hoists and combines again what its inner
-  // loops have just summarized, such as the rows of a matrix. The second
-  // invariant motion and location merge, which handled those summaries
-  // before the grouping, no longer change anything on 7zip and sqlite3. The
-  // second elimination removes accesses the merged regions cover. Object
+  // loops have just summarized, such as the rows of a matrix. A second
+  // invariant motion and location merge after the group handled those
+  // summaries before the grouping; they changed nothing on any e2e project
+  // afterwards and are gone. The second elimination removes accesses the
+  // merged regions cover. Object
   // bounds elimination, when the sanitizer trusts some objects, runs last: an
   // observation it deletes can no longer cover another one for the redundancy
   // elimination before it. The final simplification removes program points
@@ -139,10 +140,6 @@ void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM,
                    LoopInvariantObservationMotionPass(
                        /*MergeEquivalentObservations=*/true, /*Ordinal=*/1),
                    LoopPeriodicObservationCombinePass());
-  addHierarchyPass(PM,
-                   LoopInvariantObservationMotionPass(
-                       /*MergeEquivalentObservations=*/true, /*Ordinal=*/2));
-  addHierarchyPass(PM, LocationMergePass(/*Ordinal=*/2));
   addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/2));
   if (EliminateWithinTrustedObjects)
     addHierarchyPass(PM, ObjectBoundsEliminationPass());

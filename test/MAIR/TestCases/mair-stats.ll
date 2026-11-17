@@ -45,7 +45,7 @@ exit:
 ; O1: total
 ; O1: liom#1{{.*}}preheader 1
 ; O1: lpoc{{.*}}range 1
-; O1-NOT: liom#2{{.*}}preheader
+; O1-NOT: {{liom#2|locationmerge#2}}
 ; O1-NOT: repeated_row32
 
 ; OG: MAIR stats

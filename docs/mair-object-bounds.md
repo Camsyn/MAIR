@@ -66,7 +66,7 @@ sqlite3 编译时间（机器负载约 17，3 次取最小）：不开 9.09 s，
 `default<O1>` 里放在 `roe#2` 之后、`simplifygraph#2` 之前（`default<Og>` 里在 `roe#1` 之后）：
 
 ```
-... → locationmerge#2 → roe#2 → boe → simplifygraph#2
+... → [locationmerge#1, liom#1, lpoc] → roe#2 → boe → simplifygraph#2
 ```
 
 boe 只删除 Observation，不会产生新的覆盖。如果在 `roe#2` 之前删掉一个能覆盖别的访问的 Observation Y，`roe#2` 就不能再用 Y 删掉被它覆盖的 X，而 X 未必能单独证明在界内；放在之后，`roe#2` 先用 Y 删 X，boe 再删 Y，结果不会更差。最后的 `simplifygraph#2` 清理被删空的程序点。sqlite3 上三个位置（`simplifygraph#1` 之后、`roe#2` 之前、`roe#2` 之后）检查数相同（32192）。

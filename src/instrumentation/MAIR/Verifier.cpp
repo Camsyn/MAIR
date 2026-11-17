@@ -536,6 +536,7 @@ void MAIRVerifier::verifyScalarExpr(const MAIRScalarExpr &Expr,
   case Kind::Truncate:
   case Kind::ZeroExtend:
   case Kind::SignExtend:
+  case Kind::PtrToInt:
     Check(Operands.size() == 1,
           "scalar cast expression does not have one operand", Obs, PP);
     break;
@@ -560,6 +561,17 @@ void MAIRVerifier::verifyScalarExpr(const MAIRScalarExpr &Expr,
       }))
     return;
   const Kind K = Expr.getKind();
+  if (K == Kind::PtrToInt) {
+    Type *OperandTy = Operands.front().getType();
+    if (!CheckRequired(
+            Ty->isIntegerTy() && OperandTy->isPointerTy(),
+            "scalar ptrtoint does not turn a pointer into an integer", Obs, PP))
+      return;
+    Check(Graph->getFunction()->getDataLayout().getTypeSizeInBits(OperandTy) ==
+              Ty->getIntegerBitWidth(),
+          "scalar ptrtoint result is not as wide as the pointer", Obs, PP);
+    return;
+  }
   if (K == Kind::Truncate || K == Kind::ZeroExtend || K == Kind::SignExtend) {
     Type *OperandTy = Operands.front().getType();
     if (!CheckRequired(Ty->isIntegerTy() && OperandTy->isIntegerTy(),

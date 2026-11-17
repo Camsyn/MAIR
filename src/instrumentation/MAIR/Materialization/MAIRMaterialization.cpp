@@ -224,6 +224,9 @@ Value *lowerExpr(const MAIRScalarExpr &Expr, IRBuilder<> &Builder,
   case Kind::SignExtend:
     Result = Builder.CreateSExt(Ops[0], Ty, "mair.expr.sext");
     break;
+  case Kind::PtrToInt:
+    Result = Builder.CreatePtrToInt(Ops[0], Ty, "mair.expr.ptrtoint");
+    break;
   case Kind::SMin:
     Result = Builder.CreateBinaryIntrinsic(Intrinsic::smin, Ops[0], Ops[1], {},
                                            "mair.expr.smin");

@@ -228,6 +228,9 @@ public:
     Truncate,
     ZeroExtend,
     SignExtend,
+    /// The bits of a pointer as an integer of the pointer's width, so that
+    /// two pointers can be subtracted.
+    PtrToInt,
     SMin,
     UMin,
     SMax,

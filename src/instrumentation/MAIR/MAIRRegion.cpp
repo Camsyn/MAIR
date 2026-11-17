@@ -114,6 +114,9 @@ void MAIRScalarExpr::print(raw_ostream &OS, bool Signed) const {
   case Kind::SignExtend:
     OS << "sext(";
     break;
+  case Kind::PtrToInt:
+    OS << "ptrtoint(";
+    break;
   case Kind::Constant:
   case Kind::LLVMValue:
     llvm_unreachable("handled scalar expression leaf");

@@ -2803,6 +2803,68 @@ entry:
   }
 }
 
+// ptrtoint turns a pointer into an integer as wide as the pointer, so that
+// LPOC can subtract two pointers to count the steps of a pointer induction.
+TEST(MAIRSchema, PtrToIntExpressionVerifiesAndPrints) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i64 %n) {
+entry:
+  %v = load i32, ptr %p, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &F = *M->getFunction("f");
+  llvm::Argument &P = *F.getArg(0);
+  llvm::Argument &N = *F.getArg(1);
+  llvm::Instruction &Load = F.getEntryBlock().front();
+  llvm::Type &I32 = *llvm::Type::getInt32Ty(Ctx);
+  llvm::Type &I64 = *llvm::Type::getInt64Ty(Ctx);
+  using Kind = MAIRScalarExpr::Kind;
+
+  auto Verify = [&](auto Build, std::string &Error) {
+    MAIRGraph Graph(F);
+    ProgramPoint &PP = Graph.createBBProgramPoint(F.getEntryBlock(), true);
+    AbstractAccess Access(&P, AbstractValue::constant(0),
+                          AbstractValue::constant(4));
+    Access.setSizeExpr(Build(Graph));
+    PP.addObservation(Observation({&Load}, Access, AccessKind::Read));
+    llvm::raw_string_ostream OS(Error);
+    bool Valid = Graph.verify(&OS);
+    Error += Graph.toString();
+    return Valid;
+  };
+
+  std::string Valid;
+  EXPECT_TRUE(Verify(
+      [&](MAIRGraph &G) {
+        return G.createUnaryExpr(Kind::PtrToInt, I64, G.createValueExpr(P));
+      },
+      Valid));
+  EXPECT_NE(Valid.find("ptrtoint(%p to i64)"), std::string::npos);
+
+  std::string FromInteger;
+  EXPECT_FALSE(Verify(
+      [&](MAIRGraph &G) {
+        return G.createUnaryExpr(Kind::PtrToInt, I64, G.createValueExpr(N));
+      },
+      FromInteger));
+  EXPECT_NE(FromInteger.find(
+                "scalar ptrtoint does not turn a pointer into an integer"),
+            std::string::npos);
+
+  std::string Narrow;
+  EXPECT_FALSE(Verify(
+      [&](MAIRGraph &G) {
+        return G.createUnaryExpr(Kind::PtrToInt, I32, G.createValueExpr(P));
+      },
+      Narrow));
+  EXPECT_NE(Narrow.find("scalar ptrtoint result is not as wide as the pointer"),
+            std::string::npos);
+}
+
 TEST(MAIRSchema, VerifierRejectsForeignExpressionAndZeroStride) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(

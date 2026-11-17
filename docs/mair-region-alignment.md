@@ -56,6 +56,7 @@
 
 - TSan（`instrumentMAIRObservation`，`src/instrumentation/llvm23/ThreadSanitizer.cpp`）：对 2 的幂且不超过 16 字节的区间，按起点对齐选择 `__tsan_*` 或 `__tsan_unaligned_*`。
 - ASan（`instrumentMAIRObservation`，`src/instrumentation/llvm23/AddressSanitizer.cpp`）：把起点对齐交给 `doInstrumentAddress`，决定走一次 shadow load 的快路径，还是检查首尾两个字节。
+  超过 16 字节的常量长度区间交给 `insertMAIRRangeFastPath`：对齐不小于 granule 时 shadow 偏移是常量，否则由地址算出（`docs/mair-loops.md`“ASan 的 lowering”）。
 
 ## 测试
 

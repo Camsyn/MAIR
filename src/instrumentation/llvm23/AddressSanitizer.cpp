@@ -1339,6 +1339,9 @@ public:
                                  Instruction *FirstSource,
                                  IRBuilderBase &Builder, bool UseCalls,
                                  RuntimeCallInserter &RTCI);
+  Instruction *insertMAIRRangeFastPath(Instruction *InsertBefore, Value *Addr,
+                                       uint64_t Size, Align Alignment,
+                                       const DebugLoc &Loc);
 #endif
 
 private:
@@ -4159,6 +4162,106 @@ bool XsanAddressSanitizer::prepareAsanTargetsToInstrument(
 }
 
 #ifndef XSAN_PASS
+static cl::opt<unsigned> ClMAIRMaxInlineRangeSize(
+    "as-mair-max-inline-range-size",
+    cl::desc("Check a MAIR range of a constant size above 16 bytes and up to "
+             "this many bytes inline before calling __asan_loadN/storeN "
+             "(0 always calls)"),
+    cl::Hidden, cl::init(128));
+
+// The inline fast path for a MAIR range [Addr, Addr + Size) above 16 bytes.
+// It reads the shadow of every granule the range touches, so it is exact:
+// it fails if and only if some byte of the range is poisoned. Every granule
+// before the one holding the last byte must be fully addressable, so its
+// shadow byte must be 0; those bytes are read a few at a time, in at most
+// 8-byte loads, the last load overlapping the one before it. The last
+// granule follows ASan's partial granule rule: it is addressable up to the
+// last byte if its shadow is 0 or greater than that byte's offset in it. If
+// the range starts on a granule boundary the shadow offsets are constants,
+// else they are computed from the address. Returns the terminator of the
+// block taken when the fast path fails; the caller emits the runtime check
+// there, which finds the poisoned byte and reports it as before.
+Instruction *XsanAddressSanitizer::insertMAIRRangeFastPath(
+    Instruction *InsertBefore, Value *Addr, uint64_t Size, Align Alignment,
+    const DebugLoc &Loc) {
+  const uint64_t Granularity = 1ULL << Mapping.Scale;
+  assert(Size > Granularity && "short ranges have their own checks");
+  InstrumentationIRBuilder IRB(InsertBefore);
+  useOriginalAccessDebugLoc(IRB, Loc);
+  Type *ShadowPtrTy = PointerType::get(*C, ClShadowAddrSpace);
+  Value *AddrLong = IRB.CreatePointerCast(Addr, IntptrTy);
+  Value *ShadowBeg = memToShadow(AddrLong, IRB);
+  bool Aligned = Alignment.value() >= Granularity;
+  Align ShadowAlign(Aligned ? Alignment.value() >> Mapping.Scale : 1);
+
+  auto ShadowAt = [&](Value *Base, int64_t Offset) {
+    return Offset
+               ? IRB.CreateAdd(Base, ConstantInt::getSigned(IntptrTy, Offset))
+               : Base;
+  };
+  auto LoadShadow = [&](Value *ShadowAddr, uint64_t Bytes, Align A) {
+    return IRB.CreateAlignedLoad(IRB.getIntNTy(Bytes * 8),
+                                 IRB.CreateIntToPtr(ShadowAddr, ShadowPtrTy),
+                                 A);
+  };
+
+  // The granules that must be fully addressable: MinFull of them from an
+  // aligned start, then a partial granule unless Size is a multiple of the
+  // granularity. From an unaligned start, every granule before the one
+  // holding the last byte: MinFull of them, or one more if the range crosses
+  // one more granule boundary.
+  uint64_t LastOffset = (Size - 1) & (Granularity - 1);
+  uint64_t MinFull = Aligned ? Size / Granularity : (Size - 1) / Granularity;
+  bool HasPartialLast = !Aligned || LastOffset != Granularity - 1;
+  uint64_t LoadBytes = std::min<uint64_t>(8, llvm::bit_floor(MinFull));
+  Value *ShadowLast = nullptr;
+  Value *LastByteOffset = nullptr;
+  if (Aligned) {
+    if (HasPartialLast)
+      ShadowLast = ShadowAt(ShadowBeg, MinFull);
+    LastByteOffset = IRB.getInt8(LastOffset);
+  } else {
+    Value *LastLong =
+        IRB.CreateAdd(AddrLong, ConstantInt::get(IntptrTy, Size - 1));
+    ShadowLast = memToShadow(LastLong, IRB);
+    LastByteOffset = IRB.CreateTrunc(
+        IRB.CreateAnd(LastLong, ConstantInt::get(IntptrTy, Granularity - 1)),
+        IRB.getInt8Ty());
+  }
+
+  // The full granules: loads at 0, LoadBytes, ... from the first, and one
+  // ending right before the last granule, which covers the rest.
+  Value *NonZero = nullptr;
+  auto OrInto = [&](Value *&Acc, Value *V) {
+    Acc = Acc ? IRB.CreateOr(Acc, V) : V;
+  };
+  uint64_t Covered = 0;
+  for (; Covered + LoadBytes <= MinFull; Covered += LoadBytes)
+    OrInto(NonZero, LoadShadow(ShadowAt(ShadowBeg, Covered), LoadBytes,
+                               commonAlignment(ShadowAlign, Covered)));
+  if (!Aligned || Covered < MinFull) {
+    Value *TailFull = Aligned ? ShadowAt(ShadowBeg, MinFull - LoadBytes)
+                              : ShadowAt(ShadowLast, -int64_t(LoadBytes));
+    OrInto(NonZero, LoadShadow(TailFull, LoadBytes,
+                               Aligned ? commonAlignment(ShadowAlign,
+                                                         MinFull - LoadBytes)
+                                       : Align(1)));
+  }
+  Value *Bad = IRB.CreateIsNotNull(NonZero);
+
+  if (HasPartialLast) {
+    Value *Last =
+        LoadShadow(ShadowLast, 1,
+                   Aligned ? commonAlignment(ShadowAlign, MinFull) : Align(1));
+    Value *LastBad = IRB.CreateAnd(IRB.CreateIsNotNull(Last),
+                                   IRB.CreateICmpSGE(LastByteOffset, Last));
+    Bad = IRB.CreateOr(Bad, LastBad);
+  }
+
+  return SplitBlockAndInsertIfThen(Bad, InsertBefore, /*Unreachable=*/false,
+                                   MDBuilder(*C).createUnlikelyBranchWeights());
+}
+
 // Check the bytes of one MAIR observation. Its sources were accepted by
 // CanInstrumentViaMAIR in instrumentFunctionViaMAIR: loads and stores whose
 // footprint the observation covers without gaps, so every checked byte is one
@@ -4225,7 +4328,18 @@ void XsanAddressSanitizer::instrumentMAIRObservation(
   }
 
   // A longer range is checked byte by byte: its first and last byte could
-  // both be addressable around a redzone in between.
+  // both be addressable around a redzone in between. Up to
+  // -as-mair-max-inline-range-size bytes, an inline fast path reads the
+  // shadow of every granule first and calls the runtime only if it fails, so
+  // the runtime still reports. Callbacks mode keeps the call alone.
+  if (Size && !UseCalls && !TargetTriple.isAMDGPU() &&
+      Size->getValue().ugt(1ULL << Mapping.Scale) &&
+      Size->getValue().ule(ClMAIRMaxInlineRangeSize)) {
+    Instruction *SlowPath = insertMAIRRangeFastPath(
+        InsertBefore, Obs.Address, Size->getZExtValue(), Alignment, Loc);
+    IRB.SetInsertPoint(SlowPath);
+    useOriginalAccessDebugLoc(IRB, Loc);
+  }
   Value *AddrLong = IRB.CreatePointerCast(Obs.Address, IntptrTy);
   Value *SizeLong = IRB.CreateZExtOrTrunc(Obs.AccessSize, IntptrTy);
   if (ClForceExperiment == 0)

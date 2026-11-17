@@ -84,7 +84,9 @@ void store_mixed(char *p) {
 }
 
 // Beyond 16 bytes the first and last byte could both be addressable around a
-// redzone in between, so __asan_storeN checks every byte of the range.
+// redzone in between, so every byte of the range is checked: an inline read of
+// the shadow of every granule, then __asan_storeN if that fails
+// (mair-inline-range.c).
 // CHECK-LABEL: define {{.*}} @store_row(
 // CHECK-NOT:   __asan_report_store
 // CHECK:       call void @__asan_storeN(i64 %{{.*}}, i64 20)

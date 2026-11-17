@@ -1145,10 +1145,13 @@ void LoopMopInstrumenter::collectLoopMopCandidates() {
 /// being formalized as follows
 /// For ∀m1 ≠ m2 ∈ MOPs, m1 is a duplicate of m2 if
 ///     1. m1.addr = m2.addr
-///     2. m1.type = m2.type ∨ m1.type = read
-///     3. ∀ i ∈ (m1.loc, m2.loc), isNotCall(i)
+///     2. m1.size ≤ m2.size
+///     3. m1.type = m2.type ∨ m1.type = read
+///     4. ∀ i ∈ (m1.loc, m2.loc), isNotCall(i)
 /// `collectLoopMopCandidates` is the caller of this function,
-///  guaranting that the third condition holding.
+///  guaranting that the fourth condition holding.
+/// Conditions 2 and 3 make m2's check stand for m1's: it covers m1's bytes,
+/// and for TSan a write also stands for a read, but not the other way round.
 void LoopMopInstrumenter::filterAndAddMops(SmallVectorImpl<LoopMop> &MOPs) {
   if (MOPs.empty())
     return;
@@ -1156,27 +1159,30 @@ void LoopMopInstrumenter::filterAndAddMops(SmallVectorImpl<LoopMop> &MOPs) {
     LoopMopCandidates.push_back(std::move(MOPs.pop_back_val()));
     return;
   }
-  SmallMapVector<Value *, DupVec *, 4> SeenAddrs;
+  SmallMapVector<Value *, SmallVector<LoopMop *, 2>, 4> SeenAddrs;
   SmallVector<LoopMop, 8> MopsReversed;
   /// Reserve enough space to make the space stable,
-  /// avoiding pointer to MopsReversed.back().DupTo to be invalidated.
+  /// avoiding pointers to the elements of MopsReversed to be invalidated.
   MopsReversed.reserve(MOPs.size());
   /// read-after-write MOPs do NOT exist due to the compilation optimization
   /// Therefore, we traverse the MOPs in reverse order to retrieve the write
   /// MOPs first if there are any read-before-write MOPs.
   for (LoopMop &Mop : reverse(MOPs)) {
     auto &[Inst, Addr, Loop, MopSize, DupTo, InBranch, IsWrite] = Mop;
-    auto *It = SeenAddrs.find(Addr);
-    if (It != SeenAddrs.end()) {
-      // If there are other MOPs with the same address, check if they are
-      // duplicates
-      It->second->push_back(Inst);
+    SmallVector<LoopMop *, 2> &Kept = SeenAddrs[Addr];
+    // If a kept MOP at the same address covers this one, this one is its
+    // duplicate.
+    auto *Covering = find_if(Kept, [&](const LoopMop *K) {
+      return K->MopSize >= MopSize && (K->IsWrite || !IsWrite);
+    });
+    if (Covering != Kept.end()) {
+      (*Covering)->DupTo.push_back(Inst);
     } else {
       MopsReversed.push_back(std::move(Mop));
-      // &MopsReversed.back().DupTo is guauranteed to be stable
+      // &MopsReversed.back() is guauranteed to be stable
       // because MopsReversed.reserve(MOPs.size()) is called.
       // Therefore, this pointer is valid forever.
-      SeenAddrs[Addr] = &MopsReversed.back().DupTo;
+      Kept.push_back(&MopsReversed.back());
     }
   }
   // Move the MOPs back to the original order

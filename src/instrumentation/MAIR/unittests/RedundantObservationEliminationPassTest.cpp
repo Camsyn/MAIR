@@ -819,6 +819,44 @@ entry:
   EXPECT_EQ(PP.size(), 2u);
 }
 
+TEST(MAIRGraphPass, RedundantObservationKeepsFirstEqualSymbolicObservation) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i64 %i) {
+entry:
+  %pi = getelementptr i8, ptr %p, i64 %i
+  %first = load i32, ptr %pi, align 4
+  %second = load i32, ptr %pi, align 4
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+
+  const llvm::Function &F = *M->begin();
+  const llvm::BasicBlock &BB = *F.begin();
+  auto InstIt = std::next(BB.begin());
+  const llvm::Instruction &First = *InstIt++;
+  const llvm::Instruction &Second = *InstIt++;
+  MAIRGraph Graph(F);
+  ProgramPoint &PP = Graph.createInstProgramPoint(BB, First);
+  PP.addObservation(Observation::fromInstruction(Second, M->getDataLayout()));
+  ASSERT_FALSE(PP.begin()->hasConcreteRange());
+
+  llvm::PassInstrumentationCallbacks PIC;
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC);
+  RedundantObservationEliminationPass Pass;
+  llvm::PreservedAnalyses PA = Pass.run(Graph, AM);
+
+  EXPECT_FALSE(PA.areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  ASSERT_EQ(PP.size(), 1u);
+  // The two cover each other; the first in the list stays, as for concrete
+  // offsets.
+  EXPECT_EQ(PP.begin()->getInstructions().front(), &First);
+}
+
 TEST(MAIRGraphPass, RedundantObservationUnionsAllPredecessorFacts) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(

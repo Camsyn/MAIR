@@ -104,11 +104,41 @@ unsigned eraseObservations(SmallVectorImpl<Observation *> &Observations) {
   return Observations.size();
 }
 
+/// Select the observations of [Begin, End), the observations of one memory
+/// object that have no concrete range, that another of them covers. Every
+/// pair is tried. Targets are visited last to first and witnesses first to
+/// last, so of two observations that cover each other the first in the list
+/// stays. A witness is never deleted afterwards: coverage need not be
+/// transitive (cross-atomic coverage needs both sides mergeable), so each
+/// deleted observation keeps its own witness.
+void eliminateNonConcreteRun(ProgramPoint::iterator Begin,
+                             ProgramPoint::iterator End,
+                             SmallVectorImpl<Observation *> &Redundant) {
+  SmallVector<Observation *, 8> Run;
+  for (auto It = Begin; It != End; ++It)
+    Run.push_back(&*It);
+  SmallPtrSet<const Observation *, 8> Deleted, Witnesses;
+  for (Observation *Target : reverse(Run)) {
+    if (Witnesses.contains(Target))
+      continue;
+    for (Observation *Witness : Run) {
+      if (Witness == Target || Deleted.contains(Witness) ||
+          !Witness->covers(*Target))
+        continue;
+      Deleted.insert(Target);
+      Witnesses.insert(Witness);
+      Redundant.push_back(Target);
+      break;
+    }
+  }
+}
+
 unsigned doIntraROE(MAIRGraph &G) {
   SmallVector<Observation *, 16> Redundant;
 
   // Phase 1 considers only observations from the same ProgramPoint.  Sorting
-  // makes each base's concrete contiguous observations one interval-sweep run.
+  // makes each base's concrete contiguous observations one interval-sweep run,
+  // followed by a run of its other observations.
   //
   // The sort is stable, so of observations with equal ranges and levels the
   // first in the list stays. In default<O1>, which the sanitizers run, motion
@@ -119,12 +149,18 @@ unsigned doIntraROE(MAIRGraph &G) {
   for (ProgramPoint &PP : G) {
     PP.sort(compareForCoverage);
 
-    // Other region forms need their own coverage index; this sweep is exact
-    // only for concrete contiguous half-open intervals.
+    // The sweep is exact only for concrete contiguous half-open intervals.
+    // The other observations of an object follow its concrete ones; they
+    // have no order to sweep and are compared pairwise.
     for (auto Begin = PP.begin(); Begin != PP.end();) {
       std::optional<ConcreteRange> FirstRange = getConcreteRange(*Begin);
       if (!FirstRange) {
-        ++Begin;
+        auto End = std::next(Begin);
+        while (End != PP.end() &&
+               &End->getMemoryObject() == &Begin->getMemoryObject())
+          ++End;
+        eliminateNonConcreteRun(Begin, End, Redundant);
+        Begin = End;
         continue;
       }
 

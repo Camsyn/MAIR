@@ -337,3 +337,31 @@ first:
 then:
   br label %second
 }
+
+; p[i]++: the read and the write of one symbolic location share a program
+; point after simplifygraph. The write has the higher level and covers the
+; read, as for concrete offsets.
+define void @same_offset_levels(ptr %p, i64 %i) {
+; INTRA-LABEL: mair graph of fn @same_offset_levels {
+; INTRA:         pp2: preds=
+; INTRA-NEXT:      o: write ptr %p + %a, 4
+; INTRA-EMPTY:
+  %a = getelementptr i32, ptr %p, i64 %i
+  %v = load i32, ptr %a, align 4
+  %inc = add i32 %v, 1
+  store i32 %inc, ptr %a, align 4
+  ret void
+}
+
+; Two reads of one symbolic location in one program point: one stays.
+define i32 @same_offset_equal_reads(ptr %p, i64 %i) {
+; INTRA-LABEL: mair graph of fn @same_offset_equal_reads {
+; INTRA:         pp2: preds=
+; INTRA-NEXT:      o: read ptr %p + %i, 4
+; INTRA-EMPTY:
+  %pi = getelementptr i8, ptr %p, i64 %i
+  %a = load i32, ptr %pi, align 4
+  %b = load i32, ptr %pi, align 4
+  %s = add i32 %a, %b
+  ret i32 %s
+}

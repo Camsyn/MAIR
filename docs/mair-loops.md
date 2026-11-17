@@ -154,7 +154,7 @@ TODO（研究）：lifetime 是 ASan 循环里最大的单项阻挡。只对 ASa
 
 **规则 3（启发式，名字白名单）**：SanitizerCoverage 在插桩点调用的回调 `__sanitizer_cov_trace_*`、`__sanitizer_cov_load*`、`__sanitizer_cov_store*`，对两个 sanitizer 在两个方向都不是 barrier，并视作一定返回（`mair::isSanitizerCoverageCallback`，`src/instrumentation/MAIR/MAIRBarrierAnalysis.cpp`）。
 
-- 依据：它们的实现（libFuzzer 的 `src/runtime/lib/fuzzer/FuzzerTracePC.cpp`，都是 `ATTRIBUTE_NO_SANITIZE_ALL`；`sanitizer_common/sanitizer_coverage_libcdep_new.cpp` 的弱定义，多数为空）只更新覆盖率表，不加锁，不 free，不碰 shadow。SanitizerCoverage 声明它们时不带任何属性，规则 1 放不过它们。sqlite3、re2 的 e2e 用 `-fsanitize=fuzzer-no-link`，sancov 在 MAIR 之前插桩，每个比较前都有一个 `__sanitizer_cov_trace_*cmp*`；循环里残留的逐次检查有 77–92% 是被它们挡住的。
+- 依据：它们的实现（libFuzzer 的 `src/runtime/lib/fuzzer/FuzzerTracePC.cpp`，都是 `ATTRIBUTE_NO_SANITIZE_ALL`；`sanitizer_common/sanitizer_coverage_libcdep_new.cpp` 的弱定义，多数为空）只更新覆盖率表，不加锁，不 free，不碰 shadow。SanitizerCoverage 声明它们时不带任何属性，规则 1 放不过它们。sqlite3、re2 的 e2e 用 `-fsanitize=fuzzer-no-link`，sancov 在 MAIR 之前插桩，每个比较前都有一个 `__sanitizer_cov_trace_*cmp*`。循环里残留的逐次检查有 77–92% 的首个 barrier 是它们（分诊 E-loops），但多数循环里还有真实调用：放行之后，sqlite3 ASan 循环内的逐次检查只从 12125 降到 11765，整个 TU 的检查从 34231 降到 33177（`.tasks/WP1_20261117_1720/worklog.md`）。
 - 假设：用户自己实现的回调（自定义覆盖率、trace-loads/stores）同样不同步、不 free、不改 shadow，并且返回。
 - 用白名单，不用“`__sanitizer_` 前缀加排除表”。这个前缀下有状态影响的函数很多，还会随 compiler-rt 增加：容器注解、`__sanitizer_copy_contiguous_container_annotations`、fiber 切换、`__sanitizer_syscall_pre/post_*`（TSan 里做 acquire/release 和范围访问）、`__sanitizer_unaligned_load/store*`（TSan 里记录访问）等。排除表漏掉一项会漏报，白名单漏掉一项只是少一些优化。其他 `__sanitizer_*`（包括 `__sanitizer_cov_dump` 这类非插桩点回调）、`__asan_*`、`__tsan_*`、`__ubsan_handle_*` 都仍按规则 1 判断，即都是 barrier。
 

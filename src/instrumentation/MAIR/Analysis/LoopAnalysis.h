@@ -41,15 +41,17 @@ public:
                                                const llvm::Loop &L) const;
   /// How often \p PP runs in one run of \p L, for a loop that leaves on a
   /// data-dependent test and so has no backedge-taken count SCEV can compute.
-  /// The count is read off an induction variable at \p Site, the unique exit:
-  /// there the variable holds Start + BTC * Step. The result refers to that
-  /// value as a SCEVUnknown, so it is only meaningful at \p Site. \p Address,
-  /// the recurrence of the accesses at \p PP, bounds how far a variable
-  /// without wrap flags can count. Null if no induction variable qualifies.
+  /// The count is only meaningful at \p Site, the unique exit. It is read off
+  /// an induction variable that cannot have wrapped: there the variable holds
+  /// Start + BTC * Step, and the result refers to that value as a
+  /// SCEVUnknown. If no variable qualifies, the result is in terms of the
+  /// canonical induction variable {0,+,1} of \p L, a counter
+  /// materialization inserts, and \p CountsBackedges is set. Null if the
+  /// loop or \p PP does not fit (docs/mair-loops.md, 数据相关的出口).
   const llvm::SCEV *
   getExitValueExecutionCountSCEV(const ProgramPoint &PP, const llvm::Loop &L,
                                  const ProgramPointSite &Site,
-                                 const llvm::SCEVAddRecExpr &Address) const;
+                                 bool *CountsBackedges = nullptr) const;
   bool isLoopInvariant(const Observation &Obs, const llvm::Loop &L) const;
   llvm::Loop *getTopInvariantLoop(const Observation &Obs,
                                   llvm::Loop &Start) const;

@@ -285,6 +285,7 @@ pp6: preds=[pp5(dom)], succs=[pp5(pdom)]
 pp7: loop-preheader=%loop, preds=[pp1(dom), pp8(pdom)], succs=[pp1(pdom), pp8(dom)]
 
 pp8: loop-exit=%loop, preds=[pp5(pdom), pp7(dom)], succs=[pp5(dom), pp7(pdom)]
+  o: read period start=%a, stride=8192, access-size=1, trips=(1 + zext(%i to i65))
 
 }
 
@@ -292,7 +293,6 @@ mair graph of fn @huge_stride of loop %loop {
 pp2: preds=[pp3(pdom)], succs=[pp3(dom)]
 
 pp3: preds=[pp2(dom), pp4(pdom)], succs=[pp2(pdom), pp4(dom)]
-  o: read ptr %a + %off, 1
 
 pp4: preds=[pp3(dom)], succs=[pp3(pdom)]
 

@@ -1539,4 +1539,105 @@ exit:
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// No induction variable counts the iterations (%n wraps, %p has no wrap
+// flags), so the counts are backedges of %loop. The counter is inserted only
+// when the plan is applied, once for the loop, and both summaries read it at
+// the exit.
+TEST(MAIRMaterialization, InsertsTheBackedgeCounterOnApplyOnly) {
+  LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define i8 @f(ptr %s, ptr %d) {
+entry:
+  br label %loop
+loop:
+  %n = phi i8 [ 0, %entry ], [ %n.next, %body ]
+  %p = phi ptr [ %s, %entry ], [ %p.next, %body ]
+  %q = phi ptr [ %d, %entry ], [ %q.next, %body ]
+  %v = load i64, ptr %p, align 8
+  %stop = icmp slt i64 %v, 0
+  br i1 %stop, label %exit, label %body
+body:
+  store i64 %v, ptr %q, align 8
+  %p.next = getelementptr i8, ptr %p, i64 8
+  %q.next = getelementptr i8, ptr %q, i64 8
+  %n.next = add i8 %n, 1
+  br label %loop
+exit:
+  ret i8 %n
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  Function &F = *M->getFunction("f");
+  PassInstrumentationCallbacks PIC;
+  FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(F, FAM);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+  std::string Before = printModule(*M);
+  EXPECT_FALSE(
+      runPassOnGraphTree(LoopPeriodicObservationCombinePass(), Graph, AM)
+          .areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  EXPECT_EQ(printModule(*M), Before);
+  for (MAIRGraph *Scope : Graph.graphs())
+    AM.clear(*Scope, F.getName());
+
+  RecordingBackend RejectingBackend;
+  RejectingBackend.Reject = true;
+  auto Rejected = Graph.instantiate(FAM, RejectingBackend);
+  ASSERT_FALSE(Rejected);
+  consumeError(Rejected.takeError());
+  EXPECT_EQ(printModule(*M), Before);
+  ASSERT_TRUE(Graph.verify());
+
+  RecordingBackend Backend;
+  auto Result = Graph.instantiate(FAM, Backend);
+  if (!Result) {
+    ADD_FAILURE() << toString(Result.takeError());
+    return;
+  }
+  EXPECT_EQ(Backend.EmittedObservations, 2u);
+  BasicBlock *Loop = &*std::next(F.begin());
+  ASSERT_EQ(Loop->getName(), "loop");
+  BasicBlock *Body = &*std::next(Loop->getIterator());
+  ASSERT_EQ(Body->getName(), "body");
+  SmallVector<PHINode *, 1> Counters;
+  for (BasicBlock &Block : F)
+    for (Instruction &I : Block)
+      if (I.getName().starts_with("mair.count") && isa<PHINode>(I))
+        Counters.push_back(cast<PHINode>(&I));
+  ASSERT_EQ(Counters.size(), 1u);
+  PHINode *Counter = Counters.front();
+  EXPECT_EQ(Counter->getParent(), Loop);
+  EXPECT_TRUE(Counter->getType()->isIntegerTy(64));
+  ASSERT_EQ(Counter->getNumIncomingValues(), 2u);
+  auto *Zero = dyn_cast<ConstantInt>(
+      Counter->getIncomingValueForBlock(&F.getEntryBlock()));
+  ASSERT_NE(Zero, nullptr);
+  EXPECT_TRUE(Zero->isZero());
+  auto *Next =
+      dyn_cast<BinaryOperator>(Counter->getIncomingValueForBlock(Body));
+  ASSERT_NE(Next, nullptr);
+  EXPECT_EQ(Next->getOpcode(), Instruction::Add);
+  EXPECT_EQ(Next->getOperand(0), Counter);
+  auto *One = dyn_cast<ConstantInt>(Next->getOperand(1));
+  ASSERT_NE(One, nullptr);
+  EXPECT_TRUE(One->isOne());
+  // The counts read the counter at the exit; nothing reads %n or %p there.
+  unsigned Uses = 0;
+  for (User *U : Counter->users())
+    if (auto *I = dyn_cast<Instruction>(U))
+      Uses += I->getParent()->getName() == "exit";
+  EXPECT_GT(Uses, 0u);
+  for (BasicBlock &Block : F)
+    if (Block.getName() == "exit")
+      for (Instruction &I : Block)
+        for (Value *Operand : I.operands())
+          EXPECT_FALSE(Operand->getName() == "p" ||
+                       (Operand->getName() == "n" && !isa<ReturnInst>(I)));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 } // namespace

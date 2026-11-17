@@ -138,6 +138,42 @@ class SCEVExprConverter {
   MAIRGraph &Graph;
   const MAIRLoopInfo &Loops;
   const ProgramPointSite &Site;
+  // The loop whose exit Site is, if its trip count counts the backedges with
+  // a counter of its own (MAIRLoopInfo::getExitValueExecutionCountSCEV). A
+  // recurrence {Start,+,Step} of it has the value of the last iteration
+  // there, Start + Step * backedges, backedges being its BackedgeCount.
+  // Without such a count recurrences are not converted: the counter is
+  // inserted only for loops no induction variable counts.
+  const Loop *Counted;
+
+  bool canConvertExitValue(const SCEVAddRecExpr &AddRec) const {
+    if (!Counted || AddRec.getLoop() != Counted || !AddRec.isAffine() ||
+        !AddRec.getType()->isIntegerTy())
+      return false;
+    return canConvert(AddRec.getStart()) && canConvert(AddRec.getOperand(1));
+  }
+
+  MAIRScalarExpr convertExitValue(const SCEVAddRecExpr &AddRec) {
+    auto &Ty = *cast<llvm::IntegerType>(AddRec.getType());
+    auto &CountTy = *Type::getInt64Ty(Ty.getContext());
+    MAIRScalarExpr Count =
+        Graph.createBackedgeCountExpr(*Counted->getHeader(), CountTy);
+    // The count is below 2^64, so extending it loses nothing.
+    if (Ty.getBitWidth() > CountTy.getBitWidth())
+      Count =
+          Graph.createUnaryExpr(MAIRScalarExpr::Kind::ZeroExtend, Ty, Count);
+    else if (Ty.getBitWidth() < CountTy.getBitWidth())
+      Count = Graph.createUnaryExpr(MAIRScalarExpr::Kind::Truncate, Ty, Count);
+    const SCEV *Start = AddRec.getStart();
+    const SCEV *Step = AddRec.getOperand(1);
+    if (!Step->isOne())
+      Count = Graph.createBinaryExpr(MAIRScalarExpr::Kind::Mul, Ty,
+                                     convert(Step), Count);
+    if (Start->isZero())
+      return Count;
+    return Graph.createBinaryExpr(MAIRScalarExpr::Kind::Add, Ty, convert(Start),
+                                  Count);
+  }
 
   bool canConvertNAry(const SCEVNAryExpr &Expr, bool IsAdd) const {
     if (Expr.getNumOperands() < 2)
@@ -207,8 +243,8 @@ class SCEVExprConverter {
 
 public:
   SCEVExprConverter(MAIRGraph &G, const MAIRLoopInfo &L,
-                    const ProgramPointSite &S)
-      : Graph(G), Loops(L), Site(S) {}
+                    const ProgramPointSite &S, const Loop *Counted = nullptr)
+      : Graph(G), Loops(L), Site(S), Counted(Counted) {}
 
   bool canConvert(const SCEV *Expr) const {
     if (!Expr || isa<SCEVCouldNotCompute>(Expr))
@@ -242,6 +278,8 @@ public:
       return canConvertNAry(*Mul, false);
     if (const auto *MinMax = dyn_cast<SCEVMinMaxExpr>(Expr))
       return canConvertNAry(*MinMax, false);
+    if (const auto *AddRec = dyn_cast<SCEVAddRecExpr>(Expr))
+      return canConvertExitValue(*AddRec);
     if (const auto *UDiv = dyn_cast<SCEVUDivExpr>(Expr)) {
       Type *ResultType = UDiv->getType();
       return ResultType->isIntegerTy() &&
@@ -281,6 +319,8 @@ public:
       return Graph.createBinaryExpr(MAIRScalarExpr::Kind::UDiv,
                                     *UDiv->getType(), convert(UDiv->getLHS()),
                                     convert(UDiv->getRHS()));
+    if (const auto *AddRec = dyn_cast<SCEVAddRecExpr>(Expr))
+      return convertExitValue(*AddRec);
     if (const auto *MinMax = dyn_cast<SCEVMinMaxExpr>(Expr)) {
       MAIRScalarExpr::Kind Kind = MAIRScalarExpr::Kind::SMin;
       if (isa<SCEVUMinExpr>(MinMax))
@@ -456,7 +496,7 @@ buildContiguousAggregate(MAIRGraph &ExprGraph, const Observation &Obs,
                          const SCEVAddRecExpr &Recurrence,
                          const SCEV *ExecutionCount, uint64_t AccessSize,
                          ScalarEvolution &SE, const MAIRLoopInfo &Loops,
-                         const ProgramPointSite &Site) {
+                         const ProgramPointSite &Site, const Loop *Counted) {
   const auto *Step = dyn_cast<SCEVConstant>(Recurrence.getStepRecurrence(SE));
   const AbstractAccess *Location = Obs.getContiguousRegion();
   if (!Step || !Location)
@@ -516,7 +556,7 @@ buildContiguousAggregate(MAIRGraph &ExprGraph, const Observation &Obs,
   const SCEV *SizeSCEV = getUnsignedProduct(
       SE, {ExecutionCount,
            SE.getConstant(Type::getInt64Ty(SE.getContext()), AccessSize)});
-  SCEVExprConverter Converter(ExprGraph, Loops, Site);
+  SCEVExprConverter Converter(ExprGraph, Loops, Site, Counted);
   if (!SizeSCEV || !Converter.canConvert(SizeSCEV))
     return std::nullopt;
   MAIRScalarExpr SizeExpr = Converter.convert(SizeSCEV);
@@ -537,7 +577,8 @@ buildAbuttingRange(MAIRGraph &ExprGraph, const Observation &Obs,
                    const Value &Base, const SCEVAddRecExpr &Recurrence,
                    const SCEV *TripBytes, ArrayRef<const SCEV *> TotalFactors,
                    Align TripAlign, ScalarEvolution &SE,
-                   const MAIRLoopInfo &Loops, const ProgramPointSite &Site) {
+                   const MAIRLoopInfo &Loops, const ProgramPointSite &Site,
+                   const Loop *Counted) {
   // Addresses wrap modulo the index width, so trip i + 1 starts where trip i
   // ends exactly when the step and the trip size agree in that width.
   const SCEV *Step = Recurrence.getStepRecurrence(SE);
@@ -556,7 +597,7 @@ buildAbuttingRange(MAIRGraph &ExprGraph, const Observation &Obs,
           &Base, *StartOffset,
           AbstractValue::constant(Constant->getAPInt().getZExtValue()),
           TripAlign);
-  SCEVExprConverter Converter(ExprGraph, Loops, Site);
+  SCEVExprConverter Converter(ExprGraph, Loops, Site, Counted);
   if (!Converter.canConvert(Total))
     return std::nullopt;
   AbstractAccess Range(&Base, *StartOffset, AbstractValue(), TripAlign);
@@ -572,14 +613,14 @@ buildNestedRangeAggregate(MAIRGraph &ExprGraph, const Observation &Obs,
                           const SCEVAddRecExpr &Recurrence,
                           const SCEV *ExecutionCount, ScalarEvolution &SE,
                           const MAIRLoopInfo &Loops,
-                          const ProgramPointSite &Site) {
+                          const ProgramPointSite &Site, const Loop *Counted) {
   const AbstractAccess &Location = *Obs.getContiguousRegion();
   const SCEV *Size = getSCEVOf(Location.getSizeExpr(), SE);
   if (!Size || !SE.isLoopInvariant(Size, Recurrence.getLoop()))
     return std::nullopt;
   return buildAbuttingRange(ExprGraph, Obs, *Location.getBase(), Recurrence,
                             Size, {ExecutionCount, Size}, Location.getAlign(),
-                            SE, Loops, Site);
+                            SE, Loops, Site, Counted);
 }
 
 /// A periodic region an inner loop summarized: T trips of access size a,
@@ -591,7 +632,7 @@ std::optional<AbstractAccess> buildNestedPeriodicAggregate(
     MAIRGraph &ExprGraph, const Observation &Obs,
     const PeriodicRegion &Periodic, const SCEVAddRecExpr &Recurrence,
     const SCEV *ExecutionCount, ScalarEvolution &SE, const MAIRLoopInfo &Loops,
-    const ProgramPointSite &Site) {
+    const ProgramPointSite &Site, const Loop *Counted) {
   const Loop *L = Recurrence.getLoop();
   const SCEV *Stride = getSCEVOf(Periodic.getStride(), SE);
   const SCEV *Size = getSCEVOf(Periodic.getAccessSize(), SE);
@@ -609,7 +650,7 @@ std::optional<AbstractAccess> buildNestedPeriodicAggregate(
     return std::nullopt;
   return buildAbuttingRange(ExprGraph, Obs, *Periodic.getBase(), Recurrence,
                             Size, {Trips, ExecutionCount, Size},
-                            Periodic.getAlign(), SE, Loops, Site);
+                            Periodic.getAlign(), SE, Loops, Site, Counted);
 }
 
 struct AggregatePlan {
@@ -618,8 +659,10 @@ struct AggregatePlan {
   ProgramPoint *Target = nullptr;
   MemoryRegion Region;
   bool IsRange = false;
-  // The trip count was read off induction variables at the exit.
+  // The trip count was read off induction variables at the exit, or counts
+  // the backedges with a counter materialization inserts.
   bool UsesExitTrip = false;
+  bool UsesExitCounter = false;
 };
 
 std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
@@ -681,11 +724,13 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
   const SCEV *ExecutionCount =
       Loops.getExactExecutionCountSCEV(PP, RelevantLoop);
   const bool UsesExitTrip = !ExecutionCount;
+  bool UsesExitCounter = false;
   if (UsesExitTrip)
     ExecutionCount = Loops.getExitValueExecutionCountSCEV(
-        PP, RelevantLoop, *TargetSite, *Recurrence);
+        PP, RelevantLoop, *TargetSite, &UsesExitCounter);
   if (!ExecutionCount)
     return std::nullopt;
+  const Loop *Counted = UsesExitCounter ? &RelevantLoop : nullptr;
 
   MemoryRegion Aggregate;
   // A constant recurrence that fits the contiguous MAIR abstraction keeps the
@@ -694,19 +739,19 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
   bool IsRangeAggregate = false;
   if (IsNested) {
     std::optional<AbstractAccess> Range =
-        Periodic
-            ? buildNestedPeriodicAggregate(*G.getParent(), Obs, *Periodic,
-                                           *Recurrence, ExecutionCount, SE,
-                                           Loops, *TargetSite)
-            : buildNestedRangeAggregate(*G.getParent(), Obs, *Recurrence,
-                                        ExecutionCount, SE, Loops, *TargetSite);
+        Periodic ? buildNestedPeriodicAggregate(*G.getParent(), Obs, *Periodic,
+                                                *Recurrence, ExecutionCount, SE,
+                                                Loops, *TargetSite, Counted)
+                 : buildNestedRangeAggregate(*G.getParent(), Obs, *Recurrence,
+                                             ExecutionCount, SE, Loops,
+                                             *TargetSite, Counted);
     if (!Range)
       return std::nullopt;
     Aggregate = *Range;
     IsRangeAggregate = true;
   } else if (std::optional<AbstractAccess> Range = buildContiguousAggregate(
                  *G.getParent(), Obs, *Recurrence, ExecutionCount, AccessSize,
-                 SE, Loops, *TargetSite)) {
+                 SE, Loops, *TargetSite, Counted)) {
     Aggregate = *Range;
     IsRangeAggregate = true;
   } else {
@@ -719,7 +764,7 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
       if (ConstantStride->getAPInt().isZero())
         return std::nullopt;
 
-    SCEVExprConverter Converter(*G.getParent(), Loops, *TargetSite);
+    SCEVExprConverter Converter(*G.getParent(), Loops, *TargetSite, Counted);
     if (!Converter.canConvert(Stride) || !Converter.canConvert(ExecutionCount))
       return std::nullopt;
     std::optional<MAIRScalarExpr> StartExpr = representPeriodicStart(
@@ -739,7 +784,10 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
   return AggregatePlan{
       *TargetSite,
       Loops.findExitPoint(RelevantLoop, *TargetSite, AlwaysGuard{}),
-      std::move(Aggregate), IsRangeAggregate, UsesExitTrip};
+      std::move(Aggregate),
+      IsRangeAggregate,
+      UsesExitTrip,
+      UsesExitCounter};
 }
 
 void commitAggregate(MAIRGraph &G, Observation &Obs, AggregatePlan Plan,
@@ -753,6 +801,8 @@ void commitAggregate(MAIRGraph &G, Observation &Obs, AggregatePlan Plan,
   ++NumAggregatedObservations;
   if (Plan.UsesExitTrip)
     MAIRStatScope::add(MAIRStatField::ExitTrip);
+  if (Plan.UsesExitCounter)
+    MAIRStatScope::add(MAIRStatField::ExitCounter);
   if (Plan.IsRange) {
     ++NumRangeAggregates;
     MAIRStatScope::add(MAIRStatField::Range);
@@ -807,8 +857,7 @@ std::optional<MAIRStatField> classifyRejection(MAIRGraph &G,
     return MAIRStatField::RejectMultiExit;
   std::optional<ProgramPointSite> Site = Loops.getExitSite(L);
   if (!Loops.getExactExecutionCountSCEV(PP, L) &&
-      (!Site ||
-       !Loops.getExitValueExecutionCountSCEV(PP, L, *Site, *Recurrence)))
+      (!Site || !Loops.getExitValueExecutionCountSCEV(PP, L, *Site)))
     return MAIRStatField::RejectNoCount;
   return MAIRStatField::RejectOther;
 }

@@ -751,6 +751,13 @@ exit:
   EXPECT_TRUE(Graph.verify());
 }
 
+std::string printModule(const llvm::Module &M) {
+  std::string Text;
+  llvm::raw_string_ostream OS(Text);
+  M.print(OS, nullptr);
+  return Text;
+}
+
 // Evaluates a size or count expression with \p Leaf bound to \p LeafValue.
 llvm::APInt evaluate(const MAIRScalarExpr &Expr, const llvm::Value *Leaf,
                      uint64_t LeafValue) {
@@ -764,6 +771,9 @@ llvm::APInt evaluate(const MAIRScalarExpr &Expr, const llvm::Value *Leaf,
     return Expr.getConstant();
   case Kind::LLVMValue:
     EXPECT_EQ(Expr.getLLVMValue(), Leaf);
+    return llvm::APInt(Bits, LeafValue);
+  case Kind::BackedgeCount:
+    EXPECT_EQ(Expr.getLoopHeader(), Leaf);
     return llvm::APInt(Bits, LeafValue);
   case Kind::ZeroExtend:
     return Operand(0).zext(Bits);
@@ -846,6 +856,74 @@ TEST(LoopPeriodicObservationCombinePass, ReadsTheTripCountOffAnExitValue) {
       for (uint64_t BTC : {0, 1, 7}) {
         SCOPED_TRACE(BTC);
         EXPECT_EQ(evaluate(Range->getSizeExpr(), I, BTC).getZExtValue(),
+                  8 * (IsLoad ? BTC + 1 : BTC));
+      }
+    }
+  }
+  EXPECT_TRUE(Graph.verify());
+}
+
+// No induction variable gives the count at the exit: %n is an i8 that wraps
+// after 256 iterations, %i has no wrap flags and steps by 2. The count is
+// then the backedges of %header, counted by a counter inserted at
+// materialization; the IR is not changed here.
+constexpr const char *UncountedLoopIR = R"IR(
+define void @f(ptr %a, ptr %b) {
+entry:
+  br label %header
+header:
+  %n = phi i8 [ 0, %entry ], [ %n.next, %body ]
+  %i = phi i64 [ 0, %entry ], [ %next, %body ]
+  %pa = getelementptr i32, ptr %a, i64 %i
+  %v = load i64, ptr %pa, align 8
+  %neg = icmp slt i64 %v, 0
+  br i1 %neg, label %exit, label %body
+body:
+  %pb = getelementptr i32, ptr %b, i64 %i
+  store i64 1, ptr %pb, align 8
+  %n.next = add i8 %n, 1
+  %next = add i64 %i, 2
+  br label %header
+exit:
+  ret void
+}
+)IR";
+
+TEST(LoopPeriodicObservationCombinePass, CountsTheBackedgesWithoutACounter) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(UncountedLoopIR, Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &F = *M->getFunction("f");
+  std::string Before = printModule(*M);
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(F, FAM);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  EXPECT_FALSE(
+      runPassOnGraphTree(LoopPeriodicObservationCombinePass(), Graph, AM)
+          .areAllPreserved());
+  EXPECT_EQ(printModule(*M), Before);
+  EXPECT_EQ(observationCount(Graph, "header"), 0u);
+  EXPECT_EQ(observationCount(Graph, "body"), 0u);
+  ASSERT_EQ(observationCount(Graph, "exit"), 2u);
+  const llvm::BasicBlock *Header = &*std::next(F.begin());
+  ASSERT_EQ(Header->getName(), "header");
+  for (const ProgramPoint &PP : testProgramPoints(Graph)) {
+    if (!PP.getBasicBlock() || PP.getBasicBlock()->getName() != "exit")
+      continue;
+    for (const Observation &Obs : PP) {
+      const AbstractAccess *Range = Obs.getContiguousRegion();
+      ASSERT_NE(Range, nullptr);
+      ASSERT_TRUE(Range->hasSizeExpr());
+      bool IsLoad = Obs.getKind() == AccessKind::Read;
+      EXPECT_EQ(Range->getBase(), F.getArg(IsLoad ? 0 : 1));
+      // Past 256 iterations, where %n has wrapped.
+      for (uint64_t BTC : {0, 1, 7, 300}) {
+        SCOPED_TRACE(BTC);
+        EXPECT_EQ(evaluate(Range->getSizeExpr(), Header, BTC).getZExtValue(),
                   8 * (IsLoad ? BTC + 1 : BTC));
       }
     }

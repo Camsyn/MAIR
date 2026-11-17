@@ -83,21 +83,31 @@ miss:
   ret i64 -1
 }
 
-; lpoc rej-nocount: the loop leaves on loaded data, and its counter has no
-; wrap flags while the accesses are more than a page apart, so no induction
-; variable can stand in for a trip count.
-define void @no_count(ptr %a) {
+; lpoc rej-nocount: the loop leaves on loaded data, and the exit test and the
+; load sit on different paths through the loop. Neither runs before the other
+; in every iteration, so how often the load ran is not known at the exit.
+define void @no_count(ptr %a, ptr %f, i64 %n) {
 entry:
   br label %loop
 
 loop:
-  %i = phi i64 [ 0, %entry ], [ %inc, %loop ]
-  %off = mul i64 %i, 8192
-  %pa = getelementptr i8, ptr %a, i64 %off
-  %v = load i8, ptr %pa, align 1
-  %more = icmp sgt i8 %v, -1
-  %inc = add i64 %i, 1
-  br i1 %more, label %loop, label %exit
+  %i = phi i64 [ 0, %entry ], [ %inc, %body ]
+  %pf = getelementptr inbounds nuw i8, ptr %f, i64 %i
+  %flag = load i8, ptr %pf, align 1
+  %test = icmp eq i8 %flag, 0
+  br i1 %test, label %check, label %body
+
+check:
+  ; A division the CFG simplification cannot hoist into the header.
+  %q = udiv i64 %i, %n
+  %stop = icmp eq i64 %q, 100
+  br i1 %stop, label %exit, label %body
+
+body:
+  %pa = getelementptr inbounds nuw i64, ptr %a, i64 %i
+  %v = load i64, ptr %pa, align 8
+  %inc = add nuw nsw i64 %i, 1
+  br label %loop
 
 exit:
   ret void
@@ -139,5 +149,6 @@ exit:
   ret void
 }
 
-; CHECK:      liom{{ +}}in 12  exit 2  rej-cond 1  rej-multiexit 1{{$}}
-; CHECK-NEXT: lpoc{{ +}}in 13  range 3  rej-nonaffine 1  rej-cond 1  rej-multiexit 1  rej-nocount 1{{$}}
+; The flag load of no_count runs before the exit test and is summarized.
+; CHECK:      liom{{ +}}in 13  exit 2  rej-cond 1  rej-multiexit 1{{$}}
+; CHECK-NEXT: lpoc{{ +}}in 15  range 4  exit-trip 1  rej-nonaffine 1  rej-cond 1  rej-multiexit 1  rej-nocount 1{{$}}

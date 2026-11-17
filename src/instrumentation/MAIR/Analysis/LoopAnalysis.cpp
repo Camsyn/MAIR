@@ -91,8 +91,12 @@ const SCEV *MAIRLoopInfo::getExactExecutionCountSCEV(const ProgramPoint &PP,
       getSE(), BackedgeTakenCount, DT->dominates(PP.getBasicBlock(), Exiting));
 }
 
-// Accesses at most this many bytes apart cannot step over an unmapped page.
-static constexpr uint64_t MaxFaultingStride = 4096;
+// No loop runs 2^64 iterations: at one iteration a nanosecond that takes 584
+// years. A count kept in this many bits therefore does not wrap. XSan relies
+// on the same bound: it reuses only loop counters at least as wide as a
+// pointer, and its own counter is a 64-bit one (src/instrumentation/
+// Instrumentation.cpp, isLoopCountingPhi, getOrInsertLoopCounter).
+static constexpr unsigned UnwrappedCountBits = 64;
 
 // The backedge-taken count of the run of L that just left through its
 // exiting block, from the induction variable IV read there as Last:
@@ -101,14 +105,12 @@ static constexpr uint64_t MaxFaultingStride = 4096;
 // The subtraction and division are exact only if IV did not wrap: BTC * |Step|
 // must stay below 2^Width. SCEV proves that with a no-self-wrap, no-signed-wrap
 // or (for an increasing variable) no-unsigned-wrap flag. Without a flag it
-// still holds if IV is at least as wide as an address and steps no further per
-// iteration than the accesses, which are at most a page apart: they would have
-// swept the whole address space, and so faulted on an unmapped page, before IV
-// could wrap.
+// still holds for a variable of at least UnwrappedCountBits that steps by
+// one: Last - Start is then BTC modulo 2^Width, whatever the start. Any other
+// variable, such as an unsigned char counter or a pointer that steps by 8
+// without wrap flags, may have wrapped; it is not used.
 static const SCEV *backedgeCountFromExitValue(ScalarEvolution &SE, PHINode &IV,
-                                              const Loop &L, Value &Last,
-                                              const SCEVAddRecExpr &Address,
-                                              const DataLayout &DL) {
+                                              const Loop &L, Value &Last) {
   const auto *AddRec = dyn_cast<SCEVAddRecExpr>(SE.getSCEV(&IV));
   if (!AddRec || !AddRec->isAffine() || AddRec->getLoop() != &L)
     return nullptr;
@@ -120,20 +122,9 @@ static const SCEV *backedgeCountFromExitValue(ScalarEvolution &SE, PHINode &IV,
 
   bool NoWrap = AddRec->hasNoSelfWrap() || AddRec->hasNoSignedWrap() ||
                 (AddRec->hasNoUnsignedWrap() && StepValue.isStrictlyPositive());
-  if (!NoWrap) {
-    const auto *AddressStep =
-        dyn_cast<SCEVConstant>(Address.getStepRecurrence(SE));
-    if (!AddressStep)
-      return nullptr;
-    APInt AbsoluteAddressStep = AddressStep->getAPInt().abs();
-    if (AbsoluteAddressStep.isZero() ||
-        AbsoluteAddressStep.ugt(MaxFaultingStride) ||
-        AbsoluteStep.getActiveBits() > 64 ||
-        AbsoluteStep.getZExtValue() > AbsoluteAddressStep.getZExtValue() ||
-        SE.getTypeSizeInBits(IV.getType()) <
-            DL.getIndexTypeSizeInBits(Address.getType()))
-      return nullptr;
-  }
+  if (!NoWrap && (!AbsoluteStep.isOne() ||
+                  SE.getTypeSizeInBits(IV.getType()) < UnwrappedCountBits))
+    return nullptr;
 
   BasicBlock *Preheader = L.getLoopPreheader();
   Value *Start = Preheader ? IV.getIncomingValueForBlock(Preheader) : nullptr;
@@ -167,7 +158,9 @@ static const SCEV *backedgeCountFromExitValue(ScalarEvolution &SE, PHINode &IV,
 
 const SCEV *MAIRLoopInfo::getExitValueExecutionCountSCEV(
     const ProgramPoint &PP, const Loop &L, const ProgramPointSite &Site,
-    const SCEVAddRecExpr &Address) const {
+    bool *CountsBackedges) const {
+  if (CountsBackedges)
+    *CountsBackedges = false;
   if (!executesOncePerRelevantIteration(PP, L))
     return nullptr;
   BasicBlock *Exiting = L.getExitingBlock();
@@ -192,9 +185,9 @@ const SCEV *MAIRLoopInfo::getExitValueExecutionCountSCEV(
     return isValueAvailableAt(IV, Site) ? &IV : nullptr;
   };
 
-  // An integer variable gives a simpler count than a pointer one.
+  // Reuse a counter the loop has. An integer variable gives a simpler count
+  // than a pointer one.
   ScalarEvolution &SE = getSE();
-  const DataLayout &DL = Func->getDataLayout();
   const SCEV *PointerCount = nullptr;
   for (PHINode &IV : L.getHeader()->phis()) {
     if (!SE.isSCEVable(IV.getType()) ||
@@ -202,17 +195,27 @@ const SCEV *MAIRLoopInfo::getExitValueExecutionCountSCEV(
       continue;
     Value *Last = ValueAtExit(IV);
     const SCEV *Count =
-        Last ? backedgeCountFromExitValue(SE, IV, L, *Last, Address, DL)
-             : nullptr;
+        Last ? backedgeCountFromExitValue(SE, IV, L, *Last) : nullptr;
     if (!Count)
       continue;
     if (IV.getType()->isIntegerTy())
       return executionsFromBackedgeCount(SE, Count, RunsInLastIteration);
     PointerCount = Count;
   }
-  return PointerCount ? executionsFromBackedgeCount(SE, PointerCount,
-                                                    RunsInLastIteration)
-                      : nullptr;
+  if (PointerCount)
+    return executionsFromBackedgeCount(SE, PointerCount, RunsInLastIteration);
+
+  // None counts reliably: count the backedges in a counter of our own. Its
+  // value in the last iteration is that of the canonical induction variable
+  // {0,+,1} of L, which the SCEV converter turns into a BackedgeCount at the
+  // exit of L; materialization inserts the counter (BackedgeCounters,
+  // MAIRMaterialization.cpp). Nothing is inserted now.
+  if (CountsBackedges)
+    *CountsBackedges = true;
+  Type *CountTy = Type::getIntNTy(SE.getContext(), UnwrappedCountBits);
+  const SCEV *Backedges = SE.getAddRecExpr(
+      SE.getZero(CountTy), SE.getOne(CountTy), &L, SCEV::FlagAnyWrap);
+  return executionsFromBackedgeCount(SE, Backedges, RunsInLastIteration);
 }
 
 bool MAIRLoopInfo::isLoopInvariant(const Value *V, const Loop &L) const {

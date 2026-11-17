@@ -63,10 +63,11 @@ public:
   }
 };
 
-template <typename PassT>
-void addHierarchyPass(MAIRGraphPassManager &PM, PassT Pass) {
+/// Run \p Passes on each graph of the tree in turn, children first.
+template <typename... PassTs>
+void addHierarchyPass(MAIRGraphPassManager &PM, PassTs... Passes) {
   MAIRGraphPassManager LocalPM;
-  LocalPM.addPass(std::move(Pass));
+  (LocalPM.addPass(std::move(Passes)), ...);
   PM.addPass(MAIRGraphHierarchyPass(std::move(LocalPM)));
 }
 
@@ -115,22 +116,21 @@ void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM) {
   // loop motion and periodic combination: accesses merged in a loop body,
   // such as p[2i] and p[2i+1], become one access whose step equals its size,
   // which periodic combination summarizes as one contiguous range instead of
-  // two strided periodic regions. Invariant motion runs again after periodic
-  // combination: an inner loop can synthesize an observation in its parent
-  // only after the parent's first motion pass. The second location merge
-  // combines what motion and combination placed at the loop boundaries,
-  // including periodic regions whose footprints touch, and the second
-  // elimination removes accesses the merged regions cover. The final
+  // two strided periodic regions. The three run on each loop before its
+  // parent, so the parent merges, hoists and combines again what its inner
+  // loops have just summarized, such as the rows of a matrix. The second
+  // invariant motion and location merge, which handled those summaries
+  // before the grouping, no longer change anything on 7zip and sqlite3. The
+  // second elimination removes accesses the merged regions cover. The final
   // simplification removes program points emptied by those transforms.
   // docs/mair-loops.md has the e2e data behind this order.
   noteMAIRPipeline("O1");
   addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/1));
   addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/1));
-  addHierarchyPass(PM, LocationMergePass(/*Ordinal=*/1));
-  addHierarchyPass(PM,
+  addHierarchyPass(PM, LocationMergePass(/*Ordinal=*/1),
                    LoopInvariantObservationMotionPass(
-                       /*MergeEquivalentObservations=*/true, /*Ordinal=*/1));
-  addHierarchyPass(PM, LoopPeriodicObservationCombinePass());
+                       /*MergeEquivalentObservations=*/true, /*Ordinal=*/1),
+                   LoopPeriodicObservationCombinePass());
   addHierarchyPass(PM,
                    LoopInvariantObservationMotionPass(
                        /*MergeEquivalentObservations=*/true, /*Ordinal=*/2));

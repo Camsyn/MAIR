@@ -93,12 +93,23 @@ bool MAIRLoopInfo::isLoopInvariant(const AbstractValue &Value,
          (Value.isSymbol() && isLoopInvariant(Value.getSymbol(), L));
 }
 
+/// Whether every LLVM value \p Expr reads is invariant in \p L.
+static bool isExprLoopInvariant(const MAIRScalarExpr &Expr, const Loop &L) {
+  if (Expr.getKind() == MAIRScalarExpr::Kind::LLVMValue)
+    return L.isLoopInvariant(Expr.getLLVMValue());
+  return llvm::all_of(Expr.operands(), [&](const MAIRScalarExpr &Operand) {
+    return isExprLoopInvariant(Operand, L);
+  });
+}
+
 bool MAIRLoopInfo::isLoopInvariant(const Observation &Obs,
                                    const Loop &L) const {
   const AbstractAccess *Loc = Obs.getContiguousRegion();
+  // An inner loop's range may have a size expression instead of a size.
   return Loc && isLoopInvariant(Loc->getBase(), L) &&
          isLoopInvariant(Loc->getOffset(), L) &&
-         isLoopInvariant(Loc->getSize(), L);
+         (Loc->hasSizeExpr() ? isExprLoopInvariant(Loc->getSizeExpr(), L)
+                             : isLoopInvariant(Loc->getSize(), L));
 }
 
 Loop *MAIRLoopInfo::getTopInvariantLoop(const Observation &Obs,

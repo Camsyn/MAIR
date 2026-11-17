@@ -63,7 +63,7 @@ witness:
 
 barrier 也要考虑重复执行：被覆盖的一端所在块如果能在不经过见证块的情况下再次执行，它自己块内的 barrier 就落在见证和被覆盖访问之间，同样阻断这条边（`MAIRBarrierAnalysisCore::hasBarrierPath`，`src/instrumentation/MAIR/MAIRBarrierAnalysis.cpp`）。
 
-每个优化阶段按子图优先顺序执行，随后处理父图。普通冗余删除、位置合并和公共 Observation 移动继续使用本层 MAIR。它们不能沿父子图链接复用检查。循环不变量移动和周期合并可以显式导出到父图中的循环边界，嵌套导出每次只跨一层，逐层重新证明。内层周期合并会把新的区间观察放到父图的循环出口，而父层第一次不变外提此时已经结束。`default<Og>` 和 `default<O1>` 都在周期合并后再跑一次不变外提，让外层循环重新证明这条观察。
+每个优化阶段按子图优先顺序执行，随后处理父图。普通冗余删除、位置合并和公共 Observation 移动继续使用本层 MAIR。它们不能沿父子图链接复用检查。循环不变量移动和周期合并可以显式导出到父图中的循环边界，嵌套导出每次只跨一层，逐层重新证明。内层周期合并会把新的区间观察放到父图的循环出口。`default<O1>` 把位置合并、不变外提和周期合并编成一组，对每层图依次跑完再处理父图（见“`default<O1>` 的顺序”），父层的这三步因此能看到子循环刚导出的观察，并可逐层再汇总（见“外层循环再汇总”）。`default<Og>` 仍是各自整树遍历：父层第一次不变外提此时已经结束，所以它在周期合并后再跑一次不变外提，让外层循环重新证明这条观察。
 
 不变量移动按本图 ProgramPoint 和 Observation 的原顺序逐项计划并立即提交，每次实时查找父图目标。提交只删除当前源 Observation 并更新父图，不改本图其他候选、拓扑或 LLVM 分析，因此不需要从头重扫；若以后改变这些前提，必须重新检查单遍遍历的等价性。
 
@@ -113,19 +113,32 @@ MAOpt 的调用者通过 `allProgramPoints()` 读取当前图，不维护额外�
 
 periodic 回退的起点若是外层循环的 AddRec，`SCEVExprConverter` 不能转换。此时先找一个算出该 SCEV 的 IR 值作叶子（`findValueForSCEV`），找不到再用访问 GEP 的指针操作数加一段可转换的差值表示（如 `%col + 4`，循环展开后的 `B[k+1][j]` 就是 `%col + 4n`）（`representPeriodicStart`）。
 
+### 外层循环再汇总
+
+内层汇总出的区域在父层还能再汇总成一个连续区间，前提是父层各次迭代的足迹首尾相接（`buildNestedRangeAggregate`、`buildNestedPeriodicAggregate`、`buildAbuttingRange`）。父层的 AddRec 取自区域的起点：区间取地址 SCEV，periodic 区域把起点表达式还原成 SCEV（`getSCEVOf`，叶子是 LLVM 值，所以内层留下的外层归纳变量会还原成外层 AddRec）。区域的大小、stride、trip count 也还原成 SCEV，必须在父循环中不变。
+
+- **长度为表达式的区间**：每次迭代覆盖 `[R(i), R(i) + S)`。父层步长等于 S 时，各段首尾相接，并集是 `[R(0), + Count * S)`。例：`A[i][k]` 的行 `[A + 4ni, + 4n)`，i 每次前进 4n。
+- **periodic 区域**：起点 `s(j)`、stride S、access size a、trips T。父层每次把起点推进 a，且父层的 Count 个迭代恰好填满一个 stride（`Count * a == S`）时，第 k 轮的 Count 段在 `[s(0) + k * S, + S)` 内首尾相接，各轮之间也首尾相接，并集是 `[s(0), + T * Count * a)`。例：`B[k][j]` 的列（start `B + 4j`、stride 4n、size 4、n 轮），j 每次前进 4、n * 4 = 4n。条件不满足（只取前 m 列、隔列读取等）时保留原 periodic 区域，不合成外包区间；二维或更一般的 periodic 形式尚未实现。
+- 步长与大小按指针索引宽度取模比较：地址本来就按这个宽度回绕，第 i + 1 段的起点恰好是第 i 段的终点，当且仅当两者在这个宽度下相等。总长度按无符号乘积在足够宽的整数类型里计算，不会回绕（`getUnsignedProduct`）；总长度为常量时直接写成常量大小。
+- 区间从第一段的起点开始，继承内层区域的对齐（`docs/mair-region-alignment.md`）。
+- 不变外提也接受长度为表达式的区间：表达式里的 LLVM 值都在循环中不变即为不变，都在目标处可用即可移动（`MAIRLoopInfo::isLoopInvariant`、`isRegionAvailableAt`）。矩阵乘法中 B 的整块区域与 i 无关，由此提到 i 循环之前。
+
+例：`C = A * B`（`test/MAIR/TestCases/loop-matmul.ll`）在 `default<O1>` 后只剩 3 个 observation：C 的区间写，A、B 的区间读，常量 N 与符号 n 都一样。负例见 `test/MAIR/TestCases/loop-nested-symbolic.ll`（行间有 pitch、行长随外层变化、只取部分列、隔列）。sanitizer 侧：`test/MAIR/TestCases/{asan,tsan}/mair-matmul.c`（每个函数恰好 3 个区间回调，无逐元素回调），`asan/mair-matmul-oob.c`（C 最后一个元素越界仍报告），`tsan/mair-race-matmul.c`（另一线程写 A 的一个元素仍报竞争）。
+
 ## `default<O1>` 的顺序
 
 `buildMAIRGraphO1Pipeline`（`src/instrumentation/MAIR/MAIRPasses.cpp`）依次运行：
 
 ```
-simplifygraph#1 → roe#1 → locationmerge#1 → liom#1 → lpoc → liom#2 → locationmerge#2 → roe#2 → simplifygraph#2
+simplifygraph#1 → roe#1 → [locationmerge#1, liom#1, lpoc] → liom#2 → locationmerge#2 → roe#2 → simplifygraph#2
 ```
 
-每个 pass 各自做一次整树遍历（子图先于父图）。顺序依据 e2e 的 `-mair-stats` 和 `instrumented_mops`：
+方括号内的三个 pass 编成一组（`addHierarchyPass` 的多 pass 形式）：对每层图依次跑完这三步，再处理父图，子图先于父图。其余 pass 各自做一次整树遍历（子图先于父图）。顺序依据 e2e 的 `-mair-stats` 和 `instrumented_mops`：
 
 - `roe#1` 在最前，原因见上文（下沉时只保留一个来源 guard）。把位置合并提到它前面试过：re2 ASan 少 81 个检查，但 7zip ASan 多 112、sqlite3 ASan 多 8；合并还会拼接来源，ASan 因多源退回 native 的 Observation 变多（sqlite3 `multi` 342 → 463），所以不采用。
 - `locationmerge#1` 在不变外提和周期合并之前。循环体里的 `p[2i]`、`p[2i+1]` 先合并成一个 8 字节、步长也是 8 的访问，周期合并得到一个连续区间；先做周期合并只能得到两个 stride 8、size 4 的 periodic 区域。7zip ASan 中周期合并的 `range` 从 125 增至 438，`periodic` 从 3282 降至 1060。测试：`test/MAIR/TestCases/o1-pipeline.ll` 的 `o1_location_merge_before_periodic_combine`。
-- `liom#2` 原因见上文；新顺序下 7zip ASan 仍有 12 个提升。
+- 位置合并、不变外提和周期合并逐层成组：父层的位置合并能合并子循环刚放到边界上的观察（例如展开后的四列交错 periodic 区域合成一列），不变外提能把内层汇总出的不变区间提出去，父层周期合并再汇总它们（见“外层循环再汇总”）。分组前，内层汇总的结果要等整树的 `liom#2`/`locationmerge#2` 才处理，父层周期合并已经跑过。在 7zip（320 个 TU）和 sqlite3 的 `-O2` IR 上，分组后终态 Observation 数不变，`liom#2` 和 `locationmerge#2` 不再有改动（它们的工作在组内完成）。两者暂时保留，是否删去待定。测试：`test/MAIR/TestCases/mair-stats.ll`（外层的 `liom#1` 提升内层合成的区间）、`loop-matmul.ll` 的 `mm_const_unrolled`。
+- `liom#2` 原因见上文；分组前新顺序下 7zip ASan 仍有 12 个提升，分组后为 0。
 - `locationmerge#2` 合并外提和周期合并放到循环边界的 Observation，包括足迹相接的 periodic 区域（见“地址合并”）；`roe#2` 删除被合并后区域覆盖的访问（7zip ASan 110 个）。
 - 公共 Observation 移动（COM）、第三次位置合并和第三次冗余删除已移出：调整前后在 4 个项目 × 2 个 sanitizer 中都是 0。COM 不触发是因为 `-O2` 的 SimplifyCFG 已经把两条分支里相同的访问提到或沉到公共块（例如两边都读 `p[0]` 时，读已在入口块）。COM 仍可用 `-passes=com` 单独运行。
 - 位置合并之后再跑一轮 `lpoc`/`liom` 没有收益（jsoncpp、re2、sqlite3 的检查数不变），所以只跑一轮。
@@ -159,7 +172,7 @@ ASan 按 Observation 的区域检查，而不是按来源指令逐个检查（`X
 
 native ASan 永远不查的 load/store（`getInterestingMemoryOperands` 为空：读写开关关闭、promotable 或 stack-safety 证明安全的 alloca 等；或被安全栈/全局访问优化省掉）在优化**之前**就从图中删掉（`MAOpt::eraseObservationsIf`，`src/instrumentation/MAIR/MAOpt.h`）。否则它们会与要查的访问合并，使整个合并 Observation 退回 native；在 7zip/re2/sqlite3 上，退回的多来源 Observation 全部含这样的来源（多数只由它们组成，另有 4/72/20 个拖回了要查的访问）。删除是可靠的：Observation 只会覆盖或合并别的 Observation，删掉它不会去掉其他访问的检查（反而避免了它覆盖一个要查的访问、自己退回 native 不查、把那次检查一起带走）；它的来源不再被建模，交给 native，native 照旧跳过。`isSafeAccess` 只取决于地址和访问大小，与检查放在哪无关。之后 `CanInstrumentViaMAIR` 不必再逐来源问 native。测试：`test/MAIR/TestCases/asan/mair-unchecked-sources.ll`（IR 与 select 统计）、`mair-unchecked-sources-oob.c`（越界仍报告）。
 
-- 合并区间没有空洞：`AbstractAccess::merge` 只合并重叠或相邻的区间，`mergeExpressionSizedRanges` 要求区间长度不小于起点差，LIOM/COM/LPOC 只合并相等的区域，periodic 区域只在每轮足迹相接或重叠时把 size 放大，交错合并不放大 size 只缩小 stride（见“地址合并”）。所以查整个区间不会查到来源没碰过的字节。
+- 合并区间没有空洞：`AbstractAccess::merge` 只合并重叠或相邻的区间，`mergeExpressionSizedRanges` 要求区间长度不小于起点差，LIOM/COM/LPOC 只合并相等的区域，periodic 区域只在每轮足迹相接或重叠时把 size 放大，交错合并不放大 size 只缩小 stride（见“地址合并”），外层再汇总只在各次迭代的足迹首尾相接时合成区间（见“外层循环再汇总”）。所以查整个区间不会查到来源没碰过的字节。
 - 区间起点的对齐由 MAIR 在建图和合并时维护，ASan 直接读取（`AbstractAccess::getAlign`，见 `docs/mair-region-alignment.md`）。例如 `struct { long a; int b, c; }` 的三个字段合并后，起点仍按 8 字节对齐。
 - 单个未合并的访问（含固定宽度向量）照旧按 native 方式检查。不超过 16 字节的区间走内联检查：对齐时一次 shadow load，否则查首末两个字节，与 native 对不对齐访问的做法相同；中间至多跨一个 granule，ASan 自己的 redzone 不会这么窄。更长的区间或长度是表达式的区间调用 `__asan_loadN/storeN`，逐字节检查（`__asan_region_is_poisoned`）。
 - 常量长度在 16 字节以上、不超过 `-as-mair-max-inline-range-size`（默认 128）字节的区间，先走内联快速路径（`XsanAddressSanitizer::insertMAIRRangeFastPath`），失败才调用 `__asan_loadN/storeN`，由它找出第一个 poison 字节并报告，报告内容（错误类型、READ/WRITE、合并后的大小、调试位置、地址）与只调用时完全一致。快速路径读区间碰到的**每一个** granule 的 shadow，不只查首尾，所以是精确的：当且仅当区间内有字节不可访问时失败。最后一个字节所在 granule 之前的 granule 必须整块可访问（shadow 为 0），按至多 8 字节一次读出，最后一次与前一次重叠（24B 对齐：两次 2 字节读；32B：一次 4 字节；40B：两次 4 字节；64B：一次 8 字节；128B：两次 8 字节），各次读出的值或在一起与 0 比较；最后一个 granule 按 ASan 的部分 granule 规则：shadow 为 0，或大于最后一个字节在 granule 内的偏移。起点对齐（region 的 `getAlign()`，见上上一条）不小于 granule 时 shadow 偏移是常量，长度是 granule 整数倍时不单独查最后一个 granule；否则 shadow 偏移由地址算出：起点到最后一个 granule 之间有 `(Size-1)/8` 或再多一个 granule，从起点按块读、再读一块紧挨最后一个 granule 结束的，覆盖两种情况；不需要先判断对齐的运行时分支。callback 模式（函数检查数超过 `-as-instrumentation-with-call-threshold`）、长度超过上限或为表达式、AMDGPU 仍只调用 runtime。上限由微基准确定：24–96B 内联比只调用快 4–17 倍，也不慢于 native 的逐字段内联检查；128–256B 仍更快但读的数据被访存噪声淹没；超过 128B 读 shadow 的次数随长度线性增加，默认取 128。测试：`test/MAIR/TestCases/asan/mair-inline-range.c`（IR：24/32/40/64/20B 对齐与不对齐、callback 模式、超过上限）、`mair-inline-range-runtime.c`（两端各越界一个字节的读写、中间 granule 整块或部分被 poison、界内与奇数起点不误报）。
@@ -197,6 +210,7 @@ TSan 同样按 Observation 的区域记录访问（`XsanThreadSanitizer::instrum
 - `test/MAIR/TestCases/loop-normalization.ll`：缺少 preheader 和共享出口的输入规范化。
 - `test/MAIR/TestCases/loop-irreducible.ll`：不可归约环不中断构图、不建循环层；环内地址不变的访问照常删除，地址随环变化的访问不被绕环的后支配者覆盖。
 - `test/MAIR/TestCases/loop-invariant-observation-motion.ll` 与 `loop-range-aggregation.ll`：合法循环专用导出及重复执行稳定性。`repeated_row32` 同时检查内层周期合并得到的 128 字节读，以及随后不变外提把它提到外层 preheader。
+- `test/MAIR/TestCases/loop-nested-symbolic.ll` 与 `loop-matmul.ll`：外层循环再汇总长度为表达式的区间和 periodic 区域，以及不满足首尾相接条件时保留内层结果。
 - `test/MAIR/TestCases/mair-stats.ll`：`-mair-stats` 把第二次不变外提和内层区间合并分开打印。
 - `src/instrumentation/MAIR/unittests`：图边界、方向 barrier、整树生命周期和 guard 物化回归。其中 `KeepsAccessCoveredOnlyInALaterIteration`、`EliminatesInvariantAccessCoveredInALaterIteration`、`IrreducibleCyclesAreOptimizedWithinOneIteration`、`CountsBarriersOfAnEndpointThatRunsAgain`、`DoesNotHoistAnAccessTheLoopCanExitWithout` 对应上面几条规则。
 - `src/instrumentation/MAIR/unittests/RandomizedSoundnessTest.cpp`：随机生成带嵌套循环和不可归约环的函数，随机执行，要求每次写都有同地址、中间无 barrier 的 Observation，且每个 Observation 都有这样的写。

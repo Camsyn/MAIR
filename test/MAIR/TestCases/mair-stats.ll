@@ -2,8 +2,11 @@
 ; RUN: mair-opt -mair-stats -passes='default<Og>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=OG
 ; RUN: mair-opt -passes='default<O1>' -disable-output %s 2>&1 | FileCheck %s --check-prefix=OFF --allow-empty
 
-; The inner loop synthesizes one 128-byte read. The second invariant-motion
-; visit must hoist that read. LLVM -stats cannot show the two visits apart.
+; The inner loop synthesizes one 128-byte read. default<O1> runs invariant
+; motion and periodic combination on each loop before its parent, so the first
+; invariant-motion visit of the outer loop hoists that read; default<Og> runs
+; them as separate tree walks, and the second visit hoists it. LLVM -stats
+; cannot show the two visits apart.
 
 define i32 @repeated_row32(ptr %p, i32 %n) {
 entry:
@@ -40,8 +43,9 @@ exit:
 ; O1: MAIR stats
 ; O1: pipeline O1
 ; O1: total
+; O1: liom#1{{.*}}preheader 1
 ; O1: lpoc{{.*}}range 1
-; O1: liom#2{{.*}}preheader 1
+; O1-NOT: liom#2{{.*}}preheader
 ; O1-NOT: repeated_row32
 
 ; OG: MAIR stats

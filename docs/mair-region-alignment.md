@@ -48,6 +48,8 @@
 
 **LPOC 生成区域时：** 循环里的访问每次执行都满足它声明的对齐。因此不论是 periodic 区域，还是覆盖所有趟的连续区间，都继承循环体内那个区域的对齐。区间向上时从第一趟开始，向下时从最后一趟开始，起点都是某一趟的起点。
 
+**外层循环再汇总时**（`buildAbuttingRange`，`LoopPeriodicObservationCombinePass.cpp`）：区间从父层第一次迭代里内层区域的起点开始，继承内层区间或 periodic 区域的对齐。
+
 **合并 periodic 区域时：**
 - 相邻合并（`PeriodicRegion::merge`）：每一趟从低处那个区域的那一趟开始，结果的对齐是 `max(低处的对齐, commonAlignment(高处的对齐, 距离))`。
 - 交错合并（`mergeInterleaved`）：并集的每一趟都是某个切片的某一趟，结果的对齐取各切片对齐中的最弱者。

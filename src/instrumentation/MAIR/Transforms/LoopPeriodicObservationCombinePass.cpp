@@ -288,6 +288,109 @@ public:
   }
 };
 
+/// The product of the unsigned \p Factors in an integer type wide enough that
+/// it cannot wrap, or null if there is none. A constant factor counts with
+/// its active bits only, so that a count times a small access size stays as
+/// narrow as it can.
+const SCEV *getUnsignedProduct(ScalarEvolution &SE,
+                               ArrayRef<const SCEV *> Factors) {
+  unsigned ScratchBits = 0;
+  for (const SCEV *Factor : Factors) {
+    if (!Factor->getType()->isIntegerTy())
+      return nullptr;
+    ScratchBits += Factor->getType()->getIntegerBitWidth();
+  }
+  APInt Max(ScratchBits, 1);
+  unsigned Bits = 0;
+  for (const SCEV *Factor : Factors) {
+    Max *= SE.getUnsignedRangeMax(Factor).zext(ScratchBits);
+    if (const auto *Constant = dyn_cast<SCEVConstant>(Factor))
+      Bits = std::max(Bits, Constant->getAPInt().getActiveBits());
+    else
+      Bits = std::max(Bits, Factor->getType()->getIntegerBitWidth());
+  }
+  Bits = std::max({Bits, Max.getActiveBits(), 1u});
+  if (Bits > IntegerType::MAX_INT_BITS)
+    return nullptr;
+  Type *ProductTy = IntegerType::get(SE.getContext(), Bits);
+  SmallVector<const SCEV *, 3> Operands;
+  for (const SCEV *Factor : Factors) {
+    if (const auto *Constant = dyn_cast<SCEVConstant>(Factor))
+      Operands.push_back(
+          SE.getConstant(Constant->getAPInt().zextOrTrunc(Bits)));
+    else
+      Operands.push_back(SE.getNoopOrZeroExtend(Factor, ProductTy));
+  }
+  return SE.getMulExpr(Operands);
+}
+
+/// The SCEV of \p Expr, or null if a leaf has none or the operand types do
+/// not fit. The leaves are LLVM values, so an expression the inner loop
+/// left in terms of an outer induction comes back as the outer recurrence.
+const SCEV *getSCEVOf(const MAIRScalarExpr &Expr, ScalarEvolution &SE) {
+  using Kind = MAIRScalarExpr::Kind;
+  if (!Expr.isValid())
+    return nullptr;
+  Type *Ty = Expr.getType();
+  switch (Expr.getKind()) {
+  case Kind::Constant:
+    return SE.getConstant(Expr.getConstant());
+  case Kind::LLVMValue: {
+    auto *V = const_cast<Value *>(Expr.getLLVMValue());
+    return V && SE.isSCEVable(V->getType()) ? SE.getSCEV(V) : nullptr;
+  }
+  case Kind::Truncate:
+  case Kind::ZeroExtend:
+  case Kind::SignExtend: {
+    const SCEV *Operand = getSCEVOf(Expr.operands().front(), SE);
+    if (!Operand || !Operand->getType()->isIntegerTy() || !Ty->isIntegerTy())
+      return nullptr;
+    unsigned From = Operand->getType()->getIntegerBitWidth();
+    unsigned To = Ty->getIntegerBitWidth();
+    if (Expr.getKind() == Kind::Truncate)
+      return To < From ? SE.getTruncateExpr(Operand, Ty) : nullptr;
+    if (To <= From)
+      return nullptr;
+    return Expr.getKind() == Kind::ZeroExtend
+               ? SE.getZeroExtendExpr(Operand, Ty)
+               : SE.getSignExtendExpr(Operand, Ty);
+  }
+  default:
+    break;
+  }
+  if (Expr.operands().size() != 2)
+    return nullptr;
+  const SCEV *LHS = getSCEVOf(Expr.operands()[0], SE);
+  const SCEV *RHS = getSCEVOf(Expr.operands()[1], SE);
+  if (!LHS || !RHS)
+    return nullptr;
+  // A pointer add is a pointer plus an integer offset (MAIRVerifier).
+  if (Expr.getKind() == Kind::Add && Ty->isPointerTy())
+    return LHS->getType() == Ty && RHS->getType() == SE.getEffectiveSCEVType(Ty)
+               ? SE.getAddExpr(LHS, RHS)
+               : nullptr;
+  if (!Ty->isIntegerTy() || LHS->getType() != Ty || RHS->getType() != Ty)
+    return nullptr;
+  switch (Expr.getKind()) {
+  case Kind::Add:
+    return SE.getAddExpr(LHS, RHS);
+  case Kind::Mul:
+    return SE.getMulExpr(LHS, RHS);
+  case Kind::UDiv:
+    return SE.getUDivExpr(LHS, RHS);
+  case Kind::SMin:
+    return SE.getSMinExpr(LHS, RHS);
+  case Kind::UMin:
+    return SE.getUMinExpr(LHS, RHS);
+  case Kind::SMax:
+    return SE.getSMaxExpr(LHS, RHS);
+  case Kind::UMax:
+    return SE.getUMaxExpr(LHS, RHS);
+  default:
+    return nullptr;
+  }
+}
+
 /// The start of a periodic region as a MAIR expression. A start that moves
 /// with an outer loop is a recurrence, which has none. An IR value that
 /// computes it does, or a pointer the access is based on (the pointer
@@ -403,25 +506,11 @@ buildContiguousAggregate(MAIRGraph &ExprGraph, const Observation &Obs,
     return AbstractAccess(Location->getBase(), *StartOffset,
                           AbstractValue::constant(RangeSize), TripAlign);
   }
-  const SCEV *SizeSCEV = ExecutionCount;
-  if (AccessSize != 1) {
-    unsigned CountBits = ExecutionCount->getType()->getIntegerBitWidth();
-    unsigned ScratchBits = CountBits + 64;
-    APInt Scale(ScratchBits, AccessSize);
-    APInt MaxSize =
-        SE.getUnsignedRangeMax(ExecutionCount).zext(ScratchBits) * Scale;
-    unsigned SizeBits =
-        std::max({CountBits, Scale.getActiveBits(), MaxSize.getActiveBits()});
-    if (SizeBits > IntegerType::MAX_INT_BITS)
-      return std::nullopt;
-    Type *SizeTy =
-        IntegerType::get(ExecutionCount->getType()->getContext(), SizeBits);
-    if (SizeBits > CountBits)
-      SizeSCEV = SE.getZeroExtendExpr(SizeSCEV, SizeTy);
-    SizeSCEV = SE.getMulExpr(SizeSCEV, SE.getConstant(SizeTy, AccessSize));
-  }
+  const SCEV *SizeSCEV = getUnsignedProduct(
+      SE, {ExecutionCount,
+           SE.getConstant(Type::getInt64Ty(SE.getContext()), AccessSize)});
   SCEVExprConverter Converter(ExprGraph, Loops, Site);
-  if (!Converter.canConvert(SizeSCEV))
+  if (!SizeSCEV || !Converter.canConvert(SizeSCEV))
     return std::nullopt;
   MAIRScalarExpr SizeExpr = Converter.convert(SizeSCEV);
 
@@ -429,6 +518,91 @@ buildContiguousAggregate(MAIRGraph &ExprGraph, const Observation &Obs,
                        TripAlign);
   Range.setSizeExpr(SizeExpr);
   return Range;
+}
+
+/// The range of all trips of \p Recurrence when trip i covers \p TripBytes
+/// bytes from Recurrence(i) and \p Recurrence steps by exactly that many: the
+/// trips abut, so their union is [Recurrence(0), + Count * TripBytes). Each
+/// factor of \p TotalFactors is an unsigned count, their product the size.
+/// The range starts where the first trip does, which \p TripAlign holds for.
+std::optional<AbstractAccess>
+buildAbuttingRange(MAIRGraph &ExprGraph, const Observation &Obs,
+                   const Value &Base, const SCEVAddRecExpr &Recurrence,
+                   const SCEV *TripBytes, ArrayRef<const SCEV *> TotalFactors,
+                   Align TripAlign, ScalarEvolution &SE,
+                   const MAIRLoopInfo &Loops, const ProgramPointSite &Site) {
+  // Addresses wrap modulo the index width, so trip i + 1 starts where trip i
+  // ends exactly when the step and the trip size agree in that width.
+  const SCEV *Step = Recurrence.getStepRecurrence(SE);
+  if (!TripBytes || !TripBytes->getType()->isIntegerTy() ||
+      !Step->getType()->isIntegerTy() ||
+      SE.getTruncateOrZeroExtend(TripBytes, Step->getType()) != Step)
+    return std::nullopt;
+  std::optional<AbstractValue> StartOffset =
+      representStartOffset(Recurrence.getStart(), &Base, Obs, SE, Loops, Site);
+  const SCEV *Total = getUnsignedProduct(SE, TotalFactors);
+  if (!StartOffset || !Total || Total->isZero())
+    return std::nullopt;
+  if (const auto *Constant = dyn_cast<SCEVConstant>(Total))
+    if (Constant->getAPInt().getActiveBits() <= 64)
+      return AbstractAccess(
+          &Base, *StartOffset,
+          AbstractValue::constant(Constant->getAPInt().getZExtValue()),
+          TripAlign);
+  SCEVExprConverter Converter(ExprGraph, Loops, Site);
+  if (!Converter.canConvert(Total))
+    return std::nullopt;
+  AbstractAccess Range(&Base, *StartOffset, AbstractValue(), TripAlign);
+  Range.setSizeExpr(Converter.convert(Total));
+  return Range;
+}
+
+/// A range an inner loop summarized whose size S is an expression, such as
+/// the row [A + 4ni, + 4n) of A[i][k] over k. If the parent loop advances its
+/// start by S, the rows abut: [A, + Count * S).
+std::optional<AbstractAccess>
+buildNestedRangeAggregate(MAIRGraph &ExprGraph, const Observation &Obs,
+                          const SCEVAddRecExpr &Recurrence,
+                          const SCEV *ExecutionCount, ScalarEvolution &SE,
+                          const MAIRLoopInfo &Loops,
+                          const ProgramPointSite &Site) {
+  const AbstractAccess &Location = *Obs.getContiguousRegion();
+  const SCEV *Size = getSCEVOf(Location.getSizeExpr(), SE);
+  if (!Size || !SE.isLoopInvariant(Size, Recurrence.getLoop()))
+    return std::nullopt;
+  return buildAbuttingRange(ExprGraph, Obs, *Location.getBase(), Recurrence,
+                            Size, {ExecutionCount, Size}, Location.getAlign(),
+                            SE, Loops, Site);
+}
+
+/// A periodic region an inner loop summarized: T trips of access size a,
+/// stride S, starting at s(j), such as the column of B[k][j] over k. If the
+/// parent loop advances s(j) by a and its Count iterations cover a stride,
+/// Count * a == S, then for each trip k the iterations j fill
+/// [s(0) + k * S, + S), and the trips abut: [s(0), + T * Count * a).
+std::optional<AbstractAccess> buildNestedPeriodicAggregate(
+    MAIRGraph &ExprGraph, const Observation &Obs,
+    const PeriodicRegion &Periodic, const SCEVAddRecExpr &Recurrence,
+    const SCEV *ExecutionCount, ScalarEvolution &SE, const MAIRLoopInfo &Loops,
+    const ProgramPointSite &Site) {
+  const Loop *L = Recurrence.getLoop();
+  const SCEV *Stride = getSCEVOf(Periodic.getStride(), SE);
+  const SCEV *Size = getSCEVOf(Periodic.getAccessSize(), SE);
+  const SCEV *Trips = getSCEVOf(Periodic.getTripCount(), SE);
+  Type *StepTy = Recurrence.getStepRecurrence(SE)->getType();
+  if (!Stride || !Size || !Trips || !Stride->getType()->isIntegerTy() ||
+      !Size->getType()->isIntegerTy() || !StepTy->isIntegerTy() ||
+      !SE.isLoopInvariant(Stride, L) || !SE.isLoopInvariant(Size, L) ||
+      !SE.isLoopInvariant(Trips, L))
+    return std::nullopt;
+  const SCEV *Run =
+      SE.getMulExpr(SE.getTruncateOrZeroExtend(ExecutionCount, StepTy),
+                    SE.getTruncateOrZeroExtend(Size, StepTy));
+  if (Run != SE.getTruncateOrSignExtend(Stride, StepTy))
+    return std::nullopt;
+  return buildAbuttingRange(ExprGraph, Obs, *Periodic.getBase(), Recurrence,
+                            Size, {Trips, ExecutionCount, Size},
+                            Periodic.getAlign(), SE, Loops, Site);
 }
 
 struct AggregatePlan {
@@ -444,24 +618,35 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
                                                 ProgramPoint &PP,
                                                 Observation &Obs) {
   const AbstractAccess *Location = Obs.getContiguousRegion();
-  if (!Obs.isMovable() || !Location || !Location->getBase() ||
-      !Location->getSize().isConstant() ||
-      Location->getSize().getConstant() == 0 || Obs.getInstructions().empty())
+  const PeriodicRegion *Periodic = Obs.getPeriodicRegion();
+  const Value *Base = Location   ? Location->getBase()
+                      : Periodic ? Periodic->getBase()
+                                 : nullptr;
+  if (!Obs.isMovable() || !Base || Obs.getInstructions().empty())
     return std::nullopt;
-  const uint64_t AccessSize = Location->getSize().getConstant();
+  // A region an inner loop summarized: a range whose size is an expression,
+  // or a periodic region. Both are folded only into a range (buildNested*).
+  const bool IsNested = Periodic || Location->hasSizeExpr();
+  if (!IsNested && (!Location->getSize().isConstant() ||
+                    Location->getSize().getConstant() == 0))
+    return std::nullopt;
+  const uint64_t AccessSize = IsNested ? 0 : Location->getSize().getConstant();
 
   // Peel one affine AddRec of this loop. A range produced by an inner loop
   // keeps the outer induction as its start, so the address SCEV — not the
-  // original inner pointer — is the recurrence of the parent loop.
+  // original inner pointer — is the recurrence of the parent loop. So is the
+  // start of a periodic region.
   ScalarEvolution &SE = Loops.getSE();
   const SCEVAddRecExpr *Recurrence = nullptr;
-  if (const SCEV *Address = Location->getAddressSCEV(
-          SE, AbstractAccess::ZeroOffsetBase::Analyzed)) {
+  if (const SCEV *Address =
+          Periodic ? getSCEVOf(Periodic->getStart(), SE)
+                   : Location->getAddressSCEV(
+                         SE, AbstractAccess::ZeroOffsetBase::Analyzed)) {
     if (const auto *AddRec = dyn_cast<SCEVAddRecExpr>(Address))
       if (AddRec->isAffine() && AddRec->getLoop() == G.getLoop())
         Recurrence = AddRec;
   }
-  if (!Recurrence) {
+  if (!Recurrence && !IsNested) {
     for (Instruction *I : Obs.getInstructions()) {
       const Value *Pointer = I ? llvm::getLoadStorePointerOperand(I) : nullptr;
       if (!Pointer)
@@ -484,7 +669,7 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
     return std::nullopt;
   std::optional<ProgramPointSite> TargetSite = Loops.getExitSite(RelevantLoop);
   if (!TargetSite || !Loops.canSinkToExit(PP, RelevantLoop) ||
-      !Loops.isValueAvailableAt(*Location->getBase(), *TargetSite))
+      !Loops.isValueAvailableAt(*Base, *TargetSite))
     return std::nullopt;
 
   MemoryRegion Aggregate;
@@ -492,9 +677,21 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
   // compact range form. Everything else must survive as an explicit periodic
   // region with no later dependence on LLVM SCEV objects.
   bool IsRangeAggregate = false;
-  if (std::optional<AbstractAccess> Range = buildContiguousAggregate(
-          *G.getParent(), Obs, *Recurrence, ExecutionCount, AccessSize, SE,
-          Loops, *TargetSite)) {
+  if (IsNested) {
+    std::optional<AbstractAccess> Range =
+        Periodic
+            ? buildNestedPeriodicAggregate(*G.getParent(), Obs, *Periodic,
+                                           *Recurrence, ExecutionCount, SE,
+                                           Loops, *TargetSite)
+            : buildNestedRangeAggregate(*G.getParent(), Obs, *Recurrence,
+                                        ExecutionCount, SE, Loops, *TargetSite);
+    if (!Range)
+      return std::nullopt;
+    Aggregate = *Range;
+    IsRangeAggregate = true;
+  } else if (std::optional<AbstractAccess> Range = buildContiguousAggregate(
+                 *G.getParent(), Obs, *Recurrence, ExecutionCount, AccessSize,
+                 SE, Loops, *TargetSite)) {
     Aggregate = *Range;
     IsRangeAggregate = true;
   } else {

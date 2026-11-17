@@ -24,13 +24,24 @@ namespace mair {
 
 namespace {
 
+bool isExprAvailableAt(const MAIRScalarExpr &Expr, const ProgramPointSite &Site,
+                       const MAIRLoopInfo &Loops) {
+  if (Expr.getKind() == MAIRScalarExpr::Kind::LLVMValue)
+    return Loops.isValueAvailableAt(*Expr.getLLVMValue(), Site);
+  return llvm::all_of(Expr.operands(), [&](const MAIRScalarExpr &Operand) {
+    return isExprAvailableAt(Operand, Site, Loops);
+  });
+}
+
 bool isRegionAvailableAt(const AbstractAccess &Region,
                          const ProgramPointSite &Site,
                          const MAIRLoopInfo &Loops) {
   return Region.getBase() &&
          Loops.isValueAvailableAt(*Region.getBase(), Site) &&
          Loops.isValueAvailableAt(Region.getOffset(), Site) &&
-         Loops.isValueAvailableAt(Region.getSize(), Site);
+         (Region.hasSizeExpr()
+              ? isExprAvailableAt(Region.getSizeExpr(), Site, Loops)
+              : Loops.isValueAvailableAt(Region.getSize(), Site));
 }
 
 std::optional<AnyProvenanceExecutedGuard>

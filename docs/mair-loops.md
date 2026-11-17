@@ -196,6 +196,17 @@ e2e 的 `instrumented_mops`（MAIR 变体，oracle 全部通过；无 MAIR → �
 | sqlite3 | 36971 → 35485 → 35424 | 39274 → 36825 → 36783 |
 | 7zip | 112703 → 98218 → 96579 | 117691 → 106541 → 105462 |
 
+2026-11-17 NewPasses 改进方案合入后的 e2e（分支 `mair-plan-20261117`：barrier 放宽、ROE 符号覆盖、ASan 区间内联快速路径、外层循环再汇总、出口值 trip count；`boe` 默认关；oracle 全部通过）。`instrumented_mops` 为无 MAIR → 合入前（`ff7401d3`）→ 合入后，括号内是合入后相对无 MAIR 的减少：
+
+| 项目 | ASan | TSan |
+| --- | --- | --- |
+| jsoncpp | 5461 → 4569 → 4414（−19.2%） | 6732 → 5612 → 5543（−17.7%） |
+| re2 | 35194 → 29759 → 27418（−22.1%） | 38208 → 31900 → 30294（−20.7%） |
+| sqlite3 | 36971 → 34956 → 33844（−8.5%） | 39274 → 36230 → 35767（−8.9%） |
+| 7zip | 112703 → 96464 → 96027（−14.8%） | 117691 → 103566 → 101845（−13.5%） |
+
+运行时间（`average_seconds`，5 次平均）在这台机器上的波动大于差异：同一组二进制重跑时，sqlite3 TSan 无 MAIR 一次 7.33 s、一次 3.70 s，MAIR 3.17 s 与 3.84 s；不作结论。
+
 调顺序不需要重编：隐藏选项 `-mair-pipeline=<text>`（`xclang ... -mllvm -mair-pipeline=...`）用 `mair-opt -passes` 的语法替换 sanitizer 跑的流水线（`buildMAIRGraphDefaultPipeline`）。`NAME#N` 给重复的 pass 编号，`-mair-stats` 分开打印（测试 `mair-stats-counts.ll`）。
 
 ## 数据相关的出口

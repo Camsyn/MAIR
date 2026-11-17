@@ -341,7 +341,7 @@ TEST(LoopPeriodicObservationCombinePass, PreservesRangeBoundarySelection) {
       {"negative step underflow", "4", "4", -2, false},
       {"constant count symbolic start", "4", "%start", 2, true},
       {"negative step symbolic start", "4", "%start", -2, false},
-      {"symbolic count symbolic start", "%count", "%start", 2, false},
+      {"symbolic count symbolic start", "%count", "%start", 2, true},
       {"symbolic count negative step", "%count", "6", -2, false},
   };
   for (const BoundaryCase &Case : Cases) {
@@ -398,7 +398,23 @@ exit:
     EXPECT_EQ(Combined.getInstructions(),
               (llvm::ArrayRef<llvm::Instruction *>{Origin}));
     EXPECT_EQ(Combined.getKind(), AccessKind::Read);
-    if (Case.IsRange) {
+    if (Case.IsRange && Case.Count == "%count") {
+      // [base + start, + 2 * count): the size is an expression of the count.
+      const AbstractAccess *Range = Combined.getContiguousRegion();
+      ASSERT_NE(Range, nullptr);
+      EXPECT_EQ(Range->getBase(), F.getArg(0));
+      EXPECT_EQ(Range->getOffset(), AbstractValue::symbol(*F.getArg(2)));
+      ASSERT_TRUE(Range->hasSizeExpr());
+      using Kind = MAIRScalarExpr::Kind;
+      const MAIRScalarExpr Size = Range->getSizeExpr();
+      ASSERT_EQ(Size.getKind(), Kind::Mul);
+      ASSERT_EQ(Size.operands().size(), 2u);
+      ASSERT_EQ(Size.operands()[0].getKind(), Kind::Constant);
+      EXPECT_EQ(Size.operands()[0].getConstant(), llvm::APInt(65, 2));
+      ASSERT_EQ(Size.operands()[1].getKind(), Kind::ZeroExtend);
+      ASSERT_EQ(Size.operands()[1].operands()[0].getKind(), Kind::LLVMValue);
+      EXPECT_EQ(Size.operands()[1].operands()[0].getLLVMValue(), F.getArg(1));
+    } else if (Case.IsRange) {
       ASSERT_NE(Combined.getContiguousRegion(), nullptr);
       EXPECT_EQ(*Combined.getContiguousRegion(),
                 AbstractAccess(F.getArg(0), AbstractValue::symbol(*F.getArg(2)),

@@ -107,7 +107,11 @@ sanitizer 编译还会多一行 `select`，在优化之后统计 lowering 去向
 
 MAOpt 的调用者通过 `allProgramPoints()` 读取当前图，不维护额外的 Observation 快照。sanitizer 在优化前记录来源集合；ASan 先按读写开关过滤，再记录来源。优化后先收齐不能由 MAIR 物化的来源，再排除存在同源冲突的候选。已处理来源是优化前集合减去原生路径来源，不能只取最终候选的来源，否则被冗余删除的检查会重新插入。call-like Observation 保持原生 lowering。
 
-内层范围起点复用已有 LLVM Value 时，除 SCEV 相等和目标位置可用外，还必须保证类型匹配与 poison 安全。指令候选只有在 `ScalarEvolution::canReuseInstruction` 允许复用且无需丢弃 poison flags 时才接受；优化阶段不修改原 LLVM IR。`loop-start-reuse.ll` 覆盖不安全候选、非 SCEV 类型以及继续寻找安全候选。
+内层范围起点复用已有 LLVM Value 时，要求 SCEV 相等、目标位置可用、类型匹配。**obs 的优化不受 poison 与否影响**（老板决定，2026-11-17）：即使候选指针值是 poison，native ASan 也照样检查这个指针，所以 MAIR 可以拿它表示被合并的区间。因此候选指令带 poison flag（`nsw`/`nuw`/`inbounds` 等）、需要丢弃这些 flag 才能等于起点 SCEV 时照样接受；优化阶段不修改原 LLVM IR，flag 原样保留。`ScalarEvolution::canReuseInstruction` 仍然调用，但只用来拒绝算出的值可能与 SCEV 不同的候选，例如 `or disjoint`（操作数有公共位时它不是加法，丢掉 flag 也不等于 SCEV 的加法），丢弃列表不再检查（`canReuseValue`，`src/instrumentation/MAIR/Transforms/LoopPeriodicObservationCombinePass.cpp`）。这取代了 `.archive/review_loop_ranges_20261110_1447/review.md` 中 F3 的保守结论（"需要丢 flag 则拒绝候选"）；F4 要求的 `isSCEVable` 与类型过滤保留。`loop-start-reuse.ll` 覆盖带 poison flag 的候选被复用、`or disjoint` 候选被拒绝、非 SCEV 类型。
+
+符号 trip count 加符号起点时同样生成连续区间 `[base + start, + count * size)`（以前只接受常量起点，符号起点退成 periodic）。单元测试 `PreservesRangeBoundarySelection` 的 "symbolic count symbolic start"、`test/MAIR/TestCases/asan/mair-loop-range.c` 的 VEC 前缀覆盖。
+
+periodic 回退的起点若是外层循环的 AddRec，`SCEVExprConverter` 不能转换。此时先找一个算出该 SCEV 的 IR 值作叶子（`findValueForSCEV`），找不到再用访问 GEP 的指针操作数加一段可转换的差值表示（如 `%col + 4`，循环展开后的 `B[k+1][j]` 就是 `%col + 4n`）（`representPeriodicStart`）。
 
 ## `default<O1>` 的顺序
 

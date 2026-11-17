@@ -20,11 +20,12 @@
 // At -O2 the loop is vectorized and interleaved: two 16-byte vector loads at
 // +0 and +16 per 32-byte step. LocationMerge merges them in the loop body (and
 // would merge their touching periodic regions after the loop otherwise), so
-// one periodic check covers the whole 32-byte step; the scalar remainder loop
-// gets its own.
+// one 32-byte access steps by its size: one range check from p covers the
+// vector loop, even though its trip count is symbolic. The scalar remainder
+// loop starts where no IR value points and gets a periodic check.
 // VEC-LABEL: define {{.*}} @sum(
 // VEC-NOT:   __asan_report_load
-// VEC:       call void @__asan_load_periodic(i64 %{{.*}}, i64 32, i64 32, i64 %{{.*}})
+// VEC:       call void @__asan_loadN(i64 %{{.*}}, i64 %{{.*}})
 // VEC:       call void @__asan_load_periodic(i64 %{{.*}}, i64 4, i64 4, i64 %{{.*}})
 // VEC-NOT:   __asan_report_load
 // VEC-NOT:   __asan_load_periodic
@@ -36,13 +37,24 @@ int sum(int *p, int n) {
   return t;
 }
 
-// A symbolic start makes the footprint a periodic region (start, stride 4,
-// access size 4, trip count), checked by one runtime call.
+// A symbolic start that no IR value computes makes the footprint a periodic
+// region (start, stride 4, access size 4, trip count), checked by one runtime
+// call.
 // CHECK-LABEL: define {{.*}} @sum_from(
 // CHECK-NOT:   __asan_report_load
 // CHECK:       call void @__asan_load_periodic(i64 %{{.*}}, i64 4, i64 4, i64 %{{.*}})
 // CHECK-NOT:   __asan_report_load
 // CHECK:       ret i32
+// At -O2 the vector loop starts at a GEP the vectorizer computes, so with a
+// symbolic start and a symbolic trip count it is still one range check. The
+// scalar remainder loop gets a periodic check.
+// VEC-LABEL: define {{.*}} @sum_from(
+// VEC-NOT:   __asan_report_load
+// VEC:       call void @__asan_loadN(i64 %{{.*}}, i64 %{{.*}})
+// VEC:       call void @__asan_load_periodic(i64 %{{.*}}, i64 4, i64 4, i64 %{{.*}})
+// VEC-NOT:   __asan_report_load
+// VEC-NOT:   __asan_load_periodic
+// VEC:       ret i32
 int sum_from(int *p, int b, int n) {
   int t = 0;
   for (int i = b; i < n; ++i)

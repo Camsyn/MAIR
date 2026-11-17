@@ -62,23 +62,32 @@ std::optional<uint64_t> matchStartOffset(const SCEV *Start,
   return std::nullopt;
 }
 
+/// Whether \p V computes \p Expr and an observation at \p Site may use it.
+bool canReuseValue(const SCEV *Expr, const Value *V, ScalarEvolution &SE,
+                   const MAIRLoopInfo &Loops, const ProgramPointSite &Site) {
+  if (!V || !SE.isSCEVable(V->getType()) || V->getType() != Expr->getType() ||
+      !Loops.isValueAvailableAt(*V, Site) ||
+      SE.getSCEV(const_cast<Value *>(V)) != Expr)
+    return false;
+  if (const auto *Insn = dyn_cast<Instruction>(V)) {
+    // Poison-generating flags on the candidate do not matter: the
+    // observation checks the address the program computes, poison or not
+    // (docs/mair-loops.md). canReuseInstruction still rejects candidates
+    // whose computed value may differ from Expr, such as a disjoint or.
+    SmallVector<Instruction *, 4> DropPoisonGeneratingInsts;
+    return SE.canReuseInstruction(Expr, const_cast<Instruction *>(Insn),
+                                  DropPoisonGeneratingInsts);
+  }
+  return true;
+}
+
 const Value *findValueForSCEV(const SCEV *Expr, const Observation &Obs,
                               ScalarEvolution &SE, const MAIRLoopInfo &Loops,
                               const ProgramPointSite &Site) {
   if (!Expr)
     return nullptr;
   auto Matches = [&](const Value *V) {
-    if (!V || !SE.isSCEVable(V->getType()) || V->getType() != Expr->getType() ||
-        !Loops.isValueAvailableAt(*V, Site) ||
-        SE.getSCEV(const_cast<Value *>(V)) != Expr)
-      return false;
-    if (const auto *Insn = dyn_cast<Instruction>(V)) {
-      SmallVector<Instruction *, 4> DropPoisonGeneratingInsts;
-      return SE.canReuseInstruction(Expr, const_cast<Instruction *>(Insn),
-                                    DropPoisonGeneratingInsts) &&
-             DropPoisonGeneratingInsts.empty();
-    }
-    return true;
+    return canReuseValue(Expr, V, SE, Loops, Site);
   };
   for (Instruction *I : Obs.getInstructions()) {
     const Value *Pointer = I ? llvm::getLoadStorePointerOperand(I) : nullptr;
@@ -279,6 +288,43 @@ public:
   }
 };
 
+/// The start of a periodic region as a MAIR expression. A start that moves
+/// with an outer loop is a recurrence, which has none. An IR value that
+/// computes it does, or a pointer the access is based on (the pointer
+/// operand of its GEP) plus a distance that has one.
+std::optional<MAIRScalarExpr>
+representPeriodicStart(const SCEV *Start, const Observation &Obs,
+                       SCEVExprConverter &Converter, MAIRGraph &ExprGraph,
+                       ScalarEvolution &SE, const MAIRLoopInfo &Loops,
+                       const ProgramPointSite &Site) {
+  if (Converter.canConvert(Start))
+    return Converter.convert(Start);
+  if (const Value *StartValue = findValueForSCEV(Start, Obs, SE, Loops, Site))
+    return ExprGraph.createValueExpr(*StartValue);
+  Type *OffsetTy = SE.getEffectiveSCEVType(Start->getType());
+  for (Instruction *I : Obs.getInstructions()) {
+    const auto *GEP = dyn_cast_or_null<GEPOperator>(
+        I ? llvm::getLoadStorePointerOperand(I) : nullptr);
+    if (!GEP)
+      continue;
+    const Value *Candidate = GEP->getPointerOperand();
+    if (Candidate->getType() != Start->getType())
+      continue;
+    const SCEV *CandidateSCEV = SE.getSCEV(const_cast<Value *>(Candidate));
+    if (!canReuseValue(CandidateSCEV, Candidate, SE, Loops, Site))
+      continue;
+    // Pointers into different objects have no distance.
+    const SCEV *Distance = SE.getMinusSCEV(Start, CandidateSCEV);
+    if (isa<SCEVCouldNotCompute>(Distance) || Distance->getType() != OffsetTy ||
+        !Converter.canConvert(Distance))
+      continue;
+    return ExprGraph.createBinaryExpr(
+        MAIRScalarExpr::Kind::Add, *Start->getType(),
+        ExprGraph.createValueExpr(*Candidate), Converter.convert(Distance));
+  }
+  return std::nullopt;
+}
+
 void addOrMergeObservation(ProgramPoint &Target, const Observation &Obs,
                            const MemoryRegion &Region,
                            bool MergeEquivalentObservations) {
@@ -357,9 +403,6 @@ buildContiguousAggregate(MAIRGraph &ExprGraph, const Observation &Obs,
     return AbstractAccess(Location->getBase(), *StartOffset,
                           AbstractValue::constant(RangeSize), TripAlign);
   }
-  if (!StartOffset->isConstant())
-    return std::nullopt;
-
   const SCEV *SizeSCEV = ExecutionCount;
   if (AccessSize != 1) {
     unsigned CountBits = ExecutionCount->getType()->getIntegerBitWidth();
@@ -382,9 +425,8 @@ buildContiguousAggregate(MAIRGraph &ExprGraph, const Observation &Obs,
     return std::nullopt;
   MAIRScalarExpr SizeExpr = Converter.convert(SizeSCEV);
 
-  AbstractAccess Range(Location->getBase(),
-                       AbstractValue::constant(StartOffset->getConstant()),
-                       AbstractValue(), TripAlign);
+  AbstractAccess Range(Location->getBase(), *StartOffset, AbstractValue(),
+                       TripAlign);
   Range.setSizeExpr(SizeExpr);
   return Range;
 }
@@ -466,18 +508,19 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
         return std::nullopt;
 
     SCEVExprConverter Converter(*G.getParent(), Loops, *TargetSite);
-    if (!Converter.canConvert(Start) || !Converter.canConvert(Stride) ||
-        !Converter.canConvert(ExecutionCount))
+    if (!Converter.canConvert(Stride) || !Converter.canConvert(ExecutionCount))
       return std::nullopt;
-
-    MAIRScalarExpr StartExpr = Converter.convert(Start);
+    std::optional<MAIRScalarExpr> StartExpr = representPeriodicStart(
+        Start, Obs, Converter, *G.getParent(), SE, Loops, *TargetSite);
+    if (!StartExpr)
+      return std::nullopt;
     MAIRScalarExpr StrideExpr = Converter.convert(Stride);
     Type *SizeType = Type::getInt64Ty(Start->getType()->getContext());
     MAIRScalarExpr SizeExpr =
         G.getParent()->createConstantExpr(*SizeType, APInt(64, AccessSize));
     MAIRScalarExpr CountExpr = Converter.convert(ExecutionCount);
     // Each trip starts where Location does in that iteration.
-    Aggregate = PeriodicRegion(Location->getBase(), StartExpr, StrideExpr,
+    Aggregate = PeriodicRegion(Location->getBase(), *StartExpr, StrideExpr,
                                SizeExpr, CountExpr, Location->getAlign());
   }
 

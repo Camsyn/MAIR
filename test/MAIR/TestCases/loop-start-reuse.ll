@@ -2,13 +2,18 @@
 ; RUN: mair-opt -passes=lpoc -emit-llvm %s | FileCheck %s --check-prefix=FLAGS
 ; RUN: mair-opt -passes=lpoc --disable-output %s
 
-define void @reject_poison_candidate(ptr %base, i64 %offset) {
-; CHECK-LABEL: mair graph of fn @reject_poison_candidate {
-; CHECK-NOT:   %candidate
-; CHECK:       o: read period start=(%base + (2 * %offset)), stride=2, access-size=2, trips=4
-; CHECK-NOT:   %candidate
+; %candidate has the SCEV of the loop start, but the nsw on %poison.sum makes
+; it poison for most %offset where the start is not. The observation checks
+; the address the program computes either way, so it reuses %candidate (as
+; native ASan would check a poison pointer). The IR keeps the flag: the
+; optimization does not change the IR.
+define void @reuse_candidate_with_poison_flag(ptr %base, i64 %offset) {
+; CHECK-LABEL: mair graph of fn @reuse_candidate_with_poison_flag {
+; CHECK:       o: read ptr %base + %candidate, 8
+; CHECK-LABEL: mair graph of fn @reuse_candidate_with_poison_flag of loop %loop {
+; CHECK-NOT:   o:
 ; CHECK:       }
-; FLAGS-LABEL: define void @reject_poison_candidate(
+; FLAGS-LABEL: define void @reuse_candidate_with_poison_flag(
 ; FLAGS:       %poison.sum = add nsw i64 %offset, 9223372036854775807
 entry:
   %poison.sum = add nsw i64 %offset, 9223372036854775807
@@ -56,13 +61,14 @@ exit:
   ret void
 }
 
-define void @skip_poison_for_safe_candidate(ptr %base, i64 %offset) {
-; CHECK-LABEL: mair graph of fn @skip_poison_for_safe_candidate {
-; CHECK:       o: read ptr %base + %safe.candidate, 8
-; CHECK-LABEL: mair graph of fn @skip_poison_for_safe_candidate of loop %loop {
+; Poison flags do not rank candidates: the first one in the function wins.
+define void @first_candidate_despite_poison_flag(ptr %base, i64 %offset) {
+; CHECK-LABEL: mair graph of fn @first_candidate_despite_poison_flag {
+; CHECK:       o: read ptr %base + %poison.candidate, 8
+; CHECK-LABEL: mair graph of fn @first_candidate_despite_poison_flag of loop %loop {
 ; CHECK-NOT:   o:
 ; CHECK:       }
-; FLAGS-LABEL: define void @skip_poison_for_safe_candidate(
+; FLAGS-LABEL: define void @first_candidate_despite_poison_flag(
 ; FLAGS:       %poison.sum = add nsw i64 %offset, 9223372036854775807
 entry:
   %poison.sum = add nsw i64 %offset, 9223372036854775807
@@ -82,13 +88,13 @@ exit:
   ret void
 }
 
-define void @reject_poison_byte_offset(ptr %base, i64 %offset) {
-; CHECK-LABEL: mair graph of fn @reject_poison_byte_offset {
-; CHECK-NOT:   %recovered
-; CHECK:       o: read period start=(%base + %offset), stride=1, access-size=1, trips=4
-; CHECK-NOT:   %recovered
+define void @reuse_byte_offset_with_poison_flag(ptr %base, i64 %offset) {
+; CHECK-LABEL: mair graph of fn @reuse_byte_offset_with_poison_flag {
+; CHECK:       o: read ptr %base + %recovered, 4
+; CHECK-LABEL: mair graph of fn @reuse_byte_offset_with_poison_flag of loop %loop {
+; CHECK-NOT:   o:
 ; CHECK:       }
-; FLAGS-LABEL: define void @reject_poison_byte_offset(
+; FLAGS-LABEL: define void @reuse_byte_offset_with_poison_flag(
 ; FLAGS:       %poison.sum = add nsw i64 %offset, 9223372036854775807
 entry:
   %poison.sum = add nsw i64 %offset, 9223372036854775807
@@ -107,6 +113,8 @@ exit:
   ret void
 }
 
+; A disjoint or is an add only while its operands share no bit: otherwise
+; %candidate computes another address than the start, so it is not reused.
 define void @reject_disjoint_candidate(ptr %base, i64 %offset) {
 ; CHECK-LABEL: mair graph of fn @reject_disjoint_candidate {
 ; CHECK-NOT:   %candidate

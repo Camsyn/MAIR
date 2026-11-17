@@ -1,4 +1,4 @@
-// RUN: env MAIR=1 %clangxx -asan -std=c++17 -S -emit-llvm %s -o - | FileCheck %s
+// RUN: env MAIR=1 %clangxx -asan -O1 -std=c++17 -S -emit-llvm %s -o - | FileCheck %s
 
 typedef int v4i __attribute__((ext_vector_type(4)));
 typedef bool v4b __attribute__((ext_vector_type(4)));

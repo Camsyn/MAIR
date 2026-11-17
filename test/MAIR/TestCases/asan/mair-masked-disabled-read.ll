@@ -2,7 +2,7 @@
 ; masked store after it, or the store loses its check: the load would fall
 ; back to native lowering, which skips it, and take the store's check along.
 ;
-; RUN: env MAIR=1 %clang -asan -O0 -mllvm -as-instrument-reads=0 -S -emit-llvm \
+; RUN: env MAIR=1 %clang -asan -O1 -mllvm -as-instrument-reads=0 -S -emit-llvm \
 ; RUN:   -x ir %s -o - | FileCheck %s
 
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"

@@ -15,8 +15,28 @@
 
 namespace mair {
 
-/// Whether sanitizer-side MAIR optimization was explicitly enabled.
-inline bool isMAIROptEnabled() { return std::getenv("MAIR") != nullptr; }
+namespace detail {
+inline thread_local bool MAIROptSuppressed = false;
+} // namespace detail
+
+/// Whether sanitizer-side MAIR optimization was explicitly enabled, and is not
+/// turned off for the pipeline being run (MAIROptSuppressionScope).
+inline bool isMAIROptEnabled() {
+  return !detail::MAIROptSuppressed && std::getenv("MAIR") != nullptr;
+}
+
+/// Turns sanitizer-side MAIR optimization off while it lives. Clang's -O0
+/// pipeline runs the sanitizers in one (PassRegistry.cpp), so that their
+/// output is the native one.
+class MAIROptSuppressionScope {
+  bool WasSuppressed = detail::MAIROptSuppressed;
+
+public:
+  MAIROptSuppressionScope() { detail::MAIROptSuppressed = true; }
+  ~MAIROptSuppressionScope() { detail::MAIROptSuppressed = WasSuppressed; }
+  MAIROptSuppressionScope(const MAIROptSuppressionScope &) = delete;
+  MAIROptSuppressionScope &operator=(const MAIROptSuppressionScope &) = delete;
+};
 
 inline llvm::SmallPtrSet<const llvm::Instruction *, 32>
 collectModeledSources(const MAIRGraph &Graph) {

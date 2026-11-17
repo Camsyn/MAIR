@@ -1,4 +1,4 @@
-// RUN: env MAIR=1 %clangxx -tsan -O0 -S -emit-llvm %s -o - | FileCheck %s
+// RUN: env MAIR=1 %clangxx -tsan -O1 -S -emit-llvm %s -o - | FileCheck %s
 
 void copy(char *dst, char *src, long n) { __builtin_memcpy(dst, src, n); }
 
@@ -6,9 +6,10 @@ void set(char *dst, long n) { __builtin_memset(dst, 0, n); }
 
 void move(char *dst, char *src, long n) { __builtin_memmove(dst, src, n); }
 
-void copy_to_shared(char *dst) {
-  char local = 123;
-  __builtin_memcpy(dst, &local, 1);
+// The size is not constant, so -O1 keeps the memcpy.
+void copy_to_shared(char *dst, long n) {
+  char local[16] = {1, 2, 3};
+  __builtin_memcpy(dst, local, n & 15);
 }
 
 // CHECK-LABEL: define {{.*}} @_Z4copyPcS_l
@@ -26,7 +27,7 @@ void copy_to_shared(char *dst) {
 // CHECK-NOT: call void @__tsan_read_range
 // CHECK-NOT: call void @__tsan_write_range
 
-// CHECK-LABEL: define {{.*}} @_Z14copy_to_sharedPc
+// CHECK-LABEL: define {{.*}} @_Z14copy_to_sharedPcl
 // CHECK: call ptr @__tsan_memcpy
 // CHECK-NOT: call void @__tsan_read_range
 // CHECK-NOT: call void @__tsan_write_range

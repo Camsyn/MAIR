@@ -1,4 +1,4 @@
-// RUN: env MAIR=1 %clangxx -asan -O0 -mllvm -asan-detect-invalid-pointer-pair -S -emit-llvm %s -o - | FileCheck %s
+// RUN: env MAIR=1 %clangxx -asan -O1 -mllvm -asan-detect-invalid-pointer-pair -S -emit-llvm %s -o - | FileCheck %s
 
 extern void stop_now() __attribute__((noreturn));
 extern void use_buffer(char *);

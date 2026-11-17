@@ -288,6 +288,16 @@ TSan 同样按 Observation 的区域记录访问（`XsanThreadSanitizer::instrum
 
 测试：`test/MAIR/TestCases/tsan/mair-merged-access.c`、`mair-loop-range.c`、`mair-strided-loop.c`、`mair-report-first-source.c`（IR），`mair-race-*.c`、`mair-strided-loop.c`（竞争仍报告、空隙与界外不误报）。
 
+## 适用范围
+
+### -O0 不走 MAIR
+
+clang 的 -O0 流水线里，ASan 和 TSan 不用 MAIR，输出与不设 `MAIR` 时相同（`addSanitizerForClang`，`src/instrumentation/PassRegistry.cpp`）。原因：-O0 的地址都经过栈槽重新 load，MAIR 几乎证不出覆盖，C 代码上只省约 0.2% 的检查，编译时间却是 2–3 倍（分诊 B1）。
+
+- 判定用 clang 流水线的 `OptimizationLevel`，不看函数的 `optnone`：`-O0 -Xclang -disable-O0-optnone` 时函数没有 `optnone`，流水线仍是 -O0，同样不走 MAIR；反过来 -O1 以上带 `__attribute__((optnone))` 的函数照常走 MAIR。
+- 实现：-O0 时把 sanitizer pass 包进 `WithoutMAIROptPass`，它运行期间用 `mair::MAIROptSuppressionScope` 让 `mair::isMAIROptEnabled()` 返回假（`src/instrumentation/MAIR/MAOpt.h`）。只影响 clang 的 sanitizer 位置；opt 的流水线（`registerPassIntoOpt`）没有级别，不变；mair-opt 不跑 sanitizer，不受影响。
+- 测试：`test/MAIR/TestCases/{asan,tsan}/mair-O0-native.c`（-O0 与 `-O0 -disable-O0-optnone` 下与 native 逐字相同，-O1 下仍走 MAIR）。原来用 -O0 跑 MAIR 的 sanitizer 测试都改成 -O1，见 `.tasks/WP1_20261117_1720/worklog.md`。
+
 ## 可复现验证
 
 - `test/MAIR/TestCases/loop-hierarchy.ll`：循环前/循环内检查隔离、循环内冗余、嵌套图、多个出口及无出口。

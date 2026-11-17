@@ -1,5 +1,6 @@
 #include "PassRegistry.h"
 #include "AttributeTaggingPass.hpp"
+#include "MAIR/MAOpt.h"
 #include "PatchCore.h"
 #include "UbsanInstTagging.hpp"
 #include "Utils/Options.h"
@@ -542,6 +543,38 @@ llvm::ModulePassManager createPostOptimizationPasses(OptimizationLevel Level) {
   return MPM;
 }
 
+namespace {
+
+/// Runs sanitizer passes with sanitizer-side MAIR optimization off.
+class WithoutMAIROptPass : public PassInfoMixin<WithoutMAIROptPass> {
+  ModulePassManager MPM;
+
+public:
+  explicit WithoutMAIROptPass(ModulePassManager MPM) : MPM(std::move(MPM)) {}
+  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
+    mair::MAIROptSuppressionScope NoMAIROpt;
+    return MPM.run(M, AM);
+  }
+  static bool isRequired() { return true; }
+};
+
+/// Clang's sanitizer position. At -O0 the sanitizers do not use MAIR: the
+/// output is the native one. The level is the pipeline's, so this holds with
+/// -disable-O0-optnone as well. The opt pipeline (registerPassIntoOpt) has no
+/// level and is left as it is; mair-opt runs no sanitizer.
+template <void (*AddSanitizer)(ModulePassManager &, OptimizationLevel)>
+void addSanitizerForClang(ModulePassManager &MPM, OptimizationLevel Level) {
+  if (Level != OptimizationLevel::O0) {
+    AddSanitizer(MPM, Level);
+    return;
+  }
+  ModulePassManager Sanitizer;
+  AddSanitizer(Sanitizer, Level);
+  MPM.addPass(WithoutMAIROptPass(std::move(Sanitizer)));
+}
+
+} // namespace
+
 void registerAsanForClangAndOpt(PassBuilder &PB) {
   // Clang default pipelines are rewritten after PassBuilder has assembled the
   // original sanitizer pipeline.  Registering this plugin on the same
@@ -559,7 +592,8 @@ void registerAsanForClangAndOpt(PassBuilder &PB) {
   // #endif
   //         addAsanToMPM(MPM, Level);
   //       });
-  PassRegistry.registerSanitizerPassIntoClang(addAsanToMPM);
+  PassRegistry.registerSanitizerPassIntoClang(
+      addSanitizerForClang<addAsanToMPM>);
   PassRegistry.registerPassIntoOpt("asan", addAsanOptPasses);
   PassRegistry.delegateNonSanPassTo(PB);
 }
@@ -577,7 +611,8 @@ void registerTsanForClangAndOpt(PassBuilder &PB) {
   // #endif
   //         addTsanToMPM(MPM, Level);
   //       });
-  PassRegistry.registerSanitizerPassIntoClang(addTsanToMPM);
+  PassRegistry.registerSanitizerPassIntoClang(
+      addSanitizerForClang<addTsanToMPM>);
   PassRegistry.registerPassIntoOpt("tsan", addTsanOptPasses);
   PassRegistry.delegateNonSanPassTo(PB);
 }

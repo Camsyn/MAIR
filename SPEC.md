@@ -145,4 +145,6 @@ $n$ 不必是编译期可算的量，可以是运行时值。合法是指：$n$ 
 
 MAIR 实例经目标选择与优化后，由 backend 将受支持的 PP 及其 Observation 物化为具体检查。物化前须确认 site 与 guard 合法、区域表达所需的操作数在目标位置可用、来源关联有效，并确认 backend 能发射所需语义；不满足条件的 PP 不能仅因 MAIR schema 可表达就被视为可物化。
 
+在 clang 的 -O0 流水线中，sanitizer 不经过 MAIR，直接使用原生插桩（见 `docs/mair-loops.md` 的“适用范围”）。
+
 因此，MAIR 的表达能力、各优化 pass 的适用域、具体 sanitizer 的目标选择与 backend 支持域分别定义。完整正确性要将这些阶段组合起来，在第 3 节的动态执行上验证；本文只给出这一义务及当前抽象的边界。

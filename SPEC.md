@@ -110,6 +110,8 @@ $$
 
 Sanitizer 策略还决定访问类型的覆盖关系、Observation 是否可删除、合并或移动，以及哪些边可用于覆盖传播。这些条件彼此独立。例如当前 ASan 策略把读写类型视为同一覆盖级别，当前 TSan 策略使用 $r\preceq_s w\preceq_s rw$；两者都允许移动普通 Observation，并沿两种方向在各自的 barrier 条件下传播覆盖。两者仍需检查区域、属性与执行条件。
 
+barrier 的判断基准是：指令对本 sanitizer 的检测状态（ASan 的 shadow；TSan 的 happens-before、shadow 与线程状态）没有可观察的影响，就不构成相应方向的 barrier；post-dominance 方向还要求它一定把控制流交给后继。当前规则依赖 LLVM 的 `nosync`/`nofree` 属性，保留 ASan 会改写为 shadow 更新的 intrinsic，并按名字放行 SanitizerCoverage 回调。名单与理由见 `docs/mair-loops.md` 的 “Barrier” 一节。
+
 记 $E^{\mathrm{cov}}_{f,s}\subseteq E^D_{f,s}\cup E^P_{f,s}$ 为逐边通过当前策略检查的覆盖传播边集。每条边的两端必须属于同层 MAIR，父子图之间没有普通传播边。跨 PP 覆盖可以使用 $(E^{\mathrm{cov}}_{f,s})^+$，但这种可达性**只是候选关系**。只有独立保留的 Observation $o_1$ 对目标 Observation $o_2$ 满足 sanitizer 特定的 $\operatorname{covers}_s(o_1,o_2)$，且相应动态实例的区域与效果确实匹配，$o_1$ 才能作为删除 $o_2$ 的见证。$\operatorname{covers}_s$ 要求 $o_2$ 可删除，并要求区域包含、类型覆盖及属性兼容；$o_1$ 自身不可删除时仍可作为见证。区域包含必须针对被配对的动态实例解释。静态值相同本身不足以跨迭代证明覆盖。
 
 ## 5. 已实现变换的抽象边界

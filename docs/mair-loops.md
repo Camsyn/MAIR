@@ -99,7 +99,7 @@ sanitizer 编译还会多一行 `select`，在优化之后统计 lowering 去向
 
 统计汇总按函数首次出现的顺序遍历各函数的 pass visits，以 pass 标签首次出现的位置决定行顺序；不是全局事件时间顺序。汇总阶段一次累计，保持 ordinal、字段顺序及只含 `in` 的行，全零行不打印。
 
-循环 barrier 摘要来自构图时的 LLVM 指令，并包含子循环。导出 Observation 不会抹掉摘要。当前最小规则是：提升、下沉和周期合并都要求循环中正向、反向均无 barrier。任一迭代中的 barrier 都阻止相应导出，不需要逐动态回边路径查询。这是保守条件，并未放宽既有必执行、SSA 可用性、精确计数、affine recurrence 或 guard 条件。提升到 preheader 的必执行条件是：来源块支配循环的每个 exiting block，即任何出口都只能在来源块执行之后走到（`MAIRLoopInfo::canHoistToPreheader`，`src/instrumentation/MAIR/Analysis/LoopAnalysis.cpp`，例子写在该函数的注释里）。这个条件蕴含“来源块后支配 preheader”，所以不再单独查后支配树；反过来不成立，控制流可以不经过来源块就离开内层循环，再从外层循环绕回来。没有出口的循环改为要求来源块支配每个 latch。不满足条件的访问仍可用“来源执行过”的 guard 下沉到唯一出口；多出口循环需要在每条出口边放带 guard 的副本并改写 CFG，尚未实现。ASan 允许搬动普通 Observation，检查可以落在实际访问之后，因此也和 TSan 一样沿 PostDom 边传播覆盖。前提是后面的检查一定会执行：ASan 的反向 barrier 除了可能写内存的调用，还包括任何不保证把控制流交给后继的指令（可能抛异常或不返回的调用）。原子访问仍然不能搬。
+循环 barrier 摘要来自构图时的 LLVM 指令，并包含子循环。导出 Observation 不会抹掉摘要。当前最小规则是：提升、下沉和周期合并都要求循环中正向、反向均无 barrier。任一迭代中的 barrier 都阻止相应导出，不需要逐动态回边路径查询。这是保守条件，并未放宽既有必执行、SSA 可用性、精确计数、affine recurrence 或 guard 条件。提升到 preheader 的必执行条件是：来源块支配循环的每个 exiting block，即任何出口都只能在来源块执行之后走到（`MAIRLoopInfo::canHoistToPreheader`，`src/instrumentation/MAIR/Analysis/LoopAnalysis.cpp`，例子写在该函数的注释里）。这个条件蕴含“来源块后支配 preheader”，所以不再单独查后支配树；反过来不成立，控制流可以不经过来源块就离开内层循环，再从外层循环绕回来。没有出口的循环改为要求来源块支配每个 latch。不满足条件的访问仍可用“来源执行过”的 guard 下沉到唯一出口；多出口循环需要在每条出口边放带 guard 的副本并改写 CFG，尚未实现。ASan 允许搬动普通 Observation，检查可以落在实际访问之后，因此也和 TSan 一样沿 PostDom 边传播覆盖。前提是后面的检查一定会执行：ASan 的反向 barrier 除了正向 barrier，还包括任何不保证把控制流交给后继的指令（可能抛异常或不返回的调用；哪些调用是 barrier 见下节）。原子访问仍然不能搬。
 
 带“来源访问执行过”条件的下沉，以本次循环调用的 preheader 为 guard 重置位置。嵌套循环的下一次调用不会继承上一次调用的 true 状态。整树统一生成物化计划，统一 prepare/apply；完成后整树都进入 consumed 状态。
 
@@ -126,6 +126,47 @@ periodic 回退的起点若是外层循环的 AddRec，`SCEVExprConverter` 不�
 - 不变外提也接受长度为表达式的区间：表达式里的 LLVM 值都在循环中不变即为不变，都在目标处可用即可移动（`MAIRLoopInfo::isLoopInvariant`、`isRegionAvailableAt`）。矩阵乘法中 B 的整块区域与 i 无关，由此提到 i 循环之前。
 
 例：`C = A * B`（`test/MAIR/TestCases/loop-matmul.ll`）在 `default<O1>` 后只剩 3 个 observation：C 的区间写，A、B 的区间读，常量 N 与符号 n 都一样。负例见 `test/MAIR/TestCases/loop-nested-symbolic.ll`（行间有 pitch、行长随外层变化、只取部分列、隔列）。sanitizer 侧：`test/MAIR/TestCases/{asan,tsan}/mair-matmul.c`（每个函数恰好 3 个区间回调，无逐元素回调），`asan/mair-matmul-oob.c`（C 最后一个元素越界仍报告），`tsan/mair-race-matmul.c`（另一线程写 A 的一个元素仍报竞争）。
+
+## Barrier
+
+barrier 是构图时按方向断边的指令（`MAIRBarrierAnalysis`，各 sanitizer 的 trait 在 `src/instrumentation/llvm23/{Address,Thread}Sanitizer.cpp`）。正向 barrier 阻止先执行的 Observation 代表后面的访问（Dom 方向），反向 barrier 阻止后执行的代表前面的（PostDom 方向）。它同时决定 Dom/PostDom 边（`MAIRGraphBuilder.cpp`）和循环导出（上节：提升、下沉、周期合并要求循环内两个方向都没有 barrier），所以冗余删除、公共 Observation 移动和合并都受它影响。
+
+**基准**：一条调用对本 sanitizer 的检测状态没有可观察的影响，就不算 barrier。
+
+- ASan 的状态是 shadow：调用不 free，不 poison 或 unpoison，也不能经同步看到别的线程做的这些事。
+- TSan 的状态是 happens-before、shadow 和线程状态：调用不建立 happens-before，不 free 或重置 shadow，不切换 fiber，不改 ignore 状态。
+- 反向还要求调用一定返回（`isGuaranteedToTransferExecutionToSuccessor`，即 `willreturn` 且 `nounwind`）：后面的检查要代表前面的访问，就必须执行到。
+
+**规则 1（严格）**：同时带 `nosync` 和 `nofree` 的调用不是正向 barrier；一定返回时也不是反向 barrier（`TsanMAIRBarrierTrait::isTransparentCall`、`AsanMAIRBarrierTrait::mayChangeShadow`）。
+
+- `nosync` 保证不建立 happens-before，也看不到别的线程的 free 和 poison；`nofree` 保证自己不 free（TSan 把释放的内存标成 freed，ASan 把它 poison）。分配会重置 TSan 的 shadow、unpoison ASan 的 chunk，但 LLVM 从不给 malloc、`operator new` 这类函数标 `nosync`，所以它们仍是 barrier。
+- 这两个属性的来源：intrinsic 的默认属性（`DefaultAttrsIntrinsic`，`llvm/include/llvm/IR/Intrinsics.td`）；`memory(none)` 且不是 convergent 推出 `nosync`，只读推出 `nofree`（`inferAttributesFromOthers`）；FunctionAttrs 对精确定义的推断，遇到未知调用、inline asm、非 unordered 原子或跨线程 fence 就不推。`BuildLibCalls` 不给库函数设 `nosync`。没有找到带 `nosync` 却会同步的调用；属性推断错了在 LLVM 里本就是 UB。sanitizer 的接口函数都是没有属性的外部声明，因此都是 barrier，包括 `__asan_poison_*`/`__asan_unpoison_*`、`__sanitizer_annotate_contiguous_container`、`__sanitizer_annotate_double_ended_contiguous_container`、`__sanitizer_start_switch_fiber`、`__tsan_acquire`/`__tsan_release`、`__tsan_mutex_*`、`__tsan_switch_to_fiber`、`__tsan_ignore_thread_*`、`Annotate*`。
+- TSan 原有的单侧规则不变：release 是正向 barrier，acquire 是反向 barrier。memintrinsic 本身是 Observation，两个 sanitizer 都不把它当 barrier。ASan 仍只看可能写内存的调用：只读调用不能 free，也不能改 shadow。
+
+**规则 2（ASan 例外）**：ASan 自己会改写成 shadow 更新的调用，即使带 `nosync` 和 `nofree`，也仍是两个方向的 barrier：
+
+- `llvm.lifetime.start`/`llvm.lifetime.end`：use-after-scope 的 unpoison/poison；
+- `llvm.stackrestore`：ASan 在它前面插 `__asan_allocas_unpoison`。
+
+逐一核对了 ASan 处理的其他 intrinsic（`FunctionStackPoisoner::visitIntrinsicInst`、`getInterestingMemoryOperands`、`instrumentMemIntrinsic`）：`localescape` 只影响栈帧布局；`masked.*`、`vp.*` 是访问本身；memintrinsic 改写成 `__asan_mem*`，只检查不改 shadow；`get_dynamic_area_offset`、`asan.check.memaccess` 由 ASan 自己生成。动态 alloca 在 `alloca` 指令处 poison，不是调用。TSan 不跟踪 lifetime，`lifetime.*` 和 `stackrestore` 对 TSan 不是 barrier。
+
+TODO（研究）：lifetime 是 ASan 循环里最大的单项阻挡。只对 ASan 会做作用域插桩的 alloca（`UseAfterScope` 打开且 `isInterestingAlloca`）才把它当 barrier，或者按对象生效，能放开更多循环。
+
+**规则 3（启发式，名字白名单）**：SanitizerCoverage 在插桩点调用的回调 `__sanitizer_cov_trace_*`、`__sanitizer_cov_load*`、`__sanitizer_cov_store*`，对两个 sanitizer 在两个方向都不是 barrier，并视作一定返回（`mair::isSanitizerCoverageCallback`，`src/instrumentation/MAIR/MAIRBarrierAnalysis.cpp`）。
+
+- 依据：它们的实现（libFuzzer 的 `src/runtime/lib/fuzzer/FuzzerTracePC.cpp`，都是 `ATTRIBUTE_NO_SANITIZE_ALL`；`sanitizer_common/sanitizer_coverage_libcdep_new.cpp` 的弱定义，多数为空）只更新覆盖率表，不加锁，不 free，不碰 shadow。SanitizerCoverage 声明它们时不带任何属性，规则 1 放不过它们。sqlite3、re2 的 e2e 用 `-fsanitize=fuzzer-no-link`，sancov 在 MAIR 之前插桩，每个比较前都有一个 `__sanitizer_cov_trace_*cmp*`；循环里残留的逐次检查有 77–92% 是被它们挡住的。
+- 假设：用户自己实现的回调（自定义覆盖率、trace-loads/stores）同样不同步、不 free、不改 shadow，并且返回。
+- 用白名单，不用“`__sanitizer_` 前缀加排除表”。这个前缀下有状态影响的函数很多，还会随 compiler-rt 增加：容器注解、`__sanitizer_copy_contiguous_container_annotations`、fiber 切换、`__sanitizer_syscall_pre/post_*`（TSan 里做 acquire/release 和范围访问）、`__sanitizer_unaligned_load/store*`（TSan 里记录访问）等。排除表漏掉一项会漏报，白名单漏掉一项只是少一些优化。其他 `__sanitizer_*`（包括 `__sanitizer_cov_dump` 这类非插桩点回调）、`__asan_*`、`__tsan_*`、`__ubsan_handle_*` 都仍按规则 1 判断，即都是 barrier。
+
+**规则 1 覆盖的常见 intrinsic**（只是说明，没有单独的代码路径）：`dbg.*`、`pseudoprobe`、`assume`、`sideeffect`、`prefetch`、`experimental.noalias.scope.decl`、`invariant.start/end`、`launder/strip.invariant.group`、`var/ptr.annotation`、`annotation`、`codeview.annotation`、`donothing`、`expect`、`objectsize`、`threadlocal.address`、`fake.use`、`allow.ubsan.check`、`allow.runtime.check`、`stacksave`、`va_start/va_end/va_copy`，以及算术类（`smax`、`umin`、`fma`、`bswap`、`fshl` 等；这些是 `memory(none)`，ASan 原来就不当 barrier）。不在其中的：`instrprof.*`（没有默认属性；PGO 插桩的 lowering 在 sanitizer 之前）、`trap`/`ubsantrap`（不返回）、`experimental.guard`。
+
+测试：
+
+- `test/MAIR/TestCases/tsan/mair-barrier-calls.c`：smax、fma、assume、lifetime（加推断为 `nosync nofree willreturn` 的用户函数）的循环汇总成 range；外部调用的循环逐次记录；`-fsanitize=fuzzer-no-link` 下 `sum_cmp` 也汇总。
+- `test/MAIR/TestCases/{tsan,asan}/mair-barrier-attributes.ll`：属性矩阵。`nosync nofree willreturn` 和 sancov 回调放行；缺 `willreturn` 时正向放行、反向和循环被挡；缺 `nofree`、外部调用、`__tsan_release`、`__sanitizer_annotate_contiguous_container` 被挡。
+- `test/MAIR/TestCases/tsan/mair-race-barrier-calls.c`：带 smax 的循环汇总后，与其中一次迭代的竞争仍报告。
+- `test/MAIR/TestCases/asan/mair-barrier-calls.c`：assume、prefetch、`nosync` 用户函数和 sancov 的循环检查一次；lifetime 循环和 VLA（`stackrestore`）循环仍逐次检查。
+- `test/MAIR/TestCases/asan/mair-barrier-runtime.c`：跨 `lifetime.end` 的 use-after-scope、跨容器注解的 container-overflow 仍报告。
 
 ## `default<O1>` 的顺序
 

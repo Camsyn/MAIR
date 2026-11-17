@@ -7,6 +7,10 @@
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Instruction.h"
 
+namespace llvm {
+class CallBase;
+} // namespace llvm
+
 #include <cassert>
 #include <iterator>
 
@@ -24,6 +28,16 @@ struct DefaultBarrierTrait {
   static bool isForwardBarrier(const Instruction &) { return false; }
   static bool isBackwardBarrier(const Instruction &) { return false; }
 };
+
+/// Whether \p CB calls one of the callbacks SanitizerCoverage puts at its
+/// instrumentation sites: __sanitizer_cov_trace_*, __sanitizer_cov_load* and
+/// __sanitizer_cov_store*. Their implementations (libFuzzer's
+/// FuzzerTracePC.cpp, the weak defaults in sanitizer_common's
+/// sanitizer_coverage_libcdep_new.cpp) only record coverage, are not
+/// instrumented and do not synchronize, so they change neither ASan's shadow
+/// nor TSan's state. The sanitizer barrier traits let them through in both
+/// directions, as calls that return. See "Barrier" in docs/mair-loops.md.
+bool isSanitizerCoverageCallback(const llvm::CallBase &CB);
 
 class MAIRBarrierAnalysisCore {
 public:

@@ -6,10 +6,22 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/InstrTypes.h"
 
 using namespace llvm;
 
 namespace mair {
+
+bool isSanitizerCoverageCallback(const CallBase &CB) {
+  const Function *Callee = CB.getCalledFunction();
+  if (!Callee)
+    return false;
+  StringRef Name = Callee->getName();
+  return Name.starts_with("__sanitizer_cov_trace_") ||
+         Name.starts_with("__sanitizer_cov_load") ||
+         Name.starts_with("__sanitizer_cov_store");
+}
 
 bool MAIRBarrierAnalysisCore::isBarrierBlock(const BasicBlock &BB,
                                              bool Forward) {

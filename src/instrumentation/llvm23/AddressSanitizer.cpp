@@ -1307,13 +1307,43 @@ struct AsanToInstrument {
 
 #ifndef XSAN_PASS
 struct AsanMAIRBarrierTrait {
+  // Whether a call may change the shadow a check reads. Only a call that may
+  // write memory can, and not one that neither synchronizes, which could make
+  // another thread's free or poisoning visible (nosync), nor frees memory
+  // itself (nofree). Allocation, which unpoisons the new block, is never
+  // nosync in LLVM. The exceptions are the calls ASan itself turns into shadow
+  // updates: lifetime markers (use-after-scope poisoning) and stackrestore
+  // (__asan_allocas_unpoison). Container annotations and the poisoning
+  // interface are external calls without such attributes. See "Barrier" in
+  // docs/mair-loops.md.
+  static bool mayChangeShadow(const CallBase &CB) {
+    if (isa<AnyMemIntrinsic>(CB) || !CB.mayWriteToMemory() ||
+        mair::isSanitizerCoverageCallback(CB))
+      return false;
+    if (const auto *II = dyn_cast<IntrinsicInst>(&CB))
+      switch (II->getIntrinsicID()) {
+      case Intrinsic::lifetime_start:
+      case Intrinsic::lifetime_end:
+      case Intrinsic::stackrestore:
+        return true;
+      default:
+        break;
+      }
+    return !CB.hasFnAttr(Attribute::NoSync) || !CB.hasFnAttr(Attribute::NoFree);
+  }
+
   static bool isForwardBarrier(const Instruction &I) {
-    return isa<CallBase>(I) && !isa<AnyMemIntrinsic>(I) && I.mayWriteToMemory();
+    const auto *CB = dyn_cast<CallBase>(&I);
+    return CB && mayChangeShadow(*CB);
   }
   // A later check stands in for an earlier access only if it is certain to
   // run, so an instruction that may throw or never return ends that reach.
+  // SanitizerCoverage callbacks return.
   static bool isBackwardBarrier(const Instruction &I) {
-    return isForwardBarrier(I) ||
+    if (isForwardBarrier(I))
+      return true;
+    const auto *CB = dyn_cast<CallBase>(&I);
+    return !(CB && mair::isSanitizerCoverageCallback(*CB)) &&
            !isGuaranteedToTransferExecutionToSuccessor(&I);
   }
 };

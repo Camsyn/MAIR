@@ -243,11 +243,30 @@ struct TsanMAIRBarrierTrait {
     return false;
   }
 
+  // Whether a call leaves what TSan records for the accesses around it
+  // unchanged: it creates no happens-before edge (nosync) and frees no memory,
+  // which TSan would mark as freed (nofree). Allocation, which resets the
+  // shadow of the new block, is never nosync in LLVM. A later access stands in
+  // for an earlier one only if the call also returns. Fiber switches, ignores
+  // and annotations are TSan interface calls, which carry no such attributes.
+  // Memory intrinsics are observations of their own. See "Barrier" in
+  // docs/mair-loops.md.
+  static bool isTransparentCall(const CallBase &CB, bool Backward) {
+    if (isa<AnyMemIntrinsic>(CB) || mair::isSanitizerCoverageCallback(CB))
+      return true;
+    return CB.hasFnAttr(Attribute::NoSync) && CB.hasFnAttr(Attribute::NoFree) &&
+           (!Backward || isGuaranteedToTransferExecutionToSuccessor(&CB));
+  }
+
   static bool isForwardBarrier(const Instruction &I) {
-    return (isa<CallBase>(I) && !isa<AnyMemIntrinsic>(I)) || isReleaseSync(I);
+    const auto *CB = dyn_cast<CallBase>(&I);
+    return (CB && !isTransparentCall(*CB, /*Backward=*/false)) ||
+           isReleaseSync(I);
   }
   static bool isBackwardBarrier(const Instruction &I) {
-    return (isa<CallBase>(I) && !isa<AnyMemIntrinsic>(I)) || isAcquireSync(I);
+    const auto *CB = dyn_cast<CallBase>(&I);
+    return (CB && !isTransparentCall(*CB, /*Backward=*/true)) ||
+           isAcquireSync(I);
   }
 };
 #endif

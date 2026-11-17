@@ -2,6 +2,7 @@
 
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/LoopIterator.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Support/ErrorHandling.h"
 
 using namespace llvm;
@@ -57,6 +58,21 @@ bool MAIRLoopInfo::executesOncePerRelevantIteration(const ProgramPoint &PP,
   return DT->dominates(SiteBlock, Latch);
 }
 
+// Both counts are one bit wider than the backedge-taken count, so the trip
+// count of a loop whose backedge count is all ones does not wrap.
+// A site before the exit test also runs in the iteration that leaves the
+// loop: that is the trip count. A site after it runs once per backedge.
+static const SCEV *executionsFromBackedgeCount(ScalarEvolution &SE,
+                                               const SCEV *BackedgeTakenCount,
+                                               bool RunsInLastIteration) {
+  if (RunsInLastIteration)
+    return SE.getTripCountFromExitCount(BackedgeTakenCount);
+  unsigned Width = BackedgeTakenCount->getType()->getIntegerBitWidth();
+  return SE.getZeroExtendExpr(
+      BackedgeTakenCount,
+      IntegerType::get(BackedgeTakenCount->getType()->getContext(), Width + 1));
+}
+
 const SCEV *MAIRLoopInfo::getExactExecutionCountSCEV(const ProgramPoint &PP,
                                                      const Loop &L) const {
   if (!executesOncePerRelevantIteration(PP, L))
@@ -71,16 +87,132 @@ const SCEV *MAIRLoopInfo::getExactExecutionCountSCEV(const ProgramPoint &PP,
   if (!Exiting)
     return nullptr;
 
-  // Both counts are one bit wider than the backedge-taken count, so the trip
-  // count of a loop whose backedge count is all ones does not wrap.
-  // A site before the exit test also runs in the iteration that leaves the
-  // loop: that is the trip count. A site after it runs once per backedge.
-  if (DT->dominates(PP.getBasicBlock(), Exiting))
-    return getSE().getTripCountFromExitCount(BackedgeTakenCount);
-  unsigned Width = BackedgeTakenCount->getType()->getIntegerBitWidth();
-  return getSE().getZeroExtendExpr(
-      BackedgeTakenCount,
-      IntegerType::get(L.getHeader()->getContext(), Width + 1));
+  return executionsFromBackedgeCount(
+      getSE(), BackedgeTakenCount, DT->dominates(PP.getBasicBlock(), Exiting));
+}
+
+// Accesses at most this many bytes apart cannot step over an unmapped page.
+static constexpr uint64_t MaxFaultingStride = 4096;
+
+// The backedge-taken count of the run of L that just left through its
+// exiting block, from the induction variable IV read there as Last:
+// Last = Start + BTC * Step, so BTC = (Last - Start) / Step.
+//
+// The subtraction and division are exact only if IV did not wrap: BTC * |Step|
+// must stay below 2^Width. SCEV proves that with a no-self-wrap, no-signed-wrap
+// or (for an increasing variable) no-unsigned-wrap flag. Without a flag it
+// still holds if IV is at least as wide as an address and steps no further per
+// iteration than the accesses, which are at most a page apart: they would have
+// swept the whole address space, and so faulted on an unmapped page, before IV
+// could wrap.
+static const SCEV *backedgeCountFromExitValue(ScalarEvolution &SE, PHINode &IV,
+                                              const Loop &L, Value &Last,
+                                              const SCEVAddRecExpr &Address,
+                                              const DataLayout &DL) {
+  const auto *AddRec = dyn_cast<SCEVAddRecExpr>(SE.getSCEV(&IV));
+  if (!AddRec || !AddRec->isAffine() || AddRec->getLoop() != &L)
+    return nullptr;
+  const auto *Step = dyn_cast<SCEVConstant>(AddRec->getStepRecurrence(SE));
+  if (!Step || Step->getAPInt().isZero())
+    return nullptr;
+  const APInt &StepValue = Step->getAPInt();
+  APInt AbsoluteStep = StepValue.abs();
+
+  bool NoWrap = AddRec->hasNoSelfWrap() || AddRec->hasNoSignedWrap() ||
+                (AddRec->hasNoUnsignedWrap() && StepValue.isStrictlyPositive());
+  if (!NoWrap) {
+    const auto *AddressStep =
+        dyn_cast<SCEVConstant>(Address.getStepRecurrence(SE));
+    if (!AddressStep)
+      return nullptr;
+    APInt AbsoluteAddressStep = AddressStep->getAPInt().abs();
+    if (AbsoluteAddressStep.isZero() ||
+        AbsoluteAddressStep.ugt(MaxFaultingStride) ||
+        AbsoluteStep.getActiveBits() > 64 ||
+        AbsoluteStep.getZExtValue() > AbsoluteAddressStep.getZExtValue() ||
+        SE.getTypeSizeInBits(IV.getType()) <
+            DL.getIndexTypeSizeInBits(Address.getType()))
+      return nullptr;
+  }
+
+  BasicBlock *Preheader = L.getLoopPreheader();
+  Value *Start = Preheader ? IV.getIncomingValueForBlock(Preheader) : nullptr;
+  if (!Start)
+    return nullptr;
+  // Both ends are values in the IR: the expression stays opaque to SCEV, which
+  // would otherwise fold Last back into the recurrence.
+  const SCEV *First =
+      isa<Constant>(Start) ? SE.getSCEV(Start) : SE.getUnknown(Start);
+  const SCEV *Final = SE.getUnknown(&Last);
+  if (IV.getType()->isPointerTy()) {
+    First = SE.getLosslessPtrToIntExpr(First);
+    Final = SE.getLosslessPtrToIntExpr(Final);
+    if (isa<SCEVCouldNotCompute>(First) || isa<SCEVCouldNotCompute>(Final))
+      return nullptr;
+  } else if (!IV.getType()->isIntegerTy()) {
+    return nullptr;
+  }
+  const SCEV *Distance = StepValue.isNegative() ? SE.getMinusSCEV(First, Final)
+                                                : SE.getMinusSCEV(Final, First);
+  if (isa<SCEVCouldNotCompute>(Distance))
+    return nullptr;
+  if (AbsoluteStep.isOne())
+    return Distance;
+  unsigned Width = Distance->getType()->getIntegerBitWidth();
+  if (AbsoluteStep.getActiveBits() > Width)
+    return nullptr;
+  return SE.getUDivExpr(Distance,
+                        SE.getConstant(AbsoluteStep.zextOrTrunc(Width)));
+}
+
+const SCEV *MAIRLoopInfo::getExitValueExecutionCountSCEV(
+    const ProgramPoint &PP, const Loop &L, const ProgramPointSite &Site,
+    const SCEVAddRecExpr &Address) const {
+  if (!executesOncePerRelevantIteration(PP, L))
+    return nullptr;
+  BasicBlock *Exiting = L.getExitingBlock();
+  BasicBlock *Exit = L.getUniqueExitBlock();
+  if (!Exiting || !Exit || LI->getLoopFor(Exiting) != &L)
+    return nullptr;
+
+  // The induction variables hold the values of the last iteration, the one
+  // that took the exit. The source ran in it if it comes before the exit test
+  // and did not if it comes after.
+  const BasicBlock *Source = PP.getBasicBlock();
+  bool RunsInLastIteration = DT->dominates(Source, Exiting);
+  if (!RunsInLastIteration && !DT->dominates(Exiting, Source))
+    return nullptr;
+
+  // Read the variable through its LCSSA phi if there is one.
+  auto ValueAtExit = [&](PHINode &IV) -> Value * {
+    for (PHINode &Phi : Exit->phis())
+      if (Phi.getNumIncomingValues() == 1 && Phi.getIncomingValue(0) == &IV &&
+          isValueAvailableAt(Phi, Site))
+        return &Phi;
+    return isValueAvailableAt(IV, Site) ? &IV : nullptr;
+  };
+
+  // An integer variable gives a simpler count than a pointer one.
+  ScalarEvolution &SE = getSE();
+  const DataLayout &DL = Func->getDataLayout();
+  const SCEV *PointerCount = nullptr;
+  for (PHINode &IV : L.getHeader()->phis()) {
+    if (!SE.isSCEVable(IV.getType()) ||
+        (PointerCount && IV.getType()->isPointerTy()))
+      continue;
+    Value *Last = ValueAtExit(IV);
+    const SCEV *Count =
+        Last ? backedgeCountFromExitValue(SE, IV, L, *Last, Address, DL)
+             : nullptr;
+    if (!Count)
+      continue;
+    if (IV.getType()->isIntegerTy())
+      return executionsFromBackedgeCount(SE, Count, RunsInLastIteration);
+    PointerCount = Count;
+  }
+  return PointerCount ? executionsFromBackedgeCount(SE, PointerCount,
+                                                    RunsInLastIteration)
+                      : nullptr;
 }
 
 bool MAIRLoopInfo::isLoopInvariant(const Value *V, const Loop &L) const {

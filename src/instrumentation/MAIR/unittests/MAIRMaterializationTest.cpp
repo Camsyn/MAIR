@@ -1468,4 +1468,75 @@ entry:
   EXPECT_FALSE(AbstractAccess::merge(Second, First, nullptr, nullptr, &Graph));
 }
 
+// A scan with only a pointer induction variable gets a trip count read off
+// that variable at the exit: (ptrtoint(%p) - ptrtoint(%s)) / 8 + 1. The
+// count is lowered at the exit; a rejected plan leaves the module untouched,
+// and nothing is inserted into the loop either way.
+TEST(MAIRMaterialization, LowersExitTripCountAtTheExitOnly) {
+  LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %s) {
+entry:
+  br label %loop
+loop:
+  %p = phi ptr [ %s, %entry ], [ %p.next, %loop ]
+  %v = load i64, ptr %p, align 8
+  %more = icmp sgt i64 %v, -1
+  %p.next = getelementptr inbounds nuw i8, ptr %p, i64 8
+  br i1 %more, label %loop, label %exit
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  Function &F = *M->getFunction("f");
+  PassInstrumentationCallbacks PIC;
+  FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(F, FAM);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+  EXPECT_FALSE(
+      runPassOnGraphTree(LoopPeriodicObservationCombinePass(), Graph, AM)
+          .areAllPreserved());
+  ASSERT_TRUE(Graph.verify());
+  for (MAIRGraph *Scope : Graph.graphs())
+    AM.clear(*Scope, F.getName());
+  BasicBlock *Loop = &*std::next(F.begin());
+  size_t LoopSize = Loop->size();
+
+  RecordingBackend RejectingBackend;
+  RejectingBackend.Reject = true;
+  std::string Before = printModule(*M);
+  auto Rejected = Graph.instantiate(FAM, RejectingBackend);
+  ASSERT_FALSE(Rejected);
+  consumeError(Rejected.takeError());
+  EXPECT_EQ(printModule(*M), Before);
+  ASSERT_TRUE(Graph.verify());
+
+  RecordingBackend Backend;
+  auto Result = Graph.instantiate(FAM, Backend);
+  if (!Result) {
+    ADD_FAILURE() << toString(Result.takeError());
+    return;
+  }
+  EXPECT_EQ(Backend.EmittedObservations, 1u);
+  EXPECT_EQ(Loop->size(), LoopSize);
+  FreezeInst *Trips = nullptr;
+  for (BasicBlock &Block : F)
+    for (Instruction &I : Block)
+      if (I.getName() == "mair.test.trips")
+        Trips = cast<FreezeInst>(&I);
+  ASSERT_NE(Trips, nullptr);
+  EXPECT_EQ(Trips->getParent()->getName(), "exit");
+  // The count reads the induction variable itself, as an address.
+  bool ReadsInduction = false;
+  for (Instruction &I : *Trips->getParent())
+    if (auto *Cast = dyn_cast<PtrToIntInst>(&I))
+      ReadsInduction |= Cast->getPointerOperand()->getName() == "p";
+  EXPECT_TRUE(ReadsInduction);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 } // namespace

@@ -233,6 +233,9 @@ public:
         return ResultWidth < SourceWidth;
       return ResultWidth > SourceWidth;
     }
+    if (const auto *Cast = dyn_cast<SCEVPtrToIntExpr>(Expr))
+      return Cast->getOperand()->getType()->isPointerTy() &&
+             canConvert(Cast->getOperand());
     if (const auto *Add = dyn_cast<SCEVAddExpr>(Expr))
       return canConvertNAry(*Add, true);
     if (const auto *Mul = dyn_cast<SCEVMulExpr>(Expr))
@@ -266,6 +269,10 @@ public:
       return Graph.createUnaryExpr(Kind, *Cast->getType(),
                                    convert(Cast->getOperand()));
     }
+    if (const auto *Cast = dyn_cast<SCEVPtrToIntExpr>(Expr))
+      return Graph.createUnaryExpr(MAIRScalarExpr::Kind::PtrToInt,
+                                   *Cast->getType(),
+                                   convert(Cast->getOperand()));
     if (const auto *Add = dyn_cast<SCEVAddExpr>(Expr))
       return convertAdd(*Add);
     if (const auto *Mul = dyn_cast<SCEVMulExpr>(Expr))
@@ -611,6 +618,8 @@ struct AggregatePlan {
   ProgramPoint *Target = nullptr;
   MemoryRegion Region;
   bool IsRange = false;
+  // The trip count was read off induction variables at the exit.
+  bool UsesExitTrip = false;
 };
 
 std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
@@ -663,13 +672,19 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
     return std::nullopt;
 
   const Loop &RelevantLoop = *Recurrence->getLoop();
-  const SCEV *ExecutionCount =
-      Loops.getExactExecutionCountSCEV(PP, RelevantLoop);
-  if (!ExecutionCount)
-    return std::nullopt;
   std::optional<ProgramPointSite> TargetSite = Loops.getExitSite(RelevantLoop);
   if (!TargetSite || !Loops.canSinkToExit(PP, RelevantLoop) ||
       !Loops.isValueAvailableAt(*Base, *TargetSite))
+    return std::nullopt;
+  // Without a computable trip count, read the count off induction variables
+  // at the exit (docs/mair-loops.md, 数据相关的出口).
+  const SCEV *ExecutionCount =
+      Loops.getExactExecutionCountSCEV(PP, RelevantLoop);
+  const bool UsesExitTrip = !ExecutionCount;
+  if (UsesExitTrip)
+    ExecutionCount = Loops.getExitValueExecutionCountSCEV(
+        PP, RelevantLoop, *TargetSite, *Recurrence);
+  if (!ExecutionCount)
     return std::nullopt;
 
   MemoryRegion Aggregate;
@@ -724,7 +739,7 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
   return AggregatePlan{
       *TargetSite,
       Loops.findExitPoint(RelevantLoop, *TargetSite, AlwaysGuard{}),
-      std::move(Aggregate), IsRangeAggregate};
+      std::move(Aggregate), IsRangeAggregate, UsesExitTrip};
 }
 
 void commitAggregate(MAIRGraph &G, Observation &Obs, AggregatePlan Plan,
@@ -736,6 +751,8 @@ void commitAggregate(MAIRGraph &G, Observation &Obs, AggregatePlan Plan,
                         MergeEquivalentObservations);
   Obs.getParent()->erase(Obs);
   ++NumAggregatedObservations;
+  if (Plan.UsesExitTrip)
+    MAIRStatScope::add(MAIRStatField::ExitTrip);
   if (Plan.IsRange) {
     ++NumRangeAggregates;
     MAIRStatScope::add(MAIRStatField::Range);
@@ -780,13 +797,18 @@ std::optional<MAIRStatField> classifyRejection(MAIRGraph &G,
     return MAIRStatField::RejectOther;
   if (G.hasForwardBarrier() || G.hasBackwardBarrier())
     return MAIRStatField::RejectBarrier;
-  if (!findAffineRecurrenceOf(Obs, L, Loops.getSE()))
+  const SCEVAddRecExpr *Recurrence =
+      findAffineRecurrenceOf(Obs, L, Loops.getSE());
+  if (!Recurrence)
     return MAIRStatField::RejectNonAffine;
   if (!Loops.executesOncePerRelevantIteration(PP, L))
     return MAIRStatField::RejectConditional;
   if (!L.getExitingBlock() || !L.getUniqueExitBlock())
     return MAIRStatField::RejectMultiExit;
-  if (!Loops.getExactExecutionCountSCEV(PP, L))
+  std::optional<ProgramPointSite> Site = Loops.getExitSite(L);
+  if (!Loops.getExactExecutionCountSCEV(PP, L) &&
+      (!Site ||
+       !Loops.getExitValueExecutionCountSCEV(PP, L, *Site, *Recurrence)))
     return MAIRStatField::RejectNoCount;
   return MAIRStatField::RejectOther;
 }

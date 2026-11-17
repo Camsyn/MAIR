@@ -38,6 +38,17 @@ public:
                                         const llvm::Loop &L) const;
   const llvm::SCEV *getExactExecutionCountSCEV(const ProgramPoint &PP,
                                                const llvm::Loop &L) const;
+  /// How often \p PP runs in one run of \p L, for a loop that leaves on a
+  /// data-dependent test and so has no backedge-taken count SCEV can compute.
+  /// The count is read off an induction variable at \p Site, the unique exit:
+  /// there the variable holds Start + BTC * Step. The result refers to that
+  /// value as a SCEVUnknown, so it is only meaningful at \p Site. \p Address,
+  /// the recurrence of the accesses at \p PP, bounds how far a variable
+  /// without wrap flags can count. Null if no induction variable qualifies.
+  const llvm::SCEV *
+  getExitValueExecutionCountSCEV(const ProgramPoint &PP, const llvm::Loop &L,
+                                 const ProgramPointSite &Site,
+                                 const llvm::SCEVAddRecExpr &Address) const;
   bool isLoopInvariant(const Observation &Obs, const llvm::Loop &L) const;
   llvm::Loop *getTopInvariantLoop(const Observation &Obs,
                                   llvm::Loop &Start) const;

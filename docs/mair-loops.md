@@ -93,7 +93,7 @@ barrier 也要考虑重复执行：被覆盖的一端所在块如果能在不经
 
 宿主 LLVM 的 `-stats` 在 Release 构建里不会打印。要看每个 pass 实际改了什么，用 `-mair-stats`。`xclang -mair-stats` 会把它转成 `-mllvm -mair-stats`；`mair-opt -mair-stats` 直接认这个选项。每个编译单元在 stderr 打一块汇总，不按函数展开，避免 C++ mangled 名字淹没构建日志。`default<O1>` / `default<Og>` 里重复出现的 pass 带 `#1`、`#2`，所以第二次不变外提不会和第一次混在一起。`in` 仍按每次本层调用累计；比较效果看 `preheader`、`exit`、`range`、`periodic`、`merged`、`intra`、`inter`、`hoisted`、`sunk`。
 
-`lpoc` 和 `liom` 行还说明为什么有 Observation 留在循环里（每次本层调用各计一次）。`lpoc` 只计地址随循环变化的 Observation，`liom` 只计循环不变的，各按下列顺序取第一个不满足的条件：`rej-barrier`（循环里有 barrier），`rej-nonaffine`（地址不是本循环的仿射递推，仅 `lpoc`），`rej-cond`（来源不是每轮恰执行一次，含 `liom` 跳过的带 guard 的 ProgramPoint），`rej-multiexit`（不止一个 exiting block 或出口块），`rej-nocount`（没有 SCEV 算出的次数，仅 `lpoc`），`rej-other`（其余，如原子访问、非连续区域、起点或次数无法在出口表达、出口不后支配来源）。分类只在 `-mair-stats` 下计算，不影响优化。实现在 `classifyRejection`（`LoopPeriodicObservationCombinePass.cpp`、`LoopInvariantObservationMotionPass.cpp`），测试 `test/MAIR/TestCases/mair-stats-loop-rejections.ll`（mair-opt 没有 barrier，`rej-barrier` 由 sanitizer 编译体现）。
+`lpoc` 和 `liom` 行还说明为什么有 Observation 留在循环里（每次本层调用各计一次）。`lpoc` 只计地址随循环变化的 Observation，`liom` 只计循环不变的，各按下列顺序取第一个不满足的条件：`rej-barrier`（循环里有 barrier），`rej-nonaffine`（地址不是本循环的仿射递推，仅 `lpoc`），`rej-cond`（来源不是每轮恰执行一次，含 `liom` 跳过的带 guard 的 ProgramPoint），`rej-multiexit`（不止一个 exiting block 或出口块），`rej-nocount`（既没有 SCEV 算出的次数，也读不出出口处的次数，仅 `lpoc`），`rej-other`（其余，如原子访问、非连续区域、起点或次数无法在出口表达、出口不后支配来源）。分类只在 `-mair-stats` 下计算，不影响优化。`exit-trip` 是 `range`/`periodic` 中用出口处归纳变量求次数的个数（见“数据相关的出口”）。实现在 `classifyRejection`（`LoopPeriodicObservationCombinePass.cpp`、`LoopInvariantObservationMotionPass.cpp`），测试 `test/MAIR/TestCases/mair-stats-loop-rejections.ll`，以及 `loop-early-exit.ll` 和 `asan/mair-early-exit-oob.c` 的 `STATS`（后者含 `rej-barrier`）。
 
 sanitizer 编译还会多一行 `select`，在优化之后统计 lowering 去向：`in` 是非 call-like 的终态 Observation，`lowered` 交给 MAIR 物化，`native` 退回 sanitizer 自己逐访问插桩；`multi`（多源，合并产物）、`symbolic`（非常量偏移/大小或非连续区间，含 periodic）、`vector`、`shared`（来源同时被一个退回的 Observation 持有）说明退回原因，其余退回原因是 sanitizer 自身判定（如 ASan 安全栈访问、TSan 未逃逸 alloca）。`fallback` 是退回 native 的来源指令数。实现在 `selectMaterializableObservations`（`src/instrumentation/MAIR/Materialization/MAIRMaterialization.cpp`），测试 `test/MAIR/TestCases/asan/mair-select-stats.c`。这几个原因字段只描述 Observation 的形状；ASan 已能 lowering 多源、符号区间、periodic 和固定宽度向量（见“ASan 的 lowering”），在 ASan 下它们只剩 masked 区域和来源本身被 ASan 拒绝的情况。
 
@@ -155,6 +155,45 @@ e2e 的 `instrumented_mops`（MAIR 变体，oracle 全部通过；无 MAIR → �
 | 7zip | 112703 → 98218 → 96579 | 117691 → 106541 → 105462 |
 
 调顺序不需要重编：隐藏选项 `-mair-pipeline=<text>`（`xclang ... -mllvm -mair-pipeline=...`）用 `mair-opt -passes` 的语法替换 sanitizer 跑的流水线（`buildMAIRGraphDefaultPipeline`）。`NAME#N` 给重复的 pass 编号，`-mair-stats` 分开打印（测试 `mair-stats-counts.ll`）。
+
+## 数据相关的出口
+
+`while (a[i] >= 0) i++`、`while ((*d++ = *s++) != 0)` 这类循环按读到的数据决定何时退出，SCEV 算不出 backedge-taken count（BTC）。归纳变量在出口处仍记着跑了多少轮：表头的归纳变量 `IV = {Start,+,Step}` 在退出的那一轮取值 `Last = Start + BTC * Step`，所以 `BTC = (Last - Start) / |Step|`（`Step < 0` 时为 `(Start - Last) / |Step|`）。LPOC 在 SCEV 给不出精确次数时改用这个表达式（`MAIRLoopInfo::getExitValueExecutionCountSCEV`，`src/instrumentation/MAIR/Analysis/LoopAnalysis.cpp`），其余流程（连续区间或 periodic 区域、放到唯一出口）与精确次数相同。老板 2026-11-17 决定：只要能给出合法的 trip count 表达式，汇总就合法，次数可以是运行时值（`SPEC.md` 第 5 节）。
+
+条件（全部满足才用；任一不满足就留在循环里，`-mair-stats` 记为 `rej-nocount` 或更前的原因）：
+
+- 来源每轮恰执行一次：always guard、锚定 site、直接属于该循环、支配唯一 latch、循环体内无不可归约环（与精确次数相同）；循环里正反向都没有 barrier，唯一出口后支配来源（`canSinkToExit`）。
+- 只有一个 exiting block，它直接属于该循环（不在子循环里），且只有一个出口块。
+- 来源与 exiting block 之间有支配关系。来源支配 exiting block（在退出判断之前），退出的那一轮也执行了它，次数为 `BTC + 1`，区域为 `[S, addr_last + size)`；exiting block 支配来源（在判断之后），退出的那一轮没执行它，次数为 `BTC`，区域为 `[S, addr_exit)`，0 轮时为空。两者都没有则不汇总。次数都比 BTC 宽一位，与精确次数的处理相同。
+- 归纳变量取表头的 phi：SCEV 为本循环的仿射递推、步长是非零常量；整数或指针类型，优先整数（表达式更简单）。`Start` 是它从 preheader 来的值；`Last` 是它在出口处的值，有 LCSSA phi 就读 LCSSA phi，否则直接读表头 phi（表头支配出口，`isValueAvailableAt` 检查可用性）。表头 phi 的定义块支配 exiting block，所以出口处读到的一定是退出那一轮的值。指针归纳变量用 `ptrtoint` 相减。
+- 归纳变量不回绕，`Last - Start` 才精确：SCEV 证明了 no-self-wrap、no-signed-wrap，或（步长为正时）no-unsigned-wrap。`size_t i` 这类没有 wrap 标志的计数器，若至少和地址一样宽、每轮步长不超过访问地址的步长、地址步长不超过一页（4096 字节），也接受：回绕之前访问必须扫过整个地址空间，必然先碰到未映射的页（例如第 0 页）而崩溃，走不到出口。地址步长超过一页时不接受（测试 `huge_stride`）。
+
+不插计数器，也不改 IR：sanitizer 在 `-O2` 的循环优化之后、LSR 之前运行，表头已有整数或指针归纳变量。优化阶段只引用已有的值（SCEVUnknown → `MAIRScalarExpr::LLVMValue`）；物化时只在出口处生成 `sub`/`udiv`/`zext` 一类的计算，循环体不变，backend 的 `prepare` 失败时 IR 也不变（单元测试 `MAIRMaterialization.LowersExitTripCountAtTheExitOnly`）。为了表示指针差，MAIR 表达式新增 `PtrToInt`（指针转为同宽整数，lowering 成 `ptrtoint`，verifier 检查宽度）；SCEV 到 MAIR 的转换也因此接受 `ptrtoint`，`for (p = b; p != e; ++p)` 这类精确次数里含 `ptrtoint` 的循环（分诊报告中 7zip 约 199 个）随之可以汇总。
+
+### 已接受的行为
+
+- 检查推迟到出口，落在全部访问之后。ASan 在出口一次检查整个区间，报告的大小是整个区间（如 `WRITE of size 48`），地址是第一个坏字节，位置取最先执行的来源；TSan 在出口记录一次 range 访问，与已有的循环汇总相同。
+- 循环在到达出口之前就因越界访问而崩溃（SEGV），崩溃本身就是可诊断的信号，不要求先报告（老板决定，2026-11-17）。
+- 对 ASan 的写循环，这意味着越界写在检查之前就已发生，且越界长度由数据决定、没有上界：精确次数的 LPOC 越界长度受次数约束，而 `while (*s) *d++ = *s++` 可能一直写过相邻 chunk 的头部、别的对象，甚至栈帧（含返回地址），直到出口或 SEGV。只要循环正常退出，出口处的检查仍会报告并终止程序（默认 `halt_on_error=1`）；循环里没有调用（有调用就是 barrier，不会汇总），被破坏的数据在报告前不会被分配器或返回指令使用。若越界写改写了循环自己要读的数据（例如源串与目标重叠），循环可能不再退出，最终表现为 SEGV 或挂起。recover 模式（`halt_on_error=0`）报告后继续运行，此时内存已被破坏。
+- 原生 ASan 在第一次越界访问时报告；MAIR 在出口报告，报告的“访问”是合并后的区间。
+
+度量（`-O2`，静态，`-mair-stats` 与 E 组 `LoopReasons` 插件统计插桩后仍在循环内的检查）：
+
+| | 7zip ASan | 7zip TSan | sqlite3 ASan（fuzzer-no-link） | sqlite3 ASan（无 fuzzer） |
+|---|---|---|---|---|
+| `lpoc` `exit-trip` | 212 | 191 | 92 | 133 |
+| `lpoc` `range` + `periodic` | 1405 → 1813 | 1366 → 1740 | 649 → 763 | 681 → 838 |
+| `lpoc` `rej-nocount` | 237 → 2 | 216 → 3 | 94 → 0 | 138 → 0 |
+| 循环内残留检查 | 24843 → 24605 | 28295 → 28092 | 12619 → 12561 | 12256 → 12168 |
+| 其中“仿射单 exiting block、无精确次数” | 499 → 155 | 460 → 149 | 113 → 2 | 164 → 10 |
+
+`range` + `periodic` 增量里除 `exit-trip` 外的部分来自 `ptrtoint` 精确次数。残留总数降得比“单 exiting block”一类少，因为汇总后的检查放在内层循环出口，若外层循环有 barrier 或地址非仿射，它仍算外层循环里的残留，只是从每个内层迭代一次变成每个外层迭代一次。剩下的“单 exiting block”残留主要是一个 exiting block 跳到多个出口块（`switch`）的循环，以及外层循环里由内层汇总得到的符号大小区间。
+
+TODO：
+- 多出口（N4 第二步），包括一个 exiting block 用 `switch` 跳到多个出口块：需要在每条出口边放各自的区域，扩展物化。
+- `cur + zext i32 {…}` 这类 32 位无符号下标（`wrap_idx`）：地址不是仿射递推，归为 `rej-nonaffine`，是第二步的前置。
+
+测试：`test/MAIR/TestCases/loop-early-exit.ll`（正例 `until_neg`、判断之后的写 `store_after_test`、指针归纳变量、`copy_until`、32 位 `nsw` 计数器、无 wrap 标志的 `size_t` 计数器、`ptrtoint` 精确次数；负例条件执行、多出口、步长超过一页；统计行），`test/MAIR/TestCases/asan/mair-early-exit-oob.c`（越界读、越界写、仅指针归纳变量的越界写都报告，界内不误报，barrier 负例），`test/MAIR/TestCases/tsan/mair-early-exit-race.c` 与 `mair-early-exit-race-norace.c`（竞争仍报告；区间不多出停止元素之后、判断之后未写的元素，0 轮时为空），单元测试 `LoopPeriodicObservationCombinePass.ReadsTheTripCountOffAnExitValue`（按 BTC 求值的读写大小）、`ExitTripCountStopsAtACallBarrier`、`MAIRSchema.PtrToIntExpressionVerifiesAndPrints`。
 
 ## 地址合并
 

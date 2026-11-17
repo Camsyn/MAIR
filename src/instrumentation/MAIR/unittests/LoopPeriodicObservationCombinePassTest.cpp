@@ -751,4 +751,129 @@ exit:
   EXPECT_TRUE(Graph.verify());
 }
 
+// Evaluates a size or count expression with \p Leaf bound to \p LeafValue.
+llvm::APInt evaluate(const MAIRScalarExpr &Expr, const llvm::Value *Leaf,
+                     uint64_t LeafValue) {
+  using Kind = MAIRScalarExpr::Kind;
+  unsigned Bits = Expr.getType()->getIntegerBitWidth();
+  auto Operand = [&](unsigned Index) {
+    return evaluate(Expr.operands()[Index], Leaf, LeafValue);
+  };
+  switch (Expr.getKind()) {
+  case Kind::Constant:
+    return Expr.getConstant();
+  case Kind::LLVMValue:
+    EXPECT_EQ(Expr.getLLVMValue(), Leaf);
+    return llvm::APInt(Bits, LeafValue);
+  case Kind::ZeroExtend:
+    return Operand(0).zext(Bits);
+  case Kind::Add:
+    return Operand(0) + Operand(1);
+  case Kind::Mul:
+    return Operand(0) * Operand(1);
+  case Kind::UDiv:
+    return Operand(0).udiv(Operand(1));
+  default:
+    ADD_FAILURE() << "unexpected expression kind";
+    return llvm::APInt(Bits, 0);
+  }
+}
+
+constexpr const char *DataDependentLoopIR = R"IR(
+declare void @g()
+
+define void @f(ptr %a, ptr %b) {
+entry:
+  br label %header
+header:
+  %i = phi i64 [ 0, %entry ], [ %next, %body ]
+  %pa = getelementptr inbounds i64, ptr %a, i64 %i
+  %v = load i64, ptr %pa, align 8
+  %neg = icmp slt i64 %v, 0
+  br i1 %neg, label %exit, label %body
+body:
+  %pb = getelementptr inbounds i64, ptr %b, i64 %i
+  store i64 1, ptr %pb, align 8
+  CALL
+  %next = add nuw nsw i64 %i, 1
+  br label %header
+exit:
+  ret void
+}
+)IR";
+
+// SCEV computes no trip count for a loop that leaves on loaded data. At the
+// exit, %i holds the backedge-taken count BTC: the load in the header ran
+// BTC + 1 times, the store after the exit test BTC times.
+TEST(LoopPeriodicObservationCombinePass, ReadsTheTripCountOffAnExitValue) {
+  llvm::LLVMContext Ctx;
+  std::string IR = DataDependentLoopIR;
+  IR.replace(IR.find("CALL"), 4, "");
+  auto M = parseModule(IR, Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &F = *M->getFunction("f");
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(F, FAM);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+  ASSERT_TRUE(isa<llvm::SCEVCouldNotCompute>(
+      FAM.getResult<llvm::ScalarEvolutionAnalysis>(F).getBackedgeTakenCount(
+          *FAM.getResult<llvm::LoopAnalysis>(F).begin())));
+
+  EXPECT_FALSE(
+      runPassOnGraphTree(LoopPeriodicObservationCombinePass(), Graph, AM)
+          .areAllPreserved());
+  EXPECT_EQ(observationCount(Graph, "header"), 0u);
+  EXPECT_EQ(observationCount(Graph, "body"), 0u);
+  ASSERT_EQ(observationCount(Graph, "exit"), 2u);
+  const llvm::Value *I = nullptr;
+  for (llvm::BasicBlock &Block : F)
+    for (llvm::Instruction &Inst : Block)
+      if (Inst.getName() == "i")
+        I = &Inst;
+  ASSERT_NE(I, nullptr);
+  for (const ProgramPoint &PP : testProgramPoints(Graph)) {
+    if (!PP.getBasicBlock() || PP.getBasicBlock()->getName() != "exit")
+      continue;
+    for (const Observation &Obs : PP) {
+      const AbstractAccess *Range = Obs.getContiguousRegion();
+      ASSERT_NE(Range, nullptr);
+      ASSERT_TRUE(Range->hasSizeExpr());
+      bool IsLoad = Obs.getKind() == AccessKind::Read;
+      EXPECT_EQ(Range->getBase(), F.getArg(IsLoad ? 0 : 1));
+      for (uint64_t BTC : {0, 1, 7}) {
+        SCOPED_TRACE(BTC);
+        EXPECT_EQ(evaluate(Range->getSizeExpr(), I, BTC).getZExtValue(),
+                  8 * (IsLoad ? BTC + 1 : BTC));
+      }
+    }
+  }
+  EXPECT_TRUE(Graph.verify());
+}
+
+TEST(LoopPeriodicObservationCombinePass, ExitTripCountStopsAtACallBarrier) {
+  llvm::LLVMContext Ctx;
+  std::string IR = DataDependentLoopIR;
+  IR.replace(IR.find("CALL"), 4, "call void @g()");
+  auto M = parseModule(IR, Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &F = *M->getFunction("f");
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  MAIRGraph Graph = createGraphWithFunctionAnalyses<CallBarrierTrait>(F, FAM);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  EXPECT_TRUE(
+      runPassOnGraphTree(LoopPeriodicObservationCombinePass(), Graph, AM)
+          .areAllPreserved());
+  EXPECT_EQ(observationCount(Graph, "header"), 1u);
+  EXPECT_EQ(observationCount(Graph, "body"), 1u);
+  EXPECT_EQ(observationCount(Graph, "exit"), 0u);
+  EXPECT_TRUE(Graph.verify());
+}
+
 } // namespace

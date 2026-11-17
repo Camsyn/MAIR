@@ -531,6 +531,9 @@ void UnalignedMemoryAccess(ThreadState *thr, uptr pc, uptr addr, uptr size,
 // This creates 2 non-inlined specialized versions of MemoryAccessRange.
 template <bool is_read>
 void MemoryAccessRangeT(ThreadState *thr, uptr pc, uptr addr, uptr size);
+template <bool is_read>
+void MemoryAccessPeriodicT(ThreadState* thr, uptr pc, uptr start, sptr stride,
+                           uptr size, uptr count);
 
 ALWAYS_INLINE
 void MemoryAccessRange(ThreadState *thr, uptr pc, uptr addr, uptr size,
@@ -541,6 +544,15 @@ void MemoryAccessRange(ThreadState *thr, uptr pc, uptr addr, uptr size,
     MemoryAccessRangeT<false>(thr, pc, addr, size);
   else
     MemoryAccessRangeT<true>(thr, pc, addr, size);
+}
+
+ALWAYS_INLINE
+void MemoryAccessPeriodic(ThreadState* thr, uptr pc, uptr start, sptr stride,
+                          uptr size, uptr count, bool is_write) {
+  if (is_write)
+    MemoryAccessPeriodicT<false>(thr, pc, start, stride, size, count);
+  else
+    MemoryAccessPeriodicT<true>(thr, pc, start, stride, size, count);
 }
 
 void ShadowSet(RawShadow *p, RawShadow *end, RawShadow v);

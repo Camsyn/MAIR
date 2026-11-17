@@ -746,6 +746,51 @@ template void MemoryAccessRangeT<true>(ThreadState* thr, uptr pc, uptr addr,
 template void MemoryAccessRangeT<false>(ThreadState* thr, uptr pc, uptr addr,
                                         uptr size);
 
+// MAIR periodic accesses (__tsan_{read,write}_periodic): the bytes
+// [start + i * stride, start + i * stride + size) for 0 <= i < count, which
+// stand for one loop access over all its iterations. Each trip is recorded
+// as native TSan records that access in one iteration, with the same
+// callbacks the fixed-width entries use: MemoryAccess for one that fits a
+// shadow cell, UnalignedMemoryAccess for one that crosses into the next,
+// MemoryAccess16 for 16 bytes, and MemoryAccessRangeT for any other size. So
+// a trip is traced only if it changes the shadow, a race on it is reported at
+// this access, and the gaps between the trips of a strided access are not
+// recorded. They are inlined here, and the call costs one thread lookup for
+// all the trips.
+template <bool is_read>
+void MemoryAccessPeriodicT(ThreadState* thr, uptr pc, uptr start, sptr stride,
+                           uptr size, uptr count) {
+  const AccessType typ = is_read ? kAccessRead : kAccessWrite;
+  uptr addr = start;
+  if (size == 1 || size == 2 || size == 4 || size == 8) {
+    for (uptr i = 0; i < count; ++i, addr += (uptr)stride) {
+      if (LIKELY(addr % kShadowCell + size <= kShadowCell))
+        MemoryAccess(thr, pc, addr, size, typ);
+      else
+        UnalignedMemoryAccess(thr, pc, addr, size, typ);
+    }
+  } else if (size == 16) {
+    for (uptr i = 0; i < count; ++i, addr += (uptr)stride) {
+      if (LIKELY(addr % kShadowCell == 0)) {
+        MemoryAccess16(thr, pc, addr, typ);
+      } else {
+        // As __tsan_unaligned_read16 and __tsan_unaligned_write16.
+        UnalignedMemoryAccess(thr, pc, addr, 8, typ);
+        UnalignedMemoryAccess(thr, pc, addr + 8, 8, typ);
+      }
+    }
+  } else if (size != 0) {
+    for (uptr i = 0; i < count; ++i, addr += (uptr)stride)
+      MemoryAccessRangeT<is_read>(thr, pc, addr, size);
+  }
+}
+
+template void MemoryAccessPeriodicT<true>(ThreadState* thr, uptr pc, uptr start,
+                                          sptr stride, uptr size, uptr count);
+template void MemoryAccessPeriodicT<false>(ThreadState* thr, uptr pc,
+                                           uptr start, sptr stride, uptr size,
+                                           uptr count);
+
 }  // namespace __tsan
 
 #if !SANITIZER_GO

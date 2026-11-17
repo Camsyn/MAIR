@@ -153,7 +153,19 @@ native ASan 永远不查的 load/store（`getInterestingMemoryOperands` 为空�
 TSan 同样按 Observation 的区域记录访问（`XsanThreadSanitizer::instrumentMAIRObservation` 和 `sanitizeFunctionViaMAIR` 里的 `CanInstrumentViaMAIR`，`src/instrumentation/llvm23/ThreadSanitizer.cpp`）。native TSan 永远不记录的 load/store（委托给 XSan、swifterror、`shouldInstrumentReadWriteFromAddress` 为假、读常量数据、未被捕获的 alloca）与 ASan 一样在优化前删掉（`NativeTsanOmits`，测试 `test/MAIR/TestCases/tsan/mair-unrecorded-sources.ll`）。vtable 指针访问也在优化前删掉，交回 native 的 `__tsan_vptr_{read,update}`：它们给访问打上 vptr 标记，竞态才报成 "data race on vptr"，range 与普通入口都表达不了这一点，所以 vptr 访问不参与 MAIR 优化，既不覆盖也不合并普通访问。剩下的每个来源还要是 load/store 且不是 TSan atomic。固定长度向量与 native 一样按整个存储大小算一次访问，可以与标量访问合并；scalable 向量的大小不是常量，区域检查拒绝它（native 也不记录）。测试 `test/MAIR/TestCases/tsan/mair-vector-vptr.ll`、`mair-race-vptr.cpp`。开 `-ts-distinguish-volatile` 时含 volatile 来源的 Observation 退回 native。TSan 的读、写、读写层次互不相同，合并只发生在同层次之间，所以不会把读记成写。
 
 - 连续区间：2 的幂且不超过 16 字节时，与 native 单次访问相同地选择 `__tsan_{read,write}N`、`unaligned` 或 compound 变体（起点对齐取自 MAIR 区域，见 `docs/mair-region-alignment.md`）；其他大小（如 12、32 字节的向量，native 不记录）或运行时大小用 `__tsan_{read,write}_range`。LLVM 的 load/store 访问的是类型的 store size，总是整字节（i129 存 17 字节），所以不存在“非整字节”的访问。
-- periodic 区域：常量 stride 不大于 access size 时足迹连续，按 `[Start, Start + (Trips - 1) * |Stride| + AccessSize)` 记一次 range（下降 stride 起点下移，trip 为 0 时 size 为 0，runtime 直接返回）。其他情况（有空隙或 stride 只在运行时已知）调用 `__tsan_{read,write}_periodic(start, stride, size, count)`（`src/runtime/lib/tsan/rtl/tsan_interface.inc`），runtime 逐轮记录 `size` 字节，空隙不记。
+- periodic 区域：常量 stride 不大于 access size 时足迹连续，按 `[Start, Start + (Trips - 1) * |Stride| + AccessSize)` 记一次 range（下降 stride 起点下移，trip 为 0 时 size 为 0，runtime 直接返回）。其他情况（有空隙或 stride 只在运行时已知）调用 `__tsan_{read,write}_periodic(start, stride, size, count)`（`src/runtime/lib/tsan/rtl/tsan_interface.inc`），runtime 逐轮记录 `size` 字节，空隙不记。`MemoryAccessPeriodicT`（新增在 `src/runtime/lib/tsan/rtl/tsan_rtl_access.cpp`，没有改动 TSan 原有代码）对每一轮的处理与 native 插桩在一次迭代里的做法相同，直接复用 TSan 原有的函数：
+  - 1/2/4/8 字节、落在一个 shadow cell 内：`MemoryAccess`；
+  - 1/2/4/8 字节、跨入下一个 cell：`UnalignedMemoryAccess`；
+  - 16 字节：起点按 8 对齐时用 `MemoryAccess16`，否则拆成两次 `UnalignedMemoryAccess`；
+  - 其他大小：`MemoryAccessRangeT`。
+
+  这些函数内联进循环，各 cell 用的仍是 SSE 版本的 `ContainsSameAccess`/`CheckRaces`。某一轮的 shadow 已含本次访问时就不写 trace；竞态报在调用点；整次调用只取一次线程状态。
+
+  Release runtime microbenchmark（stride 16、size 4）：
+  - 同一 epoch 内重复访问，64 轮从 95.6 降到 50.9 ns，与 native 每轮一次 `__tsan_read4`（51.4 ns）持平。原实现每轮都完整走一次 range 入口并无条件写 trace。
+  - 每次换 epoch 时与改前持平。
+
+  测试：`test/MAIR/TestCases/tsan/mair-periodic-runtime.c`。
 - 报告位置取最先执行的来源（`mair::getFirstSource`，`src/instrumentation/MAIR/Materialization/MAIRMaterialization.cpp`，与 ASan 共用）；访问类型就是 Observation 的类型。循环区间在出口处记录，所以与之竞争的另一线程访问常表现为 “Write … Previous read”。
 
 测试：`test/MAIR/TestCases/tsan/mair-merged-access.c`、`mair-loop-range.c`、`mair-strided-loop.c`、`mair-report-first-source.c`（IR），`mair-race-*.c`、`mair-strided-loop.c`（竞争仍报告、空隙与界外不误报）。

@@ -577,6 +577,9 @@ void UnalignedMemoryAccess(ThreadState *thr, uptr pc, uptr addr, uptr size,
 // This creates 2 non-inlined specialized versions of MemoryAccessRange.
 template <bool is_read>
 void MemoryAccessRangeT(ThreadState *thr, uptr pc, uptr addr, uptr size);
+template <bool is_read>
+void MemoryAccessPeriodicT(ThreadState* thr, uptr pc, uptr start, sptr stride,
+                           uptr size, uptr count);
 
 ALWAYS_INLINE
 void MemoryAccessRange(ThreadState *thr, uptr pc, uptr addr, uptr size,

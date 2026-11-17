@@ -85,6 +85,8 @@ barrier 也要考虑重复执行：被覆盖的一端所在块如果能在不经
 
 例外与未覆盖：一边偏移是常量 0、另一边是以 phi 为基址的符号指针时，前者用不透明的基址，后者 SCEV 展开为 AddRec，求不出常量差（保守遗漏）；表达式大小的区间和 periodic 区域不走常量差。测试：`redundant-observation-elimination.ll` 中正例 `same_block_levels`（同一 ProgramPoint 内也生效）、`same_symbol_narrower`、`struct_cross_block`、`scaled_cross_block`、`two_equal_geps`；负例 `negative_delta_and_oversize`（$\Delta<0$、超出大小）、`no_constant_delta`（无关下标；不带 nsw 的 32 位加法可能回绕，求不出常量差）、`iterated_pdom`（目标随迭代变化）、`iterated_pdom_invariant`（只被保守条件拦下：去掉条件后该用例失败）。
 
+**表达式大小的包含。** 周期合并为每个循环各建一棵长度表达式，两个循环遍历同样的 `n` 个元素时，得到的是结构相同、节点不同的两棵树。`AbstractAccess::operator==` 按节点身份比较 SizeExpr（合并和移动用它判断结果是哪一边，不改），所以 `contains` 对带 SizeExpr 的区间单独比较：基址、偏移相同，且 `MAIRScalarExpr::operator==`（逐层比较种类、类型、常量、LLVM 值和操作数）判定两棵树结构相同，即为包含。叶子是同一批 LLVM 值，和同符号偏移的覆盖一样依赖“两端取同值”，由同一套可达规则保证。只认相等，不比较大小（例如 `n*8` 与 `n*4`），也不和常量大小互相比较。效果：`if (n <= 0) return; for … p[i] = i; for … s += p[i];` 在 `-O1` 下两个循环出口各有一个区间，前者支配后者，ROE 删去后者，ASan 只剩一个 `__asan_storeN`，TSan 只剩 `__tsan_write_range`。`-O2` 下这种形态少见（分诊报告：守卫被 jump threading 合并、循环被向量化）。测试：单元测试 `AbstractAccessContainsStructurallyEqualSizeExpressions`，sanitizer 级 `test/MAIR/TestCases/{asan,tsan}/mair-repeated-range.c`。
+
 周期合并也直接按本图 ProgramPoint 的原顺序遍历。聚合目标属于父图，提交不增删本图 ProgramPoint，因此不需要快照；内层仍先递增迭代器再删除当前 Observation。来源指针查询使用 LLVM 的 `getLoadStorePointerOperand`，仅接受 load/store，并保留空指针检查。
 
 优化输入统计按每次本层 pass 调用累计；Observation 导出后再次作为父层输入，会再次计入该统计，这不表示重复物化。`print<stat>` 则汇总当前整树的 ProgramPoint 和 Observation 数量。

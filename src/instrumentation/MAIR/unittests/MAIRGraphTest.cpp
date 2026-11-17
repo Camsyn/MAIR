@@ -635,6 +635,46 @@ entry:
       llvm::Align(1));
 }
 
+TEST(MAIRGraph, AbstractAccessContainsStructurallyEqualSizeExpressions) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i64 %n) {
+entry:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &F = *M->getFunction("f");
+  const llvm::Argument &P = *F.getArg(0);
+  llvm::Type &I64 = *llvm::Type::getInt64Ty(Ctx);
+  MAIRGraph Graph(F);
+
+  // n * Scale, built anew on each call.
+  auto SizedAccess = [&](uint64_t Offset, uint64_t Scale) {
+    MAIRScalarExpr Size = Graph.createBinaryExpr(
+        MAIRScalarExpr::Kind::Mul, I64, Graph.createValueExpr(*F.getArg(1)),
+        Graph.createConstantExpr(I64, llvm::APInt(64, Scale)));
+    AbstractAccess Access(&P, AbstractValue::constant(Offset), AbstractValue());
+    Access.setSizeExpr(Size);
+    return Access;
+  };
+  AbstractAccess A = SizedAccess(0, 8);
+  AbstractAccess B = SizedAccess(0, 8);
+  ASSERT_NE(A.getSizeExpr().getOpaqueNode(), B.getSizeExpr().getOpaqueNode());
+
+  // Equality stays identity-based; containment compares the structure.
+  EXPECT_NE(A, B);
+  EXPECT_TRUE(A.contains(B));
+  EXPECT_TRUE(B.contains(A));
+  EXPECT_FALSE(A.contains(SizedAccess(0, 4)));
+  EXPECT_FALSE(A.contains(SizedAccess(8, 8)));
+  AbstractAccess Constant(&P, AbstractValue::constant(0),
+                          AbstractValue::constant(8));
+  EXPECT_FALSE(A.contains(Constant));
+  EXPECT_FALSE(Constant.contains(A));
+}
+
 TEST(MAIRGraph, GraphTraitsExposeProgramPointGraph) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(

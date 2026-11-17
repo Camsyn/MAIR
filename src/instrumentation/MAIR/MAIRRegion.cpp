@@ -239,6 +239,12 @@ bool AbstractAccess::contains(const AbstractAccess &Other,
     return true;
   if (Base != Other.Base)
     return false;
+  // Equal lengths computed for different loops are separate expression
+  // nodes, so compare their structure here. operator== keeps comparing node
+  // identity, which merging and motion use to pick a result.
+  if (hasSizeExpr() || Other.hasSizeExpr())
+    return hasSizeExpr() && Other.hasSizeExpr() && Offset == Other.Offset &&
+           SizeExpr == Other.SizeExpr;
   if (!Size.isConstant() || !Other.Size.isConstant())
     return false;
   if (!Offset.isConstant() || !Other.Offset.isConstant()) {

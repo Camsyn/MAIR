@@ -125,7 +125,7 @@ $$
 
 **图收缩（SimplifyGraph）。** 若 $u\,E^D\,v$ 且 $v\,E^P\,u$，两个 PP 的 site 与 guard 具有兼容的执行语义，且 $u$ 的全部 Observation 可移动，则可将 $u$ 的 payload 下沉至 $v$ 并收缩图。跨基本块时，当前实现还要求两端处于同一最内层循环。互有无类型边并不足以允许收缩。
 
-**冗余观测删除（ROE）。** 若独立且保留的 $o_1$ 在同一 PP 内或经允许的覆盖传播到达 $o_2$，并满足 $\operatorname{covers}_s(o_1,o_2)$，则可删除 $o_2$ 这一 Observation。覆盖必须同时处理动态区域包含、访问类型、属性和目标 Observation 的删除能力。
+**冗余观测删除（ROE）。** 若独立且保留的 $o_1$ 在同一 PP 内或经允许的覆盖传播到达 $o_2$，并满足 $\operatorname{covers}_s(o_1,o_2)$，则可删除 $o_2$ 这一 Observation。覆盖必须同时处理动态区域包含、访问类型、属性和目标 Observation 的删除能力。当前实现中，两个常量大小的连续区间若不以相同的值命名地址，可以用 ScalarEvolution 证明两个起始地址之差为常量 $\Delta$，再按 $0\le\Delta$、$\Delta+|o_2|\le|o_1|$ 判断包含；此时还要求 $o_1$ 在 $o_2$ 不变的每个被迭代环中也不变。论证见 `docs/mair-loops.md` 的“常量差覆盖”段。
 
 **同 PP 区域合并（LocationMerge）。** 只有在两个 Observation 属于同一 PP、语义兼容且可合并，并且 $\ell_1\cup\ell_2$ 可在目标处精确表达时，才能用一个 Observation 替代二者。替代 Observation 的类型为 $t_1\sqcup t_2$，并保留必要属性与来源。不能以包含未观测空隙的外包区间代替精确并集；当前 pass 不聚合周期区域。
 

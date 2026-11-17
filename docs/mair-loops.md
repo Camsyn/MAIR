@@ -73,6 +73,18 @@ barrier 也要考虑重复执行：被覆盖的一端所在块如果能在不经
 
 同一 ProgramPoint 内，常量偏移、常量大小的连续区间按区间扫描消冗余；同一对象的其余 Observation（符号偏移、表达式大小、periodic、masked）排在其常量区间之后，组内两两用 `Observation::covers` 判断（`eliminateNonConcreteRun`，`RedundantObservationEliminationPass.cpp`）。没有这一步时，TSan 下 `p[i]++` 和 `static _Thread_local long t; t += 1;` 的读和写落在同一 ProgramPoint，地址是符号，读留了下来，比 native（只有 `__tsan_write*`）多一个回调。被删者从后往前取，见证从前往后找，所以互相覆盖的两者留下链表中靠前的一个，与常量区间一致；用过的见证此后不再删除，因为跨原子性的覆盖要求两边都可合并，覆盖不一定传递，每个被删者自己的见证都必须留下。组内是平方复杂度，与位置合并的符号区间一样；同一对象的非常量 Observation 在合并之后通常只有个位数。测试：`redundant-observation-elimination.ll` 的 `same_offset_levels`、`same_offset_equal_reads`，单元测试 `RedundantObservationKeepsFirstEqualSymbolicObservation`，sanitizer 级 `test/MAIR/TestCases/tsan/mair-read-modify-write.c`（MAIR 与 native 输出一致）。
 
+**常量差覆盖。** `AbstractAccess::contains`（`src/instrumentation/MAIR/MAIRRegion.cpp`）比较两个常量大小、偏移不全是常量的连续区间时，先求被覆盖者起点相对见证起点的距离 $\Delta$：偏移是同一个符号时 $\Delta=0$；否则若调用者给了 ScalarEvolution，用 `constantAddressDelta`（`getAddressSCEV` 后 `computeConstantDifference`，与位置合并同一实现）求常量差。包含条件是 $0\le\Delta$ 且 $\Delta+|o_2|\le|o_1|$，用 128 位算术。只有 ROE 传 SE（`RedundantObservationEliminationPass::run` 从 `LoopAnalysis` 取，方式同 `LocationMergePass`），intra 和 inter 都用；`Observation::covers`、`RedundantObservationInfo::isCovered` 的 SE 参数默认为空，其他调用者行为不变。跨 ProgramPoint 时还有一条保守条件：见证必须在目标不变的每个被迭代环中也不变，即 `closedCycles(Source) ⊆ closedCycles(Target)`（`RedundantObservationInfo::isCovered`）。
+
+正确性。`computeConstantDifference` 返回常量，说明两个地址的 SCEV 在消去相同项后只差常量：两边由同一组叶子（SCEVUnknown，即 SSA 值）和同一组 AddRec 组成。所以只需证明：见证执行时和目标执行时，每个叶子取同一个值，每个 AddRec 所在循环处在同一轮。原有的同符号覆盖证明的是同一件事，对象是地址的直接操作数；这里对象换成了它们的传递操作数。叶子的定义支配地址的计算（操作数支配使用；SCEV 穿过 phi 时只取支配该 phi 的入值，如 LCSSA phi、同值 phi、select 形 phi），AddRec 对应循环 header 的 phi，所以下面的论证对叶子和直接操作数一样成立。
+
+- Dom 引理：`W` 支配 `T`，`x` 的定义支配 `W`。在 `T` 之前最后一次执行 `x` 的定义之后，控制流一定又经过了 `W`。否则把“从入口第一次到达 `x` 的定义”（这段不经过 `W`，因为 `x` 的定义支配 `W`）和“从最后一次定义到 `T`”拼起来，就得到一条不经过 `W` 到 `T` 的路径。所以 `W` 最后一次执行时看到的 `x` 就是 `T` 看到的 `x`。对 AddRec，把 `x` 换成循环 header：同层的 `W`、`T` 处在所在循环的同一轮；地址用到已退出子循环里的值时，该值的定义支配循环外的使用，自然循环中它一定在最后一轮执行，两边都取最后一轮的值。
+- PostDom：沿用已有条件，两端在同一最内层循环（`sameLoopForPostDom`），且边不迭代环时两端之间没有开始新一轮迭代，支配目标的定义不会在两者之间重新执行。
+- Iterated：边迭代环 `C` 时，只对在 `C` 中不变的目标开放。若目标在 `C` 中不变（直接操作数都定义在 `C` 外），其所有传递操作数也在 `C` 外：取一条先在 `C` 外走到 `C` 的某个入口、再在 `C` 内走到目标的路径（环强连通，这样的路径存在）；直接操作数的定义支配目标，只能在 `C` 外的前缀上，而传递操作数的定义支配直接操作数的定义，也在这段前缀上。保守条件要求见证同样在 `C` 中不变，于是两边的叶子都不随 `C` 迭代，也没有 `C` 的 AddRec，绕环不改变两个地址。不加这条条件时，见证可能用环内定义、SCEV 上不变的值（如 `iterated_pdom_invariant` 里在环内计算的 `p[k-1]`）覆盖环外不变的目标；这仍然正确，但论证要多一步“SCEV 不变”，收益据分诊报告在 e2e 中为 0，所以不做。
+- 不可约环：LLVM 不为它建 `Loop`，SCEV 不生成它的 AddRec，环里的 phi 是 SCEVUnknown 叶子，上面的叶子论证直接适用。
+- 残余风险（nsw/nuw）：常量差可能依赖无符号或有符号不溢出的标志，例如 `sext(i + 1) - sext(i) = 1` 需要 `add nsw`，或 inbounds GEP。标志不成立时该值是 poison，经它的访问在源程序里是 UB。位置合并的 `constantAddressDelta` 有同样的前提，LLVM 自身的优化也依赖它。
+
+例外与未覆盖：一边偏移是常量 0、另一边是以 phi 为基址的符号指针时，前者用不透明的基址，后者 SCEV 展开为 AddRec，求不出常量差（保守遗漏）；表达式大小的区间和 periodic 区域不走常量差。测试：`redundant-observation-elimination.ll` 中正例 `same_block_levels`（同一 ProgramPoint 内也生效）、`same_symbol_narrower`、`struct_cross_block`、`scaled_cross_block`、`two_equal_geps`；负例 `negative_delta_and_oversize`（$\Delta<0$、超出大小）、`no_constant_delta`（无关下标；不带 nsw 的 32 位加法可能回绕，求不出常量差）、`iterated_pdom`（目标随迭代变化）、`iterated_pdom_invariant`（只被保守条件拦下：去掉条件后该用例失败）。
+
 周期合并也直接按本图 ProgramPoint 的原顺序遍历。聚合目标属于父图，提交不增删本图 ProgramPoint，因此不需要快照；内层仍先递增迭代器再删除当前 Observation。来源指针查询使用 LLVM 的 `getLoadStorePointerOperand`，仅接受 load/store，并保留空指针检查。
 
 优化输入统计按每次本层 pass 调用累计；Observation 导出后再次作为父层输入，会再次计入该统计，这不表示重复物化。`print<stat>` 则汇总当前整树的 ProgramPoint 和 Observation 数量。

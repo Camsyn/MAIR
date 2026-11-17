@@ -28,17 +28,22 @@ uint64_t RedundantObservationInfo::closedCycles(const Observation &Obs) const {
 
 bool RedundantObservationInfo::isCovered(
     const Observation &Obs,
-    const DenseSet<const Observation *> &ExcludedSources) const {
+    const DenseSet<const Observation *> &ExcludedSources,
+    ScalarEvolution *SE) const {
   const ProgramPoint *Target = Obs.getParent();
-  // A covering observation names the same bytes through the same values, so
-  // the cycles that are closed to Obs are closed to it as well.
-  const Reachability &Reach = ByClosedCycles.find(closedCycles(Obs))->second;
+  // Obs is reached along the edges open to it. A witness that names the same
+  // bytes through the same values is invariant in the same cycles. A witness
+  // at a constant distance through other values (SE) may not be, so it must
+  // not be closed in a cycle that Obs is open in.
+  const uint64_t Closed = closedCycles(Obs);
+  const Reachability &Reach = ByClosedCycles.find(Closed)->second;
   const unsigned Component = Reach.ComponentOf[PointIndex.find(Target)->second];
   const SparseBitVector<> &Sources = Reach.ReachingSources[Component];
   if (Sources.empty())
     return false;
   auto Covers = [&](const Observation &Source) {
-    return !ExcludedSources.contains(&Source) && Source.covers(Obs);
+    return !ExcludedSources.contains(&Source) && Source.covers(Obs, SE) &&
+           (closedCycles(Source) & ~Closed) == 0;
   };
 
   // A witness is an observation of the same memory object at a reaching

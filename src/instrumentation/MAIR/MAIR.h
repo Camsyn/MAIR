@@ -299,7 +299,14 @@ public:
     Size = AbstractValue();
   }
 
-  bool contains(const AbstractAccess &Other) const;
+  /// Whether every byte of \p Other is a byte of this access. Symbols are
+  /// compared as the values they denote at both accesses, as coverage does
+  /// (SPEC: the dynamic instances paired by coverage). Two constant-sized
+  /// accesses whose offsets are not both constant are compared through the
+  /// distance from this start to Other's start: zero for the same offset
+  /// symbol, otherwise what \p SE proves constant for their address SCEVs.
+  bool contains(const AbstractAccess &Other,
+                llvm::ScalarEvolution *SE = nullptr) const;
 
   /// How getAddressSCEV expresses the base of an access at offset zero. With
   /// any other offset the base is always opaque.
@@ -829,8 +836,10 @@ public:
 
   /// Capabilities and level are fixed by the graph configuration when the
   /// observation is registered. Coverage requires LHS level >= RHS level, while
-  /// merging requires equal levels.
-  bool covers(const Observation &Other) const;
+  /// merging requires equal levels. \p SE, if given, lets contiguous regions
+  /// cover at a constant distance (AbstractAccess::contains).
+  bool covers(const Observation &Other,
+              llvm::ScalarEvolution *SE = nullptr) const;
   bool mergeWith(const Observation &Other, llvm::ScalarEvolution *SE = nullptr);
   /// Merge \p Others into this periodic observation if together they are the
   /// interleaved slices of one periodic region

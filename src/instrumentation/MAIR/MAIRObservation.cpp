@@ -281,7 +281,7 @@ bool ProgramPointEdge::isOpenTo(const Observation &Obs) const {
   return !Iterated || Obs.isInvariantIn(*Iterated);
 }
 
-bool Observation::covers(const Observation &Other) const {
+bool Observation::covers(const Observation &Other, ScalarEvolution *SE) const {
   // The witness may be pinned. Only the observation being deleted must be
   // deletable, so a retained memset can cover a later ordinary store.
   if (getBase() != Other.getBase() || !Other.isDeletable() ||
@@ -295,9 +295,9 @@ bool Observation::covers(const Observation &Other) const {
 
   if (const auto *ThisAccess = getContiguousRegion()) {
     if (const auto *OtherAccess = Other.getContiguousRegion())
-      return ThisAccess->contains(*OtherAccess);
+      return ThisAccess->contains(*OtherAccess, SE);
     if (const auto *OtherMasked = Other.getMaskedRegion())
-      return ThisAccess->contains(OtherMasked->getBounds());
+      return ThisAccess->contains(OtherMasked->getBounds(), SE);
     return false;
   }
   if (const auto *ThisMasked = getMaskedRegion()) {

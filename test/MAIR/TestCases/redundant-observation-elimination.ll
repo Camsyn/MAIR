@@ -365,3 +365,216 @@ define i32 @same_offset_equal_reads(ptr %p, i64 %i) {
   %s = add i32 %a, %b
   ret i32 %s
 }
+
+; Coverage of an access a constant distance from a symbolic anchor. Both
+; addresses are SCEVs of the same values, and ScalarEvolution proves the
+; distance (computeConstantDifference).
+
+; p is an array of 4-byte elements: the 8-byte write at p[i] covers the read
+; of p[i+1], in one program point too.
+define void @same_block_levels(ptr %p, i64 %i) {
+; CHECK-LABEL: mair graph of fn @same_block_levels {
+; CHECK:       pp1: preds=
+; CHECK-NEXT:    o: write ptr %p + %a, 8
+; CHECK:       pp2: preds=
+; CHECK-EMPTY:
+; INTRA-LABEL: mair graph of fn @same_block_levels {
+; INTRA:         pp2: preds=
+; INTRA-NEXT:      o: write ptr %p + %a, 8
+; INTRA-EMPTY:
+  %a = getelementptr [4 x i8], ptr %p, i64 %i
+  store i64 0, ptr %a, align 4
+  %i1 = add nsw i64 %i, 1
+  %b = getelementptr [4 x i8], ptr %p, i64 %i1
+  %w = load i32, ptr %b, align 4
+  ret void
+}
+
+; One symbolic offset: the wider read covers the narrower one.
+define void @same_symbol_narrower(ptr %p, i64 %i) {
+; CHECK-LABEL: mair graph of fn @same_symbol_narrower {
+; CHECK:       pp1: preds=
+; CHECK-NEXT:    o: read ptr %p + %i, 8
+; CHECK:       pp4: preds=
+; CHECK-EMPTY:
+  %a = getelementptr i8, ptr %p, i64 %i
+  %v = load i64, ptr %a, align 8
+  br label %next
+next:
+  %w = load i32, ptr %a, align 4
+  ret void
+}
+
+; The second field of a 16-byte struct, read in a conditional block, lies in
+; the 16 bytes read before the branch.
+define void @struct_cross_block(ptr %s, i64 %i, i1 %c) {
+; CHECK-LABEL: mair graph of fn @struct_cross_block {
+; CHECK:       pp1: preds=
+; CHECK-NEXT:    o: read ptr %s + %base, 16
+; CHECK:       pp4: preds=
+; CHECK-EMPTY:
+  %base = getelementptr [16 x i8], ptr %s, i64 %i
+  %y = load i128, ptr %base, align 8
+  br i1 %c, label %t, label %e
+t:
+  %f2 = getelementptr i8, ptr %base, i64 8
+  %z = load i64, ptr %f2, align 8
+  br label %e
+e:
+  ret void
+}
+
+; p[i+1] of a 4-byte array lies in the 8 bytes at p[i].
+define void @scaled_cross_block(ptr %p, i64 %i, i1 %c) {
+; CHECK-LABEL: mair graph of fn @scaled_cross_block {
+; CHECK:       pp1: preds=
+; CHECK-NEXT:    o: read ptr %p + %a, 8
+; CHECK:       pp4: preds=
+; CHECK-EMPTY:
+  %a = getelementptr [4 x i8], ptr %p, i64 %i
+  %v = load i64, ptr %a, align 4
+  br i1 %c, label %t, label %e
+t:
+  %i1 = add nsw i64 %i, 1
+  %b = getelementptr [4 x i8], ptr %p, i64 %i1
+  %w = load i32, ptr %b, align 4
+  br label %e
+e:
+  ret void
+}
+
+; Two GEPs compute the same address.
+define void @two_equal_geps(ptr %p, i64 %i) {
+; CHECK-LABEL: mair graph of fn @two_equal_geps {
+; CHECK:       pp1: preds=
+; CHECK-NEXT:    o: write ptr %p + %a, 4
+; CHECK:       pp4: preds=
+; CHECK-EMPTY:
+  %a = getelementptr i32, ptr %p, i64 %i
+  store i32 0, ptr %a, align 4
+  br label %next
+next:
+  %b = getelementptr i32, ptr %p, i64 %i
+  %w = load i32, ptr %b, align 4
+  ret void
+}
+
+; p[i-1] starts before p[i], and the 8 bytes at p[i+1] end after the 8 bytes
+; at p[i]: neither is covered.
+define void @negative_delta_and_oversize(ptr %p, i64 %i, i1 %c) {
+; CHECK-LABEL: mair graph of fn @negative_delta_and_oversize {
+; CHECK:       pp1: preds=
+; CHECK-NEXT:    o: read ptr %p + %a, 8
+; CHECK:       pp4: preds=
+; CHECK-NEXT:    o: read ptr %p + %b, 4
+; CHECK:       pp5: preds=
+; CHECK-NEXT:    o: read ptr %p + %c2, 8
+  %a = getelementptr [4 x i8], ptr %p, i64 %i
+  %v = load i64, ptr %a, align 4
+  br i1 %c, label %t, label %e
+t:
+  %im1 = add nsw i64 %i, -1
+  %b = getelementptr [4 x i8], ptr %p, i64 %im1
+  %w = load i32, ptr %b, align 4
+  %i2 = add nsw i64 %i, 1
+  %c2 = getelementptr [4 x i8], ptr %p, i64 %i2
+  %x = load i64, ptr %c2, align 4
+  br label %e
+e:
+  ret void
+}
+
+; No constant distance: p[j] is unrelated to p[i], and i + 1 computed in 32
+; bits without nsw may wrap before it is extended.
+define void @no_constant_delta(ptr %p, i32 %i, i64 %j, i1 %c) {
+; CHECK-LABEL: mair graph of fn @no_constant_delta {
+; CHECK:       pp1: preds=
+; CHECK-NEXT:    o: read ptr %p + %a, 8
+; CHECK:       pp4: preds=
+; CHECK-NEXT:    o: read ptr %p + %b, 4
+; CHECK:       pp5: preds=
+; CHECK-NEXT:    o: read ptr %p + %c1, 4
+  %ie = sext i32 %i to i64
+  %a = getelementptr [4 x i8], ptr %p, i64 %ie
+  %v = load i64, ptr %a, align 4
+  br i1 %c, label %t, label %e
+t:
+  %b = getelementptr [4 x i8], ptr %p, i64 %j
+  %w = load i32, ptr %b, align 4
+  %i1 = add i32 %i, 1
+  %i1e = sext i32 %i1 to i64
+  %c1 = getelementptr [4 x i8], ptr %p, i64 %i1e
+  %x = load i32, ptr %c1, align 4
+  br label %e
+e:
+  ret void
+}
+
+; B post-dominates A only around the back edge. For i < 3 A runs and B does
+; not in that iteration, so B's read of p[i] does not cover A's read of
+; p[i+1]: the edge is closed to A, whose address changes every iteration.
+define void @iterated_pdom(ptr %p) {
+; CHECK-LABEL: mair graph of fn @iterated_pdom of loop %H {
+; CHECK:       pp7: preds=
+; CHECK-NEXT:    o: read ptr %p + %a, 8
+; CHECK:       pp10: preds=
+; CHECK-NEXT:    o: read ptr %p + %b, 4
+entry:
+  br label %H
+H:
+  %i = phi i64 [ 0, %entry ], [ %i.next, %A ]
+  %small = icmp ult i64 %i, 3
+  %a = getelementptr [4 x i8], ptr %p, i64 %i
+  %i1 = add nsw i64 %i, 1
+  %b = getelementptr [4 x i8], ptr %p, i64 %i1
+  br i1 %small, label %X, label %B
+X:
+  br label %A
+B:
+  %v = load i64, ptr %a, align 4
+  %d = icmp eq i64 %i, 100
+  br i1 %d, label %exit, label %A
+A:
+  %w = load i32, ptr %b, align 4
+  %i.next = add nsw i64 %i, 1
+  br label %H
+exit:
+  ret void
+}
+
+; A reads p[k], which is invariant in the loop, so the iterated edge is open
+; to it. B reads the 8 bytes at p[k-1], which cover p[k], through a GEP
+; computed in the loop. The address is the same in every iteration, but a
+; witness must be invariant in every cycle its target is, so B does not
+; cover A. B does not exit the loop: LoopSimplify hoists the leading invariant
+; instructions of an exiting block to the preheader.
+define void @iterated_pdom_invariant(ptr %p, i64 %k) {
+; CHECK-LABEL: mair graph of fn @iterated_pdom_invariant of loop %H {
+; CHECK:       pp7: preds=
+; CHECK-NEXT:    o: read ptr %p + %a, 8
+; CHECK:       pp12: preds=
+; CHECK-NEXT:    o: read ptr %p + %t, 4
+entry:
+  %t = getelementptr [4 x i8], ptr %p, i64 %k
+  br label %H
+H:
+  %i = phi i64 [ 0, %entry ], [ %i.next, %A ]
+  %small = icmp ult i64 %i, 3
+  br i1 %small, label %X, label %B
+X:
+  br label %A
+B:
+  %k1 = add nsw i64 %k, -1
+  %a = getelementptr [4 x i8], ptr %p, i64 %k1
+  %v = load i64, ptr %a, align 4
+  br label %latch
+latch:
+  %d = icmp eq i64 %i, 100
+  br i1 %d, label %exit, label %A
+A:
+  %w = load i32, ptr %t, align 4
+  %i.next = add nsw i64 %i, 1
+  br label %H
+exit:
+  ret void
+}

@@ -1,4 +1,5 @@
 #include "MAIR/Transforms/RedundantObservationEliminationPass.h"
+#include "MAIR/Analysis/LoopAnalysis.h"
 #include "MAIR/Analysis/MAIRStatAnalysis.h"
 #include "MAIR/Analysis/RedundantObservationAnalysis.h"
 #include "MAIR/MAIRStatLog.h"
@@ -113,7 +114,8 @@ unsigned eraseObservations(SmallVectorImpl<Observation *> &Observations) {
 /// deleted observation keeps its own witness.
 void eliminateNonConcreteRun(ProgramPoint::iterator Begin,
                              ProgramPoint::iterator End,
-                             SmallVectorImpl<Observation *> &Redundant) {
+                             SmallVectorImpl<Observation *> &Redundant,
+                             ScalarEvolution *SE) {
   SmallVector<Observation *, 8> Run;
   for (auto It = Begin; It != End; ++It)
     Run.push_back(&*It);
@@ -123,7 +125,7 @@ void eliminateNonConcreteRun(ProgramPoint::iterator Begin,
       continue;
     for (Observation *Witness : Run) {
       if (Witness == Target || Deleted.contains(Witness) ||
-          !Witness->covers(*Target))
+          !Witness->covers(*Target, SE))
         continue;
       Deleted.insert(Target);
       Witnesses.insert(Witness);
@@ -133,7 +135,7 @@ void eliminateNonConcreteRun(ProgramPoint::iterator Begin,
   }
 }
 
-unsigned doIntraROE(MAIRGraph &G) {
+unsigned doIntraROE(MAIRGraph &G, ScalarEvolution *SE) {
   SmallVector<Observation *, 16> Redundant;
 
   // Phase 1 considers only observations from the same ProgramPoint.  Sorting
@@ -159,7 +161,7 @@ unsigned doIntraROE(MAIRGraph &G) {
         while (End != PP.end() &&
                &End->getMemoryObject() == &Begin->getMemoryObject())
           ++End;
-        eliminateNonConcreteRun(Begin, End, Redundant);
+        eliminateNonConcreteRun(Begin, End, Redundant, SE);
         Begin = End;
         continue;
       }
@@ -237,7 +239,8 @@ SmallVector<ProgramPoint *, 32> dominatedFirst(MAIRGraph &G) {
   return Order;
 }
 
-unsigned doInterROE(MAIRGraph &G, const RedundantObservationInfo &Info) {
+unsigned doInterROE(MAIRGraph &G, const RedundantObservationInfo &Info,
+                    ScalarEvolution *SE) {
   DenseSet<const Observation *> ExcludedSources;
   SmallVector<Observation *, 16> Redundant;
 
@@ -262,7 +265,7 @@ unsigned doInterROE(MAIRGraph &G, const RedundantObservationInfo &Info) {
   // each other here, so their order does not matter.
   for (ProgramPoint *PP : dominatedFirst(G)) {
     for (Observation &Obs : *PP) {
-      if (!Info.isCovered(Obs, ExcludedSources))
+      if (!Info.isCovered(Obs, ExcludedSources, SE))
         continue;
       ExcludedSources.insert(&Obs);
       Redundant.push_back(&Obs);
@@ -282,13 +285,22 @@ RedundantObservationEliminationPass::run(MAIRGraph &G,
   MAIRStatScope Scope("roe", Ordinal, G, NumInputObservations, [&] {
     return MAIRStat::compute(G).getNumObservations();
   });
-  const unsigned NumEliminatedIntra = doIntraROE(G);
+  // ScalarEvolution proves constant distances between symbolic addresses
+  // (AbstractAccess::contains). The pass does not change the IR, so the
+  // analysis stays valid throughout.
+  ScalarEvolution *SE = nullptr;
+  if (AM.isPassRegistered<LoopAnalysis>()) {
+    MAIRLoopInfo &Loops = AM.getResult<LoopAnalysis>(G);
+    if (Loops.isAvailable())
+      SE = &Loops.getSE();
+  }
+  const unsigned NumEliminatedIntra = doIntraROE(G, SE);
 
   // Intra elimination changes the source set. Compute this pass's inter
   // snapshot from the current graph instead of reusing a possibly cached
   // pre-intra result; unrelated analyses remain untouched.
   RedundantObservationInfo Info = RedundantObservationAnalysis().run(G, AM);
-  const unsigned NumEliminatedInter = doInterROE(G, Info);
+  const unsigned NumEliminatedInter = doInterROE(G, Info, SE);
 
   const unsigned NumEliminated = NumEliminatedIntra + NumEliminatedInter;
   NumEliminatedObservations += NumEliminated;

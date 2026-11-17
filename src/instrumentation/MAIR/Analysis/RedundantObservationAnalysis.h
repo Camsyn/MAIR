@@ -40,9 +40,12 @@ class RedundantObservationInfo {
 public:
   /// Whether an observation that is not in \p ExcludedSources, and whose
   /// program point reaches the program point of \p Obs, covers \p Obs.
-  bool
-  isCovered(const Observation &Obs,
-            const llvm::DenseSet<const Observation *> &ExcludedSources) const;
+  /// \p SE is passed on to Observation::covers. A witness must also be
+  /// invariant in every iterated cycle that \p Obs is invariant in, so that
+  /// an edge open to \p Obs is open to the witness too.
+  bool isCovered(const Observation &Obs,
+                 const llvm::DenseSet<const Observation *> &ExcludedSources,
+                 llvm::ScalarEvolution *SE = nullptr) const;
 
 private:
   friend class RedundantObservationAnalysis;

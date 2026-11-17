@@ -226,14 +226,33 @@ AbstractAccess AbstractAccess::fromPointerAndSize(const Value &Ptr,
   return Result;
 }
 
-bool AbstractAccess::contains(const AbstractAccess &Other) const {
+namespace {
+std::optional<int64_t> constantAddressDelta(const AbstractAccess &A,
+                                            const AbstractAccess &B,
+                                            const DataLayout *DL,
+                                            ScalarEvolution *SE);
+} // namespace
+
+bool AbstractAccess::contains(const AbstractAccess &Other,
+                              ScalarEvolution *SE) const {
   if (*this == Other)
     return true;
   if (Base != Other.Base)
     return false;
-  if (!Offset.isConstant() || !Size.isConstant() ||
-      !Other.Offset.isConstant() || !Other.Size.isConstant())
+  if (!Size.isConstant() || !Other.Size.isConstant())
     return false;
+  if (!Offset.isConstant() || !Other.Offset.isConstant()) {
+    // Other starts Delta bytes past this start.
+    std::optional<int64_t> Delta;
+    if (Offset.isSymbol() && Offset == Other.Offset)
+      Delta = 0;
+    else if (SE)
+      Delta = constantAddressDelta(*this, Other, /*DL=*/nullptr, SE);
+    if (!Delta || *Delta < 0)
+      return false;
+    APInt OtherEnd = APInt(128, *Delta) + APInt(128, Other.Size.getConstant());
+    return OtherEnd.ule(APInt(128, Size.getConstant()));
+  }
 
   uint64_t ThisBegin = Offset.getConstant();
   std::optional<uint64_t> ThisEnd =

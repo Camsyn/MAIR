@@ -298,6 +298,19 @@ clang 的 -O0 流水线里，ASan 和 TSan 不用 MAIR，输出与不设 `MAIR` 
 - 实现：-O0 时把 sanitizer pass 包进 `WithoutMAIROptPass`，它运行期间用 `mair::MAIROptSuppressionScope` 让 `mair::isMAIROptEnabled()` 返回假（`src/instrumentation/MAIR/MAOpt.h`）。只影响 clang 的 sanitizer 位置；opt 的流水线（`registerPassIntoOpt`）没有级别，不变；mair-opt 不跑 sanitizer，不受影响。
 - 测试：`test/MAIR/TestCases/{asan,tsan}/mair-O0-native.c`（-O0 与 `-O0 -disable-O0-optnone` 下与 native 逐字相同，-O1 下仍走 MAIR）。原来用 -O0 跑 MAIR 的 sanitizer 测试都改成 -O1，见 `.tasks/WP1_20261117_1720/worklog.md`。
 
+### 只保证默认选项
+
+MAIR 的检测保证目前只针对默认运行时选项和默认编译期开关：在这些选项下，MAIR 不比 native 少报。MAIR 依赖几条只在默认选项下成立的事实，例如 `__asan_memcpy`/`__tsan_memcpy` 一定检查或记录整个区间，所以 memintrinsic 可以覆盖后面的访问。其他选项的适配是 TODO：
+
+- ASan `replace_intrin=0`：`__asan_memcpy` 等不再检查（`asan_interceptors_memintrinsics.cpp` 的 `replace_intrin_cached`），memintrinsic 作为覆盖者就会漏报（分诊 S2a，复现 `F-calls/mcrt.c`：native 报 `d[20]` 越界，MAIR 不报）。适配办法：运行时选项编译期不可见，只能不让 memintrinsic 覆盖别的访问，或在运行时按选项选择检查。
+- ASan `intercept_*`、`strict_memcmp`：只影响库函数拦截器查多少字节。MAIR 现在不把库函数调用当覆盖者（它们都是 barrier），所以暂不受影响；若做 B2（库函数调用作覆盖者），必须适配。
+- TSan `intercept_intrin=0`：`__tsan_memcpy` 等不再记录访问（`sanitizer_common_interceptors_memintrinsics.inc`），与 ASan `replace_intrin=0` 同类。
+- TSan `ignore_interceptors_accesses=1`（Linux 默认关）：拦截器里的访问被忽略，`__tsan_memcpy` 也走拦截器入口，同上。
+- 报告次数：ASan recover 模式（`-fsanitize-recover=address` 加 `halt_on_error=0`）下，native 对每个出错的访问位置各报一次，MAIR 合并或汇总后的区间只报一次（位置取最先执行的来源）。默认 halt_on_error 下第一次报告就终止，没有差别。
+- 编译期开关与 MAIR 的关系：
+  - 已适配：`-asan-instrument-{reads,writes,atomics,byval}=0`、stack-safety 等 native 不查的访问在优化前删掉；`-ts-instrument-memintrinsics=0`、`-asan-max-ins-per-bb` 下 native 不插桩的 memintrinsic 在优化前删掉（见“ASan 的 lowering”“TSan 的 lowering”）；`-ts-distinguish-volatile` 下含 volatile 的 Observation 退回 native；`-asan-use-after-scope=0` 时 lifetime 仍按 barrier 处理，只是保守。
+  - TODO：`-asan-debug-min/max`（`suppressInstrumentationSiteForDebug`）会跳过一部分 native 检查和 memintrinsic，MAIR 此时全部退回 native lowering，但优化阶段的覆盖照常，被覆盖的访问可能因见证被跳过而不查。这是调试开关，未适配。
+
 ## 可复现验证
 
 - `test/MAIR/TestCases/loop-hierarchy.ll`：循环前/循环内检查隔离、循环内冗余、嵌套图、多个出口及无出口。

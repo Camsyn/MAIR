@@ -4437,7 +4437,9 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
   // The globals whose accesses instrumentMop elides when it can prove them in
   // bounds (ClOptGlobals), restricted to constant ones. Nothing poisons
   // constant data: not the init-order check, which poisons only globals with
-  // a dynamic initializer, not the user, who poisons writable memory, and not
+  // a dynamic initializer, not the user, who poisons writable memory (an
+  // assumption: nothing stops the user from poisoning read-only data, which
+  // would then go unreported; see ObjectBoundsEliminationPass.h), and not
   // container annotations. So an access within one is never reported, also
   // where isSafeAccess cannot prove it. The size is the one isSafeAccess
   // uses: the exact size, unknown if another definition may replace the

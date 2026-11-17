@@ -15,6 +15,13 @@ namespace mair {
 /// The region is proven with ScalarEvolution, then with LazyValueInfo where
 /// the program point runs; docs/mair-object-bounds.md has the rules and the
 /// e2e data.
+///
+/// Assumption: trusting an object means nothing poisons the bytes within it
+/// at run time. For ASan (-mair-asan-boe) the trusted objects are constant
+/// globals, and the pass assumes the user never calls the poisoning
+/// interface (__asan_poison_memory_region, ASAN_POISON_MEMORY_REGION) on
+/// read-only data. A program that does loses the reports for accesses into
+/// the poisoned bytes.
 class ObjectBoundsEliminationPass
     : public llvm::PassInfoMixin<ObjectBoundsEliminationPass> {
   unsigned Ordinal;

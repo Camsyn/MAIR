@@ -1296,6 +1296,16 @@ bool XsanThreadSanitizer::sanitizeFunctionViaMAIR(
              });
     });
 
+    // With -ts-instrument-memintrinsics=0 native TSan records no memory
+    // intrinsic. Kept, one would stand in for the accesses after it.
+    if (!ClInstrumentMemIntrinsics)
+      Opt->eraseObservationsIf([](const mair::Observation &Obs) {
+        return Obs.isCallLike() &&
+               all_of(Obs.getInstructions(), [](Instruction *Source) {
+                 return isa<MemIntrinsic>(Source);
+               });
+      });
+
     auto MAIRModeledSources = mair::collectModeledSources(Opt->getGraph());
 
     if (Error Err = Opt->optimize())

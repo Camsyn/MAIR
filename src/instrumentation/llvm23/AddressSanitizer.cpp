@@ -4475,6 +4475,41 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
            });
   });
 
+  // Native ASan stops instrumenting a block once ClMaxInsnsToInstrumentPerBB
+  // accesses and memory intrinsics are collected (collectTargetsToIntrument),
+  // and a memory intrinsic past that point checks nothing. Counting every
+  // candidate, without native's same-address dedup, bounds what native has
+  // counted, so native instruments a memory intrinsic before the instruction
+  // at which this count reaches the cap (null if it never does).
+  DenseMap<const BasicBlock *, const Instruction *> NativeCapPoints;
+  auto MayBePastNativeCap = [&](Instruction &MI) {
+    auto [It, Inserted] = NativeCapPoints.try_emplace(MI.getParent(), nullptr);
+    if (Inserted) {
+      int NumCandidates = 0;
+      for (Instruction &I : *MI.getParent()) {
+        if (I.hasMetadata(LLVMContext::MD_nosanitize))
+          continue;
+        SmallVector<InterestingMemoryOperand, 1> InterestingOperands;
+        getInterestingMemoryOperands(&I, InterestingOperands, TTI);
+        NumCandidates += InterestingOperands.size() + isa<MemIntrinsic>(I);
+        if (NumCandidates >= ClMaxInsnsToInstrumentPerBB) {
+          It->second = &I;
+          break;
+        }
+      }
+    }
+    return It->second && It->second->comesBefore(&MI);
+  };
+
+  // A memory intrinsic native ASan leaves unchecked would stand in for the
+  // accesses after it: drop it too.
+  Opt.eraseObservationsIf([&](const mair::Observation &Obs) {
+    return Obs.isCallLike() &&
+           all_of(Obs.getInstructions(), [&](Instruction *Source) {
+             return isa<MemIntrinsic>(Source) && MayBePastNativeCap(*Source);
+           });
+  });
+
   auto MAIRModeledSources = mair::collectModeledSources(Opt.getGraph());
 
   if (Error Err = Opt.optimize())

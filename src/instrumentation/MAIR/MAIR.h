@@ -784,6 +784,14 @@ public:
   PPEdgeKind getKind() const { return It->getKind(); }
 };
 
+/// Partial carries the intersection in half-open byte offsets from the base.
+struct ObservationCoverage {
+  enum Kind { None, Full, Partial } State;
+  uint64_t Begin = 0, End = 0;
+
+  bool isFull() const { return State == Full; }
+};
+
 /// An identity-bearing memory observation (o), owned by one ProgramPoint.
 class Observation final
     : public ilist_node_with_parent<Observation, ProgramPoint,
@@ -795,6 +803,8 @@ class Observation final
   bool Mergeable = true;
   bool Movable = true;
   bool Deletable = true;
+  enum class CoverageRole : uint8_t { Ordinary, Witness, Residual };
+  CoverageRole Role = CoverageRole::Ordinary;
   uint8_t Level = 1;
   /// Fixed base operand, analogous to a single llvm::User operand.
   MemoryUse BaseUse;
@@ -862,17 +872,23 @@ public:
   bool isCallLike() const { return hasProperty(AccessProperty::CallLike); }
   bool isMasked() const { return getMaskedRegion() != nullptr; }
 
-  bool isMergeable() const { return Mergeable; }
-  bool isMovable() const { return Movable; }
-  bool isDeletable() const { return Deletable; }
+  bool isMergeable() const {
+    return Mergeable && Role == CoverageRole::Ordinary;
+  }
+  bool isMovable() const { return Movable && Role == CoverageRole::Ordinary; }
+  bool isDeletable() const {
+    return Deletable && Role == CoverageRole::Ordinary;
+  }
+  bool isPartiallyCovered() const { return Role == CoverageRole::Residual; }
   uint8_t getLevel() const { return Level; }
 
   /// Capabilities and level are fixed by the graph configuration when the
   /// observation is registered. Coverage requires LHS level >= RHS level, while
   /// merging requires equal levels. \p SE, if given, lets contiguous regions
   /// cover at a constant distance (AbstractAccess::contains).
-  bool covers(const Observation &Other,
-              llvm::ScalarEvolution *SE = nullptr) const;
+  ObservationCoverage covers(const Observation &Other,
+                             llvm::ScalarEvolution *SE = nullptr) const;
+  void retainResidual(Observation &Witness, AbstractAccess Residual);
   bool mergeWith(const Observation &Other, llvm::ScalarEvolution *SE = nullptr);
   /// Merge \p Others into this periodic observation if together they are the
   /// interleaved slices of one periodic region

@@ -9,6 +9,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/ErrorHandling.h"
 
 using namespace llvm;
@@ -278,32 +279,65 @@ bool ProgramPointEdge::isOpenTo(const Observation &Obs) const {
   return !Iterated || Obs.isInvariantIn(*Iterated);
 }
 
-bool Observation::covers(const Observation &Other, ScalarEvolution *SE) const {
+ObservationCoverage Observation::covers(const Observation &Other,
+                                        ScalarEvolution *SE) const {
+  using Coverage = ObservationCoverage;
   // The witness may be pinned. Only the observation being deleted must be
   // deletable, so a retained memset can cover a later ordinary store.
   if (getBase() != Other.getBase() || !Other.isDeletable() ||
       getLevel() < Other.getLevel())
-    return false;
+    return {Coverage::None};
   if (isAtomic() != Other.isAtomic() &&
       (!isMergeable() || !Other.isMergeable()))
-    return false;
+    return {Coverage::None};
   if (isVolatile() != Other.isVolatile() && distinguishesVolatile(*this))
-    return false;
+    return {Coverage::None};
 
   if (const auto *ThisAccess = getContiguousRegion()) {
-    if (const auto *OtherAccess = Other.getContiguousRegion())
-      return ThisAccess->contains(*OtherAccess, SE);
+    if (const auto *OtherAccess = Other.getContiguousRegion()) {
+      if (ThisAccess->contains(*OtherAccess, SE))
+        return {Coverage::Full};
+      if (hasConcreteRange() && Other.hasConcreteRange()) {
+        uint64_t Start = ThisAccess->getOffset().getConstant();
+        uint64_t OtherStart = OtherAccess->getOffset().getConstant();
+        auto End =
+            checkedAddUnsigned(Start, ThisAccess->getSize().getConstant());
+        auto OtherEnd = checkedAddUnsigned(
+            OtherStart, OtherAccess->getSize().getConstant());
+        if (End && OtherEnd &&
+            std::max(Start, OtherStart) < std::min(*End, *OtherEnd))
+          return {Coverage::Partial, std::max(Start, OtherStart),
+                  std::min(*End, *OtherEnd)};
+      }
+      return {Coverage::None};
+    }
     if (const auto *OtherMasked = Other.getMaskedRegion())
-      return ThisAccess->contains(OtherMasked->getBounds(), SE);
-    return false;
+      return {ThisAccess->contains(OtherMasked->getBounds(), SE)
+                  ? Coverage::Full
+                  : Coverage::None};
+    return {Coverage::None};
   }
   if (const auto *ThisMasked = getMaskedRegion()) {
     const auto *OtherMasked = Other.getMaskedRegion();
-    return OtherMasked && ThisMasked->contains(*OtherMasked);
+    return {OtherMasked && ThisMasked->contains(*OtherMasked) ? Coverage::Full
+                                                              : Coverage::None};
   }
   const auto *ThisPeriodic = getPeriodicRegion();
   const auto *OtherPeriodic = Other.getPeriodicRegion();
-  return ThisPeriodic && OtherPeriodic && *ThisPeriodic == *OtherPeriodic;
+  return {ThisPeriodic && OtherPeriodic && *ThisPeriodic == *OtherPeriodic
+              ? Coverage::Full
+              : Coverage::None};
+}
+
+void Observation::retainResidual(Observation &Witness,
+                                 AbstractAccess Residual) {
+  assert(isDeletable() && !Witness.isPartiallyCovered() &&
+         Residual.getBase() == getBase());
+  Region = Residual;
+  Role = CoverageRole::Residual;
+  Witness.Role = CoverageRole::Witness;
+  getParent()->invalidateSort();
+  Witness.getParent()->invalidateSort();
 }
 
 bool Observation::mergeWith(const Observation &Other, ScalarEvolution *SE) {

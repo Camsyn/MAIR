@@ -6,6 +6,8 @@
 
 namespace mair {
 
+/// TODO: Consider combining a complete traversal of an immutable permutation
+/// table when its indices cover the output range exactly and motion is legal.
 class LoopPeriodicObservationCombinePass
     : public llvm::PassInfoMixin<LoopPeriodicObservationCombinePass> {
   bool MergeEquivalentObservations;

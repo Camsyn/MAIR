@@ -24,6 +24,8 @@ MAIR_GRAPH_PASS("lpoc", LoopPeriodicObservationCombinePass(
                             /*MergeEquivalentObservations=*/true, Ordinal))
 MAIR_GRAPH_PASS("obe", ObjectBoundsEliminationPass(Ordinal))
 MAIR_GRAPH_PASS("roe", RedundantObservationEliminationPass(Ordinal))
+MAIR_GRAPH_PASS("roe<partial>", RedundantObservationEliminationPass(
+                                    Ordinal, AllowPartialCoverage))
 MAIR_GRAPH_PASS("simplifygraph", SimplifyGraphPass(Ordinal))
 MAIR_GRAPH_PASS("print<stat>", MAIRStatPrinterPass(errs()))
 

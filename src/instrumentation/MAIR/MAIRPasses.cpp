@@ -114,8 +114,9 @@ void buildMAIRGraphOgPipeline(MAIRGraphPassManager &PM,
   addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/2));
 }
 
-void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM,
-                              bool EliminateWithinTrustedObjects) {
+static void buildOptimizedPipeline(MAIRGraphPassManager &PM,
+                                   bool EliminateWithinTrustedObjects,
+                                   bool PartialCoverage) {
   // Normalize topology, then eliminate redundant observations before motion
   // (so that sinking keeps one source guard). Location merging runs before
   // loop motion and periodic combination: accesses merged in a loop body,
@@ -133,35 +134,51 @@ void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM,
   // elimination before it. The final simplification removes program points
   // emptied by those transforms.
   // docs/mair-loops.md has the e2e data behind this order.
-  noteMAIRPipeline("O1");
+  noteMAIRPipeline(PartialCoverage ? "O3" : "O1");
   addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/1));
   addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/1));
   addHierarchyPass(PM, LocationMergePass(/*Ordinal=*/1),
                    LoopInvariantObservationMotionPass(
                        /*MergeEquivalentObservations=*/true, /*Ordinal=*/1),
                    LoopPeriodicObservationCombinePass());
-  addHierarchyPass(PM, RedundantObservationEliminationPass(/*Ordinal=*/2));
+  addHierarchyPass(
+      PM, RedundantObservationEliminationPass(/*Ordinal=*/2, PartialCoverage));
   if (EliminateWithinTrustedObjects)
     addHierarchyPass(PM, ObjectBoundsEliminationPass());
   addHierarchyPass(PM, SimplifyGraphPass(/*Ordinal=*/2));
 }
 
+void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM,
+                              bool EliminateWithinTrustedObjects) {
+  buildOptimizedPipeline(PM, EliminateWithinTrustedObjects, false);
+}
+
+void buildMAIRGraphO3Pipeline(MAIRGraphPassManager &PM,
+                              bool EliminateWithinTrustedObjects) {
+  buildOptimizedPipeline(PM, EliminateWithinTrustedObjects, true);
+}
+
 void buildMAIRGraphDefaultPipeline(MAIRGraphPassManager &PM, bool KeepFullDebug,
-                                   bool EliminateWithinTrustedObjects) {
+                                   bool EliminateWithinTrustedObjects,
+                                   bool AllowPartialCoverage) {
   if (!ClMAIRPipeline.empty()) {
     noteMAIRPipeline("custom");
-    if (Error Err = parseMAIRGraphPassPipeline(PM, ClMAIRPipeline))
+    if (Error Err = parseMAIRGraphPassPipeline(PM, ClMAIRPipeline,
+                                               AllowPartialCoverage))
       report_fatal_error(Twine("-mair-pipeline: ") + toString(std::move(Err)));
     return;
   }
   if (KeepFullDebug)
     buildMAIRGraphOgPipeline(PM, EliminateWithinTrustedObjects);
+  else if (AllowPartialCoverage)
+    buildMAIRGraphO3Pipeline(PM, EliminateWithinTrustedObjects);
   else
     buildMAIRGraphO1Pipeline(PM, EliminateWithinTrustedObjects);
 }
 
 Error parseMAIRGraphPassPipeline(MAIRGraphPassManager &PM,
-                                 StringRef PipelineText) {
+                                 StringRef PipelineText,
+                                 bool AllowPartialCoverage) {
   SmallVector<StringRef, 8> Pipeline;
   PipelineText.split(Pipeline, ',', /*MaxSplit=*/-1, /*KeepEmpty=*/false);
   for (StringRef PassName : Pipeline) {
@@ -175,6 +192,11 @@ Error parseMAIRGraphPassPipeline(MAIRGraphPassManager &PM,
     }
     if (PassName == "default<O1>") {
       buildMAIRGraphO1Pipeline(PM);
+      continue;
+    }
+    if (PassName == "default<O3>") {
+      buildOptimizedPipeline(PM, /*EliminateWithinTrustedObjects=*/false,
+                             AllowPartialCoverage);
       continue;
     }
     if (PassName == "print<stat>") {

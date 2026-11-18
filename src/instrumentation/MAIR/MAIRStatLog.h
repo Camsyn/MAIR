@@ -20,6 +20,7 @@ enum class MAIRStatField : uint8_t {
   Intra,
   Inter,
   Eliminated,
+  Narrowed,
   Hoisted,
   Sunk,
   // Loop aggregates whose trip count is read off induction variables at the

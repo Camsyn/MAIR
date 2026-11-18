@@ -42,7 +42,8 @@ bool RedundantObservationInfo::isCovered(
   if (Sources.empty())
     return false;
   auto Covers = [&](const Observation &Source) {
-    return !ExcludedSources.contains(&Source) && Source.covers(Obs, SE) &&
+    return !ExcludedSources.contains(&Source) &&
+           Source.covers(Obs, SE).isFull() &&
            (closedCycles(Source) & ~Closed) == 0;
   };
 

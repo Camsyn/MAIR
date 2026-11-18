@@ -31,12 +31,15 @@ void buildMAIRGraphOgPipeline(MAIRGraphPassManager &PM,
                               bool EliminateWithinTrustedObjects = false);
 void buildMAIRGraphO1Pipeline(MAIRGraphPassManager &PM,
                               bool EliminateWithinTrustedObjects = false);
-/// The pipeline MAOpt runs: Og when \p KeepFullDebug, else O1, unless the
-/// hidden `-mair-pipeline=<text>` option replaces it.
+void buildMAIRGraphO3Pipeline(MAIRGraphPassManager &PM,
+                              bool EliminateWithinTrustedObjects = false);
+/// A sanitizer must opt in to partial coverage even for a custom pipeline.
 void buildMAIRGraphDefaultPipeline(MAIRGraphPassManager &PM, bool KeepFullDebug,
-                                   bool EliminateWithinTrustedObjects = false);
+                                   bool EliminateWithinTrustedObjects = false,
+                                   bool AllowPartialCoverage = false);
 
 llvm::Error parseMAIRGraphPassPipeline(MAIRGraphPassManager &PM,
-                                       llvm::StringRef PipelineText);
+                                       llvm::StringRef PipelineText,
+                                       bool AllowPartialCoverage = true);
 
 } // namespace mair

@@ -3271,6 +3271,29 @@ exit:
   EXPECT_NE(LLVMText.find("site=edge(%entry -> %exit)"), std::string::npos);
 }
 
+TEST(Observation, PartialCoverageReturnsIntersectionNotResidual) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule("define void @f(ptr %p) { ret void }", Ctx);
+  ASSERT_TRUE(M);
+  auto *Base = M->getFunction("f")->getArg(0);
+  auto Read = [&](uint64_t Begin, uint64_t Size) {
+    return Observation({}, AbstractAccess(Base, Begin, Size), AccessKind::Read);
+  };
+  auto Target = Read(8, 16);
+  auto Left = Read(0, 16).covers(Target);
+  EXPECT_EQ(ObservationCoverage::Partial, Left.State);
+  EXPECT_EQ(8u, Left.Begin);
+  EXPECT_EQ(16u, Left.End);
+  auto Middle = Read(12, 8).covers(Target);
+  EXPECT_EQ(ObservationCoverage::Partial, Middle.State);
+  EXPECT_EQ(12u, Middle.Begin);
+  EXPECT_EQ(20u, Middle.End);
+  EXPECT_EQ(ObservationCoverage::Full, Read(0, 24).covers(Target).State);
+  EXPECT_EQ(ObservationCoverage::None, Read(24, 8).covers(Target).State);
+  EXPECT_EQ(ObservationCoverage::None,
+            Read(UINT64_MAX - 7, 16).covers(Target).State);
+}
+
 TEST(MAIROptimizationConfig, AddressSanitizerIgnoresKindAndAtomic) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
@@ -3297,8 +3320,8 @@ entry:
   EXPECT_EQ(ReadAccess.getLevel(), WriteAccess.getLevel());
   EXPECT_TRUE(ReadAccess.isMergeable());
   EXPECT_TRUE(WriteAccess.isMergeable());
-  EXPECT_TRUE(ReadAccess.covers(WriteAccess));
-  EXPECT_TRUE(WriteAccess.covers(ReadAccess));
+  EXPECT_TRUE(ReadAccess.covers(WriteAccess).isFull());
+  EXPECT_TRUE(WriteAccess.covers(ReadAccess).isFull());
   EXPECT_FALSE(ReadAccess.isMovable());
   EXPECT_TRUE(WriteAccess.isMovable());
   EXPECT_TRUE(ReadAccess.isDeletable());
@@ -3383,8 +3406,8 @@ entry:
     Observation &Volatile = *Graph.createInstProgramPoint(BB, *It++).begin();
     EXPECT_TRUE(Volatile.isMergeable());
     EXPECT_TRUE(Volatile.isDeletable());
-    EXPECT_TRUE(Plain.covers(Volatile));
-    EXPECT_TRUE(Volatile.covers(Plain));
+    EXPECT_TRUE(Plain.covers(Volatile).isFull());
+    EXPECT_TRUE(Volatile.covers(Plain).isFull());
   }
 }
 
@@ -3419,9 +3442,9 @@ entry:
     EXPECT_TRUE(Volatile.isMovable());
     EXPECT_FALSE(Volatile.isDeletable());
     // Neither a plain nor a volatile observation stands in for the other.
-    EXPECT_FALSE(Plain.covers(Volatile));
-    EXPECT_FALSE(Volatile.covers(Plain));
-    EXPECT_FALSE(Volatile.covers(Again));
+    EXPECT_FALSE(Plain.covers(Volatile).isFull());
+    EXPECT_FALSE(Volatile.covers(Plain).isFull());
+    EXPECT_FALSE(Volatile.covers(Again).isFull());
     EXPECT_FALSE(Plain.mergeWith(Volatile));
   }
 }
@@ -3452,8 +3475,8 @@ entry:
   EXPECT_GT(WriteAccess.getLevel(), ReadAccess.getLevel());
   EXPECT_TRUE(ReadAccess.isMergeable());
   EXPECT_TRUE(WriteAccess.isMergeable());
-  EXPECT_TRUE(WriteAccess.covers(ReadAccess));
-  EXPECT_FALSE(ReadAccess.covers(WriteAccess));
+  EXPECT_TRUE(WriteAccess.covers(ReadAccess).isFull());
+  EXPECT_FALSE(ReadAccess.covers(WriteAccess).isFull());
   EXPECT_TRUE(ReadAccess.isDeletable());
   EXPECT_TRUE(WriteAccess.isDeletable());
   EXPECT_FALSE(ReadAccess.mergeWith(WriteAccess));
@@ -3484,7 +3507,7 @@ entry:
   Graph.addEdge(Available, Required, PPEdgeKind::Dom);
 
   EXPECT_FALSE(Available.begin()->mergeWith(*Required.begin()));
-  EXPECT_FALSE(Available.begin()->covers(*Required.begin()));
+  EXPECT_FALSE(Available.begin()->covers(*Required.begin()).isFull());
   EXPECT_FALSE(Available.begin()->isMergeable());
   EXPECT_FALSE(Available.begin()->isDeletable());
   EXPECT_FALSE(Required.begin()->isMergeable());
@@ -3647,11 +3670,11 @@ entry:
   EXPECT_TRUE(Wide.isMasked());
   EXPECT_FALSE(Wide.isCallLike());
   ASSERT_NE(Wide.getMaskedRegion(), nullptr);
-  EXPECT_TRUE(Wide.covers(Narrow));
-  EXPECT_FALSE(Narrow.covers(Wide))
+  EXPECT_TRUE(Wide.covers(Narrow).isFull());
+  EXPECT_FALSE(Narrow.covers(Wide).isFull())
       << "narrow=" << Narrow.toString() << " wide=" << Wide.toString();
   EXPECT_TRUE(Narrow.mergeWith(Wide));
-  EXPECT_TRUE(Narrow.covers(Wide));
+  EXPECT_TRUE(Narrow.covers(Wide).isFull());
   llvm::Instruction *First = &BB.front();
   llvm::Instruction *Second = &*std::next(BB.begin());
   llvm::Instruction *Third = &*std::next(BB.begin(), 2);
@@ -3728,8 +3751,8 @@ entry:
   Observation &Same = *Graph.createInstProgramPoint(BB, *It++).begin();
   Observation &Different = *Graph.createInstProgramPoint(BB, *It).begin();
 
-  EXPECT_TRUE(First.covers(Same));
-  EXPECT_FALSE(First.covers(Different))
+  EXPECT_TRUE(First.covers(Same).isFull());
+  EXPECT_FALSE(First.covers(Different).isFull())
       << "first=" << First.toString() << " different=" << Different.toString();
   EXPECT_TRUE(First.mergeWith(Same));
   EXPECT_EQ(First.getInstructions(),

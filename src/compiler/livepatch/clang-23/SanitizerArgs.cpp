@@ -1412,6 +1412,24 @@ void SanitizerArgs::addArgs(const ToolChain &TC, const llvm::opt::ArgList &Args,
     return;
   CmdArgs.push_back(Args.MakeArgString("-fsanitize=" + toString(Sanitizers)));
 
+  if (__xsan::getSanType() == ASan &&
+      Sanitizers.Mask == SanitizerKind::Address &&
+      !RecoverableSanitizers.has(SanitizerKind::Address) && !StableABI &&
+      !AsanOutlineInstrumentation &&
+      llvm::none_of(Args.filtered(options::OPT_Xclang), [](const Arg *A) {
+        StringRef Value = A->getValue();
+        return Value.starts_with("-fsanitize") ||
+               Value.starts_with("-fno-sanitize");
+      })) {
+    for (const Arg *A : Args.filtered(options::OPT_fplugin_EQ)) {
+      if (llvm::sys::path::filename(A->getValue()) == "ASanInstPass.so") {
+        CmdArgs.push_back("-mllvm");
+        CmdArgs.push_back("-mair-standalone-asan");
+        break;
+      }
+    }
+  }
+
   if (!SuppressUBSanFeature.empty())
     CmdArgs.push_back(
         Args.MakeArgString("-fsanitize-ignore-for-ubsan-feature=" +

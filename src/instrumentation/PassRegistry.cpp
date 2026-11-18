@@ -14,6 +14,7 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Passes/OptimizationLevel.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Instrumentation/AddressSanitizer.h"
@@ -545,14 +546,15 @@ llvm::ModulePassManager createPostOptimizationPasses(OptimizationLevel Level) {
 
 namespace {
 
-/// Runs sanitizer passes with sanitizer-side MAIR optimization off.
-class WithoutMAIROptPass : public PassInfoMixin<WithoutMAIROptPass> {
+class ClangMAIRModePass : public PassInfoMixin<ClangMAIRModePass> {
   ModulePassManager MPM;
+  mair::ClangMAIRMode Mode;
 
 public:
-  explicit WithoutMAIROptPass(ModulePassManager MPM) : MPM(std::move(MPM)) {}
+  ClangMAIRModePass(ModulePassManager MPM, mair::ClangMAIRMode Mode)
+      : MPM(std::move(MPM)), Mode(Mode) {}
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM) {
-    mair::MAIROptSuppressionScope NoMAIROpt;
+    SaveAndRestore Scope(mair::CurrentClangMAIRMode, Mode);
     return MPM.run(M, AM);
   }
   static bool isRequired() { return true; }
@@ -564,13 +566,18 @@ public:
 /// level and is left as it is; mair-opt runs no sanitizer.
 template <void (*AddSanitizer)(ModulePassManager &, OptimizationLevel)>
 void addSanitizerForClang(ModulePassManager &MPM, OptimizationLevel Level) {
-  if (Level != OptimizationLevel::O0) {
+  mair::ClangMAIRMode Mode;
+  if (Level == OptimizationLevel::O0)
+    Mode = mair::ClangMAIRMode::Disabled;
+  else if (AddSanitizer == addAsanToMPM && Level == OptimizationLevel::O3)
+    Mode = mair::ClangMAIRMode::ASanO3;
+  else {
     AddSanitizer(MPM, Level);
     return;
   }
   ModulePassManager Sanitizer;
   AddSanitizer(Sanitizer, Level);
-  MPM.addPass(WithoutMAIROptPass(std::move(Sanitizer)));
+  MPM.addPass(ClangMAIRModePass(std::move(Sanitizer), Mode));
 }
 
 } // namespace

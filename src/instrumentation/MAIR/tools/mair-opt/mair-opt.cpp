@@ -53,6 +53,9 @@ static cl::opt<bool>
 static cl::opt<bool>
     O1("O1", cl::desc("Run the standard MAIR O1 optimization pipeline"),
        cl::init(false), cl::cat(MAIROptions));
+static cl::opt<bool>
+    O3("O3", cl::desc("Run the standard MAIR O3 optimization pipeline"),
+       cl::init(false), cl::cat(MAIROptions));
 static cl::opt<bool> DistinguishVolatile(
     "distinguish-volatile",
     cl::desc("Keep volatile observations apart from all others"),
@@ -74,6 +77,7 @@ MAIRGraph pass names for -passes:
   obe                           - Object Bounds Elimination
   locationmerge                 - Location Merge
   roe                           - Redundant Observation Elimination
+  roe<partial>                  - ROE including partial coverage
   simplifygraph                 - Simplify Graph
   print<stat>                   - Print MAIR Statistics
 )");
@@ -124,6 +128,10 @@ int main(int argc, char **argv) {
   MAIRGraphAnalysisManager GAM;
   registerMAIRGraphAnalyses(GAM, &PIC, &FAM);
   MAIRGraphPassManager GPM;
+  if (O3 && (Og || O1 || !PassPipeline.empty())) {
+    errs() << "-O3 cannot be combined with -Og, -O1 or -passes\n";
+    return 1;
+  }
   if ((Og || O1) && !PassPipeline.empty()) {
     errs() << "-Og/-O1 cannot be combined with -passes\n";
     return 1;
@@ -136,6 +144,8 @@ int main(int argc, char **argv) {
     buildMAIRGraphOgPipeline(GPM);
   } else if (O1) {
     buildMAIRGraphO1Pipeline(GPM);
+  } else if (O3) {
+    buildMAIRGraphO3Pipeline(GPM);
   } else if (!PassPipeline.empty()) {
     if (Error Err = parseMAIRGraphPassPipeline(GPM, PassPipeline)) {
       errs() << toString(std::move(Err)) << "\n";
@@ -186,7 +196,7 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    if (Og || O1 || !PassPipeline.empty()) {
+    if (Og || O1 || O3 || !PassPipeline.empty()) {
       GPM.run(Graph, GAM);
       if (!Graph.verify(&errs())) {
         errs() << "invalid MAIRGraph after pass pipeline for function "

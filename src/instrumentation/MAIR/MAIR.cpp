@@ -201,6 +201,7 @@ LoopProgramPoint::LoopProgramPoint(StringRef Name, ProgramPointSite Site,
 Observation &ProgramPoint::addObservation(const Observation &A) {
   auto &Node = *new Observation(A.getInstructions(), A.getRegion(), A.getKind(),
                                 A.getProperties());
+  Node.Role = A.Role;
   Observations.push_back(Node);
   Node.setParent(this);
   if (MAIRGraph *Graph = getParent())

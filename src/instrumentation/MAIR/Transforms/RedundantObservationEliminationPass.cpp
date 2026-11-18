@@ -26,6 +26,8 @@ STATISTIC(NumEliminatedInterObservations,
           "Number of inter-program-point redundant observations eliminated");
 STATISTIC(NumInputObservations,
           "Number of observations entering redundant observation elimination");
+STATISTIC(NumNarrowedObservations,
+          "Number of partially covered observations narrowed");
 
 namespace mair {
 
@@ -86,7 +88,7 @@ bool hasCoveringWitness(const WitnessesByLevel &Witnesses,
        ++Level) {
     const ConcreteObservation &Witness = Witnesses[Level];
     if (Witness.Obs && Witness.End >= Target.End &&
-        Witness.Obs->covers(*Target.Obs))
+        Witness.Obs->covers(*Target.Obs).isFull())
       return true;
   }
   return false;
@@ -125,7 +127,7 @@ void eliminateNonConcreteRun(ProgramPoint::iterator Begin,
       continue;
     for (Observation *Witness : Run) {
       if (Witness == Target || Deleted.contains(Witness) ||
-          !Witness->covers(*Target, SE))
+          !Witness->covers(*Target, SE).isFull())
         continue;
       Deleted.insert(Target);
       Witnesses.insert(Witness);
@@ -277,6 +279,96 @@ unsigned doInterROE(MAIRGraph &G, const RedundantObservationInfo &Info,
   return eraseObservations(Redundant);
 }
 
+Observation *originalAlignedLoad(ProgramPoint &PP) {
+  if (!PP.isMemoryInstSite() || !PP.hasAlwaysGuard() || PP.size() != 1)
+    return nullptr;
+  Observation &Obs = *PP.begin();
+  const auto *Load = dyn_cast<LoadInst>(&PP.getAnchor());
+  if (!Load || !Load->isSimple() || Load->getPointerAddressSpace() != 0 ||
+      Load->getAlign() < Align(8) || !Obs.isRead() ||
+      Obs.isPartiallyCovered() || Obs.getInstructions().size() != 1 ||
+      Obs.getInstruction() != Load || !Obs.hasConcreteRange())
+    return nullptr;
+  const AbstractAccess &Access = *Obs.getContiguousRegion();
+  uint64_t Width = Access.getSize().getConstant();
+  if ((Width != 8 && Width != 16) || Access.getAlign() < Align(8))
+    return nullptr;
+  Observation Original =
+      Observation::fromInstruction(*Load, Load->getDataLayout());
+  return Access == *Original.getContiguousRegion() ? &Obs : nullptr;
+}
+
+unsigned narrowPartialOverlaps(MAIRGraph &G) {
+  if (!G.hasLoopInfo())
+    return 0;
+  const DominatorTree &DT = G.getDominatorTree();
+  SmallPtrSet<const Instruction *, 16> SharedSources;
+  bool CheckedSharing = false;
+  auto HasSharedSource = [&](const Observation &Obs) {
+    if (!CheckedSharing) {
+      SmallPtrSet<const Instruction *, 32> Seen;
+      for (const ProgramPoint *PP : G.getRoot().allProgramPoints())
+        for (const Observation &Other : *PP)
+          for (const Instruction *Source : Other.getInstructions())
+            if (!Seen.insert(Source).second)
+              SharedSources.insert(Source);
+      CheckedSharing = true;
+    }
+    return SharedSources.contains(Obs.getInstruction());
+  };
+
+  // Propagate only the nearest retained load through empty points on a single
+  // forward Dom chain. No PostDom edges or unions at joins are witnesses.
+  unsigned Narrowed = 0;
+  DenseMap<const ProgramPoint *, Observation *> Out;
+  auto Order = dominatedFirst(G);
+  for (ProgramPoint *PP : reverse(Order)) {
+    Observation *Witness = nullptr;
+    const ProgramPoint *Parent = nullptr;
+    for (const ProgramPointEdge &Edge : PP->parents()) {
+      if (!Edge.isDom())
+        continue;
+      if (Parent) {
+        Parent = nullptr;
+        break;
+      }
+      Parent = &Edge.getNode();
+    }
+    if (Parent)
+      Witness = Out.lookup(Parent);
+    if (PP->empty() && !PP->isLoopProgramPoint()) {
+      if (Witness)
+        Out[PP] = Witness;
+      continue;
+    }
+    Observation *Target = originalAlignedLoad(*PP);
+    if (!Target)
+      continue;
+    Out[PP] = Target;
+    const AbstractAccess &Access = *Target->getContiguousRegion();
+    if (!Witness || !Target->isDeletable() ||
+        Access.getSize().getConstant() != 16)
+      continue;
+    auto Covered = Witness->covers(*Target);
+    if (Covered.State != ObservationCoverage::Partial ||
+        Covered.End - Covered.Begin != 8)
+      continue;
+    uint64_t Start = Access.getOffset().getConstant();
+    if (Covered.Begin != Start && Covered.Begin != Start + 8)
+      continue;
+    if (!DT.dominates(Witness->getInstruction(), Target->getInstruction()) ||
+        HasSharedSource(*Witness) || HasSharedSource(*Target))
+      continue;
+    uint64_t Delta = Covered.Begin == Start ? 8 : 0;
+    Target->retainResidual(*Witness,
+                           {Access.getBase(), Start + Delta, 8,
+                            commonAlignment(Access.getAlign(), Delta)});
+    Out.erase(PP);
+    ++Narrowed;
+  }
+  return Narrowed;
+}
+
 } // namespace
 
 PreservedAnalyses
@@ -301,6 +393,8 @@ RedundantObservationEliminationPass::run(MAIRGraph &G,
   // pre-intra result; unrelated analyses remain untouched.
   RedundantObservationInfo Info = RedundantObservationAnalysis().run(G, AM);
   const unsigned NumEliminatedInter = doInterROE(G, Info, SE);
+  const unsigned NumNarrowed = PartialCoverage ? narrowPartialOverlaps(G) : 0;
+  NumNarrowedObservations += NumNarrowed;
 
   const unsigned NumEliminated = NumEliminatedIntra + NumEliminatedInter;
   NumEliminatedObservations += NumEliminated;
@@ -309,8 +403,9 @@ RedundantObservationEliminationPass::run(MAIRGraph &G,
   MAIRStatScope::add(MAIRStatField::Intra, NumEliminatedIntra);
   MAIRStatScope::add(MAIRStatField::Inter, NumEliminatedInter);
   MAIRStatScope::add(MAIRStatField::Eliminated, NumEliminated);
-  return NumEliminated == 0 ? PreservedAnalyses::all()
-                            : PreservedAnalyses::none();
+  MAIRStatScope::add(MAIRStatField::Narrowed, NumNarrowed);
+  return NumEliminated == 0 && NumNarrowed == 0 ? PreservedAnalyses::all()
+                                                : PreservedAnalyses::none();
 }
 
 } // namespace mair

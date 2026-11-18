@@ -15,28 +15,15 @@
 
 namespace mair {
 
-namespace detail {
-inline thread_local bool MAIROptSuppressed = false;
-} // namespace detail
+enum class ClangMAIRMode { Default, Disabled, ASanO3 };
+inline thread_local ClangMAIRMode CurrentClangMAIRMode = ClangMAIRMode::Default;
 
 /// Whether sanitizer-side MAIR optimization was explicitly enabled, and is not
-/// turned off for the pipeline being run (MAIROptSuppressionScope).
+/// turned off for the clang pipeline being run.
 inline bool isMAIROptEnabled() {
-  return !detail::MAIROptSuppressed && std::getenv("MAIR") != nullptr;
+  return CurrentClangMAIRMode != ClangMAIRMode::Disabled &&
+         std::getenv("MAIR") != nullptr;
 }
-
-/// Turns sanitizer-side MAIR optimization off while it lives. Clang's -O0
-/// pipeline runs the sanitizers in one (PassRegistry.cpp), so that their
-/// output is the native one.
-class MAIROptSuppressionScope {
-  bool WasSuppressed = detail::MAIROptSuppressed;
-
-public:
-  MAIROptSuppressionScope() { detail::MAIROptSuppressed = true; }
-  ~MAIROptSuppressionScope() { detail::MAIROptSuppressed = WasSuppressed; }
-  MAIROptSuppressionScope(const MAIROptSuppressionScope &) = delete;
-  MAIROptSuppressionScope &operator=(const MAIROptSuppressionScope &) = delete;
-};
 
 inline llvm::SmallPtrSet<const llvm::Instruction *, 32>
 collectModeledSources(const MAIRGraph &Graph) {
@@ -103,13 +90,14 @@ public:
     }
   }
 
-  llvm::Error optimize() {
+  llvm::Error optimize(bool AllowPartialCoverage = false) {
     if (!Graph)
       return llvm::createStringError("MAOpt graph has not been built");
     if (Optimized)
       return llvm::createStringError("MAOpt graph has already been optimized");
 
-    buildMAIRGraphDefaultPipeline(PM, KeepFullDebug, Config.trustsObjects());
+    buildMAIRGraphDefaultPipeline(PM, KeepFullDebug, Config.trustsObjects(),
+                                  AllowPartialCoverage);
     PM.run(*Graph, GAM);
 #ifndef NDEBUG
     // Verification walks every program point, edge and observation again, and

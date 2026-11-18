@@ -399,7 +399,7 @@ TSan 同样按 Observation 的区域记录访问（`XsanThreadSanitizer::instrum
 clang 的 -O0 流水线里，ASan 和 TSan 不用 MAIR，输出与不设 `MAIR` 时相同（`addSanitizerForClang`，`src/instrumentation/PassRegistry.cpp`）。原因：-O0 的地址都经过栈槽重新 load，MAIR 几乎证不出覆盖，C 代码上只省约 0.2% 的检查，编译时间却是 2–3 倍（分诊 B1）。
 
 - 判定用 clang 流水线的 `OptimizationLevel`，不看函数的 `optnone`：`-O0 -Xclang -disable-O0-optnone` 时函数没有 `optnone`，流水线仍是 -O0，同样不走 MAIR；反过来 -O1 以上带 `__attribute__((optnone))` 的函数照常走 MAIR。
-- 实现：-O0 时把 sanitizer pass 包进 `WithoutMAIROptPass`，它运行期间用 `mair::MAIROptSuppressionScope` 让 `mair::isMAIROptEnabled()` 返回假（`src/instrumentation/MAIR/MAOpt.h`）。只影响 clang 的 sanitizer 位置；opt 的流水线（`registerPassIntoOpt`）没有级别，不变；mair-opt 不跑 sanitizer，不受影响。
+- 实现：`ClangMAIRModePass` 只在 clang 的 sanitizer 回调期间设置模式并在返回时恢复。`-O0` 设为 `ClangMAIRMode::Disabled`，使 `mair::isMAIROptEnabled()` 返回假；ASan 的 `-O3` 回调可启用[末轮 ROE 部分覆盖](mair-optimization-plan.md#本轮实施4-部分覆盖)。opt 注册的 sanitizer 流水线没有 clang 级别，不会自动启用；`mair-opt` 只验证图，可以显式指定 `-O3` 或 `-passes='roe<partial>'`。
 - 测试：`test/MAIR/TestCases/{asan,tsan}/mair-O0-native.c`（-O0 与 `-O0 -disable-O0-optnone` 下与 native 逐字相同，-O1 下仍走 MAIR）。原来用 -O0 跑 MAIR 的 sanitizer 测试都改成 -O1，见 `.tasks/WP1_20261117_1720/worklog.md`。
 
 ### 只保证默认选项

@@ -410,6 +410,9 @@ static cl::opt<bool>
                cl::init(false));
 
 #ifndef XSAN_PASS
+static cl::opt<bool> ClMAIRStandaloneASan("mair-standalone-asan",
+                                          cl::ReallyHidden, cl::init(false));
+
 // Off by default: MAIR then checks every access native ASan checks.
 static cl::opt<bool> ClMAIRBoundsElimination(
     "mair-asan-obe",
@@ -4348,6 +4351,50 @@ void XsanAddressSanitizer::instrumentMAIRObservation(
   // merges.
   Align Alignment = Obs.Source->getContiguousRegion()->getAlign();
   const auto *Size = dyn_cast<ConstantInt>(Obs.AccessSize);
+  if (Obs.Source->isPartiallyCovered()) {
+    auto *Load = cast<LoadInst>(First);
+    const auto OriginalBits = DL.getTypeStoreSizeInBits(Load->getType());
+    assert(Sources.size() == 1 &&
+           &Obs.Source->getParent()->getAnchor() == Load && Load->isSimple() &&
+           OriginalBits == 128 && Load->getAlign() >= Align(8) &&
+           Mapping.Scale == kDefaultShadowScale && Size && Size->equalsInt(8) &&
+           Alignment >= Align(8) && "unexpected partial ASan read");
+    if (UseCalls) {
+      // The callback checks and reports the same address and size.
+      instrumentAddress(Load, InsertBefore, Load->getPointerOperand(),
+                        Load->getAlign(), OriginalBits.getFixedValue(), false,
+                        nullptr, UseCalls, ClForceExperiment, RTCI, Loc);
+      return;
+    }
+    // Each aligned half occupies one shadow byte. Offsetting the shadow, not
+    // the application address, lets both checks reuse the original mapping.
+    const mair::AbstractAccess &Residual = *Obs.Source->getContiguousRegion();
+    mair::AbstractAccess Original = mair::AbstractAccess::fromPointerAndSize(
+        *Load->getPointerOperand(),
+        mair::AbstractValue::constant(OriginalBits.getFixedValue() / 8), DL);
+    assert(Original.getBase() == Residual.getBase());
+    uint64_t Delta =
+        Residual.getOffset().getConstant() - Original.getOffset().getConstant();
+    assert((Delta == 0 || Delta == 8) && "expected a single aligned half");
+    Value *OriginalAddr =
+        IRB.CreatePointerCast(Load->getPointerOperand(), IntptrTy);
+    Value *Shadow = memToShadow(OriginalAddr, IRB);
+    if (Delta)
+      Shadow = IRB.CreateAdd(Shadow, ConstantInt::get(IntptrTy, 1));
+    Value *ShadowPtr = IRB.CreateIntToPtr(Shadow, PtrTy);
+    Value *Bad =
+        IRB.CreateIsNotNull(IRB.CreateLoad(IRB.getInt8Ty(), ShadowPtr));
+    Instruction *CrashTerm =
+        SplitBlockAndInsertIfThen(Bad, InsertBefore, !Recover,
+                                  MDBuilder(*C).createUnlikelyBranchWeights());
+    Instruction *Report = generateCrashCode(
+        CrashTerm, OriginalAddr, false,
+        TypeStoreSizeToSizeIndex(OriginalBits.getFixedValue()), nullptr,
+        ClForceExperiment, RTCI);
+    if (Loc)
+      Report->setDebugLoc(Loc);
+    return;
+  }
   if (Size && Size->getValue().getActiveBits() <= 32) {
     uint64_t Bytes = Size->getZExtValue();
     // A single unmerged access is checked exactly as native ASan would.
@@ -4544,7 +4591,20 @@ bool XsanAddressSanitizer::instrumentFunctionViaMAIR(
 
   auto MAIRModeledSources = mair::collectModeledSources(Opt.getGraph());
 
-  if (Error Err = Opt.optimize())
+  const bool AllowPartialCoverage =
+      mair::CurrentClangMAIRMode == mair::ClangMAIRMode::ASanO3 &&
+      ClMAIRStandaloneASan && !Recover && !CompileKernel &&
+      TargetTriple.getArch() == Triple::x86_64 && LongSize == 64 &&
+      Mapping.Scale == kDefaultShadowScale &&
+      Mapping.Offset != kDynamicShadowSentinel && !Mapping.InGlobal &&
+      !ClMappingScale.getNumOccurrences() &&
+      !ClMappingOffset.getNumOccurrences() && !ClForceDynamicShadow &&
+      ClShadowAddrSpace == 0 && SrcAddrSpaces.empty() && !ClAlwaysSlowPath &&
+      !ClForceExperiment && !ClDebug && !ClDebugStack && ClDebugFunc.empty() &&
+      ClDebugMin < 0 && ClDebugMax < 0 &&
+      ClMemoryAccessCallbackPrefix == "__asan_" &&
+      InstrumentationWithCallsThreshold != 0;
+  if (Error Err = Opt.optimize(AllowPartialCoverage))
     report_fatal_error(Twine(toString(std::move(Err))));
 
   // Whether one check of Obs's region can stand in for the native checks of

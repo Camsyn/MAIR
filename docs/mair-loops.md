@@ -281,33 +281,44 @@ TODO：
 
 规则（`matchNarrowIndex`、`resolveNarrowIndex`，`src/instrumentation/MAIR/Transforms/LoopPeriodicObservationCombinePass.cpp`）：
 
-- 形状：地址 SCEV 是指针加法，除一项外都在本循环不变（合起来记为 `Base`），这一项是 `zext({S,+,s}<L>)` 或 `C * zext(...)`，`C` 是常量，递推属于本图的循环 `L`。
-- 接受：零扩展、`S = 0`、`s = 1`、`C > 0`，且 `C * (2^w - 1)` 不超出地址索引宽度。
-- 次数：源 PP 这次运行执行 `T` 次（与普通 LPOC 相同：SCEV 精确次数、出口处读出的次数或自建计数器，见“数据相关的出口”）。第 `k` 次访问的下标是 `k mod 2^w`，所以 `T` 次访问恰好访问下标 `[0, min(T, 2^w))`：前 `2^w` 次各不相同、首尾相接，之后只是重访。区域就是递推 `{Base,+,C}` 的前 `min(T, 2^w)` 项，与普通仿射访问一样交给 `buildContiguousAggregate` 或 periodic 分支：`C` 等于访问大小时是连续区间 `[Base, + min(T, 2^w) * C)`，否则是 stride 为 `C`、trip count 为 `min(T, 2^w)` 的 periodic 区域。没有空洞，也不多出字节。
-- `T` 的宽度：`T` 比 BTC 宽一位，不会回绕。`T` 的类型比 `w` 宽时次数是 `umin(T, 2^w)`（`2^w` 在 `T` 的类型里可表示）；不比 `w` 宽时 `T < 2^w`，不需要 `umin`。常量 `T` 由 SCEV 直接折叠（300 轮的 `u8` 下标为 256）。MAIR 表达式已有 `UMin`，物化 lowering 成 `llvm.umin`，不需要新的表达式种类。
+- 形状：地址 SCEV 是指针加法，除一项外都在本循环不变（合起来记为 `Base`），这一项是 `zext({S,+,s}<L>)`，或它与若干循环不变因子之积 `C * zext(...)`（`C` 可以是常量，也可以是符号），递推属于本图的循环 `L`。
+- 接受：零扩展，步长是常量 `s = ±2^p`（`p < w`）：
+  - 向上（`s = 2^p`）：`S < 2^p`；向下（`s = -2^p`）：`S >= 2^w - 2^p`。`S` 可以是符号，按 SCEV 的无符号值域判断（`getUnsignedRange`）。`S = 0, s = 1` 与 `S = 2^w - 1, s = -1` 是 `p = 0` 的特例。
+  - `C` 的符号已知（常量；或 SCEV 证明 `C >= 0` / `C < 0`），且 `|C| * (2^w - 1) < 2^(N-1)`，`N` 是地址索引宽度。符号值的 `|C|` 取 SCEV 值域的上界：`unsigned` 行距 `zext i32` 的上界是 `2^32 - 1`，对 `u8`、`u16` 下标都满足；`int` 行距（`sext`）符号未知，64 位行距（哪怕已知非负）乘积可能越过 `2^63`，都拒绝（`u8_signed_pitch`、`u8_wide_pitch`）。理由：满足时每个偏移 `C * j`（`0 <= j < 2^w`）都是同号、不回绕的真整数，区域的各趟沿一个方向前进、不绕过地址空间，这是 periodic 区域的使用者（ASan 的 hull 快速路径、LocationMerge 的拼接与交错、外层循环再汇总）默认的前提。地址本身即使溢出也按 `2^N` 取模一致（运行时 `__asan_*_periodic`、`__tsan_*_periodic` 都按模运算逐趟计算），所以这条是为了让下游的推理简单可靠，而不是为了地址相等。
+- 次数与足迹：源 PP 这次运行执行 `T` 次（与普通 LPOC 相同：SCEV 精确次数、出口处读出的次数或自建计数器，见“数据相关的出口”）。第 `k` 次访问的下标是 `(S + k * s) mod 2^w`。向上时 `S, S + 2^p, ...` 在第 `2^(w-p)` 次回到 `S + 2^w ≡ S` 之前一直小于 `2^w`（最大是 `S + 2^w - 2^p < 2^w`），不回绕、互不相同；之后按同样顺序重访。所以 `T` 次访问恰好访问 `{S,+,s}` 的前 `min(T, 2^(w-p))` 项，向下同理（最小是 `S - 2^w + 2^p >= 0`）。区域就是递推 `{Base + C * S, +, C * s}` 的前 `min(T, 2^(w-p))` 项，交给 `buildContiguousAggregate` 或 periodic 分支：步长是常量且等于访问大小时是连续区间，否则是 periodic 区域（向下时 stride 为负，例如从 255 倒数、4 字节元素是起点 `a + 1020`、stride `-4`）。没有空洞，也不多出字节。
+- `T` 的宽度：`T` 比 BTC 宽一位，不会回绕。`T` 的类型比 `w - p` 宽时次数是 `umin(T, 2^(w-p))`，否则 `T < 2^(w-p)`，不需要 `umin`。常量 `T` 由 SCEV 直接折叠（300 轮的 `u8` 下标为 256）。MAIR 表达式已有 `UMin`，物化 lowering 成 `llvm.umin`，不需要新的表达式种类。
 - 合法性条件与普通 LPOC 完全相同：来源每轮恰执行一次、循环无 barrier、唯一 exiting block 与出口块、出口后支配来源、`Base` 在出口可用。
 - 拒绝（`rej-wrap`）：
-  - 起点不为 0（`a[(u8)(i + k)]` 的下标是 `{k,+,1}`，同样按起点判断）：回绕后访问到起点之前的 `[0, ...)`，足迹不是从 `Base + C * S` 开始的连续区间；不能用整个 `2^w` 窗口代替（多出的字节在 ASan 下误报、在 TSan 下造成假竞争）。
+  - 起点超出上面的范围（`a[(u8)(i + k)]` 的下标是 `{k,+,1}`，`k` 为任意值；`i += 4` 从 4 起）：回绕后访问到起点之前（向下时之后），足迹不是从首个地址开始的前缀；不能用整个 `2^w` 窗口代替（多出的字节在 ASan 下误报、在 TSan 下造成假竞争）。
   - 符号扩展：下标到 `2^(w-1)` 后变成负数，足迹在 `Base` 两侧且不连续。带 `nsw` 的递推 SCEV 已折进扩展，不会走到这里。
-  - 步长不为 1：`i += 2` 只访问偶数下标，`min(T, 2^w)` 个元素会越过 `a[254]`；步长为奇数时回绕后会填满窗口，但顺序打乱，前缀不是连续的。步长 -1、起点 `2^w - 1` 的情形足迹是 `[2^w - min(T, 2^w), 2^w)`，同样精确，尚未实现。
-- 构造的递推 `{Base,+,C}<L>` 只用来携带起点和步长，交给已有的区间/periodic 构造，标志为 `FlagAnyWrap`。SCEV 对它推出的任何标志都是关于这个数学函数本身的，与它代表的访问无关，不影响正确性。
+  - 步长不是 2 的幂（`i += 3`、`i += 6`）：与 `2^w` 互素或只有部分公因子，回绕后访问的是起点所在剩余类里打乱顺序的下标（`0, 3, ..., 255, 2, 5, ...`），任何前缀都不是一个递推的前缀。
+  - `C` 的符号未知，或 `|C| * (2^w - 1)` 可能越过 `2^(N-1)`（见上）。
+- 构造的递推 `{Base + C * S, +, C * s}<L>` 只用来携带起点和步长，交给已有的区间/periodic 构造，标志为 `FlagAnyWrap`。SCEV 对它推出的任何标志都是关于这个数学函数本身的，与它代表的访问无关，不影响正确性。
 
 起点不为 0 时能否证明不回绕（此时地址本就是仿射的 `{Base + C * zext(S), +, C * s}`）：条件是 `zext(S) + s * BTC < 2^w`。SCEV 的零扩展折叠已用常量最大 BTC 和循环 guard 尝试过同一件事。另用符号精确 BTC 加 `isKnownPredicate`、`isLoopEntryGuardedByCond`、`applyLoopGuards` 试过（原型，未入库）：`sext.c` 的 `wrap_idx` 向量循环前，LV 插了 `~k >= n - 1` 的 guard，仍证不出；7zip `LzFind.c` 的全部 14 个窄下标循环也证不出。所以不实现这一步，起点不为 0 一律拒绝。
 
 LzFind 的结论：`GetMatchesSpec1`（以及内联进 `Bt*_MatchFinder_GetMatches/Skip` 的副本，共 14 个循环、28 个访问）的匹配循环 `while (++len != lenLimit) if (pb[len] != cur[len]) break;` 地址是 `cur + zext i32 {min(len0, len1) + 2,+,1}`。起点不为 0，只有程序不变式 `len0, len1 < lenLimit` 才保证 `len` 在碰到 `lenLimit` 之前不回绕；循环前的 guard 只给出 `len + 1 != lenLimit`，SCEV 与 guard 都证不出。而且循环有两个 exiting block（到达 `lenLimit` 与不匹配时 `break`），本来就是 `rej-multiexit`。现在这 28 个访问的统计从 `rej-nonaffine` 变为 `rej-multiexit`（形状已识别，先按多出口拒绝）。要优化它需要多出口支持（N4 第二步），再加上起点不为 0 时的运行时检查或版本化，二者都超出本规则。
 
-`-O2` 下的限制：`for (k = 0; k < n; k++, i++) a[i]` 这类次数可算的循环常被运行时展开 4 次，展开后的每个访问是 `{S + j,+,4}`，步长为 4、起点为符号，按上面的规则拒绝；向量化版本里 LV 往往插 guard 把下标限制在不回绕的范围，SCEV 再折进扩展，地址变成仿射的。数据相关的循环不会被运行时展开，规则可以直接适用。运行时测试因此用 `#pragma clang loop unroll(disable) vectorize(disable)` 保持每轮一个访问。
+`-O2` 的运行时展开：`for (k = 0; k < n; k++, i++) a[i]` 这类次数可算的循环常被展开 4 次。
+
+- 先在 LPOC 之前合并 4 个副本（LocationMerge）不行：第 `j` 个副本的下标是 `(k + j) & 255`，一般情况下 `k + 3` 可能跨过 255，四个地址不相邻（`a[255]`、`a[0]`、`a[1]`、`a[2]`），只有知道 `k ≡ 0 (mod 4)` 才相邻，而这正是下面按相位的论证；SCEV 的常量差也给不出（`locationmerge-wrapping-index.ll` 的 `wrapping_index` 就是这种不合并的情形）。
+- 改为先按相位汇总、再合并。LLVM 默认用 epilogue 余数，展开的主循环从 `k = 0` 起、每轮加 4，SCEV 把第 `j` 个副本写成步长为 4 的相位：`16 * zext i6 {0,+,1}`、`4 + 4 * zext i8 {0,+,4}`、`8 + 8 * zext i7 {0,+,2}`、`12 + 4 * zext i8 {0,+,4}`（常量偏移进 `Base`）。每个相位都满足上面的规则（起点 0 小于步长），各自精确地是 stride 16（`int` 元素）、trip count `min(T, 64)` 的 periodic 区域，起点相差 4。四个相位基址、stride、size、trip count 相同、起点首尾相接，退出后父图的 LocationMerge 按“地址合并”把它们拼成一个 stride 16、access size 16 的区域，即 `[a, + 16 * min(T, 64))`。正确性：四个精确区域的并集是 `{j + 4m : j < 4, m < min(T, 64)} = [0, min(4T, 256))`，正是展开后主循环访问的元素；拼接本身是精确的并集。epilogue 循环从符号值 `4T` 起，按规则拒绝，留在循环里（至多 3 轮）。测试 `test/MAIR/TestCases/loop-wrapping-index-unrolled.ll`（clang -O2 的 IR），运行时 `asan/mair-wrapping-index-oob.c` 与 `tsan/mair-wrapping-index-race.c` 的 `fill_unrolled`（只禁向量化）。
+- 不能精确做的情形，保持拒绝：
+  - prologue 余数（向量化后的标量余数循环常用）：展开的主循环从符号值 `k0` 起，第 `j` 个副本是 `{k0 + j,+,4}`，起点值域不受限。四个合起来是从 `k0` 起的 `4T` 个连续下标模 `2^w`，回绕后不是从首个地址开始的前缀；它与 prologue 循环访问的 `[0, k0)` 合起来才是前缀，这需要跨循环汇总（`loop-wrapping-index-unrolled.ll` 的 `unrolled_from_k`）。
+  - 展开因子不是 2 的幂：常量次数 300 时 clang 展开 6 次，相位是 `zext i7 {j,+,3}` 与 `zext i8 {j,+,6}`，步长不是 2 的幂。单个相位不是递推的前缀；六个相位的并集虽然是 `[0, min(6T, 256))`，但要一次识别全部相位并证明它们覆盖一个完整剩余系，现有逐个 Observation 的 LPOC 做不到，不做近似。
+  - 向量化版本里 LV 往往插 guard 把下标限制在不回绕的范围，SCEV 再折进扩展，地址本来就是仿射的。
 
 与 XSan（`PtrAddExpr2PtrAddRecRewriter` 与 `combinePeriodicChecks`，`src/instrumentation/Instrumentation.cpp`）的异同：
 
-- 相同：只接受起点为 0 的回环访问；次数取 `umin(count, 2^w)`；连续时用区间检查，否则用 periodic 检查。
+- 相同：回环访问只接受起点为 0（步长为 1 时）；次数取 `umin(count, 2^w)`；乘数可以是循环不变的符号值；连续时用区间检查，否则用 periodic 检查。
 - 不同，均为 XSan 的边界问题（MAIR 按上面的规则拒绝或正确处理），已用 `xclang -xsan -fno-sanitize=undefined -O2` 在本仓库复现：
   - 符号扩展照样接受（`matchInnerExt` 接受任意 `SCEVIntegralCastExpr`，只看起点是否为 0）：`signed char i` 从 0 写 200 次，实际写 `a[0..127]` 与 `a[-128..-57]`，XSan 只检查 `[a, a + 200)`，漏掉起点之前被 poison 的字节（native ASan 与 MAIR 报 use-after-poison，XSan 不报），并多查 `[a + 128, a + 200)`。
   - 步长不检查：`u8 i += 2` 写 200 次，实际只写 `a[0..254]` 的偶数下标，XSan 检查到 `a + 2 * umin(200, 256)`，256 字节的缓冲区上误报 heap-buffer-overflow（native ASan 与 MAIR 不报）。
   - 数据相关的循环自建 8 位计数器，`uadd.sat` 饱和在 255：读 300 次 `a[(u8)i]`，`a[255]` 被 poison，XSan 只查 `[a, a + 255)` 而漏报，native ASan 与 MAIR 报告。MAIR 的次数是 65 位的 `1 + zext(BTC)` 再取 `umin`，不饱和。
   - 截断：`matchInnerExt` 遇到 `trunc` 时把计数类型设为窄类型，随后 `matchInnerAddRec` 又把它覆盖成递推起点的宽类型（`Instrumentation.cpp:297` 与 `:312`），注释所说的 `(u8){(u16)S,+,s}` 不会按回环处理（按代码阅读；SCEV 通常已把截断分配进递推，影响有限）。
   - 复用 32 位计数器（`isLoopCountingPhi` 只要求不窄于 32 位）时 2^32 轮后回绕（按代码阅读）。
-- MAIR 比 XSan 窄的地方：下标的乘数只接受常量（XSan 接受循环不变的符号 `Inv1`）。
+- MAIR 比 XSan 宽的地方：步长为 `±2^p`、起点在相位范围内（含倒数与展开后的相位）。
+- MAIR 比 XSan 窄的地方：符号乘数要求符号已知且 `|C| * (2^w - 1) < 2^(N-1)`（XSan 不检查，`int` 行距也接受）。
 
 度量（`-O2`，静态，7zip Alone2 全部 322 个 TU 与 sqlite3 有/无 `fuzzer-no-link`，ASan 加 `-as-instrumentation-with-call-threshold=0`；`-mair-stats` 与 E 组 `LoopReasons` 插件统计插桩后仍在循环内的检查；基线 `c78c5ae3`，脚本与原始数据在 WP7 的 worklog）：
 
@@ -325,7 +336,9 @@ LzFind 的结论：`GetMatchesSpec1`（以及内联进 `Bt*_MatchFinder_GetMatch
 
 7zip 汇总掉的窄下标多数是 `MyStringLen` 一类 `unsigned i; for (i = 0; s[i] != 0; i++)` 的数据相关循环（`MyString.cpp` 21 个、`Bench.cpp` 10 个）：下标是 `zext i32 {0,+,1}`，次数由自建计数器给出，区间为 `umin(T, 2^32)` 个元素，所以 `exit-counter` 与 `wrap-index` 同步增加，并插入了约 50 个计数器。`rej-wrap` 以 `zext i32 {S,+,1}`（S 为符号起点）为主，其次是展开或倒数产生的步长 ±2、±4、-1。sqlite3 几乎没有窄下标。
 
-测试：`test/MAIR/TestCases/loop-wrapping-index.ll`（`u8` 下标、常量次数 200/256/300，符号次数，`u16` 下标与 4 字节元素，8 字节元素的 periodic 区域，数据相关出口与自建计数器；负例起点为 `k`、`(u8)(i + k)`、`sext`、步长 2；统计行 `wrap-index 5  rej-wrap 4`），单元测试 `LoopPeriodicObservationCombinePass.CoversTheDistinctElementsOfAWrappingIndex`（`u8` 读在判断前、`u16` 写在判断后，按 BTC = 0…70000 求区间大小，与逐次模拟得到的不同元素集合比较，并检查集合没有空洞），`test/MAIR/TestCases/asan/mair-wrapping-index-oob.c`（`u8` 下标跑 300 轮，数组 256 个元素不误报、255 个元素读写都报告，循环内无逐次检查），`test/MAIR/TestCases/tsan/mair-wrapping-index-race.c`（另一线程写第 200 个元素时读、写都报竞争；只写第 256 个及以后的元素时不报）。变异验证：去掉 `umin` 后单元测试、`loop-wrapping-index.ll`、ASan 的 256 元素运行（误报）、TSan 的 norace 运行（假竞争）全部失败。
+推广到步长 `±2^p`、相位起点与符号乘数之后（基线 `63a35da9`，同样的方法）：7zip 的 `wrap-index` 为 75 → 83（ASan）、73 → 81（TSan），`rej-wrap` 234 → 226、211 → 203，`range` + `periodic` 1925 → 1933、1909 → 1917，循环内残留 24343 → 24342、27176 → 27174（地址非仿射 3665 → 3657、2693 → 2685）；新增的来自 `LzmaEnc.c`（3）、`ComHandler.cpp`（4）、`7zEncode.cpp`（1）。sqlite3 全部不变。展开 ×4 的支持在这两个项目上几乎没有静态收益。未逐个核实原因；在样例（`sum_u8` 一类）里，默认 `-O2` 先向量化，标量余数循环用 prologue 余数（起点为符号，拒绝），向量循环则由 LV 的 guard 让地址成为仿射的；epilogue 形的展开主循环出现在只禁向量化或向量化不划算的循环里。
+
+测试：`test/MAIR/TestCases/loop-wrapping-index.ll`（`u8` 下标、常量次数 200/256/300，符号次数，`u16` 下标与 4 字节元素，8 字节元素的 periodic 区域，数据相关出口与自建计数器，步长 2、从 1 起步长 4、从 255 倒数（常量与符号次数）、`unsigned` 行距；负例起点为 `k`、`(u8)(i + k)`、`sext`、步长 3、从 4 起步长 4、从 254 倒数、`int` 行距、64 位行距；统计行 `wrap-index 10  rej-wrap 8`），`loop-wrapping-index-unrolled.ll`（见上），单元测试 `LoopPeriodicObservationCombinePass.CoversTheDistinctElementsOfAWrappingIndex`（`u8` 读在判断前、`u16` 写在判断后，按 BTC = 0…70000 求区间大小，与逐次模拟得到的不同元素集合比较，并检查集合没有空洞）与 `CoversTheDistinctElementsOfWrappingPhases`（从 255 倒数、从 1 起步长 4，按 BTC 展开 periodic 区域覆盖的字节，与逐次模拟的字节集合逐一相等），`test/MAIR/TestCases/asan/mair-wrapping-index-oob.c`（`u8` 下标、展开 4 次、从 255 倒数各跑 300 轮，数组 256 个元素不误报、255 个元素都报告，循环内无逐次检查），`test/MAIR/TestCases/tsan/mair-wrapping-index-race.c`（另一线程写第 200 个元素时都报竞争；只写第 256 个及以后的元素时不报）。变异验证：去掉 `umin` 或不按步长缩小 `2^(w-p)` 后，单元测试、两个 IR 测试、ASan 的 256 元素运行（误报）、TSan 的 norace 运行（假竞争）都失败。
 
 ## 地址合并
 

@@ -5,6 +5,7 @@
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/IR/ValueMap.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
@@ -42,7 +43,12 @@ struct Visit {
 std::string Pipeline;
 // The visits of each function, in first-visit order.
 std::vector<std::vector<Visit>> Functions;
-StringMap<unsigned> FunctionIndex;
+
+// A replacement need not be a Function and must not inherit its visits.
+struct FunctionIndexConfig : ValueMapConfig<const Value *> {
+  enum { FollowRAUW = false };
+};
+ValueMap<const Value *, unsigned, FunctionIndexConfig> FunctionIndex(0);
 
 struct ActiveVisit {
   unsigned Function = 0;
@@ -111,24 +117,16 @@ void noteMAIRPipeline(StringRef Name) {
   Pipeline = Name.str();
 }
 
-// Child loop graphs do not store the function; the root graph does.
-static StringRef getFunctionName(const MAIRGraph &G) {
-  const Function *F = G.getRoot().getFunction();
-  if (!F)
-    return "<unknown>";
-  return F->getName().empty() ? "<unnamed>" : F->getName();
-}
-
 bool mairStatsEnabled() { return ClMAIRStats; }
 
 void MAIRStatScope::begin(StringRef Pass, unsigned Ordinal, const MAIRGraph &G,
                           uint64_t NumInputs) {
   assert(ClMAIRStats && "a MAIR stat scope begins only under -mair-stats");
   assert(!Current && "MAIR stat scope is not re-entrant");
-  StringRef Func = getFunctionName(G);
+  const Function *Func = G.getRoot().getFunction();
   std::string Label =
       Ordinal == 0 ? Pass.str() : (Pass + "#" + Twine(Ordinal)).str();
-  auto [It, Inserted] = FunctionIndex.try_emplace(Func, Functions.size());
+  auto [It, Inserted] = FunctionIndex.insert({Func, Functions.size()});
   if (Inserted)
     Functions.emplace_back();
   unsigned FnIndex = It->second;

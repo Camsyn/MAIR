@@ -8,12 +8,12 @@ define void @empty() {
   ret void
 }
 
-define i32 @first(ptr %p) {
+define i32 @0(ptr %p) {
   %value = load i32, ptr %p
   ret i32 %value
 }
 
-define i32 @second(ptr %p) {
+define i32 @1(ptr %p) {
   %value = load i32, ptr %p
   ret i32 %value
 }

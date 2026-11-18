@@ -208,10 +208,13 @@ int main(int argc, char **argv) {
       dumpMAIR(Graph, *OutputOS, MST);
   }
 
-  // Graphs holds the functions only under -emit-llvm.
-  if (!Graphs.empty()) {
-    SmallVector<const MAIRGraph *, 8> GraphPtrs(make_pointer_range(Graphs));
-    dumpLLVM(GraphPtrs, *OutputOS);
+  if (EmitLLVM && !DisableOutput) {
+    if (Graphs.empty()) {
+      M->print(*OutputOS, nullptr);
+    } else {
+      SmallVector<const MAIRGraph *, 8> GraphPtrs(make_pointer_range(Graphs));
+      dumpLLVM(GraphPtrs, *OutputOS);
+    }
   }
 
   if (OutputFile)

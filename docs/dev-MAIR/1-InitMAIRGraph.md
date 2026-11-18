@@ -170,6 +170,8 @@ MAIR 作为独立 IR 输出，风格接近 LLVM IR。
 
 MAIR 作为 LLVM IR 的注释输出，风格类比 LLVM 的 MSSA dump。
 
+`mair-opt -emit-llvm` 输出整个 LLVM 模块。即使没有函数定义、没有 MAIR 注释，也保留全局变量和函数声明；`-disable-output` 仍然抑制输出。
+
 要求：
 
 - 以原始 LLVM IR 为主

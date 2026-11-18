@@ -653,6 +653,89 @@ std::optional<AbstractAccess> buildNestedPeriodicAggregate(
                             Periodic.getAlign(), SE, Loops, Site, Counted);
 }
 
+/// An address Base + Scale * ext(Index), Index an affine recurrence of the
+/// loop in an integer narrower than the address and extended to it, such as
+/// a[(unsigned char)i]. SCEV keeps the extension outside the recurrence when
+/// it cannot prove that the index does not wrap, so the address is no
+/// recurrence of the loop (docs/mair-loops.md, 窄下标回环访问).
+struct NarrowIndex {
+  // Invariant in the loop.
+  const SCEV *Base = nullptr;
+  const SCEVAddRecExpr *Index = nullptr;
+  APInt Scale;
+  bool IsSigned = false;
+};
+
+std::optional<NarrowIndex> matchNarrowIndex(const SCEV *Address, const Loop &L,
+                                            ScalarEvolution &SE) {
+  const auto *Add = dyn_cast_or_null<SCEVAddExpr>(Address);
+  if (!Add || !Add->getType()->isPointerTy())
+    return std::nullopt;
+  const SCEV *Term = nullptr;
+  SmallVector<const SCEV *, 4> Invariant;
+  for (const SCEV *Operand : Add->operands()) {
+    if (SE.isLoopInvariant(Operand, &L)) {
+      Invariant.push_back(Operand);
+      continue;
+    }
+    if (Term)
+      return std::nullopt;
+    Term = Operand;
+  }
+  if (!Term || !Term->getType()->isIntegerTy())
+    return std::nullopt;
+  APInt Scale(Term->getType()->getIntegerBitWidth(), 1);
+  if (const auto *Mul = dyn_cast<SCEVMulExpr>(Term)) {
+    const auto *Factor = dyn_cast<SCEVConstant>(Mul->getOperand(0));
+    if (Mul->getNumOperands() != 2 || !Factor)
+      return std::nullopt;
+    Scale = Factor->getAPInt();
+    Term = Mul->getOperand(1);
+  }
+  const auto *Ext = dyn_cast<SCEVIntegralCastExpr>(Term);
+  if (!Ext || isa<SCEVTruncateExpr>(Ext))
+    return std::nullopt;
+  const auto *Index = dyn_cast<SCEVAddRecExpr>(Ext->getOperand());
+  if (!Index || !Index->isAffine() || Index->getLoop() != &L)
+    return std::nullopt;
+  return NarrowIndex{SE.getAddExpr(Invariant), Index, Scale,
+                     isa<SCEVSignExtendExpr>(Ext)};
+}
+
+/// The recurrence the accesses at \p Narrow follow, and how many distinct
+/// addresses \p Count of them visit. The k-th access has index Start + k *
+/// Step modulo 2^w. From 0 by 1 and zero extended, Count accesses visit
+/// exactly the indices [0, min(Count, 2^w)): once the index wraps, it only
+/// revisits them. They are Base + Scale * k for k below that bound, the
+/// first min(Count, 2^w) addresses of {Base,+,Scale}. Any other start, step
+/// or a sign extension visits indices below the start or skips some once the
+/// index wraps, so the addresses are no prefix of a recurrence from the first
+/// one: none is returned.
+std::optional<std::pair<const SCEVAddRecExpr *, const SCEV *>>
+resolveNarrowIndex(const NarrowIndex &Narrow, const SCEV *Count, const Loop &L,
+                   ScalarEvolution &SE) {
+  if (Narrow.IsSigned || !Narrow.Index->getStart()->isZero() ||
+      !Narrow.Index->getStepRecurrence(SE)->isOne() ||
+      !Count->getType()->isIntegerTy())
+    return std::nullopt;
+  // The offsets Scale * k, k < 2^w, are positive and do not wrap.
+  unsigned IndexBits = Narrow.Index->getType()->getIntegerBitWidth();
+  if (!Narrow.Scale.isStrictlyPositive() ||
+      Narrow.Scale.getActiveBits() + IndexBits >= Narrow.Scale.getBitWidth())
+    return std::nullopt;
+  // A count no wider than the index is below 2^w already.
+  const SCEV *Distinct = Count;
+  unsigned CountBits = Count->getType()->getIntegerBitWidth();
+  if (CountBits > IndexBits)
+    Distinct = SE.getUMinExpr(
+        Count, SE.getConstant(APInt::getOneBitSet(CountBits, IndexBits)));
+  const auto *Recurrence = dyn_cast<SCEVAddRecExpr>(SE.getAddRecExpr(
+      Narrow.Base, SE.getConstant(Narrow.Scale), &L, SCEV::FlagAnyWrap));
+  if (!Recurrence)
+    return std::nullopt;
+  return std::make_pair(Recurrence, Distinct);
+}
+
 struct AggregatePlan {
   ProgramPointSite TargetSite;
   // Null if the parent graph has no unguarded program point at the site yet.
@@ -663,6 +746,8 @@ struct AggregatePlan {
   // the backedges with a counter materialization inserts.
   bool UsesExitTrip = false;
   bool UsesExitCounter = false;
+  // The address is a narrow index (resolveNarrowIndex).
+  bool UsesWrapIndex = false;
 };
 
 std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
@@ -698,6 +783,9 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
       if (AddRec->isAffine() && AddRec->getLoop() == G.getLoop())
         Recurrence = AddRec;
   }
+  // Otherwise the address may be a narrow index of this loop, resolved once
+  // the count is known.
+  std::optional<NarrowIndex> Narrow;
   if (!Recurrence && !IsNested) {
     for (Instruction *I : Obs.getInstructions()) {
       const Value *Pointer = I ? llvm::getLoadStorePointerOperand(I) : nullptr;
@@ -706,15 +794,22 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
       const auto *Candidate =
           dyn_cast<SCEVAddRecExpr>(SE.getSCEV(const_cast<Value *>(Pointer)));
       if (!Candidate || !Candidate->isAffine() ||
-          (Recurrence && Recurrence != Candidate))
-        return std::nullopt;
+          (Recurrence && Recurrence != Candidate)) {
+        Recurrence = nullptr;
+        break;
+      }
       Recurrence = Candidate;
     }
+    if (!Recurrence)
+      Narrow =
+          matchNarrowIndex(Location->getAddressSCEV(
+                               SE, AbstractAccess::ZeroOffsetBase::Analyzed),
+                           *G.getLoop(), SE);
   }
-  if (!Recurrence || Recurrence->getLoop() != G.getLoop())
+  if (!Narrow && (!Recurrence || Recurrence->getLoop() != G.getLoop()))
     return std::nullopt;
 
-  const Loop &RelevantLoop = *Recurrence->getLoop();
+  const Loop &RelevantLoop = *G.getLoop();
   std::optional<ProgramPointSite> TargetSite = Loops.getExitSite(RelevantLoop);
   if (!TargetSite || !Loops.canSinkToExit(PP, RelevantLoop) ||
       !Loops.isValueAvailableAt(*Base, *TargetSite))
@@ -731,6 +826,15 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
   if (!ExecutionCount)
     return std::nullopt;
   const Loop *Counted = UsesExitCounter ? &RelevantLoop : nullptr;
+  // The accesses at a narrow index summarize as the distinct addresses they
+  // visit, the first ones of a recurrence.
+  if (Narrow) {
+    auto Resolved =
+        resolveNarrowIndex(*Narrow, ExecutionCount, RelevantLoop, SE);
+    if (!Resolved)
+      return std::nullopt;
+    std::tie(Recurrence, ExecutionCount) = *Resolved;
+  }
 
   MemoryRegion Aggregate;
   // A constant recurrence that fits the contiguous MAIR abstraction keeps the
@@ -787,7 +891,8 @@ std::optional<AggregatePlan> buildAggregatePlan(MAIRGraph &G,
       std::move(Aggregate),
       IsRangeAggregate,
       UsesExitTrip,
-      UsesExitCounter};
+      UsesExitCounter,
+      Narrow.has_value()};
 }
 
 void commitAggregate(MAIRGraph &G, Observation &Obs, AggregatePlan Plan,
@@ -803,6 +908,8 @@ void commitAggregate(MAIRGraph &G, Observation &Obs, AggregatePlan Plan,
     MAIRStatScope::add(MAIRStatField::ExitTrip);
   if (Plan.UsesExitCounter)
     MAIRStatScope::add(MAIRStatField::ExitCounter);
+  if (Plan.UsesWrapIndex)
+    MAIRStatScope::add(MAIRStatField::WrapIndex);
   if (Plan.IsRange) {
     ++NumRangeAggregates;
     MAIRStatScope::add(MAIRStatField::Range);
@@ -847,18 +954,27 @@ std::optional<MAIRStatField> classifyRejection(MAIRGraph &G,
     return MAIRStatField::RejectOther;
   if (G.hasForwardBarrier() || G.hasBackwardBarrier())
     return MAIRStatField::RejectBarrier;
-  const SCEVAddRecExpr *Recurrence =
-      findAffineRecurrenceOf(Obs, L, Loops.getSE());
-  if (!Recurrence)
-    return MAIRStatField::RejectNonAffine;
+  ScalarEvolution &SE = Loops.getSE();
+  std::optional<NarrowIndex> Narrow;
+  if (!findAffineRecurrenceOf(Obs, L, SE)) {
+    Narrow = matchNarrowIndex(Obs.getContiguousRegion()->getAddressSCEV(
+                                  SE, AbstractAccess::ZeroOffsetBase::Analyzed),
+                              L, SE);
+    if (!Narrow)
+      return MAIRStatField::RejectNonAffine;
+  }
   if (!Loops.executesOncePerRelevantIteration(PP, L))
     return MAIRStatField::RejectConditional;
   if (!L.getExitingBlock() || !L.getUniqueExitBlock())
     return MAIRStatField::RejectMultiExit;
   std::optional<ProgramPointSite> Site = Loops.getExitSite(L);
-  if (!Loops.getExactExecutionCountSCEV(PP, L) &&
-      (!Site || !Loops.getExitValueExecutionCountSCEV(PP, L, *Site)))
+  const SCEV *Count = Loops.getExactExecutionCountSCEV(PP, L);
+  if (!Count && Site)
+    Count = Loops.getExitValueExecutionCountSCEV(PP, L, *Site);
+  if (!Count)
     return MAIRStatField::RejectNoCount;
+  if (Narrow && !resolveNarrowIndex(*Narrow, Count, L, SE))
+    return MAIRStatField::RejectWrap;
   return MAIRStatField::RejectOther;
 }
 

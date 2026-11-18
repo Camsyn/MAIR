@@ -7,6 +7,8 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/FormatVariadic.h"
 
+#include <set>
+
 using namespace mair;
 
 namespace {
@@ -783,6 +785,8 @@ llvm::APInt evaluate(const MAIRScalarExpr &Expr, const llvm::Value *Leaf,
     return Operand(0) * Operand(1);
   case Kind::UDiv:
     return Operand(0).udiv(Operand(1));
+  case Kind::UMin:
+    return llvm::APIntOps::umin(Operand(0), Operand(1));
   default:
     ADD_FAILURE() << "unexpected expression kind";
     return llvm::APInt(Bits, 0);
@@ -951,6 +955,93 @@ TEST(LoopPeriodicObservationCombinePass, ExitTripCountStopsAtACallBarrier) {
   EXPECT_EQ(observationCount(Graph, "header"), 1u);
   EXPECT_EQ(observationCount(Graph, "body"), 1u);
   EXPECT_EQ(observationCount(Graph, "exit"), 0u);
+  EXPECT_TRUE(Graph.verify());
+}
+
+// a[(unsigned char)i] before the exit test and b[(unsigned short)j] after it,
+// in a loop that leaves on loaded data. Neither index carries wrap flags, so
+// LPOC counts the backedges itself. The k-th access reads a[k mod 256]: the
+// summary must cover exactly the distinct elements, without a hole and
+// nothing past them (docs/mair-loops.md, 窄下标回环访问).
+constexpr const char *WrappingIndexLoopIR = R"IR(
+define void @f(ptr %a, ptr %b, ptr %key) {
+entry:
+  br label %header
+header:
+  %i = phi i8 [ 0, %entry ], [ %i.next, %body ]
+  %j = phi i16 [ 0, %entry ], [ %j.next, %body ]
+  %k = phi ptr [ %key, %entry ], [ %k.next, %body ]
+  %v = load i64, ptr %k, align 8
+  %ia = zext i8 %i to i64
+  %pa = getelementptr inbounds i32, ptr %a, i64 %ia
+  %x = load i32, ptr %pa, align 4
+  %neg = icmp slt i64 %v, 0
+  br i1 %neg, label %exit, label %body
+body:
+  %jb = zext i16 %j to i64
+  %pb = getelementptr inbounds i32, ptr %b, i64 %jb
+  store i32 %x, ptr %pb, align 4
+  %i.next = add i8 %i, 1
+  %j.next = add i16 %j, 1
+  %k.next = getelementptr i8, ptr %k, i64 8
+  br label %header
+exit:
+  ret void
+}
+)IR";
+
+TEST(LoopPeriodicObservationCombinePass,
+     CoversTheDistinctElementsOfAWrappingIndex) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(WrappingIndexLoopIR, Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &F = *M->getFunction("f");
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(F, FAM);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  EXPECT_FALSE(
+      runPassOnGraphTree(LoopPeriodicObservationCombinePass(), Graph, AM)
+          .areAllPreserved());
+  EXPECT_EQ(observationCount(Graph, "header"), 0u);
+  EXPECT_EQ(observationCount(Graph, "body"), 0u);
+  ASSERT_EQ(observationCount(Graph, "exit"), 3u);
+  const llvm::BasicBlock *Header = &*std::next(F.begin());
+  ASSERT_EQ(Header->getName(), "header");
+  unsigned Checked = 0;
+  for (const ProgramPoint &PP : testProgramPoints(Graph)) {
+    if (!PP.getBasicBlock() || PP.getBasicBlock()->getName() != "exit")
+      continue;
+    for (const Observation &Obs : PP) {
+      const AbstractAccess *Range = Obs.getContiguousRegion();
+      if (!Range ||
+          (Range->getBase() != F.getArg(0) && Range->getBase() != F.getArg(1)))
+        continue;
+      ASSERT_TRUE(Range->getOffset().isConstant());
+      EXPECT_EQ(Range->getOffset().getConstant(), 0u);
+      ASSERT_TRUE(Range->hasSizeExpr());
+      bool IsLoad = Range->getBase() == F.getArg(0);
+      unsigned Bits = IsLoad ? 8 : 16;
+      for (uint64_t BTC :
+           {0, 1, 7, 254, 255, 256, 299, 65534, 65535, 65536, 70000}) {
+        SCOPED_TRACE(BTC);
+        // The elements the accesses visit, by brute force.
+        uint64_t Accesses = IsLoad ? BTC + 1 : BTC;
+        std::set<uint64_t> Visited;
+        for (uint64_t K = 0; K < Accesses; ++K)
+          Visited.insert(K & ((uint64_t(1) << Bits) - 1));
+        // They are the first Visited.size() elements: no hole.
+        ASSERT_TRUE(Visited.empty() || *Visited.rbegin() + 1 == Visited.size());
+        EXPECT_EQ(evaluate(Range->getSizeExpr(), Header, BTC).getZExtValue(),
+                  4 * Visited.size());
+      }
+      ++Checked;
+    }
+  }
+  EXPECT_EQ(Checked, 2u);
   EXPECT_TRUE(Graph.verify());
 }
 

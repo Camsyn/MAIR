@@ -27,14 +27,19 @@ enum class MAIRStatField : uint8_t {
   // with a counter materialization inserts into the loop.
   ExitTrip,
   ExitCounter,
+  // Loop aggregates whose address is a narrow index that may wrap, such as
+  // base + zext(u8 i) (a subset of range and periodic).
+  WrapIndex,
   // Why a loop pass left an observation inside its loop: a barrier in the
   // loop, an address that is no affine recurrence of the loop, a source that
-  // may skip an iteration, more than one exit, no trip count, anything else.
+  // may skip an iteration, more than one exit, no trip count, a narrow index
+  // whose accesses may wrap below their start, anything else.
   RejectBarrier,
   RejectNonAffine,
   RejectConditional,
   RejectMultiExit,
   RejectNoCount,
+  RejectWrap,
   RejectOther,
   // Sanitizer selection: observations lowered through MAIR or left to native
   // lowering, why each native one fell back, and the source accesses that

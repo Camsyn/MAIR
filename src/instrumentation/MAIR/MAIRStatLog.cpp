@@ -24,13 +24,21 @@ namespace {
 cl::opt<bool> ClMAIRStats("mair-stats",
                           cl::desc("Print a readable MAIR pass summary"));
 
-const char *const FieldNames[] = {
-    "in",       "preheader",     "exit",         "range",       "periodic",
-    "merged",   "intra",         "inter",        "eliminated",  "hoisted",
-    "sunk",     "exit-trip",     "exit-counter", "rej-barrier", "rej-nonaffine",
-    "rej-cond", "rej-multiexit", "rej-nocount",  "rej-other",   "lowered",
-    "native",   "multi",         "vector",       "symbolic",    "shared",
-    "fallback", "scev",          "lvi"};
+const char *const FieldNames[] = {"in",           "preheader",
+                                  "exit",         "range",
+                                  "periodic",     "merged",
+                                  "intra",        "inter",
+                                  "eliminated",   "hoisted",
+                                  "sunk",         "exit-trip",
+                                  "exit-counter", "wrap-index",
+                                  "rej-barrier",  "rej-nonaffine",
+                                  "rej-cond",     "rej-multiexit",
+                                  "rej-nocount",  "rej-wrap",
+                                  "rej-other",    "lowered",
+                                  "native",       "multi",
+                                  "vector",       "symbolic",
+                                  "shared",       "fallback",
+                                  "scev",         "lvi"};
 constexpr unsigned FieldCount = std::size(FieldNames);
 static_assert(static_cast<unsigned>(MAIRStatField::Lvi) + 1 == FieldCount,
               "every MAIR stat field needs a name");

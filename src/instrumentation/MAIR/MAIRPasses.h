@@ -24,7 +24,7 @@ void registerMAIRGraphAnalyses(MAIRGraphAnalysisManager &AM,
 
 bool normalizeMAIRLoops(llvm::Function &F, llvm::FunctionAnalysisManager &FAM);
 
-/// \p EliminateWithinTrustedObjects adds object bounds elimination (`boe`),
+/// \p EliminateWithinTrustedObjects adds object bounds elimination (`obe`),
 /// for a sanitizer that trusts some objects
 /// (MAIROptimizationConfig::trustsObjects).
 void buildMAIRGraphOgPipeline(MAIRGraphPassManager &PM,

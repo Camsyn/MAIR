@@ -6,7 +6,7 @@
 
 namespace mair {
 
-/// Object bounds elimination (`boe`). Deletes every deletable observation
+/// Object bounds elimination (`obe`). Deletes every deletable observation
 /// whose region provably lies within an object the sanitizer trusts
 /// (MAIROptimizationConfig::getTrustedObjectSize): an access there is never
 /// reported, so its check can never fire. Without a trusted object oracle, as
@@ -17,7 +17,7 @@ namespace mair {
 /// e2e data.
 ///
 /// Assumption: trusting an object means nothing poisons the bytes within it
-/// at run time. For ASan (-mair-asan-boe) the trusted objects are constant
+/// at run time. For ASan (-mair-asan-obe) the trusted objects are constant
 /// globals, and the pass assumes the user never calls the poisoning
 /// interface (__asan_poison_memory_region, ASAN_POISON_MEMORY_REGION) on
 /// read-only data. A program that does loses the reports for accesses into

@@ -1,16 +1,16 @@
-// Object bounds elimination (-mair-asan-boe) deletes the checks of accesses
+// Object bounds elimination (-mair-asan-obe) deletes the checks of accesses
 // that provably stay within a constant global. Constant data is never
 // poisoned, so such a check can never fire.
 //
-// RUN: env MAIR=1 %clang -asan -O1 -mllvm -mair-asan-boe -S -emit-llvm %s -o - \
+// RUN: env MAIR=1 %clang -asan -O1 -mllvm -mair-asan-obe -S -emit-llvm %s -o - \
 // RUN:   | FileCheck %s --check-prefix=IR
 // RUN: env MAIR=1 %clang -asan -O1 -S -emit-llvm %s -o - \
 // RUN:   | FileCheck %s --check-prefixes=IR,DEFAULT
-// RUN: env MAIR=1 %clang -asan -O1 -mllvm -mair-asan-boe -mair-stats -c %s \
+// RUN: env MAIR=1 %clang -asan -O1 -mllvm -mair-asan-obe -mair-stats -c %s \
 // RUN:   -o /dev/null 2>&1 | FileCheck %s --check-prefix=STATS
 // RUN: env MAIR=1 %clang -asan -O1 -mair-stats -c %s -o /dev/null 2>&1 \
 // RUN:   | FileCheck %s --check-prefix=NO-STATS
-// RUN: env MAIR=1 %clang -asan -O1 -g -mllvm -mair-asan-boe %s -o %t
+// RUN: env MAIR=1 %clang -asan -O1 -g -mllvm -mair-asan-obe %s -o %t
 // RUN: %t 255
 // RUN: not %t 300 2>&1 | FileCheck %s --check-prefix=OOB
 
@@ -72,11 +72,11 @@ __attribute__((noinline)) int lookup(int idx) {
   return T[idx];
 }
 
-// The option adds boe after the second redundancy elimination.
+// The option adds obe after the second redundancy elimination.
 // STATS:      roe#2
-// STATS-NEXT: boe{{ +}}in {{[0-9]+}}  eliminated 1  scev 1{{$}}
+// STATS-NEXT: obe{{ +}}in {{[0-9]+}}  eliminated 1  scev 1{{$}}
 // STATS-NEXT: simplify#2
-// NO-STATS-NOT: boe
+// NO-STATS-NOT: obe
 
 volatile int Sink;
 

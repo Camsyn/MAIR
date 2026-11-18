@@ -184,7 +184,7 @@ simplifygraph#1 → roe#1 → [locationmerge#1, liom#1, lpoc] → roe#2 → simp
 - `roe#2` 删除被组内合并、汇总后的区域覆盖的访问（2026-11-17 e2e：ASan jsoncpp/sqlite3/re2/7zip 13/18/39/78 个，TSan 14/16/57/78 个）。分组前，`liom#2` 在 7zip ASan 上还有 12 个提升，`locationmerge#2` 合并外提和周期合并放到循环边界的 Observation。
 - 公共 Observation 移动（COM）、第三次位置合并和第三次冗余删除已移出：调整前后在 4 个项目 × 2 个 sanitizer 中都是 0。COM 不触发是因为 `-O2` 的 SimplifyCFG 已经把两条分支里相同的访问提到或沉到公共块（例如两边都读 `p[0]` 时，读已在入口块）。COM 仍可用 `-passes=com` 单独运行。
 - 位置合并之后再跑一轮 `lpoc`/`liom` 没有收益（jsoncpp、re2、sqlite3 的检查数不变），所以只跑一轮。
-- ASan 加 `-mllvm -mair-asan-boe` 时，`roe#2` 之后、`simplifygraph#2` 之前多一个对象边界消除 `boe`，删除可证明落在常量全局内的访问；默认不跑。规则、位置理由与数据见 `docs/mair-object-bounds.md`。
+- ASan 加 `-mllvm -mair-asan-obe` 时，`roe#2` 之后、`simplifygraph#2` 之前多一个对象边界消除 `obe`，删除可证明落在常量全局内的访问；默认不跑。规则、位置理由与数据见 `docs/mair-object-bounds.md`。
 
 e2e 的 `instrumented_mops`（MAIR 变体，oracle 全部通过；无 MAIR → 旧 O1 → 新 O1，新 O1 含 periodic 足迹合并）：
 
@@ -195,7 +195,7 @@ e2e 的 `instrumented_mops`（MAIR 变体，oracle 全部通过；无 MAIR → �
 | sqlite3 | 36971 → 35485 → 35424 | 39274 → 36825 → 36783 |
 | 7zip | 112703 → 98218 → 96579 | 117691 → 106541 → 105462 |
 
-2026-11-17 NewPasses 改进方案合入后的 e2e（分支 `mair-plan-20261117`：barrier 放宽、ROE 符号覆盖、ASan 区间内联快速路径、外层循环再汇总、出口值 trip count；`boe` 默认关；oracle 全部通过）。`instrumented_mops` 为无 MAIR → 合入前（`ff7401d3`）→ 合入后，括号内是合入后相对无 MAIR 的减少：
+2026-11-17 NewPasses 改进方案合入后的 e2e（分支 `mair-plan-20261117`：barrier 放宽、ROE 符号覆盖、ASan 区间内联快速路径、外层循环再汇总、出口值 trip count；`obe` 默认关；oracle 全部通过）。`instrumented_mops` 为无 MAIR → 合入前（`ff7401d3`）→ 合入后，括号内是合入后相对无 MAIR 的减少：
 
 | 项目 | ASan | TSan |
 | --- | --- | --- |

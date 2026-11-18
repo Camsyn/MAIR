@@ -412,9 +412,9 @@ static cl::opt<bool>
 #ifndef XSAN_PASS
 // Off by default: MAIR then checks every access native ASan checks.
 static cl::opt<bool> ClMAIRBoundsElimination(
-    "mair-asan-boe",
+    "mair-asan-obe",
     cl::desc("With MAIR, do not check accesses that provably stay within a "
-             "constant global (MAIR pass boe)"),
+             "constant global (MAIR pass obe)"),
     cl::init(false));
 #endif
 

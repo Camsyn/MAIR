@@ -59,8 +59,8 @@ static cl::opt<bool> DistinguishVolatile(
     cl::init(false), cl::cat(MAIROptions));
 static cl::opt<bool> TrustConstantGlobals(
     "trust-constant-globals",
-    cl::desc("Let boe delete accesses within constant globals that no other "
-             "definition can replace (as ASan with -mair-asan-boe)"),
+    cl::desc("Let obe delete accesses within constant globals that no other "
+             "definition can replace (as ASan with -mair-asan-obe)"),
     cl::init(false), cl::cat(MAIROptions));
 static cl::opt<std::string> PassPipeline("passes",
                                          cl::desc("MAIRGraph pass pipeline"),
@@ -71,7 +71,7 @@ MAIRGraph pass names for -passes:
   com                           - Common Observation Motion
   liom                          - Loop Invariant Observation Motion
   lpoc                          - Loop Periodic Observation Combine
-  boe                           - Object Bounds Elimination
+  obe                           - Object Bounds Elimination
   locationmerge                 - Location Merge
   roe                           - Redundant Observation Elimination
   simplifygraph                 - Simplify Graph

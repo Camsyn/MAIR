@@ -1,14 +1,14 @@
-# 对象边界消除（boe）
+# 对象边界消除（obe）
 
-`ObjectBoundsEliminationPass`（CLI 名称 `boe`，`src/instrumentation/MAIR/Transforms/ObjectBoundsEliminationPass.cpp`）删除区域可证明落在某个“信任对象”之内的 Observation。sanitizer 保证信任对象 `[B, B + N)` 内的访问永远不会被报告，所以这些检查永远不会触发，删掉不丢报告。
+`ObjectBoundsEliminationPass`（CLI 名称 `obe`，`src/instrumentation/MAIR/Transforms/ObjectBoundsEliminationPass.cpp`）删除区域可证明落在某个“信任对象”之内的 Observation。sanitizer 保证信任对象 `[B, B + N)` 内的访问永远不会被报告，所以这些检查永远不会触发，删掉不丢报告。
 
 ## 开关与范围
 
-- 只在 ASan 下、显式开启：`-mllvm -mair-asan-boe`（`ClMAIRBoundsElimination`，`src/instrumentation/llvm23/AddressSanitizer.cpp`），默认关闭。不开时 MAIR 检查的访问与现在完全相同，流水线里也没有 boe。
-- 信任对象由 sanitizer 通过 `MAIROptimizationConfig::setTrustedObjectSize` 回调提供（`src/instrumentation/MAIR/MAIR.h`），MAIR core 不含任何 ASan 语义。没有回调时（所有 sanitizer 的默认），pass 直接返回，`-mair-stats` 也不打印。`MAOpt` 只在配置带回调时把 boe 加进默认流水线（`buildMAIRGraphDefaultPipeline` 的 `EliminateWithinTrustedObjects`）。
-- TSan 不检查越界：TSan 插件里没有这个选项，传入即报 `Unknown command line argument '-mair-asan-boe'`；TSan 也不提供信任对象，在 `-mair-pipeline` 里写上 boe 也什么都不删（测试 `test/MAIR/TestCases/tsan/mair-asan-boe.c`）。
-- `mair-opt -trust-constant-globals -passes=boe` 单独运行：用与 ASan 相同的 `ObjectSizeOffsetVisitor` 规则信任常量全局，但没有 ASan 的选项与初始化顺序条件。
-- 调整流水线时，`-mair-pipeline` 只决定位置；仍要加 `-mllvm -mair-asan-boe`，否则没有信任对象。
+- 只在 ASan 下、显式开启：`-mllvm -mair-asan-obe`（`ClMAIRBoundsElimination`，`src/instrumentation/llvm23/AddressSanitizer.cpp`），默认关闭。不开时 MAIR 检查的访问与现在完全相同，流水线里也没有 obe。
+- 信任对象由 sanitizer 通过 `MAIROptimizationConfig::setTrustedObjectSize` 回调提供（`src/instrumentation/MAIR/MAIR.h`），MAIR core 不含任何 ASan 语义。没有回调时（所有 sanitizer 的默认），pass 直接返回，`-mair-stats` 也不打印。`MAOpt` 只在配置带回调时把 obe 加进默认流水线（`buildMAIRGraphDefaultPipeline` 的 `EliminateWithinTrustedObjects`）。
+- TSan 不检查越界：TSan 插件里没有这个选项，传入即报 `Unknown command line argument '-mair-asan-obe'`；TSan 也不提供信任对象，在 `-mair-pipeline` 里写上 obe 也什么都不删（测试 `test/MAIR/TestCases/tsan/mair-asan-obe.c`）。
+- `mair-opt -trust-constant-globals -passes=obe` 单独运行：用与 ASan 相同的 `ObjectSizeOffsetVisitor` 规则信任常量全局，但没有 ASan 的选项与初始化顺序条件。
+- 调整流水线时，`-mair-pipeline` 只决定位置；仍要加 `-mllvm -mair-asan-obe`，否则没有信任对象。
 
 ## ASan 信任哪些对象
 
@@ -44,7 +44,7 @@ ASan 先插桩函数、后插桩模块（`AddressSanitizerPass::run`），函数
 
 程序点取 anchor 指令，edge site 取 From 块的 terminator。证明的是所有到达该程序点的执行，比 guard 条件更强。删除依赖 MAIR 的不变量：Observation 在其程序点的检查代表它的所有来源访问（`SPEC.md` 第 3 节）；被 ROE 删除的访问也被保留的 Observation 覆盖，覆盖者在界内，被覆盖者也在界内。证明以 LLVM IR 语义为准：`nsw`/`nuw`/`inbounds` 违反时结果是 poison，程序已有未定义行为，与 LPOC 依赖 SCEV 的 no-wrap 标志相同。
 
-`-mair-stats` 中 `boe` 一行：`eliminated` 是删除数，`scev` 是只用前三步就证明的个数，`lvi` 是用到第 4 步的个数。
+`-mair-stats` 中 `obe` 一行：`eliminated` 是删除数，`scev` 是只用前三步就证明的个数，`lvi` 是用到第 4 步的个数。
 
 ### 各方法的贡献与编译时间
 
@@ -66,10 +66,10 @@ sqlite3 编译时间（机器负载约 17，3 次取最小）：不开 9.09 s，
 `default<O1>` 里放在 `roe#2` 之后、`simplifygraph#2` 之前（`default<Og>` 里在 `roe#1` 之后）：
 
 ```
-... → [locationmerge#1, liom#1, lpoc] → roe#2 → boe → simplifygraph#2
+... → [locationmerge#1, liom#1, lpoc] → roe#2 → obe → simplifygraph#2
 ```
 
-boe 只删除 Observation，不会产生新的覆盖。如果在 `roe#2` 之前删掉一个能覆盖别的访问的 Observation Y，`roe#2` 就不能再用 Y 删掉被它覆盖的 X，而 X 未必能单独证明在界内；放在之后，`roe#2` 先用 Y 删 X，boe 再删 Y，结果不会更差。最后的 `simplifygraph#2` 清理被删空的程序点。sqlite3 上三个位置（`simplifygraph#1` 之后、`roe#2` 之前、`roe#2` 之后）检查数相同（32192）。
+obe 只删除 Observation，不会产生新的覆盖。如果在 `roe#2` 之前删掉一个能覆盖别的访问的 Observation Y，`roe#2` 就不能再用 Y 删掉被它覆盖的 X，而 X 未必能单独证明在界内；放在之后，`roe#2` 先用 Y 删 X，obe 再删 Y，结果不会更差。最后的 `simplifygraph#2` 清理被删空的程序点。sqlite3 上三个位置（`simplifygraph#1` 之后、`roe#2` 之前、`roe#2` 之后）检查数相同（32192）。
 
 ## 结果
 
@@ -92,8 +92,8 @@ sqlite3 e2e workload（`test-e2e/sqlite3` 的 oracle 与 fuzzer，`-O2 -g -fsani
 
 ## 测试
 
-- `test/MAIR/TestCases/object-bounds-elimination.ll`：mair-opt 单测 boe；字节下标、`c + 1`、可变/外部/weak 全局、掩码下标、支配条件、循环内查表、LPOC 得到的区间与 periodic（界内删除，可能越界保留），以及不信任时什么都不删。
+- `test/MAIR/TestCases/object-bounds-elimination.ll`：mair-opt 单测 obe；字节下标、`c + 1`、可变/外部/weak 全局、掩码下标、支配条件、循环内查表、LPOC 得到的区间与 periodic（界内删除，可能越界保留），以及不信任时什么都不删。
 - `test/MAIR/TestCases/object-bounds-elimination-stats.ll`：`-mair-stats` 的 `scev`、`lvi` 计数。
-- `test/MAIR/TestCases/asan/mair-safe-const-table.c`：开选项时 `T[(unsigned char)s[i]]` 的检查被删，`T[s[i] + 1]`、可变全局保留；不开时与现状一致；运行时越界的 `T[idx]` 报 global-buffer-overflow；boe 位于 `roe#2` 与 `simplify#2` 之间。
-- `test/MAIR/TestCases/tsan/mair-asan-boe.c`：TSan 不接受该选项，流水线里写 boe 也不删。
+- `test/MAIR/TestCases/asan/mair-safe-const-table.c`：开选项时 `T[(unsigned char)s[i]]` 的检查被删，`T[s[i] + 1]`、可变全局保留；不开时与现状一致；运行时越界的 `T[idx]` 报 global-buffer-overflow；obe 位于 `roe#2` 与 `simplify#2` 之间。
+- `test/MAIR/TestCases/tsan/mair-asan-obe.c`：TSan 不接受该选项，流水线里写 obe 也不删。
 - `src/instrumentation/MAIR/unittests/ObjectBoundsEliminationPassTest.cpp`：上述规则的单元测试，含负下标、跨越末尾的 2 字节访问、另一条路径上的条件、volatile 的可删除性。

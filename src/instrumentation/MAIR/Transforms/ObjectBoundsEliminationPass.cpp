@@ -401,7 +401,7 @@ ObjectBoundsEliminationPass::run(MAIRGraph &G, MAIRGraphAnalysisManager &AM) {
   if (!Loops.isAvailable())
     return PreservedAnalyses::all();
 
-  MAIRStatScope Scope("boe", Ordinal, G, NumInputObservations, [&] {
+  MAIRStatScope Scope("obe", Ordinal, G, NumInputObservations, [&] {
     return MAIRStat::compute(G).getNumObservations();
   });
   ScalarEvolution &SE = Loops.getSE();

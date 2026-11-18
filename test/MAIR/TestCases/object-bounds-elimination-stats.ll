@@ -1,8 +1,8 @@
 ; -mair-stats counts the observations object bounds elimination deletes, and
 ; whether a proof needed LazyValueInfo after ScalarEvolution. Without trusted
 ; objects the pass does nothing and reports nothing.
-; RUN: mair-opt -trust-constant-globals -mair-stats -passes=lpoc,boe -disable-output %s 2>&1 | FileCheck %s
-; RUN: mair-opt -mair-stats -passes=lpoc,boe -disable-output %s 2>&1 | FileCheck %s --check-prefix=UNTRUSTED
+; RUN: mair-opt -trust-constant-globals -mair-stats -passes=lpoc,obe -disable-output %s 2>&1 | FileCheck %s
+; RUN: mair-opt -mair-stats -passes=lpoc,obe -disable-output %s 2>&1 | FileCheck %s --check-prefix=UNTRUSTED
 
 @T = internal constant [256 x i8] zeroinitializer
 
@@ -36,7 +36,7 @@ done:
 }
 
 ; CHECK: MAIR stats
-; CHECK: boe{{ +}}in 2  eliminated 2  scev 1  lvi 1{{$}}
+; CHECK: obe{{ +}}in 2  eliminated 2  scev 1  lvi 1{{$}}
 
 ; UNTRUSTED: MAIR stats
-; UNTRUSTED-NOT: boe
+; UNTRUSTED-NOT: obe

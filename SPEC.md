@@ -139,7 +139,7 @@ $$
 
 $n$ 不必是编译期可算的量，可以是运行时值。合法是指：$n$ 的操作数在出口处可用，且循环的每次调用经该出口离开时，$n$ 在出口处的值都恰等于源 PP 在这次调用中执行的次数。例如循环按读到的数据决定何时退出时，归纳变量在出口处的值为 $s+\mathrm{BTC}\cdot c$，在它不回绕的前提下，$n$ 可由该值反推（源 PP 在退出判断之前为 $\mathrm{BTC}+1$，之后为 $\mathrm{BTC}$）。不回绕须有依据：SCEV 证明的 no-wrap 标志，或变量至少 64 位且 $|c|=1$（循环跑不到 $2^{64}$ 轮）；不能依赖地址空间布局一类的推断。没有这样的变量时，$\mathrm{BTC}$ 由物化插入循环的 64 位计数器给出（表达式叶子 $\mathrm{backedges}(h)$，$h$ 为循环表头），与 XSan 自建循环计数器的做法相同；插入只发生在 apply 阶段。这样的观测在全部访问之后才发生：若原程序在到达出口之前就因这些访问而崩溃（如 SEGV），崩溃本身即视为可诊断的信号，不要求在崩溃前报告（第 3 节的延迟报告）。具体条件见 [循环结构说明](docs/mair-loops.md) 的“数据相关的出口”。
 
-**对象边界消除（ObjectBoundsElimination，CLI 名称 `boe`，显式开启）。** 若 sanitizer 声明对象 $B$ 的前 $N$ 个字节在整个运行期间的任何访问都不会被报告（信任对象），且能证明 $o$ 可删除、在其 PP 的每次动态实例 $d$ 中都有 $\llbracket\ell_o\rrbracket_{\eta_d}\subseteq[B,B+N)$，则可删除 $o$。删除不需要见证 Observation：$o$ 的事件在 $\operatorname{Run}_s$ 下本来就不产生错误。区域包含针对 PP 处的值证明，对所有到达该 site 的执行成立，因而不依赖 guard。默认没有信任对象，该 pass 不改变任何 Observation，默认流水线也不含它。当前只有 ASan 在 `-mair-asan-boe` 下提供信任对象：大小精确（不可被其他定义替换）的常量全局，它们不会被 init-order 检查、用户 poison 或容器注解 poison。TSan 不检查越界，不提供信任对象。可变全局与堆对象不满足前提（用户 poison、容器注解、释放与并发 use-after-free），不在范围内。规则、证明方法与度量见 `docs/mair-object-bounds.md`。
+**对象边界消除（ObjectBoundsElimination，CLI 名称 `obe`，显式开启）。** 若 sanitizer 声明对象 $B$ 的前 $N$ 个字节在整个运行期间的任何访问都不会被报告（信任对象），且能证明 $o$ 可删除、在其 PP 的每次动态实例 $d$ 中都有 $\llbracket\ell_o\rrbracket_{\eta_d}\subseteq[B,B+N)$，则可删除 $o$。删除不需要见证 Observation：$o$ 的事件在 $\operatorname{Run}_s$ 下本来就不产生错误。区域包含针对 PP 处的值证明，对所有到达该 site 的执行成立，因而不依赖 guard。默认没有信任对象，该 pass 不改变任何 Observation，默认流水线也不含它。当前只有 ASan 在 `-mair-asan-obe` 下提供信任对象：大小精确（不可被其他定义替换）的常量全局，它们不会被 init-order 检查、用户 poison 或容器注解 poison。TSan 不检查越界，不提供信任对象。可变全局与堆对象不满足前提（用户 poison、容器注解、释放与并发 use-after-free），不在范围内。规则、证明方法与度量见 `docs/mair-object-bounds.md`。
 
 以上是当前 MAIR graph pass 的范围。
 

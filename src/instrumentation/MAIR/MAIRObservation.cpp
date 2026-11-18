@@ -171,13 +171,16 @@ uint8_t MAIROptimizationConfig::getLevel(AccessKind Kind) const {
 }
 
 void MAIROptimizationConfig::initializeObservation(Observation &Obs) const {
+  const AbstractAccess *Contiguous = Obs.getContiguousRegion();
   const MaskedRegion *Masked = Obs.getMaskedRegion();
-  const bool IsComparableMasked = !Masked || Masked->isComparable();
+  const bool IsComparable = (!Contiguous || Contiguous->hasKnownSize()) &&
+                            (!Masked || Masked->isComparable());
   const bool KeepVolatile = DistinguishVolatile && Obs.isVolatile();
   // TODO: CallLike observations, currently modeled memory intrinsics, should
   // become movable and mergeable. They remain pinned until that is proven.
   const bool CanMerge = !KeepVolatile && !Obs.isCallLike() &&
-                        IsComparableMasked && (IgnoreAtomic || !Obs.isAtomic());
+                        IsComparable &&
+                        (IgnoreAtomic || !Obs.isAtomic());
   // A volatile access stays where it is, but its observation may move even
   // when volatile is distinguished.
   const bool CanMove = AllowRelocation && !Obs.isCallLike() && !Obs.isAtomic();

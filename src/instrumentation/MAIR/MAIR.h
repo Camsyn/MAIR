@@ -322,6 +322,7 @@ public:
   Align getAlign() const { return Alignment; }
   void setAlign(Align A) { Alignment = A; }
   bool hasSizeExpr() const { return SizeExpr.isValid(); }
+  bool hasKnownSize() const { return !Size.isUnknown() || hasSizeExpr(); }
   MAIRScalarExpr getSizeExpr() const {
     assert(hasSizeExpr() && "the access length is not an expression");
     return SizeExpr;
@@ -576,7 +577,7 @@ public:
   uint64_t getElementSize() const { return ElementSize; }
   unsigned getNumLanes() const;
   bool isConstantMask() const { return IsConstant; }
-  bool isComparable() const { return IsComparable; }
+  bool isComparable() const { return IsComparable && Bounds.hasKnownSize(); }
 
   bool contains(const MaskedRegion &Other) const;
   static std::optional<MaskedRegion> merge(const MaskedRegion &A,

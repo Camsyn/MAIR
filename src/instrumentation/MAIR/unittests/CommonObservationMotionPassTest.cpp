@@ -49,6 +49,36 @@ exit:
   EXPECT_TRUE(Graph.verify());
 }
 
+TEST(CommonObservationMotionPass, KeepsReadsWithUnknownWidthsOnTheirBranches) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(R"IR(
+define void @f(ptr %p, i1 %cond) {
+entry:
+  br i1 %cond, label %left, label %right
+left:
+  %narrow = load <vscale x 2 x i32>, ptr %p, align 4
+  br label %exit
+right:
+  %wide = load <vscale x 4 x i32>, ptr %p, align 4
+  br label %exit
+exit:
+  ret void
+}
+)IR",
+                       Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &F = *M->getFunction("f");
+  MAIRGraph Graph = buildGraph(F);
+  ASSERT_NO_FATAL_FAILURE(placeBranchReadsOnEntries(Graph, F));
+  MAIRGraphAnalysisManager AM;
+  EXPECT_TRUE(CommonObservationMotionPass().run(Graph, AM).areAllPreserved());
+  EXPECT_EQ(observationCount(Graph, "left"), 1u);
+  EXPECT_EQ(observationCount(Graph, "right"), 1u);
+  EXPECT_EQ(observationCount(Graph, "entry"), 0u);
+  EXPECT_EQ(observationCount(Graph, "exit"), 0u);
+  EXPECT_TRUE(Graph.verify());
+}
+
 TEST(CommonObservationMotionPass, AddressSanitizerHoistsIdenticalReads) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(

@@ -249,6 +249,8 @@ std::optional<int64_t> constantAddressDelta(const AbstractAccess &A,
 
 bool AbstractAccess::contains(const AbstractAccess &Other,
                               ScalarEvolution *SE) const {
+  if (!hasKnownSize() || !Other.hasKnownSize())
+    return false;
   if (*this == Other)
     return true;
   if (Base != Other.Base)
@@ -673,8 +675,6 @@ std::optional<AbstractAccess> AbstractAccess::merge(const AbstractAccess &A,
         proveStartAlign(Result, *Part, *Distance);
     return Result;
   };
-  if (A == B)
-    return WithStartAlign(A);
   if (A.Base != B.Base)
     return std::nullopt;
   if (A.contains(B))

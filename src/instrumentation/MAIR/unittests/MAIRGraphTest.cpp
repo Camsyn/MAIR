@@ -635,6 +635,18 @@ entry:
       llvm::Align(1));
 }
 
+TEST(MAIRGraph, UnknownSizesDoNotProveCoverageOrMerge) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule("define void @f(ptr %p) { ret void }", Ctx);
+  ASSERT_TRUE(M);
+  const llvm::Argument *Base = M->getFunction("f")->getArg(0);
+  AbstractAccess First(Base, 0, AbstractValue::unknown());
+  AbstractAccess Second(Base, 0, AbstractValue::unknown());
+  EXPECT_EQ(First, Second);
+  EXPECT_FALSE(First.contains(Second));
+  EXPECT_FALSE(AbstractAccess::merge(First, Second));
+}
+
 TEST(MAIRGraph, AbstractAccessContainsStructurallyEqualSizeExpressions) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
@@ -3736,10 +3748,10 @@ entry:
   EXPECT_TRUE(Graph.verify());
 }
 
-TEST(MAIROptimizationConfig, LocationMergeJoinsEquivalentNonConcreteLocations) {
+TEST(MAIROptimizationConfig, LocationMergeJoinsEqualSymbolicSizes) {
   llvm::LLVMContext Ctx;
   auto M = parseModule(R"IR(
-define void @f(ptr %p) {
+define void @f(ptr %p, i64 %size) {
 entry:
   %v = load i32, ptr %p, align 4
   ret void
@@ -3759,7 +3771,7 @@ entry:
     return Observation(
         {&Load},
         MemoryRegion(AbstractAccess(&P, AbstractValue::constant(Offset),
-                                    AbstractValue::unknown())),
+                                    AbstractValue::symbol(*F.getArg(1)))),
         AccessKind::Read);
   };
 

@@ -2,6 +2,8 @@
 
 连续范围可以用常量、LLVM 整数值或图拥有的整数表达式表示字节长度。表达式本身合法并不意味着它可以作为长度，例如 pointer add 的结果仍是指针。
 
+没有长度表达式的 `unknown` 不代表一个共享的长度值。例如，同址读取 `<vscale x 2 x i32>` 和 `<vscale x 4 x i32>` 在图中都显示 `unknown`；不能仅凭这个标记删除或合并其中一条观察。若两个同址范围的长度是同一个 SSA 值，则仍可证明它们相等。
+
 连续范围的 SizeExpr 根类型必须为整数。Verifier 检查这个约束，instantiate 在修改 LLVM IR 或调用 backend 前验证整图；类型错误会直接拒绝物化，并保留原图和 IR。
 
 回归测试：`MAIRMaterialization.RejectsPointerContiguousSizeBeforeMutation`。完整检查在 build 中运行 `ninja check-mair`。

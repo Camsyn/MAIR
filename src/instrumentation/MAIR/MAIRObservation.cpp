@@ -45,16 +45,10 @@ static AccessProperty getInstructionProperties(const Instruction &I) {
   AccessProperty Properties = AccessProperty::None;
   if (I.isAtomic())
     Properties |= AccessProperty::Atomic;
-  if (const auto *LI = dyn_cast<LoadInst>(&I)) {
-    if (LI->isVolatile())
-      Properties |= AccessProperty::Volatile;
-  } else if (const auto *SI = dyn_cast<StoreInst>(&I)) {
-    if (SI->isVolatile())
-      Properties |= AccessProperty::Volatile;
-  } else if (const auto *MI = dyn_cast<AnyMemIntrinsic>(&I)) {
+  if (I.isVolatile())
+    Properties |= AccessProperty::Volatile;
+  if (const auto *MI = dyn_cast<AnyMemIntrinsic>(&I)) {
     Properties |= AccessProperty::CallLike;
-    if (MI->isVolatile())
-      Properties |= AccessProperty::Volatile;
     if (MI->isAtomic())
       Properties |= AccessProperty::Atomic;
   }

@@ -1,6 +1,7 @@
 ; MAIR optimizes the observation of a volatile access like any other unless
 ; -distinguish-volatile keeps volatile observations apart. The accesses
 ; themselves are never touched.
+; RUN: mair-opt %s | FileCheck %s --check-prefix=RAW
 ; RUN: mair-opt -passes=roe %s | FileCheck %s --check-prefix=ROE
 ; RUN: mair-opt -distinguish-volatile -passes=roe %s \
 ; RUN:   | FileCheck %s --check-prefix=ROE-DISTINCT
@@ -76,3 +77,23 @@ entry:
 ; MERGE-DISTINCT-DAG:     o: read ptr %p + 4, 4
 ; MERGE-DISTINCT-DAG:     o: read volatile ptr %p, 4
 ; MERGE-DISTINCT:       }
+
+define void @atomicrmw_properties(ptr %plain, ptr %vol) {
+  %old = atomicrmw add ptr %plain, i32 1 monotonic
+  %old_vol = atomicrmw volatile add ptr %vol, i32 1 monotonic
+  ret void
+}
+
+; RAW-LABEL: mair graph of fn @atomicrmw_properties {
+; RAW:         o: read/write atomic ptr %plain, 4
+; RAW:         o: read/write volatile atomic ptr %vol, 4
+
+define void @cmpxchg_properties(ptr %plain, ptr %vol) {
+  %old = cmpxchg ptr %plain, i32 0, i32 1 monotonic monotonic
+  %old_vol = cmpxchg volatile ptr %vol, i32 0, i32 1 monotonic monotonic
+  ret void
+}
+
+; RAW-LABEL: mair graph of fn @cmpxchg_properties {
+; RAW:         o: read/write atomic ptr %plain, 4
+; RAW:         o: read/write volatile atomic ptr %vol, 4

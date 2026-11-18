@@ -48,6 +48,8 @@ MAIR 这一层要解决的是另一件事：把一个 `llvm::Function` 先构造
 
 这里是包含关系和接口习惯的类比，不是一一映射。一个 basic block 可产生多个 PP，PP 中 Observation 的排列不表示原指令执行次序；图边记录经过 barrier 过滤的 Dom / PDom 关系，不是 CFG successor 边。
 
+建图分别记录 `atomic` 和 `volatile`。带 `volatile` 的 `atomicrmw` 和 `cmpxchg` 都产生 `read/write volatile atomic` 观察；非 volatile 版本只标 `read/write atomic`。
+
 这一步不要把三层揉成一层，也不要把 edge 构建逻辑塞进 dump 逻辑里。
 
 ## 设计决策

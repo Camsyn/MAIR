@@ -8,12 +8,14 @@
 ; RUN:   | FileCheck %s --check-prefix=STATS
 
 ; A narrow index that wraps (docs/mair-loops.md, 窄下标回环访问): the address
-; is base + C * zext(i), i an unsigned char or short induction variable that
-; starts at 0 and steps by 1. SCEV leaves the extension outside the recurrence
-; when it cannot prove that i does not wrap. After T accesses i has taken the
-; values [0, min(T, 2^w)), so LPOC summarizes them as the min(T, 2^w) elements
-; from base. Any other start, step or a sign extension that may wrap visits a
-; set that does not start at base, and stays in the loop.
+; is base + C * zext(i), i an unsigned char or short induction variable. SCEV
+; leaves the extension outside the recurrence when it cannot prove that i does
+; not wrap. If i steps by 2^p and starts below 2^p, T accesses visit i, i +
+; 2^p, ... without wrapping until they come back to the start after 2^(w-p),
+; so LPOC summarizes them as the first min(T, 2^(w-p)) of them; counting down
+; from at least 2^w - 2^p likewise. C may be a loop-invariant value of known
+; sign. Any other start, step or a sign extension that may wrap visits a set
+; that is no prefix of one recurrence, and stays in the loop.
 
 ; u8 index, 200 trips: SCEV proves that i does not wrap, the address is affine.
 define void @u8_below(ptr %a) {
@@ -486,8 +488,7 @@ exit:
   ret void
 }
 
-; Negative: i += 2 visits the even indices only, and min(T, 256) elements
-; would reach past a[254].
+; i += 2 from 0 visits the even indices only: min(T, 128) trips of stride 2.
 define void @u8_step2(ptr %a, i64 %len) {
 ; CHECK-LABEL: define void @u8_step2(
 ; CHECK-SAME: ptr [[A:%.*]], i64 [[LEN:%.*]]) {
@@ -503,7 +504,6 @@ define void @u8_step2(ptr %a, i64 %len) {
 ; CHECK-NEXT:    [[IDX:%.*]] = zext i8 [[I]] to i64
 ; CHECK-NEXT:    [[P:%.*]] = getelementptr inbounds i8, ptr [[A]], i64 [[IDX]]
 ; CHECK-NEXT:  ; pp3: preds=[pp2(dom), pp4(pdom)], succs=[pp2(pdom), pp4(dom)]
-; CHECK-NEXT:  ; o: read ptr [[A]] + [[IDX]], 1
 ; CHECK-NEXT:    [[V:%.*]] = load i8, ptr [[P]], align 1
 ; CHECK-NEXT:    [[I_NEXT]] = add i8 [[I]], 2
 ; CHECK-NEXT:    [[N_NEXT]] = add nuw nsw i64 [[N]], 1
@@ -514,6 +514,7 @@ define void @u8_step2(ptr %a, i64 %len) {
 ; CHECK-NEXT:  ; pp5: preds=[pp8(dom), pp6(pdom)], succs=[pp8(pdom), pp6(dom)]
 ; CHECK-NEXT:  ; pp6: preds=[pp5(dom)], succs=[pp5(pdom)]
 ; CHECK-NEXT:  ; pp8: loop-exit=%[[LOOP]], preds=[pp5(pdom), pp7(dom)], succs=[pp5(dom), pp7(pdom)]
+; CHECK-NEXT:  ; o: read period start=[[A]], stride=2, access-size=1, trips=(128 umin (1 umax zext([[LEN]] to i65)))
 ; CHECK-NEXT:    ret void
 ;
 entry:
@@ -534,6 +535,449 @@ exit:
   ret void
 }
 
-; STATS: lpoc{{ +}}in {{[0-9]+}}  range 6  periodic 1  exit-trip 1  exit-counter 1  wrap-index 5  rej-wrap 4{{$}}
+; Negative: i += 3 visits every index once 256 trips have passed, but not in
+; order: the first 86 are 0, 3, ..., 255, then 2, 5, ... No prefix of one
+; recurrence.
+define void @u8_step3(ptr %a, i64 %len) {
+; CHECK-LABEL: define void @u8_step3(
+; CHECK-SAME: ptr [[A:%.*]], i64 [[LEN:%.*]]) {
+; CHECK-NEXT:  [[ENTRY:.*]]:
+; CHECK-NEXT:  ; pp0: preds=[pp1(pdom)], succs=[pp1(dom)]
+; CHECK-NEXT:  ; pp1: preds=[pp0(dom), pp7(pdom)], succs=[pp0(pdom), pp7(dom)]
+; CHECK-NEXT:  ; pp7: loop-preheader=%[[LOOP:.*]], preds=[pp1(dom), pp8(pdom)], succs=[pp1(pdom), pp8(dom)]
+; CHECK-NEXT:    br label %[[LOOP]]
+; CHECK:       [[LOOP]]:
+; CHECK-NEXT:    [[N:%.*]] = phi i64 [ 0, %[[ENTRY]] ], [ [[N_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:    [[I:%.*]] = phi i8 [ 0, %[[ENTRY]] ], [ [[I_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:  ; pp2: preds=[pp3(pdom)], succs=[pp3(dom)]
+; CHECK-NEXT:    [[IDX:%.*]] = zext i8 [[I]] to i64
+; CHECK-NEXT:    [[P:%.*]] = getelementptr inbounds i8, ptr [[A]], i64 [[IDX]]
+; CHECK-NEXT:  ; pp3: preds=[pp2(dom), pp4(pdom)], succs=[pp2(pdom), pp4(dom)]
+; CHECK-NEXT:  ; o: read ptr [[A]] + [[IDX]], 1
+; CHECK-NEXT:    [[V:%.*]] = load i8, ptr [[P]], align 1
+; CHECK-NEXT:    [[I_NEXT]] = add i8 [[I]], 3
+; CHECK-NEXT:    [[N_NEXT]] = add nuw nsw i64 [[N]], 1
+; CHECK-NEXT:    [[C:%.*]] = icmp ult i64 [[N_NEXT]], [[LEN]]
+; CHECK-NEXT:  ; pp4: preds=[pp3(dom)], succs=[pp3(pdom)]
+; CHECK-NEXT:    br i1 [[C]], label %[[LOOP]], label %[[EXIT:.*]]
+; CHECK:       [[EXIT]]:
+; CHECK-NEXT:  ; pp5: preds=[pp8(dom), pp6(pdom)], succs=[pp8(pdom), pp6(dom)]
+; CHECK-NEXT:  ; pp6: preds=[pp5(dom)], succs=[pp5(pdom)]
+; CHECK-NEXT:  ; pp8: loop-exit=%[[LOOP]], preds=[pp5(pdom), pp7(dom)], succs=[pp5(dom), pp7(pdom)]
+; CHECK-NEXT:    ret void
+;
+entry:
+  br label %loop
+
+loop:
+  %n = phi i64 [ 0, %entry ], [ %n.next, %loop ]
+  %i = phi i8 [ 0, %entry ], [ %i.next, %loop ]
+  %idx = zext i8 %i to i64
+  %p = getelementptr inbounds i8, ptr %a, i64 %idx
+  %v = load i8, ptr %p, align 1
+  %i.next = add i8 %i, 3
+  %n.next = add nuw nsw i64 %n, 1
+  %c = icmp ult i64 %n.next, %len
+  br i1 %c, label %loop, label %exit
+
+exit:
+  ret void
+}
+
+; i += 4 from 1, the second phase of a loop unrolled 4 times: 1, 5, ..., 253,
+; then 1 again. min(T, 64) trips of stride 16 from a + 4.
+define void @u8_phase1_step4(ptr %a, i64 %len) {
+; CHECK-LABEL: define void @u8_phase1_step4(
+; CHECK-SAME: ptr [[A:%.*]], i64 [[LEN:%.*]]) {
+; CHECK-NEXT:  [[ENTRY:.*]]:
+; CHECK-NEXT:  ; pp0: preds=[pp1(pdom)], succs=[pp1(dom)]
+; CHECK-NEXT:  ; pp1: preds=[pp0(dom), pp7(pdom)], succs=[pp0(pdom), pp7(dom)]
+; CHECK-NEXT:  ; pp7: loop-preheader=%[[LOOP:.*]], preds=[pp1(dom), pp8(pdom)], succs=[pp1(pdom), pp8(dom)]
+; CHECK-NEXT:    br label %[[LOOP]]
+; CHECK:       [[LOOP]]:
+; CHECK-NEXT:    [[N:%.*]] = phi i64 [ 0, %[[ENTRY]] ], [ [[N_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:    [[I:%.*]] = phi i8 [ 1, %[[ENTRY]] ], [ [[I_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:  ; pp2: preds=[pp3(pdom)], succs=[pp3(dom)]
+; CHECK-NEXT:    [[IDX:%.*]] = zext i8 [[I]] to i64
+; CHECK-NEXT:    [[P:%.*]] = getelementptr inbounds i32, ptr [[A]], i64 [[IDX]]
+; CHECK-NEXT:  ; pp3: preds=[pp2(dom), pp4(pdom)], succs=[pp2(pdom), pp4(dom)]
+; CHECK-NEXT:    store i32 0, ptr [[P]], align 4
+; CHECK-NEXT:    [[I_NEXT]] = add i8 [[I]], 4
+; CHECK-NEXT:    [[N_NEXT]] = add nuw nsw i64 [[N]], 1
+; CHECK-NEXT:    [[C:%.*]] = icmp ult i64 [[N_NEXT]], [[LEN]]
+; CHECK-NEXT:  ; pp4: preds=[pp3(dom)], succs=[pp3(pdom)]
+; CHECK-NEXT:    br i1 [[C]], label %[[LOOP]], label %[[EXIT:.*]]
+; CHECK:       [[EXIT]]:
+; CHECK-NEXT:  ; pp5: preds=[pp8(dom), pp6(pdom)], succs=[pp8(pdom), pp6(dom)]
+; CHECK-NEXT:  ; pp6: preds=[pp5(dom)], succs=[pp5(pdom)]
+; CHECK-NEXT:  ; pp8: loop-exit=%[[LOOP]], preds=[pp5(pdom), pp7(dom)], succs=[pp5(dom), pp7(pdom)]
+; CHECK-NEXT:  ; o: write period start=([[A]] + 4), stride=16, access-size=4, trips=(64 umin (1 umax zext([[LEN]] to i65))), align 4
+; CHECK-NEXT:    ret void
+;
+entry:
+  br label %loop
+
+loop:
+  %n = phi i64 [ 0, %entry ], [ %n.next, %loop ]
+  %i = phi i8 [ 1, %entry ], [ %i.next, %loop ]
+  %idx = zext i8 %i to i64
+  %p = getelementptr inbounds i32, ptr %a, i64 %idx
+  store i32 0, ptr %p, align 4
+  %i.next = add i8 %i, 4
+  %n.next = add nuw nsw i64 %n, 1
+  %c = icmp ult i64 %n.next, %len
+  br i1 %c, label %loop, label %exit
+
+exit:
+  ret void
+}
+
+; Negative: i += 4 from 4 wraps to 0, below the start.
+define void @u8_phase4_step4(ptr %a, i64 %len) {
+; CHECK-LABEL: define void @u8_phase4_step4(
+; CHECK-SAME: ptr [[A:%.*]], i64 [[LEN:%.*]]) {
+; CHECK-NEXT:  [[ENTRY:.*]]:
+; CHECK-NEXT:  ; pp0: preds=[pp1(pdom)], succs=[pp1(dom)]
+; CHECK-NEXT:  ; pp1: preds=[pp0(dom), pp7(pdom)], succs=[pp0(pdom), pp7(dom)]
+; CHECK-NEXT:  ; pp7: loop-preheader=%[[LOOP:.*]], preds=[pp1(dom), pp8(pdom)], succs=[pp1(pdom), pp8(dom)]
+; CHECK-NEXT:    br label %[[LOOP]]
+; CHECK:       [[LOOP]]:
+; CHECK-NEXT:    [[N:%.*]] = phi i64 [ 0, %[[ENTRY]] ], [ [[N_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:    [[I:%.*]] = phi i8 [ 4, %[[ENTRY]] ], [ [[I_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:  ; pp2: preds=[pp3(pdom)], succs=[pp3(dom)]
+; CHECK-NEXT:    [[IDX:%.*]] = zext i8 [[I]] to i64
+; CHECK-NEXT:    [[P:%.*]] = getelementptr inbounds i32, ptr [[A]], i64 [[IDX]]
+; CHECK-NEXT:  ; pp3: preds=[pp2(dom), pp4(pdom)], succs=[pp2(pdom), pp4(dom)]
+; CHECK-NEXT:  ; o: write ptr [[A]] + [[P]], 4, align 4
+; CHECK-NEXT:    store i32 0, ptr [[P]], align 4
+; CHECK-NEXT:    [[I_NEXT]] = add i8 [[I]], 4
+; CHECK-NEXT:    [[N_NEXT]] = add nuw nsw i64 [[N]], 1
+; CHECK-NEXT:    [[C:%.*]] = icmp ult i64 [[N_NEXT]], [[LEN]]
+; CHECK-NEXT:  ; pp4: preds=[pp3(dom)], succs=[pp3(pdom)]
+; CHECK-NEXT:    br i1 [[C]], label %[[LOOP]], label %[[EXIT:.*]]
+; CHECK:       [[EXIT]]:
+; CHECK-NEXT:  ; pp5: preds=[pp8(dom), pp6(pdom)], succs=[pp8(pdom), pp6(dom)]
+; CHECK-NEXT:  ; pp6: preds=[pp5(dom)], succs=[pp5(pdom)]
+; CHECK-NEXT:  ; pp8: loop-exit=%[[LOOP]], preds=[pp5(pdom), pp7(dom)], succs=[pp5(dom), pp7(pdom)]
+; CHECK-NEXT:    ret void
+;
+entry:
+  br label %loop
+
+loop:
+  %n = phi i64 [ 0, %entry ], [ %n.next, %loop ]
+  %i = phi i8 [ 4, %entry ], [ %i.next, %loop ]
+  %idx = zext i8 %i to i64
+  %p = getelementptr inbounds i32, ptr %a, i64 %idx
+  store i32 0, ptr %p, align 4
+  %i.next = add i8 %i, 4
+  %n.next = add nuw nsw i64 %n, 1
+  %c = icmp ult i64 %n.next, %len
+  br i1 %c, label %loop, label %exit
+
+exit:
+  ret void
+}
+
+; Counting down from 255: 255, 254, ..., 0, then 255 again. 300 trips visit
+; all 256 bytes.
+define void @u8_down(ptr %a) {
+; CHECK-LABEL: define void @u8_down(
+; CHECK-SAME: ptr [[A:%.*]]) {
+; CHECK-NEXT:  [[ENTRY:.*]]:
+; CHECK-NEXT:  ; pp0: preds=[pp1(pdom)], succs=[pp1(dom)]
+; CHECK-NEXT:  ; pp1: preds=[pp0(dom), pp7(pdom)], succs=[pp0(pdom), pp7(dom)]
+; CHECK-NEXT:  ; pp7: loop-preheader=%[[LOOP:.*]], preds=[pp1(dom), pp8(pdom)], succs=[pp1(pdom), pp8(dom)]
+; CHECK-NEXT:    br label %[[LOOP]]
+; CHECK:       [[LOOP]]:
+; CHECK-NEXT:    [[N:%.*]] = phi i64 [ 0, %[[ENTRY]] ], [ [[N_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:    [[I:%.*]] = phi i8 [ -1, %[[ENTRY]] ], [ [[I_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:  ; pp2: preds=[pp3(pdom)], succs=[pp3(dom)]
+; CHECK-NEXT:    [[IDX:%.*]] = zext i8 [[I]] to i64
+; CHECK-NEXT:    [[P:%.*]] = getelementptr inbounds i8, ptr [[A]], i64 [[IDX]]
+; CHECK-NEXT:  ; pp3: preds=[pp2(dom), pp4(pdom)], succs=[pp2(pdom), pp4(dom)]
+; CHECK-NEXT:    [[V:%.*]] = load i8, ptr [[P]], align 1
+; CHECK-NEXT:    [[I_NEXT]] = add i8 [[I]], -1
+; CHECK-NEXT:    [[N_NEXT]] = add nuw nsw i64 [[N]], 1
+; CHECK-NEXT:    [[C:%.*]] = icmp ult i64 [[N_NEXT]], 300
+; CHECK-NEXT:  ; pp4: preds=[pp3(dom)], succs=[pp3(pdom)]
+; CHECK-NEXT:    br i1 [[C]], label %[[LOOP]], label %[[EXIT:.*]]
+; CHECK:       [[EXIT]]:
+; CHECK-NEXT:  ; pp5: preds=[pp8(dom), pp6(pdom)], succs=[pp8(pdom), pp6(dom)]
+; CHECK-NEXT:  ; pp6: preds=[pp5(dom)], succs=[pp5(pdom)]
+; CHECK-NEXT:  ; pp8: loop-exit=%[[LOOP]], preds=[pp5(pdom), pp7(dom)], succs=[pp5(dom), pp7(pdom)]
+; CHECK-NEXT:  ; o: read ptr [[A]], 256
+; CHECK-NEXT:    ret void
+;
+entry:
+  br label %loop
+
+loop:
+  %n = phi i64 [ 0, %entry ], [ %n.next, %loop ]
+  %i = phi i8 [ -1, %entry ], [ %i.next, %loop ]
+  %idx = zext i8 %i to i64
+  %p = getelementptr inbounds i8, ptr %a, i64 %idx
+  %v = load i8, ptr %p, align 1
+  %i.next = add i8 %i, -1
+  %n.next = add nuw nsw i64 %n, 1
+  %c = icmp ult i64 %n.next, 300
+  br i1 %c, label %loop, label %exit
+
+exit:
+  ret void
+}
+
+; Counting down from 255 with a symbolic count: min(T, 256) trips of stride
+; -4 from a + 1020, the elements [256 - min(T, 256), 256).
+define void @u8_down_symbolic(ptr %a, i64 %len) {
+; CHECK-LABEL: define void @u8_down_symbolic(
+; CHECK-SAME: ptr [[A:%.*]], i64 [[LEN:%.*]]) {
+; CHECK-NEXT:  [[ENTRY:.*]]:
+; CHECK-NEXT:  ; pp0: preds=[pp1(pdom)], succs=[pp1(dom)]
+; CHECK-NEXT:  ; pp1: preds=[pp0(dom), pp7(pdom)], succs=[pp0(pdom), pp7(dom)]
+; CHECK-NEXT:  ; pp7: loop-preheader=%[[LOOP:.*]], preds=[pp1(dom), pp8(pdom)], succs=[pp1(pdom), pp8(dom)]
+; CHECK-NEXT:    br label %[[LOOP]]
+; CHECK:       [[LOOP]]:
+; CHECK-NEXT:    [[N:%.*]] = phi i64 [ 0, %[[ENTRY]] ], [ [[N_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:    [[I:%.*]] = phi i8 [ -1, %[[ENTRY]] ], [ [[I_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:  ; pp2: preds=[pp3(pdom)], succs=[pp3(dom)]
+; CHECK-NEXT:    [[IDX:%.*]] = zext i8 [[I]] to i64
+; CHECK-NEXT:    [[P:%.*]] = getelementptr inbounds i32, ptr [[A]], i64 [[IDX]]
+; CHECK-NEXT:  ; pp3: preds=[pp2(dom), pp4(pdom)], succs=[pp2(pdom), pp4(dom)]
+; CHECK-NEXT:    store i32 0, ptr [[P]], align 4
+; CHECK-NEXT:    [[I_NEXT]] = add i8 [[I]], -1
+; CHECK-NEXT:    [[N_NEXT]] = add nuw nsw i64 [[N]], 1
+; CHECK-NEXT:    [[C:%.*]] = icmp ult i64 [[N_NEXT]], [[LEN]]
+; CHECK-NEXT:  ; pp4: preds=[pp3(dom)], succs=[pp3(pdom)]
+; CHECK-NEXT:    br i1 [[C]], label %[[LOOP]], label %[[EXIT:.*]]
+; CHECK:       [[EXIT]]:
+; CHECK-NEXT:  ; pp5: preds=[pp8(dom), pp6(pdom)], succs=[pp8(pdom), pp6(dom)]
+; CHECK-NEXT:  ; pp6: preds=[pp5(dom)], succs=[pp5(pdom)]
+; CHECK-NEXT:  ; pp8: loop-exit=%[[LOOP]], preds=[pp5(pdom), pp7(dom)], succs=[pp5(dom), pp7(pdom)]
+; CHECK-NEXT:  ; o: write period start=([[A]] + 1020), stride=-4, access-size=4, trips=(256 umin (1 umax zext([[LEN]] to i65))), align 4
+; CHECK-NEXT:    ret void
+;
+entry:
+  br label %loop
+
+loop:
+  %n = phi i64 [ 0, %entry ], [ %n.next, %loop ]
+  %i = phi i8 [ -1, %entry ], [ %i.next, %loop ]
+  %idx = zext i8 %i to i64
+  %p = getelementptr inbounds i32, ptr %a, i64 %idx
+  store i32 0, ptr %p, align 4
+  %i.next = add i8 %i, -1
+  %n.next = add nuw nsw i64 %n, 1
+  %c = icmp ult i64 %n.next, %len
+  br i1 %c, label %loop, label %exit
+
+exit:
+  ret void
+}
+
+; Negative: counting down from 254 wraps to 255, above the start.
+define void @u8_down_from_254(ptr %a, i64 %len) {
+; CHECK-LABEL: define void @u8_down_from_254(
+; CHECK-SAME: ptr [[A:%.*]], i64 [[LEN:%.*]]) {
+; CHECK-NEXT:  [[ENTRY:.*]]:
+; CHECK-NEXT:  ; pp0: preds=[pp1(pdom)], succs=[pp1(dom)]
+; CHECK-NEXT:  ; pp1: preds=[pp0(dom), pp7(pdom)], succs=[pp0(pdom), pp7(dom)]
+; CHECK-NEXT:  ; pp7: loop-preheader=%[[LOOP:.*]], preds=[pp1(dom), pp8(pdom)], succs=[pp1(pdom), pp8(dom)]
+; CHECK-NEXT:    br label %[[LOOP]]
+; CHECK:       [[LOOP]]:
+; CHECK-NEXT:    [[N:%.*]] = phi i64 [ 0, %[[ENTRY]] ], [ [[N_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:    [[I:%.*]] = phi i8 [ -2, %[[ENTRY]] ], [ [[I_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:  ; pp2: preds=[pp3(pdom)], succs=[pp3(dom)]
+; CHECK-NEXT:    [[IDX:%.*]] = zext i8 [[I]] to i64
+; CHECK-NEXT:    [[P:%.*]] = getelementptr inbounds i8, ptr [[A]], i64 [[IDX]]
+; CHECK-NEXT:  ; pp3: preds=[pp2(dom), pp4(pdom)], succs=[pp2(pdom), pp4(dom)]
+; CHECK-NEXT:  ; o: read ptr [[A]] + [[IDX]], 1
+; CHECK-NEXT:    [[V:%.*]] = load i8, ptr [[P]], align 1
+; CHECK-NEXT:    [[I_NEXT]] = add i8 [[I]], -1
+; CHECK-NEXT:    [[N_NEXT]] = add nuw nsw i64 [[N]], 1
+; CHECK-NEXT:    [[C:%.*]] = icmp ult i64 [[N_NEXT]], [[LEN]]
+; CHECK-NEXT:  ; pp4: preds=[pp3(dom)], succs=[pp3(pdom)]
+; CHECK-NEXT:    br i1 [[C]], label %[[LOOP]], label %[[EXIT:.*]]
+; CHECK:       [[EXIT]]:
+; CHECK-NEXT:  ; pp5: preds=[pp8(dom), pp6(pdom)], succs=[pp8(pdom), pp6(dom)]
+; CHECK-NEXT:  ; pp6: preds=[pp5(dom)], succs=[pp5(pdom)]
+; CHECK-NEXT:  ; pp8: loop-exit=%[[LOOP]], preds=[pp5(pdom), pp7(dom)], succs=[pp5(dom), pp7(pdom)]
+; CHECK-NEXT:    ret void
+;
+entry:
+  br label %loop
+
+loop:
+  %n = phi i64 [ 0, %entry ], [ %n.next, %loop ]
+  %i = phi i8 [ -2, %entry ], [ %i.next, %loop ]
+  %idx = zext i8 %i to i64
+  %p = getelementptr inbounds i8, ptr %a, i64 %idx
+  %v = load i8, ptr %p, align 1
+  %i.next = add i8 %i, -1
+  %n.next = add nuw nsw i64 %n, 1
+  %c = icmp ult i64 %n.next, %len
+  br i1 %c, label %loop, label %exit
+
+exit:
+  ret void
+}
+
+; A symbolic scale, a row pitch of unsigned type: zext(%pitch) is not
+; negative and zext(%pitch) * 255 fits easily. min(T, 256) trips of stride
+; zext(%pitch).
+define void @u8_pitch(ptr %a, i32 %pitch, i64 %len) {
+; CHECK-LABEL: define void @u8_pitch(
+; CHECK-SAME: ptr [[A:%.*]], i32 [[PITCH:%.*]], i64 [[LEN:%.*]]) {
+; CHECK-NEXT:  [[ENTRY:.*]]:
+; CHECK-NEXT:  ; pp0: preds=[pp1(pdom)], succs=[pp1(dom)]
+; CHECK-NEXT:    [[PW:%.*]] = zext i32 [[PITCH]] to i64
+; CHECK-NEXT:  ; pp1: preds=[pp0(dom), pp7(pdom)], succs=[pp0(pdom), pp7(dom)]
+; CHECK-NEXT:  ; pp7: loop-preheader=%[[LOOP:.*]], preds=[pp1(dom), pp8(pdom)], succs=[pp1(pdom), pp8(dom)]
+; CHECK-NEXT:    br label %[[LOOP]]
+; CHECK:       [[LOOP]]:
+; CHECK-NEXT:    [[N:%.*]] = phi i64 [ 0, %[[ENTRY]] ], [ [[N_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:    [[I:%.*]] = phi i8 [ 0, %[[ENTRY]] ], [ [[I_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:  ; pp2: preds=[pp3(pdom)], succs=[pp3(dom)]
+; CHECK-NEXT:    [[IDX:%.*]] = zext i8 [[I]] to i64
+; CHECK-NEXT:    [[OFF:%.*]] = mul i64 [[IDX]], [[PW]]
+; CHECK-NEXT:    [[P:%.*]] = getelementptr inbounds i8, ptr [[A]], i64 [[OFF]]
+; CHECK-NEXT:  ; pp3: preds=[pp2(dom), pp4(pdom)], succs=[pp2(pdom), pp4(dom)]
+; CHECK-NEXT:    [[V:%.*]] = load i8, ptr [[P]], align 1
+; CHECK-NEXT:    [[I_NEXT]] = add i8 [[I]], 1
+; CHECK-NEXT:    [[N_NEXT]] = add nuw nsw i64 [[N]], 1
+; CHECK-NEXT:    [[C:%.*]] = icmp ult i64 [[N_NEXT]], [[LEN]]
+; CHECK-NEXT:  ; pp4: preds=[pp3(dom)], succs=[pp3(pdom)]
+; CHECK-NEXT:    br i1 [[C]], label %[[LOOP]], label %[[EXIT:.*]]
+; CHECK:       [[EXIT]]:
+; CHECK-NEXT:  ; pp5: preds=[pp8(dom), pp6(pdom)], succs=[pp8(pdom), pp6(dom)]
+; CHECK-NEXT:  ; pp6: preds=[pp5(dom)], succs=[pp5(pdom)]
+; CHECK-NEXT:  ; pp8: loop-exit=%[[LOOP]], preds=[pp5(pdom), pp7(dom)], succs=[pp5(dom), pp7(pdom)]
+; CHECK-NEXT:  ; o: read period start=[[A]], stride=zext([[PITCH]] to i64), access-size=1, trips=(256 umin (1 umax zext([[LEN]] to i65)))
+; CHECK-NEXT:    ret void
+;
+entry:
+  %pw = zext i32 %pitch to i64
+  br label %loop
+
+loop:
+  %n = phi i64 [ 0, %entry ], [ %n.next, %loop ]
+  %i = phi i8 [ 0, %entry ], [ %i.next, %loop ]
+  %idx = zext i8 %i to i64
+  %off = mul i64 %idx, %pw
+  %p = getelementptr inbounds i8, ptr %a, i64 %off
+  %v = load i8, ptr %p, align 1
+  %i.next = add i8 %i, 1
+  %n.next = add nuw nsw i64 %n, 1
+  %c = icmp ult i64 %n.next, %len
+  br i1 %c, label %loop, label %exit
+
+exit:
+  ret void
+}
+
+; Negative: a signed int pitch may be negative or not; its sign is unknown.
+define void @u8_signed_pitch(ptr %a, i32 %pitch, i64 %len) {
+; CHECK-LABEL: define void @u8_signed_pitch(
+; CHECK-SAME: ptr [[A:%.*]], i32 [[PITCH:%.*]], i64 [[LEN:%.*]]) {
+; CHECK-NEXT:  [[ENTRY:.*]]:
+; CHECK-NEXT:  ; pp0: preds=[pp1(pdom)], succs=[pp1(dom)]
+; CHECK-NEXT:    [[PW:%.*]] = sext i32 [[PITCH]] to i64
+; CHECK-NEXT:  ; pp1: preds=[pp0(dom), pp7(pdom)], succs=[pp0(pdom), pp7(dom)]
+; CHECK-NEXT:  ; pp7: loop-preheader=%[[LOOP:.*]], preds=[pp1(dom), pp8(pdom)], succs=[pp1(pdom), pp8(dom)]
+; CHECK-NEXT:    br label %[[LOOP]]
+; CHECK:       [[LOOP]]:
+; CHECK-NEXT:    [[N:%.*]] = phi i64 [ 0, %[[ENTRY]] ], [ [[N_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:    [[I:%.*]] = phi i8 [ 0, %[[ENTRY]] ], [ [[I_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:  ; pp2: preds=[pp3(pdom)], succs=[pp3(dom)]
+; CHECK-NEXT:    [[IDX:%.*]] = zext i8 [[I]] to i64
+; CHECK-NEXT:    [[OFF:%.*]] = mul i64 [[IDX]], [[PW]]
+; CHECK-NEXT:    [[P:%.*]] = getelementptr inbounds i8, ptr [[A]], i64 [[OFF]]
+; CHECK-NEXT:  ; pp3: preds=[pp2(dom), pp4(pdom)], succs=[pp2(pdom), pp4(dom)]
+; CHECK-NEXT:  ; o: read ptr [[A]] + [[OFF]], 1
+; CHECK-NEXT:    [[V:%.*]] = load i8, ptr [[P]], align 1
+; CHECK-NEXT:    [[I_NEXT]] = add i8 [[I]], 1
+; CHECK-NEXT:    [[N_NEXT]] = add nuw nsw i64 [[N]], 1
+; CHECK-NEXT:    [[C:%.*]] = icmp ult i64 [[N_NEXT]], [[LEN]]
+; CHECK-NEXT:  ; pp4: preds=[pp3(dom)], succs=[pp3(pdom)]
+; CHECK-NEXT:    br i1 [[C]], label %[[LOOP]], label %[[EXIT:.*]]
+; CHECK:       [[EXIT]]:
+; CHECK-NEXT:  ; pp5: preds=[pp8(dom), pp6(pdom)], succs=[pp8(pdom), pp6(dom)]
+; CHECK-NEXT:  ; pp6: preds=[pp5(dom)], succs=[pp5(pdom)]
+; CHECK-NEXT:  ; pp8: loop-exit=%[[LOOP]], preds=[pp5(pdom), pp7(dom)], succs=[pp5(dom), pp7(pdom)]
+; CHECK-NEXT:    ret void
+;
+entry:
+  %pw = sext i32 %pitch to i64
+  br label %loop
+
+loop:
+  %n = phi i64 [ 0, %entry ], [ %n.next, %loop ]
+  %i = phi i8 [ 0, %entry ], [ %i.next, %loop ]
+  %idx = zext i8 %i to i64
+  %off = mul i64 %idx, %pw
+  %p = getelementptr inbounds i8, ptr %a, i64 %off
+  %v = load i8, ptr %p, align 1
+  %i.next = add i8 %i, 1
+  %n.next = add nuw nsw i64 %n, 1
+  %c = icmp ult i64 %n.next, %len
+  br i1 %c, label %loop, label %exit
+
+exit:
+  ret void
+}
+
+; Negative: a 64-bit pitch, even if known not negative (the and), may make
+; pitch * 255 wrap the address.
+define void @u8_wide_pitch(ptr %a, i64 %pitch, i64 %len) {
+; CHECK-LABEL: define void @u8_wide_pitch(
+; CHECK-SAME: ptr [[A:%.*]], i64 [[PITCH:%.*]], i64 [[LEN:%.*]]) {
+; CHECK-NEXT:  [[ENTRY:.*]]:
+; CHECK-NEXT:  ; pp0: preds=[pp1(pdom)], succs=[pp1(dom)]
+; CHECK-NEXT:    [[PW:%.*]] = and i64 [[PITCH]], 9223372036854775807
+; CHECK-NEXT:  ; pp1: preds=[pp0(dom), pp7(pdom)], succs=[pp0(pdom), pp7(dom)]
+; CHECK-NEXT:  ; pp7: loop-preheader=%[[LOOP:.*]], preds=[pp1(dom), pp8(pdom)], succs=[pp1(pdom), pp8(dom)]
+; CHECK-NEXT:    br label %[[LOOP]]
+; CHECK:       [[LOOP]]:
+; CHECK-NEXT:    [[N:%.*]] = phi i64 [ 0, %[[ENTRY]] ], [ [[N_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:    [[I:%.*]] = phi i8 [ 0, %[[ENTRY]] ], [ [[I_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:  ; pp2: preds=[pp3(pdom)], succs=[pp3(dom)]
+; CHECK-NEXT:    [[IDX:%.*]] = zext i8 [[I]] to i64
+; CHECK-NEXT:    [[OFF:%.*]] = mul i64 [[IDX]], [[PW]]
+; CHECK-NEXT:    [[P:%.*]] = getelementptr inbounds i8, ptr [[A]], i64 [[OFF]]
+; CHECK-NEXT:  ; pp3: preds=[pp2(dom), pp4(pdom)], succs=[pp2(pdom), pp4(dom)]
+; CHECK-NEXT:  ; o: read ptr [[A]] + [[OFF]], 1
+; CHECK-NEXT:    [[V:%.*]] = load i8, ptr [[P]], align 1
+; CHECK-NEXT:    [[I_NEXT]] = add i8 [[I]], 1
+; CHECK-NEXT:    [[N_NEXT]] = add nuw nsw i64 [[N]], 1
+; CHECK-NEXT:    [[C:%.*]] = icmp ult i64 [[N_NEXT]], [[LEN]]
+; CHECK-NEXT:  ; pp4: preds=[pp3(dom)], succs=[pp3(pdom)]
+; CHECK-NEXT:    br i1 [[C]], label %[[LOOP]], label %[[EXIT:.*]]
+; CHECK:       [[EXIT]]:
+; CHECK-NEXT:  ; pp5: preds=[pp8(dom), pp6(pdom)], succs=[pp8(pdom), pp6(dom)]
+; CHECK-NEXT:  ; pp6: preds=[pp5(dom)], succs=[pp5(pdom)]
+; CHECK-NEXT:  ; pp8: loop-exit=%[[LOOP]], preds=[pp5(pdom), pp7(dom)], succs=[pp5(dom), pp7(pdom)]
+; CHECK-NEXT:    ret void
+;
+entry:
+  %pw = and i64 %pitch, 9223372036854775807
+  br label %loop
+
+loop:
+  %n = phi i64 [ 0, %entry ], [ %n.next, %loop ]
+  %i = phi i8 [ 0, %entry ], [ %i.next, %loop ]
+  %idx = zext i8 %i to i64
+  %off = mul i64 %idx, %pw
+  %p = getelementptr inbounds i8, ptr %a, i64 %off
+  %v = load i8, ptr %p, align 1
+  %i.next = add i8 %i, 1
+  %n.next = add nuw nsw i64 %n, 1
+  %c = icmp ult i64 %n.next, %len
+  br i1 %c, label %loop, label %exit
+
+exit:
+  ret void
+}
+
+; STATS: lpoc{{ +}}in {{[0-9]+}}  range 7  periodic 5  exit-trip 1  exit-counter 1  wrap-index 10  rej-wrap 8{{$}}
 ;; NOTE: These prefixes are unused and the list is autogenerated. Do not add tests below this line:
 ; STATS: {{.*}}

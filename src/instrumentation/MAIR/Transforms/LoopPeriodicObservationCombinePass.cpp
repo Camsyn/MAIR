@@ -659,10 +659,10 @@ std::optional<AbstractAccess> buildNestedPeriodicAggregate(
 /// it cannot prove that the index does not wrap, so the address is no
 /// recurrence of the loop (docs/mair-loops.md, 窄下标回环访问).
 struct NarrowIndex {
-  // Invariant in the loop.
+  // Both invariant in the loop; Scale has the type of the address index.
   const SCEV *Base = nullptr;
+  const SCEV *Scale = nullptr;
   const SCEVAddRecExpr *Index = nullptr;
-  APInt Scale;
   bool IsSigned = false;
 };
 
@@ -684,53 +684,103 @@ std::optional<NarrowIndex> matchNarrowIndex(const SCEV *Address, const Loop &L,
   }
   if (!Term || !Term->getType()->isIntegerTy())
     return std::nullopt;
-  APInt Scale(Term->getType()->getIntegerBitWidth(), 1);
+  // Term is ext(Index) or a product of it and invariant factors.
+  const SCEV *Scale = SE.getOne(Term->getType());
+  const SCEV *Extended = Term;
   if (const auto *Mul = dyn_cast<SCEVMulExpr>(Term)) {
-    const auto *Factor = dyn_cast<SCEVConstant>(Mul->getOperand(0));
-    if (Mul->getNumOperands() != 2 || !Factor)
+    Extended = nullptr;
+    SmallVector<const SCEV *, 4> Factors;
+    for (const SCEV *Factor : Mul->operands()) {
+      if (SE.isLoopInvariant(Factor, &L)) {
+        Factors.push_back(Factor);
+        continue;
+      }
+      if (Extended)
+        return std::nullopt;
+      Extended = Factor;
+    }
+    if (!Extended || Factors.empty())
       return std::nullopt;
-    Scale = Factor->getAPInt();
-    Term = Mul->getOperand(1);
+    Scale = SE.getMulExpr(Factors);
   }
-  const auto *Ext = dyn_cast<SCEVIntegralCastExpr>(Term);
+  const auto *Ext = dyn_cast<SCEVIntegralCastExpr>(Extended);
   if (!Ext || isa<SCEVTruncateExpr>(Ext))
     return std::nullopt;
   const auto *Index = dyn_cast<SCEVAddRecExpr>(Ext->getOperand());
   if (!Index || !Index->isAffine() || Index->getLoop() != &L)
     return std::nullopt;
-  return NarrowIndex{SE.getAddExpr(Invariant), Index, Scale,
+  return NarrowIndex{SE.getAddExpr(Invariant), Scale, Index,
                      isa<SCEVSignExtendExpr>(Ext)};
 }
 
+/// Whether the sign of \p Scale is known and |Scale| * (2^w - 1) stays below
+/// 2^(N - 1), N the width of the address index. Every offset Scale * j,
+/// 0 <= j < 2^w, is then a true integer of that sign, so the trips of the
+/// region go one way without wrapping around the address space, as the users
+/// of periodic regions assume (ASan's hull, LocationMerge, the parent loop).
+/// The addresses themselves would agree modulo 2^N either way.
+bool isScaleBounded(const SCEV *Scale, unsigned IndexBits,
+                    ScalarEvolution &SE) {
+  unsigned AddressBits = Scale->getType()->getIntegerBitWidth();
+  APInt Magnitude;
+  if (const auto *Constant = dyn_cast<SCEVConstant>(Scale))
+    Magnitude = Constant->getAPInt().abs();
+  else if (SE.isKnownNonNegative(Scale))
+    Magnitude = SE.getUnsignedRangeMax(Scale);
+  else if (SE.isKnownNegative(Scale))
+    Magnitude = SE.getSignedRangeMin(Scale).abs();
+  else
+    return false;
+  // |Scale| * (2^w - 1) < 2^(active bits + w) <= 2^(AddressBits - 1).
+  return !Magnitude.isZero() &&
+         Magnitude.getActiveBits() + IndexBits < AddressBits;
+}
+
 /// The recurrence the accesses at \p Narrow follow, and how many distinct
-/// addresses \p Count of them visit. The k-th access has index Start + k *
-/// Step modulo 2^w. From 0 by 1 and zero extended, Count accesses visit
-/// exactly the indices [0, min(Count, 2^w)): once the index wraps, it only
-/// revisits them. They are Base + Scale * k for k below that bound, the
-/// first min(Count, 2^w) addresses of {Base,+,Scale}. Any other start, step
-/// or a sign extension visits indices below the start or skips some once the
-/// index wraps, so the addresses are no prefix of a recurrence from the first
-/// one: none is returned.
+/// addresses \p Count of them visit. The k-th access has index S + k * s
+/// modulo 2^w. If s = 2^p and S < 2^p, the indices S, S + s, ... do not wrap
+/// until S + 2^(w-p) * s = S + 2^w, which is S again: Count accesses visit
+/// exactly the first min(Count, 2^(w-p)) indices of {S,+,s}, without a hole
+/// and nothing more. Counting down, s = -2^p and S >= 2^w - 2^p, likewise.
+/// They are the first min(Count, 2^(w-p)) addresses of {Base + Scale * S,
+/// +, Scale * s}. Any other start or step, or a sign extension, visits
+/// indices on both sides of the start or out of order once the index wraps,
+/// so the addresses are no prefix of one recurrence: none is returned.
 std::optional<std::pair<const SCEVAddRecExpr *, const SCEV *>>
 resolveNarrowIndex(const NarrowIndex &Narrow, const SCEV *Count, const Loop &L,
                    ScalarEvolution &SE) {
-  if (Narrow.IsSigned || !Narrow.Index->getStart()->isZero() ||
-      !Narrow.Index->getStepRecurrence(SE)->isOne() ||
-      !Count->getType()->isIntegerTy())
+  const auto *Step =
+      dyn_cast<SCEVConstant>(Narrow.Index->getStepRecurrence(SE));
+  if (Narrow.IsSigned || !Step || !Count->getType()->isIntegerTy())
     return std::nullopt;
-  // The offsets Scale * k, k < 2^w, are positive and do not wrap.
-  unsigned IndexBits = Narrow.Index->getType()->getIntegerBitWidth();
-  if (!Narrow.Scale.isStrictlyPositive() ||
-      Narrow.Scale.getActiveBits() + IndexBits >= Narrow.Scale.getBitWidth())
+  const APInt &StepValue = Step->getAPInt();
+  APInt Period = StepValue.abs();
+  if (!Period.isPowerOf2())
     return std::nullopt;
-  // A count no wider than the index is below 2^w already.
+  const SCEV *Start = Narrow.Index->getStart();
+  ConstantRange Starts = SE.getUnsignedRange(Start);
+  if (StepValue.isNegative() ? Starts.getUnsignedMin().ult(-Period)
+                             : Starts.getUnsignedMax().uge(Period))
+    return std::nullopt;
+  unsigned IndexBits = StepValue.getBitWidth();
+  if (!isScaleBounded(Narrow.Scale, IndexBits, SE))
+    return std::nullopt;
+  // 2^(w-p) distinct indices; a count no wider is below that already.
+  unsigned DistinctBits = IndexBits - Period.logBase2();
   const SCEV *Distinct = Count;
   unsigned CountBits = Count->getType()->getIntegerBitWidth();
-  if (CountBits > IndexBits)
+  if (CountBits > DistinctBits)
     Distinct = SE.getUMinExpr(
-        Count, SE.getConstant(APInt::getOneBitSet(CountBits, IndexBits)));
-  const auto *Recurrence = dyn_cast<SCEVAddRecExpr>(SE.getAddRecExpr(
-      Narrow.Base, SE.getConstant(Narrow.Scale), &L, SCEV::FlagAnyWrap));
+        Count, SE.getConstant(APInt::getOneBitSet(CountBits, DistinctBits)));
+  Type *OffsetTy = Narrow.Scale->getType();
+  const SCEV *First = SE.getAddExpr(
+      Narrow.Base,
+      SE.getMulExpr(Narrow.Scale, SE.getZeroExtendExpr(Start, OffsetTy)));
+  const SCEV *Stride = SE.getMulExpr(
+      Narrow.Scale,
+      SE.getConstant(StepValue.sext(OffsetTy->getIntegerBitWidth())));
+  const auto *Recurrence = dyn_cast<SCEVAddRecExpr>(
+      SE.getAddRecExpr(First, Stride, &L, SCEV::FlagAnyWrap));
   if (!Recurrence)
     return std::nullopt;
   return std::make_pair(Recurrence, Distinct);

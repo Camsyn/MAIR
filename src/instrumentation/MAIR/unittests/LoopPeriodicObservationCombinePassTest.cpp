@@ -1045,4 +1045,104 @@ TEST(LoopPeriodicObservationCombinePass,
   EXPECT_TRUE(Graph.verify());
 }
 
+// a[(unsigned char)d] counting down from 255 and b[(unsigned char)q] from 1
+// by 4, the second phase of a loop unrolled 4 times, in a loop that leaves on
+// loaded data. Both summarize as periodic regions; the addresses they stand
+// for must be exactly those the accesses visit (docs/mair-loops.md,
+// 窄下标回环访问).
+constexpr const char *WrappingPhasesLoopIR = R"IR(
+define void @f(ptr %a, ptr %b, ptr %key) {
+entry:
+  br label %header
+header:
+  %d = phi i8 [ -1, %entry ], [ %d.next, %header ]
+  %q = phi i8 [ 1, %entry ], [ %q.next, %header ]
+  %k = phi ptr [ %key, %entry ], [ %k.next, %header ]
+  %v = load i64, ptr %k, align 8
+  %da = zext i8 %d to i64
+  %pa = getelementptr inbounds i8, ptr %a, i64 %da
+  %x = load i8, ptr %pa, align 1
+  %qb = zext i8 %q to i64
+  %pb = getelementptr inbounds i32, ptr %b, i64 %qb
+  store i32 0, ptr %pb, align 4
+  %d.next = add i8 %d, -1
+  %q.next = add i8 %q, 4
+  %k.next = getelementptr i8, ptr %k, i64 8
+  %neg = icmp slt i64 %v, 0
+  br i1 %neg, label %exit, label %header
+exit:
+  ret void
+}
+)IR";
+
+// The constant byte offset of a periodic start Base or Base + C.
+int64_t startOffset(const MAIRScalarExpr &Start, const llvm::Value *Base) {
+  if (Start.getKind() == MAIRScalarExpr::Kind::LLVMValue) {
+    EXPECT_EQ(Start.getLLVMValue(), Base);
+    return 0;
+  }
+  EXPECT_EQ(Start.getKind(), MAIRScalarExpr::Kind::Add);
+  EXPECT_EQ(Start.operands()[0].getLLVMValue(), Base);
+  return Start.operands()[1].getConstant().getSExtValue();
+}
+
+TEST(LoopPeriodicObservationCombinePass,
+     CoversTheDistinctElementsOfWrappingPhases) {
+  llvm::LLVMContext Ctx;
+  auto M = parseModule(WrappingPhasesLoopIR, Ctx);
+  ASSERT_TRUE(M);
+  llvm::Function &F = *M->getFunction("f");
+  llvm::PassInstrumentationCallbacks PIC;
+  llvm::FunctionAnalysisManager FAM;
+  registerLoopAnalyses(FAM, PIC);
+  MAIRGraph Graph = createGraphWithFunctionAnalyses(F, FAM);
+  MAIRGraphAnalysisManager AM;
+  registerMAIRGraphAnalyses(AM, &PIC, &FAM);
+
+  EXPECT_FALSE(
+      runPassOnGraphTree(LoopPeriodicObservationCombinePass(), Graph, AM)
+          .areAllPreserved());
+  EXPECT_EQ(observationCount(Graph, "header"), 0u);
+  const llvm::BasicBlock *Header = &*std::next(F.begin());
+  unsigned Checked = 0;
+  for (const ProgramPoint &PP : testProgramPoints(Graph)) {
+    if (!PP.getBasicBlock() || PP.getBasicBlock()->getName() != "exit")
+      continue;
+    for (const Observation &Obs : PP) {
+      const PeriodicRegion *Region = Obs.getPeriodicRegion();
+      if (!Region || (Region->getBase() != F.getArg(0) &&
+                      Region->getBase() != F.getArg(1)))
+        continue;
+      bool IsA = Region->getBase() == F.getArg(0);
+      int64_t Start = startOffset(Region->getStart(), Region->getBase());
+      ASSERT_EQ(Region->getStride().getKind(), MAIRScalarExpr::Kind::Constant);
+      int64_t Stride = Region->getStride().getConstant().getSExtValue();
+      ASSERT_EQ(Region->getAccessSize().getKind(),
+                MAIRScalarExpr::Kind::Constant);
+      int64_t Size = Region->getAccessSize().getConstant().getSExtValue();
+      for (uint64_t BTC : {0, 1, 62, 63, 64, 65, 200, 254, 255, 256, 299}) {
+        SCOPED_TRACE(BTC);
+        // The bytes the accesses touch, by brute force: each runs BTC + 1
+        // times, the k-th at index 255 - k or 1 + 4k modulo 256.
+        std::set<int64_t> Touched;
+        for (uint64_t K = 0; K <= BTC; ++K) {
+          int64_t Index = IsA ? (255 - K) & 255 : (1 + 4 * K) & 255;
+          for (int64_t Byte = 0; Byte < (IsA ? 1 : 4); ++Byte)
+            Touched.insert(Index * (IsA ? 1 : 4) + Byte);
+        }
+        std::set<int64_t> Covered;
+        uint64_t Trips =
+            evaluate(Region->getTripCount(), Header, BTC).getZExtValue();
+        for (uint64_t K = 0; K < Trips; ++K)
+          for (int64_t Byte = 0; Byte < Size; ++Byte)
+            Covered.insert(Start + int64_t(K) * Stride + Byte);
+        EXPECT_EQ(Covered, Touched);
+      }
+      ++Checked;
+    }
+  }
+  EXPECT_EQ(Checked, 2u);
+  EXPECT_TRUE(Graph.verify());
+}
+
 } // namespace

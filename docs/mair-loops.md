@@ -95,7 +95,7 @@ barrier 也要考虑重复执行：被覆盖的一端所在块如果能在不经
 
 `functions` 是被统计的不同 LLVM 函数数。两个匿名函数分别计数；同一函数被多个 pass 或多个循环访问时只计一次。
 
-`lpoc` 和 `liom` 行还说明为什么有 Observation 留在循环里（每次本层调用各计一次）。`lpoc` 只计地址随循环变化的 Observation，`liom` 只计循环不变的，各按下列顺序取第一个不满足的条件：`rej-barrier`（循环里有 barrier），`rej-nonaffine`（地址不是本循环的仿射递推，仅 `lpoc`），`rej-cond`（来源不是每轮恰执行一次，含 `liom` 跳过的带 guard 的 ProgramPoint），`rej-multiexit`（不止一个 exiting block 或出口块），`rej-nocount`（既没有 SCEV 算出的次数，也得不到出口处的次数，仅 `lpoc`；自建计数器之后只剩来源与 exiting block 互不支配的情形），`rej-other`（其余，如原子访问、非连续区域、起点或次数无法在出口表达、出口不后支配来源）。分类只在 `-mair-stats` 下计算，不影响优化。`exit-trip` 是 `range`/`periodic` 中在出口处求次数的个数，`exit-counter` 是其中用自建计数器的个数（见“数据相关的出口”）。实现在 `classifyRejection`（`LoopPeriodicObservationCombinePass.cpp`、`LoopInvariantObservationMotionPass.cpp`），测试 `test/MAIR/TestCases/mair-stats-loop-rejections.ll`，以及 `loop-early-exit.ll` 和 `asan/mair-early-exit-oob.c` 的 `STATS`（后者含 `rej-barrier`）。
+`lpoc` 和 `liom` 行还说明为什么有 Observation 留在循环里（每次本层调用各计一次）。`lpoc` 只计地址随循环变化的 Observation，`liom` 只计循环不变的，各按下列顺序取第一个不满足的条件：`rej-barrier`（循环里有 barrier），`rej-nonaffine`（地址不是本循环的仿射递推，仅 `lpoc`），`rej-cond`（来源不是每轮恰执行一次，含 `liom` 跳过的带 guard 的 ProgramPoint），`rej-multiexit`（不止一个 exiting block 或出口块），`rej-nocount`（既没有 SCEV 算出的次数，也得不到出口处的次数，仅 `lpoc`；自建计数器之后只剩来源与 exiting block 互不支配的情形），`rej-wrap`（地址是窄下标，但回绕后的足迹不是从起点开始的前缀，仅 `lpoc`，见“窄下标回环访问”；窄下标不计入 `rej-nonaffine`，先按其后的条件分类），`rej-other`（其余，如原子访问、非连续区域、起点或次数无法在出口表达、出口不后支配来源）。分类只在 `-mair-stats` 下计算，不影响优化。`exit-trip` 是 `range`/`periodic` 中在出口处求次数的个数，`exit-counter` 是其中用自建计数器的个数（见“数据相关的出口”），`wrap-index` 是其中地址为窄下标的个数（见“窄下标回环访问”）。实现在 `classifyRejection`（`LoopPeriodicObservationCombinePass.cpp`、`LoopInvariantObservationMotionPass.cpp`），测试 `test/MAIR/TestCases/mair-stats-loop-rejections.ll`，以及 `loop-early-exit.ll` 和 `asan/mair-early-exit-oob.c` 的 `STATS`（后者含 `rej-barrier`）。
 
 sanitizer 编译还会多一行 `select`，在优化之后统计 lowering 去向：`in` 是非 call-like 的终态 Observation，`lowered` 交给 MAIR 物化，`native` 退回 sanitizer 自己逐访问插桩；`multi`（多源，合并产物）、`symbolic`（非常量偏移/大小或非连续区间，含 periodic）、`vector`、`shared`（来源同时被一个退回的 Observation 持有）说明退回原因，其余退回原因是 sanitizer 自身判定（如 ASan 安全栈访问、TSan 未逃逸 alloca）。`fallback` 是退回 native 的来源指令数。实现在 `selectMaterializableObservations`（`src/instrumentation/MAIR/Materialization/MAIRMaterialization.cpp`），测试 `test/MAIR/TestCases/asan/mair-select-stats.c`。这几个原因字段只描述 Observation 的形状；ASan 已能 lowering 多源、符号区间、periodic 和固定宽度向量（见“ASan 的 lowering”），在 ASan 下它们只剩 masked 区域和来源本身被 ASan 拒绝的情况。
 
@@ -244,7 +244,7 @@ WP5 曾用“4096 兜底”接受没有 wrap 标志、不比地址窄、步长�
 
 - 相同：唯一 exiting block、唯一出口块；先复用表头的计数 phi，没有再在表头自建计数器；来源在退出判断之前时次数加 1；没有 wrap 标志时，复用的计数器要求至少 64 位（XSan 一律要求不窄于指针，`isLoopCountingPhi`）；自建计数器是 64 位（`getOrInsertLoopCounter`）。
 - 不同：XSan 只复用起点为 0 或 1、步长为 +1 的整数 phi，不看 wrap 标志，不复用指针；MAIR 接受任意起点、步长 ±1 的 64 位变量，以及 SCEV 证明不回绕的任意宽度、任意常量步长的整数或指针变量。XSan 要求表头恰有两个前驱；MAIR 的计数器 phi 按前驱逐个给入值。XSan 的计数器在 `combinePeriodicChecks` 里立即插入；MAIR 在优化阶段只写成表达式，物化时才插入。XSan 用 `uadd.sat`，MAIR 用普通 `add`（见上）。
-- XSan 还处理“回环访问”：地址是 `base + zext(u8 i)` 这类窄索引，回绕后重复访问同样的 `2^w` 个元素，次数取 `umin(count, 2^w)`，只接受起点为 0 的情形（`PtrAddExpr2PtrAddRecRewriter`、`saturationTruncate`）。MAIR 的 LPOC 要求地址本身是本循环的仿射递推，这类地址归为 `rej-nonaffine`，不在本节范围（见 TODO）。按代码阅读（未在 XSan 上复现），XSan 这条路径有两处边界问题：复用的 32 位计数器 2^32 轮后回绕，以及自建的 8 位计数器饱和在 255、少覆盖一个元素。MAIR 不复用窄计数器，也就没有这两个问题。
+- XSan 还处理“回环访问”：地址是 `base + zext(u8 i)` 这类窄索引，回绕后重复访问同样的 `2^w` 个元素，次数取 `umin(count, 2^w)`，只接受起点为 0 的情形（`PtrAddExpr2PtrAddRecRewriter`、`saturationTruncate`）。MAIR 的对应规则见下节“窄下标回环访问”。XSan 这条路径有两处计数器的边界问题：复用的 32 位计数器 2^32 轮后回绕（按代码阅读），以及自建的 8 位计数器饱和在 255、少覆盖一个元素（已在 XSan 上复现，见下节）。MAIR 不复用窄计数器，次数按 BTC 加宽一位后再取 `umin`，也就没有这两个问题。
 
 优化阶段不改 IR：复用时只引用已有的值（SCEVUnknown → `MAIRScalarExpr::LLVMValue`），物化时只在出口处生成 `sub`/`udiv`/`zext` 一类的计算，循环体不变（单元测试 `MAIRMaterialization.LowersExitTripCountAtTheExitOnly`）；自建时循环体只多出表头的计数器 phi 和加法。为了表示指针差，MAIR 表达式有 `PtrToInt`（指针转为同宽整数，lowering 成 `ptrtoint`，verifier 检查宽度）；SCEV 到 MAIR 的转换也因此接受 `ptrtoint`，`for (p = b; p != e; ++p)` 这类精确次数里含 `ptrtoint` 的循环（分诊报告中 7zip 约 199 个）随之可以汇总。
 
@@ -271,9 +271,61 @@ WP5 曾用“4096 兜底”接受没有 wrap 标志、不比地址窄、步长�
 
 TODO：
 - 多出口（N4 第二步），包括一个 exiting block 用 `switch` 跳到多个出口块：需要在每条出口边放各自的区域，扩展物化。
-- `cur + zext i32 {…}` 这类 32 位无符号下标（`wrap_idx`）：地址不是仿射递推，归为 `rej-nonaffine`，是第二步的前置。
+- `cur + zext i32 {…}` 这类 32 位无符号下标（`wrap_idx`、LzFind）：起点为 0 的已按“窄下标回环访问”汇总；LzFind 的起点不为 0、证不出不回绕，且是多出口，见该节结论。
 
 测试：`test/MAIR/TestCases/loop-early-exit.ll`（正例 `until_neg`、判断之后的写 `store_after_test`、指针归纳变量、`copy_until`、32 位 `nsw` 计数器、无 wrap 标志的 `size_t` 计数器、`ptrtoint` 精确次数、步长超过一页的 `size_t` 计数器；负例条件执行、多出口；统计行），`test/MAIR/TestCases/loop-exit-counter.ll`（复用无标志的 64 位计数器、复用带 `nsw` 的 32 位计数器；回绕的 `u8`、`i16`、`i32` 计数器和无标志的指针、步长为 2 的 `size_t` 计数器改用 `backedges`；统计行含 `exit-counter`），`test/MAIR/TestCases/asan/mair-exit-counter-oob.c` 与 `tsan/mair-exit-counter-race.c`（`-fno-strict-overflow`，`u8` 计数器循环跑 301 轮，越界读写与第 256 个元素之后的竞争都报告，IR 中有 `%mair.count`），`test/MAIR/TestCases/asan/mair-early-exit-oob.c`（越界读、越界写、仅指针归纳变量的越界写都报告，界内不误报，barrier 负例），`test/MAIR/TestCases/tsan/mair-early-exit-race.c` 与 `mair-early-exit-race-norace.c`（竞争仍报告；区间不多出停止元素之后、判断之后未写的元素，0 轮时为空），单元测试 `LoopPeriodicObservationCombinePass.ReadsTheTripCountOffAnExitValue`（按 BTC 求值的读写大小）、`CountsTheBackedgesWithoutACounter`（按 BTC = 0/1/7/300 求值，IR 不变）、`ExitTripCountStopsAtACallBarrier`、`MAIRMaterialization.InsertsTheBackedgeCounterOnApplyOnly`、`MAIRSchema.PtrToIntExpressionVerifiesAndPrints`、`BackedgeCountExpressionVerifiesAndPrints`。
+
+## 窄下标回环访问
+
+`unsigned char i` 这类窄下标会回绕：地址是 `base + C * zext(i)`，`i` 是本循环的 `w` 位归纳变量 `{S,+,s}`（`w` 比地址窄）。SCEV 证明不了 `i` 不回绕时，扩展留在递推外面，地址不是本循环的仿射递推，原先归为 `rej-nonaffine`。SCEV 能证明时（常量最大 BTC 足够小，或循环 guard 足以让 `proveNoUnsignedWrapViaInduction` 成立），它已把扩展折进递推，地址本来就是仿射的，例如 `u8` 下标跑 200 或 256 轮。
+
+规则（`matchNarrowIndex`、`resolveNarrowIndex`，`src/instrumentation/MAIR/Transforms/LoopPeriodicObservationCombinePass.cpp`）：
+
+- 形状：地址 SCEV 是指针加法，除一项外都在本循环不变（合起来记为 `Base`），这一项是 `zext({S,+,s}<L>)` 或 `C * zext(...)`，`C` 是常量，递推属于本图的循环 `L`。
+- 接受：零扩展、`S = 0`、`s = 1`、`C > 0`，且 `C * (2^w - 1)` 不超出地址索引宽度。
+- 次数：源 PP 这次运行执行 `T` 次（与普通 LPOC 相同：SCEV 精确次数、出口处读出的次数或自建计数器，见“数据相关的出口”）。第 `k` 次访问的下标是 `k mod 2^w`，所以 `T` 次访问恰好访问下标 `[0, min(T, 2^w))`：前 `2^w` 次各不相同、首尾相接，之后只是重访。区域就是递推 `{Base,+,C}` 的前 `min(T, 2^w)` 项，与普通仿射访问一样交给 `buildContiguousAggregate` 或 periodic 分支：`C` 等于访问大小时是连续区间 `[Base, + min(T, 2^w) * C)`，否则是 stride 为 `C`、trip count 为 `min(T, 2^w)` 的 periodic 区域。没有空洞，也不多出字节。
+- `T` 的宽度：`T` 比 BTC 宽一位，不会回绕。`T` 的类型比 `w` 宽时次数是 `umin(T, 2^w)`（`2^w` 在 `T` 的类型里可表示）；不比 `w` 宽时 `T < 2^w`，不需要 `umin`。常量 `T` 由 SCEV 直接折叠（300 轮的 `u8` 下标为 256）。MAIR 表达式已有 `UMin`，物化 lowering 成 `llvm.umin`，不需要新的表达式种类。
+- 合法性条件与普通 LPOC 完全相同：来源每轮恰执行一次、循环无 barrier、唯一 exiting block 与出口块、出口后支配来源、`Base` 在出口可用。
+- 拒绝（`rej-wrap`）：
+  - 起点不为 0（`a[(u8)(i + k)]` 的下标是 `{k,+,1}`，同样按起点判断）：回绕后访问到起点之前的 `[0, ...)`，足迹不是从 `Base + C * S` 开始的连续区间；不能用整个 `2^w` 窗口代替（多出的字节在 ASan 下误报、在 TSan 下造成假竞争）。
+  - 符号扩展：下标到 `2^(w-1)` 后变成负数，足迹在 `Base` 两侧且不连续。带 `nsw` 的递推 SCEV 已折进扩展，不会走到这里。
+  - 步长不为 1：`i += 2` 只访问偶数下标，`min(T, 2^w)` 个元素会越过 `a[254]`；步长为奇数时回绕后会填满窗口，但顺序打乱，前缀不是连续的。步长 -1、起点 `2^w - 1` 的情形足迹是 `[2^w - min(T, 2^w), 2^w)`，同样精确，尚未实现。
+- 构造的递推 `{Base,+,C}<L>` 只用来携带起点和步长，交给已有的区间/periodic 构造，标志为 `FlagAnyWrap`。SCEV 对它推出的任何标志都是关于这个数学函数本身的，与它代表的访问无关，不影响正确性。
+
+起点不为 0 时能否证明不回绕（此时地址本就是仿射的 `{Base + C * zext(S), +, C * s}`）：条件是 `zext(S) + s * BTC < 2^w`。SCEV 的零扩展折叠已用常量最大 BTC 和循环 guard 尝试过同一件事。另用符号精确 BTC 加 `isKnownPredicate`、`isLoopEntryGuardedByCond`、`applyLoopGuards` 试过（原型，未入库）：`sext.c` 的 `wrap_idx` 向量循环前，LV 插了 `~k >= n - 1` 的 guard，仍证不出；7zip `LzFind.c` 的全部 14 个窄下标循环也证不出。所以不实现这一步，起点不为 0 一律拒绝。
+
+LzFind 的结论：`GetMatchesSpec1`（以及内联进 `Bt*_MatchFinder_GetMatches/Skip` 的副本，共 14 个循环、28 个访问）的匹配循环 `while (++len != lenLimit) if (pb[len] != cur[len]) break;` 地址是 `cur + zext i32 {min(len0, len1) + 2,+,1}`。起点不为 0，只有程序不变式 `len0, len1 < lenLimit` 才保证 `len` 在碰到 `lenLimit` 之前不回绕；循环前的 guard 只给出 `len + 1 != lenLimit`，SCEV 与 guard 都证不出。而且循环有两个 exiting block（到达 `lenLimit` 与不匹配时 `break`），本来就是 `rej-multiexit`。现在这 28 个访问的统计从 `rej-nonaffine` 变为 `rej-multiexit`（形状已识别，先按多出口拒绝）。要优化它需要多出口支持（N4 第二步），再加上起点不为 0 时的运行时检查或版本化，二者都超出本规则。
+
+`-O2` 下的限制：`for (k = 0; k < n; k++, i++) a[i]` 这类次数可算的循环常被运行时展开 4 次，展开后的每个访问是 `{S + j,+,4}`，步长为 4、起点为符号，按上面的规则拒绝；向量化版本里 LV 往往插 guard 把下标限制在不回绕的范围，SCEV 再折进扩展，地址变成仿射的。数据相关的循环不会被运行时展开，规则可以直接适用。运行时测试因此用 `#pragma clang loop unroll(disable) vectorize(disable)` 保持每轮一个访问。
+
+与 XSan（`PtrAddExpr2PtrAddRecRewriter` 与 `combinePeriodicChecks`，`src/instrumentation/Instrumentation.cpp`）的异同：
+
+- 相同：只接受起点为 0 的回环访问；次数取 `umin(count, 2^w)`；连续时用区间检查，否则用 periodic 检查。
+- 不同，均为 XSan 的边界问题（MAIR 按上面的规则拒绝或正确处理），已用 `xclang -xsan -fno-sanitize=undefined -O2` 在本仓库复现：
+  - 符号扩展照样接受（`matchInnerExt` 接受任意 `SCEVIntegralCastExpr`，只看起点是否为 0）：`signed char i` 从 0 写 200 次，实际写 `a[0..127]` 与 `a[-128..-57]`，XSan 只检查 `[a, a + 200)`，漏掉起点之前被 poison 的字节（native ASan 与 MAIR 报 use-after-poison，XSan 不报），并多查 `[a + 128, a + 200)`。
+  - 步长不检查：`u8 i += 2` 写 200 次，实际只写 `a[0..254]` 的偶数下标，XSan 检查到 `a + 2 * umin(200, 256)`，256 字节的缓冲区上误报 heap-buffer-overflow（native ASan 与 MAIR 不报）。
+  - 数据相关的循环自建 8 位计数器，`uadd.sat` 饱和在 255：读 300 次 `a[(u8)i]`，`a[255]` 被 poison，XSan 只查 `[a, a + 255)` 而漏报，native ASan 与 MAIR 报告。MAIR 的次数是 65 位的 `1 + zext(BTC)` 再取 `umin`，不饱和。
+  - 截断：`matchInnerExt` 遇到 `trunc` 时把计数类型设为窄类型，随后 `matchInnerAddRec` 又把它覆盖成递推起点的宽类型（`Instrumentation.cpp:297` 与 `:312`），注释所说的 `(u8){(u16)S,+,s}` 不会按回环处理（按代码阅读；SCEV 通常已把截断分配进递推，影响有限）。
+  - 复用 32 位计数器（`isLoopCountingPhi` 只要求不窄于 32 位）时 2^32 轮后回绕（按代码阅读）。
+- MAIR 比 XSan 窄的地方：下标的乘数只接受常量（XSan 接受循环不变的符号 `Inv1`）。
+
+度量（`-O2`，静态，7zip Alone2 全部 322 个 TU 与 sqlite3 有/无 `fuzzer-no-link`，ASan 加 `-as-instrumentation-with-call-threshold=0`；`-mair-stats` 与 E 组 `LoopReasons` 插件统计插桩后仍在循环内的检查；基线 `c78c5ae3`，脚本与原始数据在 WP7 的 worklog）：
+
+| | 7zip ASan | 7zip TSan | sqlite3 ASan fuzz | sqlite3 TSan fuzz | sqlite3 ASan nofuzz | sqlite3 TSan nofuzz |
+|---|---|---|---|---|---|---|
+| `lpoc` `wrap-index` | 75 | 73 | 0 | 0 | 0 | 0 |
+| `lpoc` `range` + `periodic` | 1850 → 1925 | 1836 → 1909 | 888 → 888 | 895 → 895 | 845 → 845 | 850 → 850 |
+| 其中 `exit-trip`（`exit-counter`） | 228 → 300（0 → 72） | 218 → 288（0 → 70） | 131 | 127 | 137 | 133 |
+| `lpoc` `rej-nonaffine` | 3684 → 3281 | 3361 → 2979 | 1878 → 1865 | 1309 → 1295 | 1906 → 1894 | 1332 → 1319 |
+| `lpoc` `rej-wrap` | 234 | 211 | 7 | 8 | 6 | 7 |
+| 窄下标转入 `rej-multiexit` / `rej-cond` | +77 / +19 | +73 / +27 | +6 / 0 | +6 / 0 | +6 / 0 | +6 / 0 |
+| 插入的 `mair.count`（每函数第一个，下限） | 0 → 53 | 0 → 54 | 0 | 0 | 0 | 0 |
+| 循环内残留检查 | 24397 → 24343 | 27227 → 27176 | 12153 → 12153 | 12296 → 12296 | 12147 → 12147 | 12266 → 12266 |
+| 其中“地址非仿射” | 3738 → 3665 | 2765 → 2693 | 380 → 380 | 324 → 324 | 1909 → 1909 | 1257 → 1257 |
+
+7zip 汇总掉的窄下标多数是 `MyStringLen` 一类 `unsigned i; for (i = 0; s[i] != 0; i++)` 的数据相关循环（`MyString.cpp` 21 个、`Bench.cpp` 10 个）：下标是 `zext i32 {0,+,1}`，次数由自建计数器给出，区间为 `umin(T, 2^32)` 个元素，所以 `exit-counter` 与 `wrap-index` 同步增加，并插入了约 50 个计数器。`rej-wrap` 以 `zext i32 {S,+,1}`（S 为符号起点）为主，其次是展开或倒数产生的步长 ±2、±4、-1。sqlite3 几乎没有窄下标。
+
+测试：`test/MAIR/TestCases/loop-wrapping-index.ll`（`u8` 下标、常量次数 200/256/300，符号次数，`u16` 下标与 4 字节元素，8 字节元素的 periodic 区域，数据相关出口与自建计数器；负例起点为 `k`、`(u8)(i + k)`、`sext`、步长 2；统计行 `wrap-index 5  rej-wrap 4`），单元测试 `LoopPeriodicObservationCombinePass.CoversTheDistinctElementsOfAWrappingIndex`（`u8` 读在判断前、`u16` 写在判断后，按 BTC = 0…70000 求区间大小，与逐次模拟得到的不同元素集合比较，并检查集合没有空洞），`test/MAIR/TestCases/asan/mair-wrapping-index-oob.c`（`u8` 下标跑 300 轮，数组 256 个元素不误报、255 个元素读写都报告，循环内无逐次检查），`test/MAIR/TestCases/tsan/mair-wrapping-index-race.c`（另一线程写第 200 个元素时读、写都报竞争；只写第 256 个及以后的元素时不报）。变异验证：去掉 `umin` 后单元测试、`loop-wrapping-index.ll`、ASan 的 256 元素运行（误报）、TSan 的 norace 运行（假竞争）全部失败。
 
 ## 地址合并
 
